@@ -20,8 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Skill updated with the full bootstrap story (programmatic + CLI paths), codegen workflow, and the recipes above.
-- `compose.yml` annotated as test-only (`tmpfs` is ephemeral; copy with a named volume for real apps).
+- **Vendor-first SQL.** Framework + auth SQL is now copied into the consumer's `init_db/` by `delta init` (with a version header) and applied by the consumer's `setup.ts`. `applyFramework(pool)` / `applyAuthJwtSchema(pool)` still exist for internal tests but are no longer the advocated path.
+- **Skill rewritten as a runbook.** `SKILL.md` is now numbered steps + template references (mirroring `bun-route`'s shape). Paste-ready templates live in `.claude/skills/delta-doc/templates/` (`new-app/`, `per-user/`, `add-auth/`).
+- **`reference.md` trimmed** to contracts, scope syntax, stored-function table, wire protocol, and RLS rules — no prose examples.
+- **`delta init --upgrade`** replaces older vendored files with `.bak` backups, refuses to clobber files without the `@blueshed/delta` version header, and no-ops when already current.
+- `compose.yml` annotated as test-only (`tmpfs` is ephemeral; consumers copy the template's volume-based compose instead).
 
 ### Driven by
 

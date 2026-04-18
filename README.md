@@ -40,9 +40,19 @@ Existing sync libraries are built for human developers: big API surfaces, many i
 
 Lineage: started as dzql (Vue / Pinia, database-first), matured into seiro (CQRS over WS with Preact Signals), refined in paintbrush's delta-sync, realised in clean as a Postgres-resident primitive. This package is the extraction.
 
+## Vendor-first
+
+Delta's framework SQL is **copied into your `init_db/`** by `bunx @blueshed/delta init`, not read from `node_modules` at runtime. The philosophy is shadcn/ui for database schemas:
+
+- Files are explicit, git-tracked, and yours to read.
+- Upgrades run `delta init --upgrade` which replaces the vendored files (with `.bak` backups) and tells you what changed.
+- Your `setup.ts` walks `init_db/` in alphabetical order — no `applyFramework(pool)` call that imports SQL from a black box.
+
+TypeScript runtime is imported normally (`createWs`, `jwtAuth`, `docTypeFromDef`, `openDoc`). Only SQL is vendored.
+
 ## For Claude
 
-The authoritative documentation is the bundled skill at [`.claude/skills/delta-doc/SKILL.md`](.claude/skills/delta-doc/SKILL.md). Install the package and Claude Code discovers it automatically; the skill fits in one context load and covers the whole API surface with examples.
+The authoritative documentation is the bundled skill at [`.claude/skills/delta-doc/SKILL.md`](.claude/skills/delta-doc/SKILL.md) plus the templates in [`.claude/skills/delta-doc/templates/`](.claude/skills/delta-doc/templates/). Install the package and Claude Code discovers them automatically. The skill is a runbook (not a reference manual) that points at paste-ready template files for new apps, per-user isolation, and auth.
 
 ## Status
 
