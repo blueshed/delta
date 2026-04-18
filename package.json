@@ -1,0 +1,64 @@
+{
+  "name": "@blueshed/delta",
+  "version": "0.1.0",
+  "description": "Delta-doc — JSON-Patch document sync with SQLite and Postgres backends, WebSocket transport, and reactive client signals",
+  "type": "module",
+  "main": "core.ts",
+  "types": "core.ts",
+  "exports": {
+    "./core": "./core.ts",
+    "./client": "./client.ts",
+    "./server": "./server.ts",
+    "./sqlite": "./sqlite.ts",
+    "./postgres": "./postgres/index.ts",
+    "./logger": "./logger.ts",
+    "./auth": "./auth.ts",
+    "./auth-jwt": "./auth-jwt.ts"
+  },
+  "files": [
+    "*.ts",
+    "!*.test.ts",
+    "!tests",
+    "*.sql",
+    "postgres/**/*.ts",
+    "postgres/**/*.sql",
+    ".claude/skills",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "bunx tsc --noEmit",
+    "test": "bun test tests/core.test.ts tests/server.test.ts tests/sqlite.test.ts tests/auth.test.ts",
+    "test:pg": "bun test tests/postgres.test.ts tests/auth-jwt.test.ts",
+    "test:all": "bun test tests/",
+    "db:up": "docker compose up -d --wait",
+    "db:down": "docker compose down -v",
+    "ci": "bun run db:up && bun run check && bun run test:all; code=$?; bun run db:down; exit $code"
+  },
+  "peerDependencies": {
+    "@blueshed/railroad": "^0.6.0",
+    "pg": "^8.20.0",
+    "jose": "^6.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@blueshed/railroad": { "optional": true },
+    "pg": { "optional": true },
+    "jose": { "optional": true }
+  },
+  "devDependencies": {
+    "@blueshed/railroad": "^0.6.3",
+    "@types/bun": "^1.3.11",
+    "@types/pg": "^8.20.0",
+    "jose": "^6.2.2",
+    "pg": "^8.20.0",
+    "typescript": "^5.9.3"
+  },
+  "author": "Peter Bunyan <peter@blueshed.co.uk> (https://blueshed.co.uk)",
+  "license": "MIT",
+  "homepage": "https://github.com/blueshed/delta",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/blueshed/delta"
+  },
+  "keywords": ["delta-doc", "json-patch", "websocket", "postgres", "sqlite", "realtime"]
+}

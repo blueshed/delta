@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Build output / caches
+dist/
+coverage/
+.tsbuildinfo
+*.tsbuildinfo
+
+# Bun
+.bun/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test runtime artifacts
+test-results/
+playwright-report/
