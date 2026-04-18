@@ -23,6 +23,26 @@ import { applyOps, type DeltaOp } from "./core";
 
 export type { DeltaOp } from "./core";
 
+/**
+ * Rejection shape of `call()` and `doc.send()` — returned by the server when
+ * an action errors. `code` is numeric (401 for auth, 400 for bad input, etc).
+ * `DeltaError.isDeltaError(e)` narrows a caught unknown to this shape.
+ */
+export interface DeltaError {
+  code: number;
+  message: string;
+}
+
+export const DeltaError = {
+  isDeltaError(e: unknown): e is DeltaError {
+    return (
+      !!e && typeof e === "object"
+      && typeof (e as any).code === "number"
+      && typeof (e as any).message === "string"
+    );
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Reconnecting WebSocket
 // ---------------------------------------------------------------------------

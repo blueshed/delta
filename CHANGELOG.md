@@ -13,10 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Bootstrap helpers** (`postgres/bootstrap.ts`): `applyFramework(pool)`, `applySql(pool, sql)`, `frameworkSql()`, `frameworkSqlFiles()` for programmatic DB setup.
 - **Auth-JWT bootstrap** (`auth-jwt.ts`): `applyAuthJwtSchema(pool)`, `authJwtSql()`, `authJwtSqlFile()`.
 - **CLI** (`cli.ts`): `delta sql <module>` regenerates table SQL; `delta init <dir> [--with-auth]` copies framework + optional users SQL into a consumer's `init_db/`.
+- **`logout` action** on `jwtAuth` — clears `client.data.identity` for identity-switching on a live socket.
+- **`DeltaError`** type export from `client.ts` with an `isDeltaError(e)` narrowing helper for typed rejection handling.
+- **Skill recipes**: per-user list isolation (most common multi-tenant shape), RLS two-pool pattern (admin + non-super `app` role for real RLS enforcement), auth-before-open race note.
 
 ### Changed
 
-- Skill updated with the full bootstrap story (programmatic + CLI paths) and codegen workflow.
+- Skill updated with the full bootstrap story (programmatic + CLI paths), codegen workflow, and the recipes above.
+- `compose.yml` annotated as test-only (`tmpfs` is ephemeral; copy with a named volume for real apps).
+
+### Driven by
+
+Feedback from a fresh Claude session that built a multi-user todo app against the 0.1.0 skill — surfaced the codegen gap, the missing per-user recipe, the RLS two-pool requirement, the auth-before-open race, and the missing logout/error-type primitives.
 
 ## [0.1.0] — 2026-04-18
 

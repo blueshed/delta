@@ -1,3 +1,7 @@
+# Test-only compose. `tmpfs` keeps the data directory in memory so every
+# `docker compose down -v` leaves no state behind — perfect for a CI cycle,
+# wrong for an app that needs durable data. Copy this file into your own
+# project but replace the `tmpfs` block with a named volume for real use.
 services:
   postgres:
     image: postgres:18-alpine
@@ -13,4 +17,4 @@ services:
       timeout: 3s
       retries: 20
     tmpfs:
-      - /var/lib/postgresql
+      - /var/lib/postgresql   # EPHEMERAL — see comment at top of file

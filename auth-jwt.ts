@@ -149,6 +149,13 @@ export function jwtAuth(opts: JwtAuthOpts): DeltaAuth<User> {
         log.info(`authenticate user=${user.id}`);
         return { result: user };
       },
+
+      async logout(_params, client) {
+        const prev = client.data?.identity as User | undefined;
+        delete client.data.identity;
+        if (prev) log.info(`logout user=${prev.id}`);
+        return { result: { ack: true } };
+      },
     },
 
     gate(client) {

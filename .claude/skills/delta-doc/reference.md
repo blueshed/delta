@@ -66,18 +66,28 @@ Bun.serve({
 ```tsx
 // client.tsx
 import { provide, effect } from "@blueshed/railroad";
-import { connectWs, WS, openDoc, call } from "@blueshed/delta/client";
+import { connectWs, WS, openDoc, call, DeltaError } from "@blueshed/delta/client";
 
 provide(WS, connectWs("/ws"));
 
+// Await authenticate BEFORE openDoc — an open sent on an unauthenticated
+// connection races ahead of auth and is rejected with 401.
 await call("authenticate", { token: localStorage.token });
-const items = openDoc<{ items: Record<string, Item> }>("items:");
 
+const items = openDoc<{ items: Record<string, Item> }>("items:");
 effect(() => console.log(items.data.get()));
 
-items.send([
-  { op: "add", path: "/items/-", value: { name: "hello", value: 1 } },
-]);
+try {
+  await items.send([
+    { op: "add", path: "/items/-", value: { name: "hello", value: 1 } },
+  ]);
+} catch (err) {
+  if (DeltaError.isDeltaError(err)) console.warn(`${err.code}: ${err.message}`);
+  else throw err;
+}
+
+// Sign out: clear identity on the socket (stays connected).
+await call("logout");
 ```
 
 ## Contracts
@@ -169,6 +179,72 @@ defineDoc("venue:", {
 // open "venue:42" → { venues: {...}, areas: [...], sites: [...] } for venue 42 only
 ```
 
+**Per-user list isolation** — each user sees only their own rows. The most common multi-tenant shape.
+
+Two parts: (1) scope the generic doc by a user-id carried in the doc name, (2) wrap `docTypeFromDef` with an identity check that the doc-name id matches the authenticated identity. The wrap also injects the owner id on `add` so the user can't forge other users' rows.
+
+```ts
+// types.ts
+export const schema = defineSchema({
+  todos: {
+    columns: { owner_id: "integer", text: "text", done: { type: "boolean", default: false } },
+    temporal: false,
+  },
+});
+
+export const docs = [
+  defineDoc("todos:", {
+    root: "todos",
+    include: [],
+    scope: { owner_id: ":id" },   // read  /<id> from the doc name
+  }),
+];
+```
+
+```ts
+// server.ts — register a scoped-per-user DocType
+import { defineDoc, docTypeFromDef, registerDocType, type DocType } from "@blueshed/delta/postgres";
+import type { User } from "@blueshed/delta/auth-jwt";
+import type { DeltaOp } from "@blueshed/delta/core";
+
+const generic = docTypeFromDef(
+  defineDoc("todos:", { root: "todos", include: [], scope: { owner_id: ":id" } }),
+  pool,
+  { auth },
+);
+
+const myTodos: DocType<{ userId: number }, User> = {
+  prefix: "todos:",
+  parse(name) {
+    const m = name.match(/^todos:(\d+)$/);
+    return m ? { userId: Number(m[1]) } : null;
+  },
+  async open(ctx, name, msg, identity) {
+    if (!identity || Number(identity.id) !== ctx.userId) return null; // 404, not 403
+    return generic.open({}, name, msg, identity);
+  },
+  async apply(ctx, name, ops, identity) {
+    if (!identity || Number(identity.id) !== ctx.userId) {
+      throw Object.assign(new Error("Forbidden"), { code: 403 });
+    }
+    // Inject owner_id on adds so the user can't forge rows for someone else.
+    const safeOps: DeltaOp[] = ops.map((op) =>
+      op.op === "add" && op.path === "/todos/-"
+        ? { ...op, value: { ...(op.value as object), owner_id: ctx.userId } }
+        : op,
+    );
+    return generic.apply({}, name, safeOps, identity);
+  },
+};
+registerDocType(myTodos);
+```
+
+```tsx
+// client — each user opens their own stream, channel isolation is automatic
+const me = (await call<User>("authenticate", { token })).id;
+const myTodos = openDoc<{ todos: Record<string, Todo> }>(`todos:${me}`);
+```
+
 **Custom DocType** — when the lens isn't expressible as `DocDef`:
 
 ```ts
@@ -232,6 +308,14 @@ createDocListener(ws, pool, { auth });         // gate every open / delta
 1. **Upgrade-time** — cookie / `Authorization` header via `onUpgrade`.
 2. **In-message** — send `{ action: "call", method: "authenticate", params: { token } }` after connecting unauthenticated.
 
+**Identity switching on a live socket.** `jwtAuth` ships a `logout` action that clears `client.data.identity`. Client usage:
+
+```ts
+await call("logout");              // server-side: delete client.data.identity
+localStorage.removeItem("token");
+// Next open/delta will fail the gate with 401 until the user re-authenticates.
+```
+
 ## RLS with `app.user_id`
 
 With `auth.asSqlArg` set, every `docTypeFromDef` query runs inside `withAppAuth(pool, id, fn)`:
@@ -256,7 +340,36 @@ ALTER TABLE items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE items FORCE ROW LEVEL SECURITY;
 ```
 
-**Gotcha:** superusers (including the default `postgres` role) bypass RLS even with FORCE. Create a non-super role and connect as it for RLS-enforced paths.
+**Gotcha:** superusers (including the default `postgres` role) bypass RLS even with FORCE. Use **two pools** — an admin role for schema + auth (login/register mutate `users` unscoped), a non-super role for all doc queries.
+
+```sql
+-- One-time setup, as the admin role:
+CREATE ROLE app LOGIN PASSWORD 'app-secret';
+GRANT CONNECT ON DATABASE mydb TO app;
+GRANT USAGE ON SCHEMA public TO app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app;
+-- `app` has no BYPASSRLS, so FORCE ROW LEVEL SECURITY policies apply.
+```
+
+```ts
+// server.ts — two pools
+import { Pool } from "pg";
+
+const adminPool = new Pool({ connectionString: process.env.PG_ADMIN_URL });  // postgres user
+const appPool   = new Pool({ connectionString: process.env.PG_APP_URL });    // app user
+
+// Auth uses the admin pool (writes to `users`, which the app role can't modify).
+const auth = jwtAuth({ pool: adminPool, secret: process.env.JWT_SECRET! });
+
+// Doc queries use the app pool so RLS policies bind.
+registerDocType(docTypeFromDef(def, appPool, { auth }));
+await createDocListener(ws, appPool, { auth });
+```
+
+Under this setup `withAppAuth(appPool, ...)` sets `app.user_id` as the `app` role, and the policy `USING (owner_id = current_setting('app.user_id')::bigint)` filters without the role bypassing it.
 
 ## Stored functions (read-only contract)
 

@@ -191,6 +191,25 @@ describe("jwtAuth.actions.authenticate", () => {
 // gate + asSqlArg
 // ---------------------------------------------------------------------------
 
+describe("jwtAuth.actions.logout", () => {
+  test("clears identity from client.data and acks", async () => {
+    const auth = jwtAuth({ pool, secret: SECRET });
+    const client = { data: { identity: { id: 5, email: "x@x" } } as Record<string, unknown> };
+
+    const outcome = await auth.actions!.logout({}, client);
+    expect("result" in outcome).toBe(true);
+    if ("result" in outcome) expect(outcome.result.ack).toBe(true);
+    expect(client.data.identity).toBeUndefined();
+  });
+
+  test("is a no-op when no identity is set", async () => {
+    const auth = jwtAuth({ pool, secret: SECRET });
+    const client = { data: {} as Record<string, unknown> };
+    const outcome = await auth.actions!.logout({}, client);
+    expect("result" in outcome).toBe(true);
+  });
+});
+
 describe("jwtAuth.gate + asSqlArg", () => {
   test("gate returns identity when set on client.data", () => {
     const auth = jwtAuth({ pool, secret: SECRET });
