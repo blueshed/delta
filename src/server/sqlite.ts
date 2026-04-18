@@ -17,7 +17,7 @@
  * the backend is a JSON file or SQLite.
  */
 import type { WsServer } from "./server";
-import { applyOps as deltaApplyOps, type DeltaOp } from "./core";
+import { applyOps as deltaApplyOps, type DeltaOp } from "../core";
 import { createLogger } from "./logger";
 
 // ---------------------------------------------------------------------------

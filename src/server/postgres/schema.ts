@@ -158,7 +158,7 @@ export async function pruneOpsLog(pool: Pool, keepInterval = "1 hour"): Promise<
 
 export interface ValidationError { path: string; message: string; }
 
-export function validateOps(schema: Schema, def: DocDef, ops: import("../core").DeltaOp[]): ValidationError[] {
+export function validateOps(schema: Schema, def: DocDef, ops: import("../../core").DeltaOp[]): ValidationError[] {
   const errors: ValidationError[] = [];
   for (const op of ops) {
     const parts = op.path.split("/").filter(Boolean);

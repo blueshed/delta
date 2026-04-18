@@ -19,9 +19,9 @@
  *   const status = await call<Status>("status");
  */
 import { signal, createLogger, key, inject } from "@blueshed/railroad";
-import { applyOps, type DeltaOp } from "./core";
+import { applyOps, type DeltaOp } from "../core";
 
-export type { DeltaOp } from "./core";
+export type { DeltaOp } from "../core";
 
 /**
  * Rejection shape of `call()` and `doc.send()` — returned by the server when

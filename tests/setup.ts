@@ -8,8 +8,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Pool } from "pg";
-import { applyFramework as applyFrameworkFromPkg } from "../postgres";
-import { applyAuthJwtSchema } from "../auth-jwt";
+import { applyFramework as applyFrameworkFromPkg } from "../src/server/postgres";
+import { applyAuthJwtSchema } from "../src/server/auth-jwt";
 
 export const PG_URL =
   process.env.DELTA_TEST_PG_URL ??

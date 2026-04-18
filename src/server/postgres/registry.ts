@@ -15,7 +15,7 @@
  */
 import type { Pool, PoolClient } from "pg";
 import type { DocDef } from "./schema";
-import type { DeltaOp } from "../core";
+import type { DeltaOp } from "../../core";
 import type { DeltaAuth } from "../auth";
 import { withAppAuth } from "./auth";
 

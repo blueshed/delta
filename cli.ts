@@ -17,10 +17,10 @@
 import { parseArgs } from "node:util";
 import { resolve, basename, join, dirname } from "node:path";
 import { mkdirSync, copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { generateSql } from "./postgres/codegen";
-import { frameworkSqlFiles } from "./postgres/bootstrap";
-import { authJwtSqlFile } from "./auth-jwt";
-import type { Schema, DocDef } from "./postgres";
+import { generateSql } from "./src/server/postgres/codegen";
+import { frameworkSqlFiles } from "./src/server/postgres/bootstrap";
+import { authJwtSqlFile } from "./src/server/auth-jwt";
+import type { Schema, DocDef } from "./src/server/postgres";
 
 const PKG_VERSION = (() => {
   try {

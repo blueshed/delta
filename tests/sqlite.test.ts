@@ -5,9 +5,9 @@ import {
   loadDocAt, createSnapshot, resolveSnapshot,
   migrateSchema, validateOps,
   type Schema, type DocDef,
-} from "../sqlite";
-import { createWs } from "../server";
-import { setLogLevel } from "../logger";
+} from "../src/server/sqlite";
+import { createWs } from "../src/server/server";
+import { setLogLevel } from "../src/server/logger";
 
 setLogLevel("silent");
 

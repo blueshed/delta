@@ -5,8 +5,8 @@
  * SQL is fed to a real Postgres and used to open/apply a doc.
  */
 import { describe, test, expect } from "bun:test";
-import { defineSchema, defineDoc, generateSql } from "../postgres";
-import { setLogLevel } from "../logger";
+import { defineSchema, defineDoc, generateSql } from "../src/server/postgres";
+import { setLogLevel } from "../src/server/logger";
 
 setLogLevel("silent");
 

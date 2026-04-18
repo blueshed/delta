@@ -9,26 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Codegen** (`postgres/codegen.ts`): `generateSql(schema, docs)` produces a self-contained `CREATE TABLE` + `_delta_collections` + `_delta_docs` SQL file from TypeScript. Ported from `clean/tasks.ts`.
-- **Bootstrap helpers** (`postgres/bootstrap.ts`): `applyFramework(pool)`, `applySql(pool, sql)`, `frameworkSql()`, `frameworkSqlFiles()` for programmatic DB setup.
-- **Auth-JWT bootstrap** (`auth-jwt.ts`): `applyAuthJwtSchema(pool)`, `authJwtSql()`, `authJwtSqlFile()`.
-- **CLI** (`cli.ts`): `delta sql <module>` regenerates table SQL; `delta init <dir> [--with-auth]` copies framework + optional users SQL into a consumer's `init_db/`.
+- **Codegen** (`src/server/postgres/codegen.ts`): `generateSql(schema, docs)` produces a self-contained `CREATE TABLE` + `_delta_collections` + `_delta_docs` SQL file from TypeScript. Ported from `clean/tasks.ts`.
+- **Bootstrap helpers** (`src/server/postgres/bootstrap.ts`): `applyFramework(pool)`, `applySql(pool, sql)`, `frameworkSql()`, `frameworkSqlFiles()` for programmatic DB setup.
+- **Auth-JWT bootstrap** (`src/server/auth-jwt.ts`): `applyAuthJwtSchema(pool)`, `authJwtSql()`, `authJwtSqlFile()`.
+- **CLI** (`cli.ts`): `delta sql <module>` regenerates table SQL; `delta init <dir> [--with-auth]` copies framework + optional users SQL into a consumer's `init_db/` with a `-- @blueshed/delta <kind> v<version>` header. `--upgrade` replaces older files with `.bak` backups, refuses to clobber files missing the header or at a newer version, and no-ops when already current.
 - **`logout` action** on `jwtAuth` — clears `client.data.identity` for identity-switching on a live socket.
-- **`DeltaError`** type export from `client.ts` with an `isDeltaError(e)` narrowing helper for typed rejection handling.
-- **Skill recipes**: per-user list isolation (most common multi-tenant shape), RLS two-pool pattern (admin + non-super `app` role for real RLS enforcement), auth-before-open race note.
+- **`DeltaError`** type export from `src/client/client.ts` with an `isDeltaError(e)` narrowing helper for typed rejection handling.
+- **Skill recipes** in `reference.md`: per-user list isolation (most common multi-tenant shape), RLS two-pool pattern (admin + non-super `app` role for real RLS enforcement), auth-before-open race note, `scope` syntax table (`:id` vs `id` distinction), `owner_id` injection + RLS `WITH CHECK` rationale, Bun HTML-route + WebSocket co-serve recipe.
 - **`/publish` command** at `.claude/commands/publish.md` — reproducible release pipeline (preflight → CI → bump → CHANGELOG promote → commit → tag). Prints the `git push` command but does not push.
 
 ### Changed
 
-- **Vendor-first SQL.** Framework + auth SQL is now copied into the consumer's `init_db/` by `delta init` (with a version header) and applied by the consumer's `setup.ts`. `applyFramework(pool)` / `applyAuthJwtSchema(pool)` still exist for internal tests but are no longer the advocated path.
-- **Skill rewritten as a runbook.** `SKILL.md` is now numbered steps + template references (mirroring `bun-route`'s shape). Paste-ready templates live in `.claude/skills/delta-doc/templates/` (`new-app/`, `per-user/`, `add-auth/`).
-- **`reference.md` trimmed** to contracts, scope syntax, stored-function table, wire protocol, and RLS rules — no prose examples.
-- **`delta init --upgrade`** replaces older vendored files with `.bak` backups, refuses to clobber files without the `@blueshed/delta` version header, and no-ops when already current.
-- `compose.yml` annotated as test-only (`tmpfs` is ephemeral; consumers copy the template's volume-based compose instead).
+- **`src/` layout.** All library code moved under `src/` with three children: `src/client/` (browser), `src/server/` (Bun + backends), `src/sql/` (vendored SQL — framework `001a-001e-*.sql` plus `auth-jwt.sql`). Shared `DeltaOp` primitive is `src/core.ts`. Subpath exports from `package.json` are unchanged (`@blueshed/delta/client`, `/server`, `/postgres`, `/auth`, `/auth-jwt`, etc.) — the reorganization is internal only.
+- `compose.yml` annotated as test-only (`tmpfs` is ephemeral; real apps use a named volume).
 
 ### Driven by
 
-Feedback from a fresh Claude session that built a multi-user todo app against the 0.1.0 skill — surfaced the codegen gap, the missing per-user recipe, the RLS two-pool requirement, the auth-before-open race, and the missing logout/error-type primitives.
+Two fresh Claude sessions that built the same multi-user todo app against the 0.1.0 skill. The first surfaced the codegen gap, the missing per-user recipe, the RLS two-pool requirement, the auth-before-open race, and the missing logout / error-type primitives. The second (with those fixes in place) surfaced the `scope` syntax subtlety, the injection-vs-RLS overlap, and the Bun route + WS wiring question — all now in `reference.md`.
 
 ## [0.1.0] — 2026-04-18
 

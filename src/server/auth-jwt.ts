@@ -36,7 +36,7 @@ const log = createLogger("[auth-jwt]");
 // Bootstrap — apply the reference users schema + login/register functions.
 // ---------------------------------------------------------------------------
 
-const AUTH_JWT_SQL_PATH = join(import.meta.dir, "auth-jwt.sql");
+const AUTH_JWT_SQL_PATH = join(import.meta.dir, "..", "sql", "auth-jwt.sql");
 
 /** Absolute path to the reference auth-jwt SQL file (users + register + login). */
 export function authJwtSqlFile(): string {

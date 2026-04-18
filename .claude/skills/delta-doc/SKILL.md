@@ -1,90 +1,88 @@
 ---
 name: delta-doc
-description: "Scaffold or extend a Bun + @blueshed/delta project. Use when the user asks for a delta-doc app, when adding a new doc type, when wiring auth, or when building per-user isolated lists."
-argument-hint: "[new <app-name> | per-user <collection> | auth | doc <name>]"
+description: "Delta-doc — JSON-Patch document sync over WebSocket with Postgres or SQLite. Use when importing @blueshed/delta, defining doc types, writing ops against a delta-doc backend, or wiring authentication."
 ---
 
-# Delta-doc scaffolding
+Narrow AI-native primitive. Mutations are JSON-Patch ops on `/collection/id`. Transport is WebSocket. Backends are Postgres (stored functions + LISTEN/NOTIFY + temporal tables) or SQLite. Clients get reactive signals via `@blueshed/railroad`.
 
-Bun + Postgres + `@blueshed/delta` apps. Vendor-first: framework SQL is copied into the user's `init_db/` (explicit, editable, git-tracked), not imported at runtime. Templates live in `${CLAUDE_SKILL_DIR}/templates/`.
+**For the full API, patterns, and recipes: read `reference.md` (in this skill directory).** This file is the router; reference.md is the manual.
 
-`reference.md` in this directory holds the contract reference — read it only when a template doesn't cover the case.
+## Exports
 
-## Step 1 — Detect scenario from `$ARGUMENTS`
-
-| Argument | Scenario | What to do |
+| Subpath | Runs | Purpose |
 |---|---|---|
-| `new <app-name>` | Fresh project in an empty directory | Run all of §2. |
-| `per-user <collection>` | Add a per-user isolated list to an existing delta app | §3 only. |
-| `doc <name>` | Add a shared list doc to an existing delta app | §4 only. |
-| `auth` | Add `jwtAuth` to an existing `createWs()` server | §5 only. |
+| `@blueshed/delta/core` | anywhere | `applyOps`, `DeltaOp` |
+| `@blueshed/delta/client` | browser | `connectWs`, `openDoc`, `call`, `WS` |
+| `@blueshed/delta/server` | Bun | `createWs`, `registerDoc`, `registerMethod` |
+| `@blueshed/delta/sqlite` | Bun | `defineSchema`, `defineDoc`, `registerDocs`, snapshots |
+| `@blueshed/delta/postgres` | Bun + pg | `defineSchema`, `defineDoc`, `generateSql`, `applyFramework`, `createDocListener`, `registerDocType`, `docTypeFromDef`, `withAppAuth` |
+| `@blueshed/delta/auth` | Bun | `DeltaAuth` contract, `wireAuth`, `upgradeWithAuth` |
+| `@blueshed/delta/auth-jwt` | Bun + pg + jose | `jwtAuth({ pool, secret })`, `applyAuthJwtSchema(pool)` |
 
-If `$ARGUMENTS` is empty, ask the user what they're building.
+## CLI
 
-## Step 2 — New project bootstrap (`new <app-name>`)
+`bunx @blueshed/delta` (available after `bun install`):
 
-1. **Preflight.** Confirm the working directory is empty (`ls -a` — just `.` and `..`). If not, stop and ask.
+```bash
+# Copy framework SQL (001a–001e) into init_db/. Add --with-auth for the users schema.
+bunx @blueshed/delta init init_db --with-auth
 
-2. **Vendor the framework.**
-   ```bash
-   bun init -y
-   bun add @blueshed/delta @blueshed/railroad pg jose
-   bun add -d @types/bun @types/pg typescript
-   bunx @blueshed/delta init init_db --with-auth
-   ```
-   This writes versioned SQL files into `init_db/` (header `-- @blueshed/delta framework v<ver>`). **These files belong to the user.** Leave them alone unless running `delta init --upgrade`.
+# Regenerate your table SQL from types.ts (must export `schema` and `docs`).
+bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql
+```
 
-3. **Copy starter files.** From `${CLAUDE_SKILL_DIR}/templates/new-app/`:
-   - `compose.yml`, `tsconfig.json`, `package.json`, `types.ts`, `server.ts`, `setup.ts`, `client/index.html`, `client/client.tsx`, `client/app.css`.
+## Bootstrap (two ways)
 
-   Replace these literal tokens in every file: `{{APP}}` → app name (slug), `{{PORT}}` → a port (default `3000`), `{{DB}}` → db name (default same as app name), `{{APP_ROLE}}` → non-super role name (default `{{APP}}_app`).
+**Programmatic** (recommended when the app owns the DB):
 
-4. **Generate the tables SQL.**
-   ```bash
-   bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql
-   ```
-   This file is committed too. Regenerate whenever `types.ts` changes.
+```ts
+import { Pool } from "pg";
+import { applyFramework, applySql, generateSql } from "@blueshed/delta/postgres";
+import { applyAuthJwtSchema } from "@blueshed/delta/auth-jwt";
+import { schema, docs } from "./types";
 
-5. **Write the per-user app SQL.** Copy `${CLAUDE_SKILL_DIR}/templates/per-user/app.sql` to `init_db/004-app.sql`, substituting `{{TABLE}}` / `{{USER_COL}}` / `{{APP_ROLE}}` for this app.
+const pool = new Pool({ connectionString: process.env.PG_URL });
+await applyFramework(pool);              // 001a–001e framework SQL
+await applyAuthJwtSchema(pool);          // users + register/login (opt-in)
+await applySql(pool, generateSql(schema, docs));  // your 002-tables equivalent
+```
 
-6. **Verify.** `docker compose up -d --wait && bun --hot server.ts`, then `curl -s -o /dev/null -w "%{http_code}\n" http://localhost:{{PORT}}` → expect `200`. Report the URL + seeded users.
+**File-based** (when `docker-entrypoint-initdb.d` or a migration tool owns the DB):
 
-## Step 3 — Per-user list isolation (`per-user <collection>`)
+```bash
+bunx @blueshed/delta init init_db --with-auth
+bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql
+```
 
-For adding a per-user list to an existing delta-backed server. The collection and doc are already defined in `types.ts` with `scope: { user_id: ":id" }`.
+Everything is idempotent — safe to re-apply on every boot.
 
-1. In `init_db/NNN-app.sql`, append the role (if missing), the RLS policy, and the `ENABLE`/`FORCE ROW LEVEL SECURITY` block from `${CLAUDE_SKILL_DIR}/templates/per-user/app.sql`. Substitute `{{TABLE}}` = the collection's table name and `{{USER_COL}}` = the owner column (e.g. `owner_id`).
-2. Regenerate: `bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql`.
-3. In `server.ts`, register the collection with the wrapper pattern from `${CLAUDE_SKILL_DIR}/templates/per-user/server-wrapper.ts` (identity check + owner_id injection).
-4. Verify: log in as two users in two tabs, add rows in both, confirm each sees only theirs.
+## Files to read when deeper detail is needed
 
-## Step 4 — Shared doc (`doc <name>`)
+`core.ts` · `client.ts` · `server.ts` · `sqlite.ts` · `logger.ts` · `auth.ts` · `auth-jwt.ts` · `cli.ts`
+`postgres/index.ts` · `postgres/schema.ts` · `postgres/codegen.ts` · `postgres/bootstrap.ts` · `postgres/listener.ts` · `postgres/registry.ts` · `postgres/auth.ts`
+`postgres/sql/001a-001e-*.sql` (framework stored functions — read-only) · `auth-jwt.sql` (reference users schema)
 
-For a doc every authenticated user can read/write (no scoping).
+## The primitive
 
-1. Add the collection and `defineDoc("<name>:", { root: "<name>", include: [] })` in `types.ts`.
-2. `bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql`.
-3. In `server.ts`: `registerDocType(docTypeFromDef(defineDoc("<name>:", { root: "<name>", include: [] }), appPool, { auth }))`.
-4. Client: `openDoc<{ <name>: Record<string, Row> }>("<name>:")`.
+```ts
+type DeltaOp =
+  | { op: "replace"; path: string; value: unknown }  // set at path
+  | { op: "add";     path: string; value: unknown }  // set, or append with /-
+  | { op: "remove";  path: string };                 // delete by path
+```
 
-## Step 5 — Add auth (`auth`)
-
-For a delta server that currently has no auth.
-
-1. `bunx @blueshed/delta init init_db --with-auth` (adds `002-users.sql` only; skips files already present).
-2. In `server.ts`, insert the block from `${CLAUDE_SKILL_DIR}/templates/add-auth/server.snippet.ts` (two pools, `jwtAuth`, `wireAuth`, `upgradeWithAuth`).
-3. In the client bootstrap, insert the login/logout/authenticate flow from `${CLAUDE_SKILL_DIR}/templates/add-auth/client.snippet.tsx`.
+Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (field), `/collection/-` (append).
 
 ## Rules
 
-- **Vendor SQL, import TS.** Framework SQL lives in `init_db/`, not in node_modules. Never advise `applyFramework(pool)` in consumer code.
-- **Regenerate `003-tables.sql` with `delta sql`.** Never hand-edit generated files. Never inline `generateSql()` into `setup.ts` — the whole point of a generated artifact is that it's visible in git.
-- **`setup.ts` reads `init_db/`**. It walks the directory, applies each `.sql` alphabetically, and seeds. No imports from `@blueshed/delta/postgres` for SQL content.
-- **Two pools for RLS.** Admin pool for `login`/`register` (writes to `users`); non-super app-role pool for doc queries (so FORCE RLS binds).
-- **Doc names carry scope.** `todos:5` means "todos for user 5" — `scope: { user_id: ":id" }` reads the `5` from the name. Per-user docs get per-user WS broadcast channels for free.
-- **Await `authenticate` before `openDoc`.** `openDoc` schedules its first `open` immediately; an unawaited auth races past it and fails with 401.
-- **Never put tokens in WS URLs.** Use cookies / `Authorization` via `onUpgrade`, or the `authenticate` call action.
-- **Sequences are `seq_<table>`.** `delta sql` handles this; don't hand-write tables.
-- **Client rejects with `DeltaError` shape, not `Error`.** Import `DeltaError` from `@blueshed/delta/client`; use `DeltaError.isDeltaError(e)` for typed handling.
-- **`SET LOCAL` can't bind params.** `withAppAuth` already uses `set_config(name, value, true)` — don't replicate the broken pattern.
-- **Custom `DocType` parses its own prefix.** Prefix logic lives in exactly one place per doc type. Never in the app shell.
+- **One op vocabulary**: only `add` / `replace` / `remove` on `/<coll>/<id>` paths. Never invent new op verbs.
+- **Regenerate `002-tables.sql` with the CLI**: `bunx @blueshed/delta sql ./types.ts --out init_db/002-tables.sql`. Never hand-edit.
+- **Never edit framework SQL**: `001a-001e-*.sql` are the stored-function contract.
+- **Never put tokens in WS URLs**: use `onUpgrade` (cookies / Authorization) or the `authenticate` call action.
+- **No bare `pool.query` when auth is enabled**: let `docTypeFromDef({ auth })` route through `withAppAuth`.
+- **Sequences follow `seq_<table>` convention**: `delta_apply` expects `nextval('seq_items')`. `generateSql` handles this — don't hand-write tables.
+- **`SET LOCAL` can't bind params**: use `set_config(name, value, true)` instead. (This is why `withAppAuth` looks the way it does.)
+- **Custom `DocType` parses its own prefix**: do not put prefix logic anywhere else in the app.
+- **Doc names are data**: `items:` (list), `venue:42` (single), `venue-at:42:2026-06-16` (temporal scoped). Prefix up to and including `:` owns the handler.
+- **Client is signal-driven**: subscribers on `doc.data` auto-update; do not re-read the doc manually.
+- **Await `authenticate` before `openDoc`**: an unauthenticated `open` will race past the auth response and fail with 401. Order: `await call("authenticate", {...})` → then `openDoc(...)`.

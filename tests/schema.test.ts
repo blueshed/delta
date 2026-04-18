@@ -9,8 +9,8 @@ import {
   defineSchema,
   defineDoc,
   validateOps,
-} from "../postgres";
-import { setLogLevel } from "../logger";
+} from "../src/server/postgres";
+import { setLogLevel } from "../src/server/logger";
 
 setLogLevel("silent");
 

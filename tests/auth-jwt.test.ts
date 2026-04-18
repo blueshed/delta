@@ -7,18 +7,18 @@
 import { describe, test, expect, beforeAll, beforeEach, afterAll } from "bun:test";
 import { Pool } from "pg";
 import { SignJWT } from "jose";
-import { jwtAuth } from "../auth-jwt";
+import { jwtAuth } from "../src/server/auth-jwt";
 import {
   docTypeFromDef,
   defineDoc,
-} from "../postgres";
+} from "../src/server/postgres";
 import {
   newPool,
   applyFramework,
   applyAuthJwt,
   resetState,
 } from "./setup";
-import { setLogLevel } from "../logger";
+import { setLogLevel } from "../src/server/logger";
 
 setLogLevel("silent");
 
@@ -244,7 +244,7 @@ describe("jwtAuth.gate + asSqlArg", () => {
 
 describe("withAppAuth + identity plumbing", () => {
   test("withAppAuth sets app.user_id for the inner callback", async () => {
-    const { withAppAuth } = await import("../postgres");
+    const { withAppAuth } = await import("../src/server/postgres");
     const value = await withAppAuth(pool, 42, async (c) => {
       const { rows } = await c.query("SELECT current_setting('app.user_id') AS v");
       return rows[0].v;
@@ -253,7 +253,7 @@ describe("withAppAuth + identity plumbing", () => {
   });
 
   test("withAppAuth accepts string identity and returns the callback result", async () => {
-    const { withAppAuth } = await import("../postgres");
+    const { withAppAuth } = await import("../src/server/postgres");
     const value = await withAppAuth(pool, "user-7", async (c) => {
       const { rows } = await c.query("SELECT current_setting('app.user_id') AS v");
       return rows[0].v;
@@ -262,7 +262,7 @@ describe("withAppAuth + identity plumbing", () => {
   });
 
   test("withAppAuth rolls back on thrown error", async () => {
-    const { withAppAuth } = await import("../postgres");
+    const { withAppAuth } = await import("../src/server/postgres");
     await expect(
       withAppAuth(pool, 1, async (c) => {
         await c.query("SELECT 1");
@@ -282,7 +282,7 @@ describe("withAppAuth + identity plumbing", () => {
     // withAppAuth observing current_setting. If asSqlArg was wired through,
     // the same user id should be visible.
     const auth = jwtAuth({ pool, secret: SECRET });
-    const { withAppAuth } = await import("../postgres");
+    const { withAppAuth } = await import("../src/server/postgres");
     const reg = await auth.actions!.register(
       { name: "Plumb", email: "plumb@example.com", password: "pw" },
       { data: {} },

@@ -19,12 +19,14 @@ import type { Pool } from "pg";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
-const FRAMEWORK_SQL_DIR = join(import.meta.dir, "sql");
+const FRAMEWORK_SQL_DIR = join(import.meta.dir, "..", "..", "sql");
 
-/** Absolute paths to the framework SQL files, in apply-order. */
+/** Absolute paths to the framework SQL files, in apply-order.
+ *  Filters to `001*-*.sql` — siblings like `auth-jwt.sql` are applied
+ *  separately (see `@blueshed/delta/auth-jwt` → `applyAuthJwtSchema`). */
 export function frameworkSqlFiles(): string[] {
   return readdirSync(FRAMEWORK_SQL_DIR)
-    .filter((f) => f.endsWith(".sql"))
+    .filter((f) => /^001[a-z]?-.+\.sql$/.test(f))
     .sort()
     .map((f) => join(FRAMEWORK_SQL_DIR, f));
 }

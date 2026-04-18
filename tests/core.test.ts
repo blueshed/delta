@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { applyOps, type DeltaOp } from "../core";
+import { applyOps, type DeltaOp } from "../src/core";
 
 describe("applyOps", () => {
   test("replace a top-level field", () => {

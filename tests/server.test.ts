@@ -1,6 +1,6 @@
 import { describe, test, expect, afterAll } from "bun:test";
-import { createWs, registerDoc, registerMethod } from "../server";
-import { setLogLevel } from "../logger";
+import { createWs, registerDoc, registerMethod } from "../src/server/server";
+import { setLogLevel } from "../src/server/logger";
 import { unlinkSync } from "fs";
 
 setLogLevel("silent");

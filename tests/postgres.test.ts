@@ -20,9 +20,9 @@ import {
   createSnapshot,
   resolveSnapshot,
   pruneOpsLog,
-} from "../postgres";
-import { createWs } from "../server";
-import { setLogLevel } from "../logger";
+} from "../src/server/postgres";
+import { createWs } from "../src/server/server";
+import { setLogLevel } from "../src/server/logger";
 import {
   PG_URL,
   newPool,

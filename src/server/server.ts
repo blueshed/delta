@@ -20,7 +20,7 @@
  *   ws.setServer(server);
  */
 import { createLogger } from "./logger";
-import { applyOps, type DeltaOp } from "./core";
+import { applyOps, type DeltaOp } from "../core";
 
 // ---------------------------------------------------------------------------
 // Types

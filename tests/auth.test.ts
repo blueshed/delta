@@ -3,14 +3,14 @@
  * no database required.
  */
 import { describe, test, expect, beforeEach } from "bun:test";
-import { createWs } from "../server";
+import { createWs } from "../src/server/server";
 import {
   wireAuth,
   upgradeWithAuth,
   isAuthError,
   type DeltaAuth,
-} from "../auth";
-import { setLogLevel } from "../logger";
+} from "../src/server/auth";
+import { setLogLevel } from "../src/server/logger";
 
 setLogLevel("silent");
 

@@ -20,5 +20,5 @@
 
     "types": ["bun"]
   },
-  "include": ["*.ts", "postgres/**/*.ts", "tests/**/*.ts"]
+  "include": ["cli.ts", "src/**/*.ts", "tests/**/*.ts"]
 }
