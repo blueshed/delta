@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`logout` action** on `jwtAuth` — clears `client.data.identity` for identity-switching on a live socket.
 - **`DeltaError`** type export from `client.ts` with an `isDeltaError(e)` narrowing helper for typed rejection handling.
 - **Skill recipes**: per-user list isolation (most common multi-tenant shape), RLS two-pool pattern (admin + non-super `app` role for real RLS enforcement), auth-before-open race note.
+- **`/publish` command** at `.claude/commands/publish.md` — reproducible release pipeline (preflight → CI → bump → CHANGELOG promote → commit → tag). Prints the `git push` command but does not push.
 
 ### Changed
 
