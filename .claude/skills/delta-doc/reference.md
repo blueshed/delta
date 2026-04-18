@@ -2,6 +2,36 @@
 
 Full API, patterns, and recipes. The companion `SKILL.md` is the router; start there if you haven't.
 
+## First-time bootstrap
+
+Before anything else your database needs the delta framework tables + stored functions. Two equivalent paths:
+
+**Programmatic** (server owns migrations):
+
+```ts
+import { Pool } from "pg";
+import {
+  applyFramework, applySql, generateSql,
+  defineSchema, defineDoc,
+} from "@blueshed/delta/postgres";
+import { applyAuthJwtSchema } from "@blueshed/delta/auth-jwt";
+import { schema, docs } from "./types";
+
+const pool = new Pool({ connectionString: process.env.PG_URL });
+await applyFramework(pool);
+await applyAuthJwtSchema(pool);                    // if using jwtAuth
+await applySql(pool, generateSql(schema, docs));   // your tables
+```
+
+**CLI** (docker-entrypoint-initdb.d or a migration tool owns the DB):
+
+```bash
+bunx @blueshed/delta init init_db --with-auth
+bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql
+```
+
+`init` copies `001a-001e-*.sql` (and optionally `002-users.sql` from auth-jwt) into your directory. `sql` runs the codegen. Everything is idempotent.
+
 ## Quick start (Postgres backend)
 
 ```ts

@@ -42,6 +42,16 @@ export {
   defaultForType,
 } from "./sql";
 
+export { generateSql } from "./codegen";
+export type { GenerateSqlOptions } from "./codegen";
+
+export {
+  applyFramework,
+  applySql,
+  frameworkSql,
+  frameworkSqlFiles,
+} from "./bootstrap";
+
 export { createDocListener } from "./listener";
 
 export {

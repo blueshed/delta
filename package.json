@@ -5,6 +5,9 @@
   "type": "module",
   "main": "core.ts",
   "types": "core.ts",
+  "bin": {
+    "delta": "./cli.ts"
+  },
   "exports": {
     "./core": "./core.ts",
     "./client": "./client.ts",
@@ -24,7 +27,8 @@
     "postgres/**/*.sql",
     ".claude/skills",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "check": "bunx tsc --noEmit",

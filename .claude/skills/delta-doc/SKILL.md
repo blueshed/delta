@@ -15,14 +15,51 @@ Narrow AI-native primitive. Mutations are JSON-Patch ops on `/collection/id`. Tr
 | `@blueshed/delta/client` | browser | `connectWs`, `openDoc`, `call`, `WS` |
 | `@blueshed/delta/server` | Bun | `createWs`, `registerDoc`, `registerMethod` |
 | `@blueshed/delta/sqlite` | Bun | `defineSchema`, `defineDoc`, `registerDocs`, snapshots |
-| `@blueshed/delta/postgres` | Bun + pg | `defineSchema`, `createDocListener`, `registerDocType`, `docTypeFromDef`, `withAppAuth` |
+| `@blueshed/delta/postgres` | Bun + pg | `defineSchema`, `defineDoc`, `generateSql`, `applyFramework`, `createDocListener`, `registerDocType`, `docTypeFromDef`, `withAppAuth` |
 | `@blueshed/delta/auth` | Bun | `DeltaAuth` contract, `wireAuth`, `upgradeWithAuth` |
-| `@blueshed/delta/auth-jwt` | Bun + pg + jose | `jwtAuth({ pool, secret })` reference impl |
+| `@blueshed/delta/auth-jwt` | Bun + pg + jose | `jwtAuth({ pool, secret })`, `applyAuthJwtSchema(pool)` |
+
+## CLI
+
+`bunx @blueshed/delta` (available after `bun install`):
+
+```bash
+# Copy framework SQL (001a–001e) into init_db/. Add --with-auth for the users schema.
+bunx @blueshed/delta init init_db --with-auth
+
+# Regenerate your table SQL from types.ts (must export `schema` and `docs`).
+bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql
+```
+
+## Bootstrap (two ways)
+
+**Programmatic** (recommended when the app owns the DB):
+
+```ts
+import { Pool } from "pg";
+import { applyFramework, applySql, generateSql } from "@blueshed/delta/postgres";
+import { applyAuthJwtSchema } from "@blueshed/delta/auth-jwt";
+import { schema, docs } from "./types";
+
+const pool = new Pool({ connectionString: process.env.PG_URL });
+await applyFramework(pool);              // 001a–001e framework SQL
+await applyAuthJwtSchema(pool);          // users + register/login (opt-in)
+await applySql(pool, generateSql(schema, docs));  // your 002-tables equivalent
+```
+
+**File-based** (when `docker-entrypoint-initdb.d` or a migration tool owns the DB):
+
+```bash
+bunx @blueshed/delta init init_db --with-auth
+bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql
+```
+
+Everything is idempotent — safe to re-apply on every boot.
 
 ## Files to read when deeper detail is needed
 
-`core.ts` · `client.ts` · `server.ts` · `sqlite.ts` · `logger.ts` · `auth.ts` · `auth-jwt.ts`
-`postgres/index.ts` · `postgres/schema.ts` · `postgres/listener.ts` · `postgres/registry.ts` · `postgres/auth.ts`
+`core.ts` · `client.ts` · `server.ts` · `sqlite.ts` · `logger.ts` · `auth.ts` · `auth-jwt.ts` · `cli.ts`
+`postgres/index.ts` · `postgres/schema.ts` · `postgres/codegen.ts` · `postgres/bootstrap.ts` · `postgres/listener.ts` · `postgres/registry.ts` · `postgres/auth.ts`
 `postgres/sql/001a-001e-*.sql` (framework stored functions — read-only) · `auth-jwt.sql` (reference users schema)
 
 ## The primitive
@@ -39,11 +76,11 @@ Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (fie
 ## Rules
 
 - **One op vocabulary**: only `add` / `replace` / `remove` on `/<coll>/<id>` paths. Never invent new op verbs.
-- **Never edit generated SQL**: `002-tables.sql` comes from `defineSchema` codegen. Regenerate it.
+- **Regenerate `002-tables.sql` with the CLI**: `bunx @blueshed/delta sql ./types.ts --out init_db/002-tables.sql`. Never hand-edit.
 - **Never edit framework SQL**: `001a-001e-*.sql` are the stored-function contract.
 - **Never put tokens in WS URLs**: use `onUpgrade` (cookies / Authorization) or the `authenticate` call action.
 - **No bare `pool.query` when auth is enabled**: let `docTypeFromDef({ auth })` route through `withAppAuth`.
-- **Sequences follow `seq_<table>` convention**: `delta_apply` expects `nextval('seq_items')`, not `items_id_seq`.
+- **Sequences follow `seq_<table>` convention**: `delta_apply` expects `nextval('seq_items')`. `generateSql` handles this — don't hand-write tables.
 - **`SET LOCAL` can't bind params**: use `set_config(name, value, true)` instead. (This is why `withAppAuth` looks the way it does.)
 - **Custom `DocType` parses its own prefix**: do not put prefix logic anywhere else in the app.
 - **Doc names are data**: `items:` (list), `venue:42` (single), `venue-at:42:2026-06-16` (temporal scoped). Prefix up to and including `:` owns the handler.

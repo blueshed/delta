@@ -5,16 +5,16 @@
  * The compose service listens on localhost:5433 (so it won't fight with any
  * local Postgres on :5432). Override with DELTA_TEST_PG_URL if needed.
  */
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Pool } from "pg";
+import { applyFramework as applyFrameworkFromPkg } from "../postgres";
+import { applyAuthJwtSchema } from "../auth-jwt";
 
 export const PG_URL =
   process.env.DELTA_TEST_PG_URL ??
   "postgres://delta:delta@localhost:5433/delta_test";
 
-const SQL_DIR = join(import.meta.dir, "..", "postgres", "sql");
-const AUTH_JWT_SQL = join(import.meta.dir, "..", "auth-jwt.sql");
 const ITEMS_FIXTURE = join(import.meta.dir, "fixtures", "items.sql");
 
 export async function newPool(): Promise<Pool> {
@@ -28,13 +28,12 @@ async function applyFile(pool: Pool, path: string): Promise<void> {
 
 /** Apply the delta framework SQL (001*) in alphabetical order. */
 export async function applyFramework(pool: Pool): Promise<void> {
-  const files = readdirSync(SQL_DIR).filter((f) => f.endsWith(".sql")).sort();
-  for (const f of files) await applyFile(pool, join(SQL_DIR, f));
+  await applyFrameworkFromPkg(pool);
 }
 
 /** Apply the auth-jwt reference schema (users + login/register). */
 export async function applyAuthJwt(pool: Pool): Promise<void> {
-  await applyFile(pool, AUTH_JWT_SQL);
+  await applyAuthJwtSchema(pool);
 }
 
 /** Apply the items fixture used by postgres.test.ts. */
