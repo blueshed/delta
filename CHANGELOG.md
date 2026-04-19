@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CLI** (`cli.ts`): `delta sql <module>` regenerates table SQL; `delta init <dir> [--with-auth]` copies framework + optional users SQL into a consumer's `init_db/` with a `-- @blueshed/delta <kind> v<version>` header. `--upgrade` replaces older files with `.bak` backups, refuses to clobber files missing the header or at a newer version, and no-ops when already current.
 - **`logout` action** on `jwtAuth` — clears `client.data.identity` for identity-switching on a live socket.
 - **`DeltaError`** type export from `src/client/client.ts` with an `isDeltaError(e)` narrowing helper for typed rejection handling.
-- **Skill recipes** in `reference.md`: per-user list isolation (most common multi-tenant shape), RLS two-pool pattern (admin + non-super `app` role for real RLS enforcement), auth-before-open race note, `scope` syntax table (`:id` vs `id` distinction), `owner_id` injection + RLS `WITH CHECK` rationale, Bun HTML-route + WebSocket co-serve recipe.
+- **Skill recipes** in `reference.md`: per-user list isolation (most common multi-tenant shape), RLS two-pool pattern (admin + non-super `app` role for real RLS enforcement), auth-before-open race note, `scope` syntax table (`:id` vs `id` distinction), `owner_id` injection + RLS `WITH CHECK` rationale, Bun HTML-route + WebSocket co-serve recipe, `docker-entrypoint-initdb.d` bootstrap option, session-restore client flow (`localStorage.token` → `call("authenticate", ...)` on load).
 - **`/publish` command** at `.claude/commands/publish.md` — reproducible release pipeline (preflight → CI → bump → CHANGELOG promote → commit → tag). Prints the `git push` command but does not push.
 
 ### Changed
@@ -23,9 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`src/` layout.** All library code moved under `src/` with three children: `src/client/` (browser), `src/server/` (Bun + backends), `src/sql/` (vendored SQL — framework `001a-001e-*.sql` plus `auth-jwt.sql`). Shared `DeltaOp` primitive is `src/core.ts`. Subpath exports from `package.json` are unchanged (`@blueshed/delta/client`, `/server`, `/postgres`, `/auth`, `/auth-jwt`, etc.) — the reorganization is internal only.
 - `compose.yml` annotated as test-only (`tmpfs` is ephemeral; real apps use a named volume).
 
+### Fixed
+
+- **`delta init` no longer requires `jose` to be installed.** The CLI was eagerly importing `auth-jwt.ts` (which value-imports jose at module load) just to read a file path constant. Split the SQL-file helpers into `src/server/auth-jwt-sql.ts` — the CLI imports from there; `@blueshed/delta/auth-jwt` still re-exports them for consumers.
+
 ### Driven by
 
-Two fresh Claude sessions that built the same multi-user todo app against the 0.1.0 skill. The first surfaced the codegen gap, the missing per-user recipe, the RLS two-pool requirement, the auth-before-open race, and the missing logout / error-type primitives. The second (with those fixes in place) surfaced the `scope` syntax subtlety, the injection-vs-RLS overlap, and the Bun route + WS wiring question — all now in `reference.md`.
+Three fresh Claude sessions that built the same multi-user todo app against the skill. The first surfaced the codegen gap, the missing per-user recipe, the RLS two-pool requirement, the auth-before-open race, and the missing logout / error-type primitives. The second (with those fixes in place) surfaced the `scope` syntax subtlety, the injection-vs-RLS overlap, and the Bun route + WS wiring question. The third surfaced the CLI's eager jose import and the missing `docker-entrypoint-initdb.d` + session-restore recipes — all now in `reference.md`.
 
 ## [0.1.0] — 2026-04-18
 

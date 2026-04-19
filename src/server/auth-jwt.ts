@@ -22,40 +22,24 @@
  *
  *   wireAuth(ws, auth);
  *   await createDocListener(ws, pool, { auth });
+ *
+ * SQL-file helpers (`authJwtSqlFile`, `authJwtSql`, `applyAuthJwtSchema`) live
+ * in `./auth-jwt-sql.ts` and are re-exported from here for convenience. They
+ * have no jose dependency, so the `delta init` CLI can load them without
+ * forcing consumers to install jose just to copy SQL files.
  */
 import { SignJWT, jwtVerify } from "jose";
 import type { Pool } from "pg";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { createLogger } from "./logger";
 import type { DeltaAuth } from "./auth";
 
+export {
+  authJwtSqlFile,
+  authJwtSql,
+  applyAuthJwtSchema,
+} from "./auth-jwt-sql";
+
 const log = createLogger("[auth-jwt]");
-
-// ---------------------------------------------------------------------------
-// Bootstrap — apply the reference users schema + login/register functions.
-// ---------------------------------------------------------------------------
-
-const AUTH_JWT_SQL_PATH = join(import.meta.dir, "..", "sql", "auth-jwt.sql");
-
-/** Absolute path to the reference auth-jwt SQL file (users + register + login). */
-export function authJwtSqlFile(): string {
-  return AUTH_JWT_SQL_PATH;
-}
-
-/** The reference auth-jwt SQL as a string. */
-export function authJwtSql(): string {
-  return readFileSync(AUTH_JWT_SQL_PATH, "utf8");
-}
-
-/**
- * Apply the reference users schema + login/register stored functions to a
- * pool. Idempotent. Call once at boot alongside `applyFramework(pool)`, or
- * use `delta init --with-auth` to copy the file for docker-entrypoint use.
- */
-export async function applyAuthJwtSchema(pool: Pool): Promise<void> {
-  await pool.query(authJwtSql());
-}
 
 export interface User {
   id: number | string;

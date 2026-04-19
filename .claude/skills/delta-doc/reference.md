@@ -32,6 +32,27 @@ bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql
 
 `init` copies `001a-001e-*.sql` (and optionally `002-users.sql` from auth-jwt) into your directory. `sql` runs the codegen. Everything is idempotent.
 
+**`docker-entrypoint-initdb.d`** — the cleanest setup for a fresh volume: mount your `init_db/` into the Postgres image and let it apply the SQL on first start. No boot-time application code.
+
+```yaml
+# compose.yml
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: myapp
+      POSTGRES_USER: myapp
+      POSTGRES_PASSWORD: myapp
+    volumes:
+      - ./init_db:/docker-entrypoint-initdb.d:ro
+      - myapp_pgdata:/var/lib/postgresql/data
+    ports: ["5432:5432"]
+volumes:
+  myapp_pgdata:
+```
+
+Postgres applies `.sql` files in the mounted dir alphabetically on the first boot against an empty data volume. Subsequent boots skip. Re-run `docker compose down -v` to start fresh.
+
 ## Quick start (Postgres backend)
 
 ```ts
@@ -89,6 +110,30 @@ try {
 // Sign out: clear identity on the socket (stays connected).
 await call("logout");
 ```
+
+**Session restore** — the client above assumes `localStorage.token` is set. For the full restore-on-load flow (present everywhere a real app ships), wrap bootstrap in a check:
+
+```ts
+async function bootstrap() {
+  const token = localStorage.getItem("token");
+  if (!token) return showLogin();
+  try {
+    const user = await call<User>("authenticate", { token });
+    showApp(user);
+  } catch {
+    localStorage.removeItem("token");  // stale or revoked
+    showLogin();
+  }
+}
+
+async function login(email: string, password: string) {
+  const user = await call<User & { token: string }>("login", { email, password });
+  localStorage.setItem("token", user.token);
+  showApp(user);
+}
+```
+
+Token never goes in the WS URL — it's always in-band via `call("authenticate", ...)`.
 
 ## Contracts
 
