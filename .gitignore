@@ -29,3 +29,4 @@ yarn-error.log*
 # Test runtime artifacts
 test-results/
 playwright-report/
+handoff.md

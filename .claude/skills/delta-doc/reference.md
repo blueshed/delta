@@ -456,6 +456,43 @@ ws.setServer(server);               // let ws.publish() reach the server
 
 Order doesn't matter — the WebSocket upgrade is a distinct HTTP request (`Upgrade: websocket` header), so it doesn't conflict with the HTML route at `/`.
 
+## Rendering collections with op-level precision
+
+The `doc.data` signal is great for read-only views and small docs. For a list of N rows where a single op changes one field on one row, re-rendering from `doc.data` on every change throws away N-1 rows' worth of DOM state (focus, scroll, inputs in flight, CSS transitions). Delta already knows exactly which row changed — `doc.onOps(handler)` delivers the raw ops.
+
+The canonical pattern:
+
+```tsx
+import { openDoc } from "@blueshed/delta/client";
+import { applyOpsToCollection, type DomCollection } from "@blueshed/delta/dom-ops";
+
+interface Todo { id: number; text: string; done: boolean; }
+
+const doc = openDoc<{ todos: Record<string, Todo> }>("todos:5");
+const list = document.getElementById("todo-list")!;
+const nodes = new Map<string, Node>();
+
+const renderer: DomCollection<Todo> = {
+  key: (t) => String(t.id),
+  create: (t) => { /* build li */ return li; },
+  update: (node, t) => { /* patch in place */ },
+  remove: (node) => { /* cleanup hook; DOM removal is automatic */ },
+};
+
+// Initial render from the full state (once).
+await doc.ready;
+for (const todo of Object.values(doc.data.get()?.todos ?? {})) {
+  const node = renderer.create(todo);
+  nodes.set(renderer.key(todo), node);
+  list.appendChild(node);
+}
+
+// Subsequent updates via ops — patches DOM surgically, never rebuilds.
+doc.onOps((ops) => applyOpsToCollection(list, "todos", ops, renderer, nodes));
+```
+
+**When `doc.data` is still fine:** the whole doc fits in one card, no keyboard focus to preserve, < ~10 rows.
+
 ## Stored functions (read-only contract)
 
 Apply `postgres/sql/001a-001e-*.sql` alphabetically to every database — idempotent. Key functions:
@@ -469,6 +506,11 @@ Apply `postgres/sql/001a-001e-*.sql` alphabetically to every database — idempo
 | `delta_snapshot(name, at)` | pins a timestamp to a label |
 | `delta_resolve_snapshot(name)` | looks up a pinned timestamp |
 | `delta_prune_ops(keep_interval interval)` | trims `_delta_ops_log` older than interval |
+| `delta_open_as(user_id, doc_name)` | 1-RTT variant — `set_config('app.user_id', …, true)` + `delta_open` in one SELECT |
+| `delta_open_at_as(user_id, doc_name, timestamptz)` | 1-RTT variant of `delta_open_at` |
+| `delta_apply_as(user_id, doc_name, ops jsonb)` | 1-RTT variant of `delta_apply` |
+
+The `*_as` variants collapse the four identity-scoping round-trips (`BEGIN` → `set_config` → call → `COMMIT`) into one `SELECT`. The implicit transaction around the SELECT scopes `set_config(..., true)` to that statement, and RLS policies read it back exactly the same way. `docTypeFromDef({ auth })` uses them automatically — there's no opt-in. For arbitrary queries under an identity (escape hatch), `withAppAuth(pool, sqlArg, fn)` still exists and pays the extra RTTs.
 
 Collections register themselves via `_delta_collections` (`columns_def`, `parent`, `temporal`); docs via `_delta_docs` (`prefix`, `root`, `include`, `scope`). Populated by your generated `002-tables.sql` — never hand-edited.
 

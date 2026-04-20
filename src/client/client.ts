@@ -7,8 +7,8 @@
  *   - call()       — invoke a stateless RPC method
  *
  * Usage:
- *   import { connectWs, openDoc, call, WS } from "@blueshed/railroad/delta-client";
- *   import { provide } from "@blueshed/railroad/shared";
+ *   import { connectWs, openDoc, call, WS } from "@blueshed/delta/client";
+ *   import { provide } from "@blueshed/railroad";
  *
  *   provide(WS, connectWs("/ws"));
  *
@@ -17,6 +17,11 @@
  *   message.send([{ op: "replace", path: "/message", value: "hello" }]);
  *
  *   const status = await call<Status>("status");
+ *
+ * For large collections, prefer `doc.onOps(handler)` over `doc.data` — it
+ * delivers the raw JSON-Patch ops so a renderer can mutate DOM atomically
+ * (see `@blueshed/delta/dom-ops` → `applyOpsToCollection`) instead of
+ * rebuilding subtrees on every change.
  */
 import { signal, createLogger, key, inject } from "@blueshed/railroad";
 import { applyOps, type DeltaOp } from "../core";
@@ -178,18 +183,31 @@ export function connectWs(
 // Document — reactive signal backed by a server-side delta-doc
 // ---------------------------------------------------------------------------
 
+export type OpsHandler = (ops: DeltaOp[]) => void;
+
 export interface Doc<T> {
   data: ReturnType<typeof signal<T | null>>;
   dataVersion: ReturnType<typeof signal<number>>;
   ready: Promise<void>;
   send(ops: DeltaOp[]): Promise<any>;
+  /**
+   * Subscribe to the raw JSON-Patch ops as they arrive — BEFORE they are
+   * applied to `doc.data`. Use this to route `add` / `replace` / `remove`
+   * straight to DOM nodes via `applyOpsToCollection` (see `dom-ops.ts`)
+   * instead of re-rendering from the full state signal. Returns an
+   * unsubscribe function.
+   */
+  onOps(handler: OpsHandler): () => void;
+}
+
+interface OpenDocEntry {
+  data: ReturnType<typeof signal<any>>;
+  dataVersion: ReturnType<typeof signal<number>>;
+  opsHandlers: Set<OpsHandler>;
 }
 
 const log = createLogger("[doc]");
-const openDocs = new Map<
-  string,
-  { data: ReturnType<typeof signal<any>>; dataVersion: ReturnType<typeof signal<number>> }
->();
+const openDocs = new Map<string, OpenDocEntry>();
 
 /** Lazily resolve the WS client — deferred so openDoc can be called at module level. */
 let _ws: WsClient | null = null;
@@ -209,14 +227,19 @@ function ws(): WsClient {
     _ws.on("message", (msg) => {
       if (msg.doc && msg.ops) {
         const entry = openDocs.get(msg.doc);
-        if (entry) {
-          const current = entry.data.peek();
-          if (current) {
-            const updated = structuredClone(current);
-            applyOps(updated, msg.ops);
-            entry.data.set(updated);
-            entry.dataVersion.set(entry.dataVersion.peek() + 1);
-          }
+        if (!entry) return;
+        // Fire op subscribers FIRST, so DOM patchers see the op that matches
+        // the state change about to land on `data`.
+        for (const handler of entry.opsHandlers) {
+          try { handler(msg.ops); }
+          catch (err: any) { log.error(`onOps handler threw: ${err.message}`); }
+        }
+        const current = entry.data.peek();
+        if (current) {
+          const updated = structuredClone(current);
+          applyOps(updated, msg.ops);
+          entry.data.set(updated);
+          entry.dataVersion.set(entry.dataVersion.peek() + 1);
         }
       }
     });
@@ -228,7 +251,8 @@ function ws(): WsClient {
 export function openDoc<T>(name: string): Doc<T> {
   const data = signal<T | null>(null);
   const dataVersion = signal(0);
-  openDocs.set(name, { data, dataVersion });
+  const opsHandlers = new Set<OpsHandler>();
+  openDocs.set(name, { data, dataVersion, opsHandlers });
 
   let readyResolve: () => void;
   const ready = new Promise<void>((r) => {
@@ -254,6 +278,10 @@ export function openDoc<T>(name: string): Doc<T> {
     ready,
     send(ops: DeltaOp[]) {
       return ws().send({ action: "delta", doc: name, ops });
+    },
+    onOps(handler) {
+      opsHandlers.add(handler);
+      return () => { opsHandlers.delete(handler); };
     },
   };
 }

@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`@blueshed/delta/dom-ops` subpath** (`src/client/dom-ops.ts`): `applyOpsToCollection(parent, collection, ops, { key, create, update?, remove? }, nodes?)` routes delta ops to a keyed `Map<id, Node>` and mutates the DOM surgically — no rebuild from `doc.data`, so focus, scroll, inputs in flight, and CSS transitions survive every op. Paired with six tests in `tests/dom-ops.test.ts`.
+- **`Doc.onOps(handler)`** (`src/client/client.ts`): subscribe to raw `DeltaOp[]` **before** the full-state `doc.data` signal updates. Lets DOM patchers see the change-event, not a state blob. Returns an unsubscribe function.
+- **1-RTT identity-scoped stored functions** (new `src/sql/001f-delta-as.sql`): `delta_open_as(user_id, doc_name)`, `delta_apply_as(user_id, doc_name, ops)`, `delta_open_at_as(user_id, doc_name, at)`. Each wraps `PERFORM set_config('app.user_id', …, true)` + the base call; the SELECT's implicit transaction scopes the setting, and RLS reads it back identically.
+- **Bench suite** (`bench/`): single-write workload across `delta-new`, `delta-old`, and `raw-postgres` adapters. Results captured in [bench/results-0.3.0.md](bench/results-0.3.0.md) — on realistic (20 ms RTT) networks, `delta-new` is ~4× faster per authenticated op than `delta-old`.
+- **Skill updates** (`.claude/skills/delta-doc/`): `SKILL.md` + `reference.md` cover the `dom-ops` export, the "never rebuild a collection inside an `effect`" rule, the canonical `onOps` + `applyOpsToCollection` pattern, and the `*_as` stored-function row + transparency note.
+
+### Changed
+
+- **`docTypeFromDef` hot path** (`src/server/postgres/registry.ts`): when `opts.auth?.asSqlArg` is set, `open` / `apply` / `openAt` call the `delta_*_as` variants directly — one round-trip per op. `withAppAuth` is no longer on the auth hot path; it stays exported as the escape hatch for arbitrary queries under an identity that can't be expressed as a single SELECT.
+
+### Driven by
+
+Two observations from feedback sessions. (1) `withAppAuth` was taking four round-trips (`BEGIN` / `set_config` / call / `COMMIT`) for one logical op the protocol can do in one — at 20 ms RTT, an 80 ms tax per authenticated write, compounding into UI lag on a mobile app. (2) The dominant client pattern would be `effect(() => rebuild(list, doc.data.get()))`, which throws away the op-level precision delta already has — focus, scroll, animations all reset on every keystroke in a collaborative doc. `dom-ops` + `onOps` preserves that precision end-to-end; the `*_as` variants collapse the four RTTs into one.
+
 ## [0.2.1] — 2026-04-19
 
 ### Added

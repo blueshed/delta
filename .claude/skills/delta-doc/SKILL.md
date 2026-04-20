@@ -13,6 +13,7 @@ Narrow AI-native primitive. Mutations are JSON-Patch ops on `/collection/id`. Tr
 |---|---|---|
 | `@blueshed/delta/core` | anywhere | `applyOps`, `DeltaOp` |
 | `@blueshed/delta/client` | browser | `connectWs`, `openDoc`, `call`, `WS` |
+| `@blueshed/delta/dom-ops` | browser | `applyOpsToCollection` — route ops to keyed DOM nodes without rebuilding |
 | `@blueshed/delta/server` | Bun | `createWs`, `registerDoc`, `registerMethod` |
 | `@blueshed/delta/sqlite` | Bun | `defineSchema`, `defineDoc`, `registerDocs`, snapshots |
 | `@blueshed/delta/postgres` | Bun + pg | `defineSchema`, `defineDoc`, `generateSql`, `applyFramework`, `createDocListener`, `registerDocType`, `docTypeFromDef`, `withAppAuth` |
@@ -85,4 +86,5 @@ Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (fie
 - **Custom `DocType` parses its own prefix**: do not put prefix logic anywhere else in the app.
 - **Doc names are data**: `items:` (list), `venue:42` (single), `venue-at:42:2026-06-16` (temporal scoped). Prefix up to and including `:` owns the handler.
 - **Client is signal-driven**: subscribers on `doc.data` auto-update; do not re-read the doc manually.
+- **Never rebuild a collection from `doc.data` inside an `effect`**: patterns like `effect(() => { list.innerHTML = ""; for (const r of doc.data.get().rows) list.append(render(r)); })` throw away the op-level precision the protocol gave you — focus, scroll, animations, cursor all reset on every op. **Use `doc.onOps(handler)` with `applyOpsToCollection` from `@blueshed/delta/dom-ops`** for any list of more than ~10 rows.
 - **Await `authenticate` before `openDoc`**: an unauthenticated `open` will race past the auth response and fail with 401. Order: `await call("authenticate", {...})` → then `openDoc(...)`.
