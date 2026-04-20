@@ -1,55 +1,60 @@
-name: publish
+name: Publish to npm
 
-# Fires when a `v*` tag is pushed to origin — the explicit "make public"
-# moment in the release flow (see .claude/commands/publish.md). The same
-# SHA has already been tested by `bun run ci` locally (via `/publish`) and
-# by `ci.yml` on the preceding push to main, so this workflow's only job
-# is to verify the tag ↔ version agreement and publish to npm via Trusted
-# Publishing (OIDC, no long-lived token).
+# Matches the pattern proven in @blueshed/railroad: fires when a GitHub
+# Release is published, runs the full CI gate inline, then publishes via
+# npm Trusted Publishing (OIDC).
 #
-# Setup (one-time, on the npm side):
-#   npmjs.com → Packages → @blueshed/delta → Publishing access →
-#     Add trusted publisher → GitHub Actions → repo: blueshed/delta,
-#     workflow: .github/workflows/publish.yml.
+# Release flow:
+#   /publish <level>                     → commits + tags locally
+#   git push origin main --follow-tags   → pushes main + tag
+#   gh release create v<ver> -t v<ver> --notes-from-tag   (or GH UI)
+#   → this workflow fires → npm publish
+#
+# npm Trusted Publisher (one-time):
+#   npmjs.com → @blueshed/delta → Publishing access →
+#     GitHub Actions: blueshed/delta, workflow: publish.yml, env blank.
 
 on:
-  push:
-    tags:
-      - 'v*'
+  release:
+    types: [published]
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
     permissions:
       contents: read
-      id-token: write   # lets the runner request an OIDC token for npm
-
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
+      - uses: oven-sh/setup-bun@v2
+
+      - run: bun install --frozen-lockfile
+
+      - name: Start Postgres
+        run: docker compose up -d --wait
+
+      - run: bunx tsc --noEmit
+
+      - run: bun test tests/
+
+      - name: Stop Postgres
+        if: always()
+        run: docker compose down -v
+
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
+          node-version: 24
+          registry-url: "https://registry.npmjs.org"
 
-      # Trusted Publishing needs npm 11.5.1+; Node 22's bundled npm is older.
-      # `npm install -g npm@latest` hits a self-upgrade MODULE_NOT_FOUND race
-      # on hosted runners, so go through corepack which sidesteps it.
-      - name: Activate latest npm via corepack
-        run: |
-          corepack enable
-          corepack prepare npm@latest --activate
-          npm --version
-
-      - name: Verify tag matches package.json version
+      - name: Verify tag matches package.json
         run: |
           PKG_VERSION=$(node -p "require('./package.json').version")
-          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          TAG_VERSION="${{ github.event.release.tag_name }}"
+          TAG_VERSION="${TAG_VERSION#v}"
           if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
-            echo "::error::Tag v$TAG_VERSION does not match package.json version $PKG_VERSION"
+            echo "::error::Release tag $TAG_VERSION does not match package.json version $PKG_VERSION"
             exit 1
           fi
 
-      - name: Publish to npm (Trusted Publishing + provenance)
-        run: npm publish --access public --provenance
+      - run: NODE_AUTH_TOKEN="" npm publish --provenance --access public
