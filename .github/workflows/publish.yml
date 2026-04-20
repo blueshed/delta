@@ -3,12 +3,14 @@ name: publish
 # Fires when a `v*` tag is pushed to origin — the explicit "make public"
 # moment in the release flow (see .claude/commands/publish.md). Runs the
 # same CI gate as ci.yml, verifies the tag matches package.json, then
-# publishes to npm.
+# publishes to npm via Trusted Publishing (OIDC, no long-lived token).
 #
-# Required secrets:
-#   NPM_TOKEN — npm automation token with publish access to @blueshed/delta.
-#               Create at npmjs.com → Access Tokens → Granular; scope to the
-#               @blueshed org / delta package with Publish permission.
+# Setup (one-time, on the npm side):
+#   npmjs.com → Packages → @blueshed/delta → Publishing access →
+#     Add trusted publisher → GitHub Actions → repo: blueshed/delta,
+#     workflow: .github/workflows/publish.yml.
+#   No NPM_TOKEN secret is needed; the OIDC token requested by
+#   `permissions: id-token: write` below is what npm trusts.
 
 on:
   push:
@@ -19,6 +21,9 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write   # lets the runner request an OIDC token for npm
 
     steps:
       - uses: actions/checkout@v4
@@ -45,8 +50,12 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+
+      # Trusted Publishing requires npm 11.5.1+; Node 22 still ships 10.x.
+      - name: Upgrade npm for Trusted Publishing support
+        run: npm install -g npm@latest
 
       - name: Verify tag matches package.json version
         run: |
@@ -57,7 +66,5 @@ jobs:
             exit 1
           fi
 
-      - name: Publish to npm
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish to npm (Trusted Publishing + provenance)
+        run: npm publish --access public --provenance

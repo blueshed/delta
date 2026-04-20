@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Publish workflow uses npm Trusted Publishing** (`.github/workflows/publish.yml`) — was configured for a classic `NPM_TOKEN` secret; the registry is actually set up for OIDC. Added `permissions: id-token: write` on the job, upgraded the runner's npm to 11.5.1+ (required for Trusted Publishing), and swapped `npm publish --access public` for `npm publish --access public --provenance` to emit attestations alongside the package. v0.4.1 was tagged but never reached npm because of this; 0.4.2 is the first automated release.
+
 ## [0.4.1] — 2026-04-20
 
 ### Added
