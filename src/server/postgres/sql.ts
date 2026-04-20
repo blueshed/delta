@@ -46,5 +46,6 @@ export function defaultForType(type: ColumnDef["type"]): unknown {
     case "real": return 0;
     case "boolean": return false;
     case "json": return null;
+    case "timestamptz": return null;   // no sensible default — must be supplied
   }
 }

@@ -12,7 +12,7 @@ Narrow AI-native primitive. Mutations are JSON-Patch ops on `/collection/id`. Tr
 | Subpath | Runs | Purpose |
 |---|---|---|
 | `@blueshed/delta/core` | anywhere | `applyOps`, `DeltaOp` |
-| `@blueshed/delta/client` | browser | `connectWs`, `openDoc`, `call`, `WS` |
+| `@blueshed/delta/client` | browser | `connectWs` (with `close()`), `openDoc`, `call`, `WS` |
 | `@blueshed/delta/dom-ops` | browser | `applyOpsToCollection` — route ops to keyed DOM nodes without rebuilding |
 | `@blueshed/delta/server` | Bun | `createWs`, `registerDoc`, `registerMethod` |
 | `@blueshed/delta/sqlite` | Bun | `defineSchema`, `defineDoc`, `registerDocs`, snapshots |
@@ -77,10 +77,14 @@ Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (fie
 ## Rules
 
 - **One op vocabulary**: only `add` / `replace` / `remove` on `/<coll>/<id>` paths. Never invent new op verbs.
-- **Regenerate `002-tables.sql` with the CLI**: `bunx @blueshed/delta sql ./types.ts --out init_db/002-tables.sql`. Never hand-edit.
+- **Regenerate `003-tables.sql` with the CLI**: `bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql`. Never hand-edit. (Framework SQL is `001a–001f`, auth-jwt is `002`, your tables are `003`.)
 - **Never edit framework SQL**: `001a-001e-*.sql` are the stored-function contract.
 - **Never put tokens in WS URLs**: use `onUpgrade` (cookies / Authorization) or the `authenticate` call action.
 - **No bare `pool.query` when auth is enabled**: let `docTypeFromDef({ auth })` route through `withAppAuth`.
+- **Scope keys must be real columns of the root collection**: `scope: { "items.id": ":id" }` looks reasonable but raises at runtime — use `scope: { id: ":id" }` (or leave the scope empty for single-mode; the framework defaults to `WHERE id = <doc-id>`). Same for any scope key: typos / dotted forms fail fast.
+- **`delta_open` raises on config errors**: unknown doc prefix or unknown root collection → exception, not NULL. NULL only means "single-mode row doesn't exist yet" — the listener maps that to 404.
+- **`openDoc(name, ws?)` takes an optional client for multi-client scripts**: each `connectWs()` instance owns its own reactive state. `openDoc("foo")` without a client falls back to `inject(WS)` (browser DI path); `openDoc("foo", alice)` / `openDoc("foo", bob)` give two independent signals + ops handlers.
+- **Close sockets with `wsClient.close()` in tests/scripts**: `connectWs` gives a reconnecting socket. Without `close()` it reconnects forever after the server stops.
 - **Sequences follow `seq_<table>` convention**: `delta_apply` expects `nextval('seq_items')`. `generateSql` handles this — don't hand-write tables.
 - **`SET LOCAL` can't bind params**: use `set_config(name, value, true)` instead. (This is why `withAppAuth` looks the way it does.)
 - **Custom `DocType` parses its own prefix**: do not put prefix logic anywhere else in the app.

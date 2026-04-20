@@ -278,3 +278,260 @@ describe("snapshots + pruneOpsLog", () => {
     expect(pruned).toBeGreaterThanOrEqual(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Fail-fast — config errors must raise, not silently return NULL
+// ---------------------------------------------------------------------------
+
+describe("fail-fast on config errors", () => {
+  test("delta_open raises when the doc prefix is not registered", async () => {
+    await expect(
+      pool.query("SELECT delta_open($1) AS doc", ["bogus:42"]),
+    ).rejects.toThrow(/no doc def for: bogus:42/);
+  });
+
+  test("delta_open raises when the doc's root_collection is unknown", async () => {
+    // Hand-insert a bad doc def so the "unknown root collection" branch fires.
+    await pool.query(`
+      INSERT INTO _delta_docs (prefix, root_collection, include, scope)
+      VALUES ('ghost:', 'no_such_collection', '{}', '{}')
+      ON CONFLICT (prefix) DO UPDATE SET root_collection = EXCLUDED.root_collection
+    `);
+    try {
+      await expect(
+        pool.query("SELECT delta_open($1) AS doc", ["ghost:1"]),
+      ).rejects.toThrow(/unknown root collection: no_such_collection/);
+    } finally {
+      await pool.query("DELETE FROM _delta_docs WHERE prefix = 'ghost:'");
+    }
+  });
+
+  test("_delta_resolve_scope raises when a scope key isn't a real column", async () => {
+    // "items.id" is the dotted-key footgun — not a column of the items table.
+    await pool.query(`
+      INSERT INTO _delta_docs (prefix, root_collection, include, scope)
+      VALUES ('bad:', 'items', '{}', '{"items.id":":id"}')
+      ON CONFLICT (prefix) DO UPDATE SET scope = EXCLUDED.scope
+    `);
+    try {
+      await expect(
+        pool.query("SELECT delta_open($1) AS doc", ["bad:1"]),
+      ).rejects.toThrow(/scope key "items\.id" is not a column of "items"/);
+    } finally {
+      await pool.query("DELETE FROM _delta_docs WHERE prefix = 'bad:'");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scope DSL — each operator produces the right WHERE / mode
+// ---------------------------------------------------------------------------
+
+describe("scope DSL operators", () => {
+  async function registerScope(prefix: string, scope: Record<string, string>) {
+    await pool.query(
+      `INSERT INTO _delta_docs (prefix, root_collection, include, scope)
+       VALUES ($1, 'items', '{}', $2::jsonb)
+       ON CONFLICT (prefix) DO UPDATE SET scope = EXCLUDED.scope`,
+      [prefix, JSON.stringify(scope)],
+    );
+  }
+  async function cleanup(prefix: string) {
+    await pool.query("DELETE FROM _delta_docs WHERE prefix = $1", [prefix]);
+  }
+  async function resolve(prefix: string, docName: string) {
+    const { rows } = await pool.query(
+      `SELECT _delta_resolve_scope(d, $1) AS r FROM _delta_docs d WHERE prefix = $2`,
+      [docName, prefix],
+    );
+    return rows[0].r as { where: string; mode: string; values: Record<string, unknown>; at: string | null };
+  }
+
+  // Identifiers come out unquoted when they don't require quoting ("id", "name"
+  // are safe bare); %L always single-quotes the literal.
+
+  test("':id' shorthand → col = <id>, single mode", async () => {
+    await registerScope("s1:", { id: ":id" });
+    try {
+      const r = await resolve("s1:", "s1:42");
+      expect(r.where).toBe("id = '42'");
+      expect(r.mode).toBe("single");
+      expect(r.values.id).toBe("42");
+    } finally { await cleanup("s1:"); }
+  });
+
+  test("'=:name' → col = <name>, list mode if key isn't 'id'", async () => {
+    await registerScope("s2:", { name: "=:name" });
+    try {
+      const r = await resolve("s2:", "s2:hello");
+      expect(r.where).toBe("name = 'hello'");
+      expect(r.mode).toBe("list");
+    } finally { await cleanup("s2:"); }
+  });
+
+  test("'>=:start' → col >= <param>", async () => {
+    await registerScope("s3:", { value: ">=:start" });
+    try {
+      const r = await resolve("s3:", "s3:5");
+      expect(r.where).toBe("value >= '5'");
+      expect(r.mode).toBe("list");
+    } finally { await cleanup("s3:"); }
+  });
+
+  test("'<=:end' → col <= <param>", async () => {
+    await registerScope("s4:", { value: "<=:end" });
+    try {
+      const r = await resolve("s4:", "s4:10");
+      expect(r.where).toBe("value <= '10'");
+      expect(r.mode).toBe("list");
+    } finally { await cleanup("s4:"); }
+  });
+
+  test("'like:prefix' → col ILIKE '<param>%'", async () => {
+    await registerScope("s5:", { name: "like:prefix" });
+    try {
+      const r = await resolve("s5:", "s5:foo");
+      expect(r.where).toBe("name ILIKE 'foo%'");
+      expect(r.mode).toBe("list");
+    } finally { await cleanup("s5:"); }
+  });
+
+  test("multiple scope keys are AND'd", async () => {
+    await registerScope("s6:", { id: ":id", name: "=:name" });
+    try {
+      const r = await resolve("s6:", "s6:7:hello");
+      expect(r.where).toContain("id = '7'");
+      expect(r.where).toContain("name = 'hello'");
+      expect(r.where).toContain(" AND ");
+      expect(r.mode).toBe("single");  // 'id' equality → single mode
+    } finally { await cleanup("s6:"); }
+  });
+
+  test("empty scope with an id in the doc name → defaults to WHERE id = <id>", async () => {
+    await registerScope("s7:", {});
+    try {
+      const r = await resolve("s7:", "s7:99");
+      expect(r.where).toMatch(/id = '99'/);
+      expect(r.mode).toBe("single");
+    } finally { await cleanup("s7:"); }
+  });
+
+  test("junk operators (e.g. '<<<:x') raise rather than silently producing bad SQL", async () => {
+    await registerScope("bad-op:", { name: "<<<:foo" });
+    try {
+      await expect(resolve("bad-op:", "bad-op:hello")).rejects.toThrow(
+        /invalid scope operator/,
+      );
+    } finally { await cleanup("bad-op:"); }
+  });
+
+  test("'at:when' → populates r.at, not WHERE (temporal snapshot marker)", async () => {
+    // `at:` is a sentinel that feeds delta_open_at's `at` parameter rather
+    // than adding to the WHERE — scope resolution just pulls it out.
+    await registerScope("at-op:", { valid_from: "at:when" });
+    try {
+      const r = await resolve("at-op:", "at-op:2026-06-01");
+      expect(r.at).toBe("2026-06-01");
+      // No WHERE contribution — the 'at' op short-circuits the filter branch.
+      expect(r.where).not.toContain("valid_from");
+    } finally { await cleanup("at-op:"); }
+  });
+
+  test("empty scope with no id in the doc name → list mode, WHERE TRUE", async () => {
+    await registerScope("s8:", {});
+    try {
+      const r = await resolve("s8:", "s8:");
+      expect(r.where).toBe("TRUE");
+      expect(r.mode).toBe("list");
+    } finally { await cleanup("s8:"); }
+  });
+
+  test("delta_open_at returns historical state before the replace landed", async () => {
+    // Register a temporal collection + a scoped-single doc. Can't piggyback
+    // on the `items` fixture — that one is non-temporal.
+    await pool.query(`
+      CREATE SEQUENCE IF NOT EXISTS seq_items_t;
+      CREATE TABLE IF NOT EXISTS items_t (
+        id         BIGINT NOT NULL DEFAULT nextval('seq_items_t'),
+        name       TEXT NOT NULL,
+        value      INTEGER NOT NULL DEFAULT 0,
+        valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        valid_to   TIMESTAMPTZ,
+        PRIMARY KEY (id, valid_from)
+      );
+      CREATE OR REPLACE VIEW current_items_t AS
+        SELECT * FROM items_t WHERE valid_to IS NULL;
+      INSERT INTO _delta_collections (collection_key, table_name, columns_def, temporal)
+      VALUES ('items_t', 'items_t',
+              '{"name":{"type":"text","nullable":false},
+                "value":{"type":"integer","nullable":false,"default":0}}'::jsonb,
+              TRUE)
+      ON CONFLICT (collection_key) DO UPDATE SET temporal = EXCLUDED.temporal;
+      INSERT INTO _delta_docs (prefix, root_collection, include, scope)
+      VALUES ('t:', 'items_t', '{}', '{}')
+      ON CONFLICT (prefix) DO UPDATE SET scope = EXCLUDED.scope;
+    `);
+
+    try {
+      const type = docTypeFromDef(
+        defineDoc("t:", { root: "items_t", include: [] }),
+        pool,
+      );
+
+      // Add a row.
+      await type.apply({}, "t:", [
+        { op: "add", path: "/items_t/-", value: { name: "original", value: 1 } },
+      ]);
+      const { rows } = await pool.query(
+        "SELECT id FROM current_items_t WHERE name = 'original'",
+      );
+      const id = rows[0].id as string;
+
+      // Capture a timestamp BETWEEN the add and the replace.
+      await new Promise((r) => setTimeout(r, 10));
+      const snapshotAt = new Date().toISOString();
+      await new Promise((r) => setTimeout(r, 10));
+
+      // Update the row — temporal tables will retain the old version.
+      await type.apply({}, "t:", [
+        { op: "replace", path: `/items_t/${id}/name`, value: "updated" },
+      ]);
+
+      // Current state sees the update; snapshotAt sees the original.
+      const current = await loadDocAt(pool, `t:${id}`, new Date().toISOString());
+      expect(current?.items_t?.name).toBe("updated");
+
+      const historical = await loadDocAt(pool, `t:${id}`, snapshotAt);
+      expect(historical?.items_t?.name).toBe("original");
+    } finally {
+      await pool.query(`
+        DELETE FROM _delta_docs WHERE prefix = 't:';
+        DELETE FROM _delta_collections WHERE collection_key = 'items_t';
+        DROP VIEW IF EXISTS current_items_t;
+        DROP TABLE IF EXISTS items_t;
+        DROP SEQUENCE IF EXISTS seq_items_t;
+      `);
+    }
+  });
+
+  test("':id' end-to-end — delta_open('p:N') returns only rows where id=N", async () => {
+    await registerScope("endto:", { id: ":id" });
+    try {
+      // Seed a couple of rows, then open by id.
+      await pool.query("INSERT INTO items (name, value) VALUES ('a', 1), ('b', 2), ('c', 3)");
+      const { rows: ids } = await pool.query("SELECT id FROM items ORDER BY id");
+      const target = ids[1].id;   // middle row
+
+      const { rows } = await pool.query(
+        "SELECT delta_open($1) AS doc",
+        [`endto:${target}`],
+      );
+      const doc = rows[0].doc;
+      expect(doc).not.toBeNull();
+      // Single mode puts the row under the root_collection key.
+      expect(doc.items).toBeDefined();
+      expect(Number(doc.items.id)).toBe(Number(target));
+      expect(doc.items.name).toBe("b");
+    } finally { await cleanup("endto:"); }
+  });
+});

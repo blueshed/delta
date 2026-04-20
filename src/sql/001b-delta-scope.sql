@@ -55,6 +55,52 @@ BEGIN
   v_doc_id := substring(p_doc_name FROM length(p_def.prefix) + 1);
   v_scope  := p_def.scope;
 
+  -- Fail-fast: every scope key must be a real column of the root collection.
+  -- Catches typos and the "dotted key" footgun (e.g. "kanban_boards.id")
+  -- before they silently produce an always-empty WHERE.
+  IF v_scope IS NOT NULL AND v_scope != '{}'::jsonb THEN
+    DECLARE
+      v_root_coll      RECORD;
+      v_bad_key        TEXT;
+      v_valid_keys_txt TEXT;
+    BEGIN
+      SELECT * INTO v_root_coll FROM _delta_collections
+       WHERE collection_key = p_def.root_collection;
+      IF NOT FOUND THEN
+        RAISE EXCEPTION 'doc "%" references unknown root collection: %',
+          p_def.prefix, p_def.root_collection
+          USING ERRCODE = 'P0001';
+      END IF;
+
+      -- "id" is implicit; parent_fk is implicit if set. `at:`-typed values
+      -- feed the temporal snapshot marker and don't go through the WHERE,
+      -- so their keys (typically `valid_from`) don't need to be real columns.
+      SELECT k INTO v_bad_key
+        FROM jsonb_each_text(v_scope) AS x(k, val)
+       WHERE k != 'id'
+         AND k IS DISTINCT FROM v_root_coll.parent_fk
+         AND NOT (v_root_coll.columns_def ? k)
+         AND val !~ '^at:'
+       LIMIT 1;
+
+      IF v_bad_key IS NOT NULL THEN
+        SELECT 'id'
+             || CASE WHEN v_root_coll.parent_fk IS NOT NULL
+                     THEN ', ' || v_root_coll.parent_fk
+                     ELSE '' END
+             || COALESCE(
+                  (SELECT ', ' || string_agg(kk, ', ')
+                     FROM jsonb_object_keys(v_root_coll.columns_def) kk),
+                  '')
+          INTO v_valid_keys_txt;
+        RAISE EXCEPTION
+          'scope key "%" is not a column of "%" (valid keys: %)',
+          v_bad_key, v_root_coll.collection_key, v_valid_keys_txt
+          USING ERRCODE = 'P0001';
+      END IF;
+    END;
+  END IF;
+
   -- Empty scope: default behaviour
   IF v_scope = '{}'::jsonb OR v_scope IS NULL THEN
     IF v_doc_id = '' THEN
@@ -104,6 +150,16 @@ BEGIN
     ELSIF v_val ~ '^[<>=!]+:' THEN
       v_op    := substring(v_val FROM '^([<>=!]+):');
       v_param := substring(v_val FROM '[<>=!]+:(.+)$');
+      -- Defence in depth: the regex above only matches `<`, `>`, `=`, `!`
+      -- characters, and the scope value is app-controlled (from _delta_docs),
+      -- but we still whitelist the final operator so any future exposure of
+      -- the scope DSL to user input can't smuggle arbitrary SQL into
+      -- `format('%I %s %L', ...)`.
+      IF v_op NOT IN ('=', '>=', '<=', '>', '<', '!=') THEN
+        RAISE EXCEPTION
+          'invalid scope operator "%" (valid: =, >=, <=, >, <, !=, like, at)',
+          v_op USING ERRCODE = 'P0001';
+      END IF;
     ELSE
       v_op    := '=';
       v_param := ltrim(v_val, ':');

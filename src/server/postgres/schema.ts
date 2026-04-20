@@ -1,134 +1,36 @@
 /**
- * Delta Postgres — schema definition and utilities.
+ * Delta Postgres — schema wrappers + Postgres-specific utilities.
  *
- * Tables are generated at build time: bunx invt sql
- * Generic doc dispatch lives in ./doc-registry (docTypeFromDef).
+ * The shared schema vocabulary (ColumnDef, TableDef, Schema, ResolvedTable,
+ * DocDef, defineSchema, defineDoc) lives in `../../schema` and is identical
+ * across the Postgres and SQLite backends. This module re-exports those
+ * types and adds the Postgres helpers that hit the live database
+ * (time-travel, snapshots, ops-log pruning, op validation).
  */
 import type { Pool } from "pg";
+import type { DeltaOp } from "../../core";
+import {
+  type ColumnDef,
+  type Schema,
+  type DocDef,
+  type ValidationError,
+} from "../../schema";
 import { defaultForType } from "./sql";
 
-// ---------------------------------------------------------------------------
-// Schema types
-// ---------------------------------------------------------------------------
-
-export interface ColumnDef {
-  type: "text" | "integer" | "real" | "boolean" | "json" | "timestamptz";
-  nullable?: boolean;
-  default?: unknown;
-}
-
-type ColumnShorthand = "text" | "integer" | "real" | "boolean" | "json" | "timestamptz"
-  | "text?" | "integer?" | "real?" | "boolean?" | "json?" | "timestamptz?";
-
-export interface TableDef {
-  table?: string;
-  columns: Record<string, ColumnDef | ColumnShorthand>;
-  parent?: string | { collection: string; fk: string };
-  cascadeOn?: (string | { fk: string; collection: string })[];
-  temporal?: boolean;
-}
-
-export interface Schema {
-  tables: Record<string, ResolvedTable>;
-}
-
-export interface ResolvedTable {
-  name: string;
-  docKey: string;
-  columns: Record<string, ColumnDef>;
-  parent?: { collection: string; fkColumn: string };
-  temporal: boolean;
-  children: string[];
-  referencedBy: { collection: string; fkColumn: string }[];
-}
-
-export interface DocDef {
-  prefix: string;
-  root: string;
-  include: string[];
-  scope: Record<string, string>;
-}
+export type {
+  ColumnType,
+  ColumnDef,
+  ColumnShorthand,
+  TableDef,
+  Schema,
+  ResolvedTable,
+  DocDef,
+  ValidationError,
+} from "../../schema";
+export { defineSchema, defineDoc } from "../../schema";
 
 // ---------------------------------------------------------------------------
-// defineSchema
-// ---------------------------------------------------------------------------
-
-export function defineSchema(defs: Record<string, TableDef>): Schema {
-  const tables: Record<string, ResolvedTable> = {};
-
-  for (const [key, def] of Object.entries(defs)) {
-    const columns: Record<string, ColumnDef> = {};
-    for (const [col, shorthand] of Object.entries(def.columns)) {
-      if (typeof shorthand === "string") {
-        const nullable = shorthand.endsWith("?");
-        const type = (nullable ? shorthand.slice(0, -1) : shorthand) as ColumnDef["type"];
-        columns[col] = { type, nullable };
-      } else {
-        columns[col] = shorthand;
-      }
-    }
-
-    let parent: ResolvedTable["parent"];
-    if (def.parent) {
-      if (typeof def.parent === "string") {
-        parent = { collection: def.parent, fkColumn: `${def.parent}_id` };
-      } else {
-        parent = { collection: def.parent.collection, fkColumn: def.parent.fk };
-      }
-    }
-
-    tables[key] = {
-      name: def.table ?? key,
-      docKey: key,
-      columns,
-      parent,
-      temporal: def.temporal !== false,
-      children: [],
-      referencedBy: [],
-    };
-  }
-
-  for (const [key, table] of Object.entries(tables)) {
-    if (table.parent) {
-      const parentTable = tables[table.parent.collection];
-      if (parentTable) parentTable.children.push(key);
-    }
-    for (const cascade of defs[key]?.cascadeOn ?? []) {
-      let fkCol: string;
-      let targetKey: string | undefined;
-      if (typeof cascade === "string") {
-        fkCol = cascade;
-        const stem = fkCol.replace(/_id$/, "");
-        targetKey = Object.keys(tables).find(
-          (k) => k === stem || k === stem + "s" || tables[k]!.name === stem || tables[k]!.name === stem + "s",
-        );
-      } else {
-        fkCol = cascade.fk;
-        targetKey = cascade.collection;
-      }
-      const target = targetKey ? tables[targetKey] : undefined;
-      if (target) {
-        target.referencedBy.push({ collection: key, fkColumn: fkCol });
-      }
-    }
-  }
-
-  return { tables };
-}
-
-// ---------------------------------------------------------------------------
-// defineDoc
-// ---------------------------------------------------------------------------
-
-export function defineDoc(
-  prefix: string,
-  opts: { root: string; include: string[]; scope?: Record<string, string> },
-): DocDef {
-  return { prefix, root: opts.root, include: opts.include, scope: opts.scope ?? {} };
-}
-
-// ---------------------------------------------------------------------------
-// Utilities
+// Postgres-specific doc helpers — all thin wrappers over stored functions.
 // ---------------------------------------------------------------------------
 
 export async function loadDocAt(pool: Pool, docName: string, at: string | Date): Promise<any | null> {
@@ -138,7 +40,10 @@ export async function loadDocAt(pool: Pool, docName: string, at: string | Date):
 }
 
 export async function createSnapshot(pool: Pool, name: string, at?: string): Promise<string> {
-  const { rows } = await pool.query("SELECT delta_snapshot($1, $2) AS ts", [name, at ?? new Date().toISOString()]);
+  const { rows } = await pool.query(
+    "SELECT delta_snapshot($1, $2) AS ts",
+    [name, at ?? new Date().toISOString()],
+  );
   return rows[0]?.ts;
 }
 
@@ -153,12 +58,11 @@ export async function pruneOpsLog(pool: Pool, keepInterval = "1 hour"): Promise<
 }
 
 // ---------------------------------------------------------------------------
-// Validation
+// validateOps — pre-flight check that ops reference known collections and
+// fields, with required-field detection via the Postgres `defaultForType`.
 // ---------------------------------------------------------------------------
 
-export interface ValidationError { path: string; message: string; }
-
-export function validateOps(schema: Schema, def: DocDef, ops: import("../../core").DeltaOp[]): ValidationError[] {
+export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): ValidationError[] {
   const errors: ValidationError[] = [];
   for (const op of ops) {
     const parts = op.path.split("/").filter(Boolean);
@@ -176,7 +80,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: import("../../core
       }
       for (const [col, colDef] of Object.entries(table.columns)) {
         if (!colDef.nullable && colDef.default === undefined && value[col] === undefined) {
-          if (defaultForType(colDef.type) === null) {
+          if (defaultForType((colDef as ColumnDef).type) === null) {
             errors.push({ path: op.path, message: `Required field missing: ${col}` });
           }
         }

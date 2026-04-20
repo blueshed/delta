@@ -134,7 +134,12 @@ DECLARE
   v_version   BIGINT;
 BEGIN
   v_def := _delta_find_doc(p_doc_name);
-  IF v_def.prefix IS NULL THEN RETURN NULL; END IF;
+  IF v_def.prefix IS NULL THEN
+    -- Fail-fast: caller asked for a doc whose prefix isn't registered.
+    -- NULL-as-config-error used to mask typos and missing migrations.
+    RAISE EXCEPTION 'no doc def for: %', p_doc_name
+      USING ERRCODE = 'P0001';
+  END IF;
 
   v_resolved := _delta_resolve_scope(v_def, p_doc_name);
   v_where    := v_resolved->>'where';
@@ -145,7 +150,11 @@ BEGIN
 
   SELECT * INTO v_root_coll FROM _delta_collections
    WHERE collection_key = v_def.root_collection;
-  IF NOT FOUND THEN RETURN NULL; END IF;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'doc "%" references unknown root collection: %',
+      p_doc_name, v_def.root_collection
+      USING ERRCODE = 'P0001';
+  END IF;
 
   v_view := _delta_source_view(v_root_coll.table_name, v_root_coll.temporal);
 

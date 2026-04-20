@@ -83,6 +83,10 @@ export function generateSql(
     lines.push(`CREATE TABLE IF NOT EXISTS ${q(table.name)} (`);
     lines.push(cols.map((c) => `  ${c}`).join(",\n"));
     lines.push(");");
+    // Own the sequence to the table.id so `TRUNCATE RESTART IDENTITY`
+    // actually resets the counter — without this, re-seeds in tests and
+    // demo scripts drift by the stale sequence value.
+    lines.push(`ALTER SEQUENCE ${q(seqName)} OWNED BY ${q(table.name)}.id;`);
 
     if (table.temporal) {
       lines.push(

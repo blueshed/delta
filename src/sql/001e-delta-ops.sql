@@ -32,19 +32,28 @@ DECLARE
   v_coll_key  TEXT;
 BEGIN
   v_def := _delta_find_doc(p_doc_name);
-  IF v_def.prefix IS NULL THEN RETURN NULL; END IF;
+  IF v_def.prefix IS NULL THEN
+    RAISE EXCEPTION 'no doc def for: %', p_doc_name
+      USING ERRCODE = 'P0001';
+  END IF;
 
   v_resolved := _delta_resolve_scope(v_def, p_doc_name);
   v_mode     := v_resolved->>'mode';
 
-  -- open_at only supports single-mode docs
+  -- open_at only supports single-mode docs. List-mode docs return NULL so
+  -- callers can probe "can I time-travel this?" without an exception —
+  -- typo'd doc names are caught upstream by _delta_find_doc's raise.
   IF v_mode != 'single' THEN RETURN NULL; END IF;
 
   v_doc_id := (v_resolved->'values'->>'id')::BIGINT;
 
   SELECT * INTO v_root_coll FROM _delta_collections
    WHERE collection_key = v_def.root_collection;
-  IF NOT FOUND THEN RETURN NULL; END IF;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'doc "%" references unknown root collection: %',
+      p_doc_name, v_def.root_collection
+      USING ERRCODE = 'P0001';
+  END IF;
 
   IF v_root_coll.temporal THEN
     EXECUTE format(

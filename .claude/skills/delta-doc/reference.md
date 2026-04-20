@@ -217,6 +217,8 @@ if (errors.length) throw new Error(errors.map(e => e.message).join("\n"));
 
 Named params are resolved positionally from the colon-separated doc id. `id` always takes position 1; other names are alphabetical. `todos:5` has one param; `venue-at:42:2026-06-16` has two (`id=42`, second positional).
 
+**Scope keys must be real columns of the root collection.** `scope: { id: ":id" }` works; `scope: { "items.id": ":id" }` raises at open time with `scope key "items.id" is not a column of "items" (valid keys: id, …)`. For a scoped-single doc, you can omit `scope` entirely — the framework defaults to `WHERE id = <doc-id>`.
+
 ## Doc patterns
 
 **List doc** — prefix matches the whole name; opens every row:
@@ -226,19 +228,24 @@ defineDoc("items:", { root: "items", include: [] });
 // open "items:" → { items: { "1": { id: 1, ... }, "2": { ... } } }
 ```
 
-**Scoped single doc** — prefix + id; scope filters included collections:
+**Scoped single doc** — prefix + id; the `scope` filters the *root* collection, and `include` collections travel along their declared `parent_fk` relationships (from `defineSchema`).
 
 ```ts
+const schema = defineSchema({
+  venues: { columns: { name: "text" } },
+  areas:  { columns: { name: "text" }, parent: "venues" },   // → venues_id
+  sites:  { columns: { name: "text" }, parent: "venues" },   // → venues_id
+});
+
 defineDoc("venue:", {
   root: "venues",
   include: ["areas", "sites"],
-  scope: {
-    "venues.id": "id",          // use the {id} from the doc name
-    "areas.venue_id": "id",
-    "sites.venue_id": "id",
-  },
+  scope: { id: ":id" },          // scope keys must be bare columns of `venues`
 });
-// open "venue:42" → { venues: {...}, areas: [...], sites: [...] } for venue 42 only
+// open "venue:42" → { venues: {...}, areas: {...}, sites: {...} } for venue 42 only.
+// The includes are filtered by their parent_fk (venues_id = 42) via _delta_load_collection.
+// You can omit `scope` entirely — an empty scope on a single-mode open defaults to
+// `WHERE id = <doc-id>` which is the same thing.
 ```
 
 **Per-user list isolation** — each user sees only their own rows. The most common multi-tenant shape.
@@ -435,6 +442,8 @@ await createDocListener(ws, appPool, { auth });
 
 Under this setup `withAppAuth(appPool, ...)` sets `app.user_id` as the `app` role, and the policy `USING (owner_id = current_setting('app.user_id')::bigint)` filters without the role bypassing it.
 
+**Error surfaces leak names, not values.** `_delta_resolve_scope`'s fail-fast raises (unknown doc prefix, unknown root collection, invalid scope key) include the offending identifier in the error message, and `createDocListener` propagates those messages back to the client as `{error: {code: 500, message: ...}}`. That's deliberate — it's what makes delta easy to debug from a Claude session reading the error. The side-effect is a tenant with direct WS access can enumerate registered doc prefixes / collection columns by probing bad inputs. Two rules to stay clean: (1) don't encode tenant-sensitive identifiers in doc-name prefixes (`tenant-42:` bad; `boards:42` fine — the id is already per-identity-gated); (2) if your WS server is public-facing and column names are sensitive, scrub the `500` branch in `createDocListener` before sending to the wire.
+
 ## Bun HTML route + WebSocket on the same server
 
 `ws.upgrade` is a function that Bun's router recognises as a WebSocket upgrade handler. HTML route handlers are just imported `.html` files. Register both on the same `Bun.serve`:
@@ -543,6 +552,21 @@ beforeEach(async () => {
 ```
 
 Run: `bun run db:up` (compose) → `bun run test:all` → `bun run db:down`. Or `bun run ci` (up + check + test + down).
+
+### Client-side tests and one-shot scripts
+
+Two things to know when driving `@blueshed/delta/client` from a Bun test or script instead of a browser:
+
+- **`openDoc(name, ws?)` accepts an explicit client for multi-client scripts.** Each `connectWs()` instance owns its own per-client map of reactive entries, so two clients in one process get independent `data` signals + `onOps` handlers. Browser code keeps the DI ergonomic — `openDoc("foo")` resolves the client from `inject(WS)`. Tests / Bun scripts that simulate multiple devices pass the client explicitly:
+
+  ```ts
+  const alice = connectWs(url);
+  const bob   = connectWs(url);
+  const aliceDoc = openDoc<Board>("board:1", alice);
+  const bobDoc   = openDoc<Board>("board:1", bob);
+  ```
+
+- **`wsClient.close()` suppresses the reconnect loop.** `connectWs` returns a reconnecting socket; without `close()`, it tries to come back forever after the server stops, keeping the process alive. Always call `close()` (it's idempotent) before tearing a server down.
 
 ## Wire-level protocol
 

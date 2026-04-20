@@ -19,155 +19,28 @@
 import type { WsServer } from "./server";
 import { applyOps as deltaApplyOps, type DeltaOp } from "../core";
 import { createLogger } from "./logger";
+import {
+  type ColumnDef,
+  type Schema,
+  type ResolvedTable,
+  type DocDef,
+  type ValidationError,
+  defineSchema as defineSchemaShared,
+  defineDoc as defineDocShared,
+} from "../schema";
 
-// ---------------------------------------------------------------------------
-// Schema types
-// ---------------------------------------------------------------------------
-
-export interface ColumnDef {
-  type: "text" | "integer" | "real" | "boolean" | "json";
-  nullable?: boolean;
-  default?: unknown;
-}
-
-type ColumnShorthand = "text" | "integer" | "real" | "boolean" | "json"
-  | "text?" | "integer?" | "real?" | "boolean?" | "json?";
-
-export interface TableDef {
-  /** SQL table name (defaults to the schema key). */
-  table?: string;
-  /** Column definitions. */
-  columns: Record<string, ColumnDef | ColumnShorthand>;
-  /** Parent collection. String = collection key (FK auto-derived). Object = explicit FK column. */
-  parent?: string | { collection: string; fk: string };
-  /** FK columns that trigger cascade deletes when the referenced row is removed.
-   *  String = FK column name (collection derived from column name convention).
-   *  Object = explicit FK column + collection. */
-  cascadeOn?: (string | { fk: string; collection: string })[];
-  /** Set to false to disable temporal versioning (valid_from/valid_to). Default: true. */
-  temporal?: boolean;
-}
-
-export interface Schema {
-  tables: Record<string, ResolvedTable>;
-}
-
-export interface ResolvedTable {
-  name: string;             // SQL table name
-  docKey: string;           // key in the schema definition
-  columns: Record<string, ColumnDef>;
-  parent?: { collection: string; fkColumn: string };
-  temporal: boolean;
-  /** Computed: collections that have this table as parent. */
-  children: string[];
-  /** Computed: collections that reference this table via cascadeOn. */
-  referencedBy: { collection: string; fkColumn: string }[];
-}
-
-// ---------------------------------------------------------------------------
-// Doc types
-// ---------------------------------------------------------------------------
-
-export interface DocDef {
-  prefix: string;
-  root: string;
-  include: string[];
-  scope: Record<string, string>;
-}
-
-// ---------------------------------------------------------------------------
-// defineSchema
-// ---------------------------------------------------------------------------
-
-/** Declare tables and their relationships. */
-export function defineSchema(defs: Record<string, TableDef>): Schema {
-  const tables: Record<string, ResolvedTable> = {};
-
-  // First pass: resolve columns and basic properties
-  for (const [key, def] of Object.entries(defs)) {
-    const columns: Record<string, ColumnDef> = {};
-
-    for (const [col, shorthand] of Object.entries(def.columns)) {
-      if (typeof shorthand === "string") {
-        const nullable = shorthand.endsWith("?");
-        const type = (nullable ? shorthand.slice(0, -1) : shorthand) as ColumnDef["type"];
-        columns[col] = { type, nullable };
-      } else {
-        columns[col] = shorthand;
-      }
-    }
-
-    let parent: ResolvedTable["parent"];
-    if (def.parent) {
-      if (typeof def.parent === "string") {
-        parent = { collection: def.parent, fkColumn: `${def.parent}_id` };
-      } else {
-        parent = { collection: def.parent.collection, fkColumn: def.parent.fk };
-      }
-    }
-
-    tables[key] = {
-      name: def.table ?? key,
-      docKey: key,
-      columns,
-      parent,
-      temporal: def.temporal !== false,
-      children: [],
-      referencedBy: [],
-    };
-  }
-
-  // Second pass: compute children and referencedBy
-  for (const [key, table] of Object.entries(tables)) {
-    if (table.parent) {
-      const parentTable = tables[table.parent.collection];
-      if (parentTable) {
-        parentTable.children.push(key);
-      }
-    }
-    const cascades = defs[key]?.cascadeOn ?? [];
-    for (const cascade of cascades) {
-      let fkCol: string;
-      let targetKey: string | undefined;
-
-      if (typeof cascade === "string") {
-        fkCol = cascade;
-        // Derive collection from FK column name: try exact match, then common patterns
-        const stem = fkCol.replace(/_id$/, "");
-        targetKey = Object.keys(tables).find((k) => k === stem || k === stem + "s" || tables[k]!.name === stem || tables[k]!.name === stem + "s");
-      } else {
-        fkCol = cascade.fk;
-        targetKey = cascade.collection;
-      }
-
-      const target = targetKey ? tables[targetKey] : undefined;
-      if (target) {
-        target.referencedBy.push({ collection: key, fkColumn: fkCol });
-      } else {
-        log.warn(`cascadeOn unresolved: ${key}.${fkCol}`);
-      }
-    }
-  }
-
-  return { tables };
-}
-
-// ---------------------------------------------------------------------------
-// defineDoc
-// ---------------------------------------------------------------------------
-
-/** Define a document lens into the schema. */
-export function defineDoc(
-  prefix: string,
-  opts: { root: string; include: string[]; scope?: Record<string, string> },
-): DocDef {
-  return {
-    prefix,
-    root: opts.root,
-    include: opts.include,
-    scope: opts.scope ?? {},
-  };
-}
+export type {
+  ColumnType,
+  ColumnDef,
+  ColumnShorthand,
+  TableDef,
+  Schema,
+  ResolvedTable,
+  DocDef,
+  ValidationError,
+} from "../schema";
+export const defineSchema = defineSchemaShared;
+export const defineDoc = defineDocShared;
 
 // ---------------------------------------------------------------------------
 // createTables
@@ -224,7 +97,9 @@ export function createTables(db: any, schema: Schema) {
 
 function columnSqlType(def: ColumnDef): string {
   switch (def.type) {
-    case "text": case "json": return "TEXT";
+    // SQLite stores timestamps as TEXT (ISO-8601) — the conventional mapping
+    // for `timestamptz` from the shared schema vocabulary.
+    case "text": case "json": case "timestamptz": return "TEXT";
     case "integer": case "boolean": return "INTEGER";
     case "real": return "REAL";
   }
@@ -675,11 +550,6 @@ export function migrateSchema(db: any, schema: Schema): string[] {
 // Validation
 // ---------------------------------------------------------------------------
 
-export interface ValidationError {
-  path: string;
-  message: string;
-}
-
 /** Validate delta ops against the schema. Returns an array of errors (empty = valid). */
 export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): ValidationError[] {
   const errors: ValidationError[] = [];
@@ -765,6 +635,12 @@ function validateFieldType(def: ColumnDef, field: string, value: unknown): strin
       break;
     case "json":
       break; // any type is valid for json
+    case "timestamptz":
+      // SQLite stores as TEXT (ISO-8601). Accept strings or Date instances.
+      if (typeof value !== "string" && !(value instanceof Date)) {
+        return `${field} must be an ISO-8601 string or Date`;
+      }
+      break;
   }
   return null;
 }
@@ -942,5 +818,6 @@ function defaultForType(type: ColumnDef["type"]): unknown {
     case "real": return 0;
     case "boolean": return false;
     case "json": return null;
+    case "timestamptz": return null;   // no sensible default — must be supplied
   }
 }

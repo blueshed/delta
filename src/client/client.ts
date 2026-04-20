@@ -56,6 +56,7 @@ function reconnectingWebSocket(url: string): WebSocket {
   let ws!: WebSocket;
   const proxy = new EventTarget();
   let backoff = 500;
+  let closed = false;
 
   function connect() {
     ws = new WebSocket(url);
@@ -68,6 +69,9 @@ function reconnectingWebSocket(url: string): WebSocket {
     });
     ws.addEventListener("close", () => {
       proxy.dispatchEvent(new Event("close"));
+      // Suppress reconnect when close() was called explicitly — otherwise
+      // every server restart (tests, demos, HMR) loops forever.
+      if (closed) return;
       setTimeout(connect, (backoff = Math.min(backoff * 2, 30_000)));
     });
     ws.addEventListener("error", () => {
@@ -77,6 +81,10 @@ function reconnectingWebSocket(url: string): WebSocket {
 
   (proxy as any).send = (data: string) => {
     if (ws.readyState === WebSocket.OPEN) ws.send(data);
+  };
+  (proxy as any).close = () => {
+    closed = true;
+    try { ws.close(); } catch { /* already closed */ }
   };
 
   Object.defineProperty(proxy, "readyState", {
@@ -97,6 +105,28 @@ export interface WsClient {
   connected: ReturnType<typeof signal<boolean>>;
   send(msg: any): Promise<any>;
   on(event: string, handler: NotifyHandler): () => void;
+  /**
+   * Close the socket and suppress reconnection. Pending `send` promises
+   * remain unresolved — callers should await them before calling close.
+   * Idempotent.
+   */
+  close(): void;
+  /**
+   * Internal — per-client map of `openDoc` subscribers. Each `connectWs`
+   * instance has its own, so multiple clients in one process don't share
+   * state. Consumers shouldn't read this directly; use `openDoc(name, ws)`.
+   */
+  _docs: Map<string, OpenDocEntry>;
+}
+
+export type OpsHandler = (ops: DeltaOp[]) => void;
+
+export interface OpenDocEntry {
+  data: ReturnType<typeof signal<any>>;
+  dataVersion: ReturnType<typeof signal<number>>;
+  opsHandlers: Set<OpsHandler>;
+  /** Called with the full doc state on open and every reconnect. */
+  onOpen: (state: any) => void;
 }
 
 export const WS = key<WsClient>("ws");
@@ -117,17 +147,42 @@ export function connectWs(
     { resolve: (v: any) => void; reject: (e: any) => void }
   >();
   const listeners = new Map<string, Set<NotifyHandler>>();
+  // Per-client doc subscriptions. Moved off module scope so two connectWs()
+  // instances in the same process don't share reactive state.
+  const docs = new Map<string, OpenDocEntry>();
+  const docLog = createLogger("[doc]");
   let nextId = 1;
+  let isClosed = false;
   let readyResolve: () => void;
   let ready = new Promise<void>((r) => {
     readyResolve = r;
   });
+
+  async function sendInternal(msg: any): Promise<any> {
+    if (isClosed) throw { code: 0, message: "closed" };
+    await ready;
+    return new Promise((resolve, reject) => {
+      const id = nextId++;
+      pending.set(id, { resolve, reject });
+      log.debug(`#${id} ${msg.action} ${msg.doc ?? msg.method ?? ""}`);
+      ws.send(JSON.stringify({ ...msg, id }));
+    });
+  }
 
   ws.addEventListener("open", () => {
     log.info("connected");
     connected.set(true);
     readyResolve();
     listeners.get("open")?.forEach((fn) => fn({}));
+
+    // Re-open every tracked doc. Fires on initial connect AND on reconnect,
+    // so a doc opened before the socket came up or during an outage catches
+    // up as soon as the socket is ready.
+    for (const [name, entry] of docs) {
+      sendInternal({ action: "open", doc: name })
+        .then((state) => entry.onOpen(state))
+        .catch((err: any) => docLog.error(`re-open ${name}: ${err.message}`));
+    }
   });
 
   ws.addEventListener("close", () => {
@@ -155,6 +210,27 @@ export function connectWs(
         }
       } else {
         log.debug(`notify ${JSON.stringify(msg).slice(0, 80)}`);
+
+        // Doc op broadcast — dispatch to the matching entry if any.
+        if (msg.doc && msg.ops) {
+          const entry = docs.get(msg.doc);
+          if (entry) {
+            // Fire op subscribers FIRST, so DOM patchers see the op that
+            // matches the state change about to land on `data`.
+            for (const handler of entry.opsHandlers) {
+              try { handler(msg.ops); }
+              catch (err: any) { docLog.error(`onOps handler threw: ${err.message}`); }
+            }
+            const current = entry.data.peek();
+            if (current) {
+              const updated = structuredClone(current);
+              applyOps(updated, msg.ops);
+              entry.data.set(updated);
+              entry.dataVersion.set(entry.dataVersion.peek() + 1);
+            }
+          }
+        }
+
         listeners.get("message")?.forEach((fn) => fn(msg));
       }
     }) as EventListener,
@@ -162,28 +238,28 @@ export function connectWs(
 
   return {
     connected,
-    async send(msg: any): Promise<any> {
-      await ready;
-      return new Promise((resolve, reject) => {
-        const id = nextId++;
-        pending.set(id, { resolve, reject });
-        log.debug(`#${id} ${msg.action} ${msg.doc ?? msg.method ?? ""}`);
-        ws.send(JSON.stringify({ ...msg, id }));
-      });
-    },
+    send: sendInternal,
     on(event: string, handler: NotifyHandler): () => void {
       if (!listeners.has(event)) listeners.set(event, new Set());
       listeners.get(event)!.add(handler);
       return () => listeners.get(event)!.delete(handler);
     },
+    close() {
+      if (isClosed) return;
+      isClosed = true;
+      (ws as any).close?.();
+      listeners.clear();
+      docs.clear();
+      pending.forEach(({ reject }) => reject({ code: 0, message: "closed" }));
+      pending.clear();
+    },
+    _docs: docs,
   };
 }
 
 // ---------------------------------------------------------------------------
 // Document — reactive signal backed by a server-side delta-doc
 // ---------------------------------------------------------------------------
-
-export type OpsHandler = (ops: DeltaOp[]) => void;
 
 export interface Doc<T> {
   data: ReturnType<typeof signal<T | null>>;
@@ -200,84 +276,68 @@ export interface Doc<T> {
   onOps(handler: OpsHandler): () => void;
 }
 
-interface OpenDocEntry {
-  data: ReturnType<typeof signal<any>>;
-  dataVersion: ReturnType<typeof signal<number>>;
-  opsHandlers: Set<OpsHandler>;
-}
+const docLog = createLogger("[doc]");
 
-const log = createLogger("[doc]");
-const openDocs = new Map<string, OpenDocEntry>();
-
-/** Lazily resolve the WS client — deferred so openDoc can be called at module level. */
-let _ws: WsClient | null = null;
-function ws(): WsClient {
-  if (!_ws) {
-    _ws = inject(WS);
-
-    _ws.on("open", () => {
-      for (const [name, entry] of openDocs) {
-        _ws!.send({ action: "open", doc: name }).then((state) => {
-          entry.data.set(state);
-          entry.dataVersion.set(entry.dataVersion.peek() + 1);
-        });
-      }
-    });
-
-    _ws.on("message", (msg) => {
-      if (msg.doc && msg.ops) {
-        const entry = openDocs.get(msg.doc);
-        if (!entry) return;
-        // Fire op subscribers FIRST, so DOM patchers see the op that matches
-        // the state change about to land on `data`.
-        for (const handler of entry.opsHandlers) {
-          try { handler(msg.ops); }
-          catch (err: any) { log.error(`onOps handler threw: ${err.message}`); }
-        }
-        const current = entry.data.peek();
-        if (current) {
-          const updated = structuredClone(current);
-          applyOps(updated, msg.ops);
-          entry.data.set(updated);
-          entry.dataVersion.set(entry.dataVersion.peek() + 1);
-        }
-      }
-    });
-  }
-  return _ws;
-}
-
-/** Open a persisted doc as a reactive signal. Safe to call at module level. */
-export function openDoc<T>(name: string): Doc<T> {
+/**
+ * Open a persisted doc as a reactive signal. Safe to call at module level —
+ * if no `client` is passed, the WsClient is resolved lazily from DI
+ * (`provide(WS, connectWs(...))`). For scripts or tests that want multiple
+ * independent clients in one process, pass the `client` explicitly.
+ */
+export function openDoc<T>(name: string, client?: WsClient): Doc<T> {
   const data = signal<T | null>(null);
   const dataVersion = signal(0);
   const opsHandlers = new Set<OpsHandler>();
-  openDocs.set(name, { data, dataVersion, opsHandlers });
 
   let readyResolve: () => void;
   const ready = new Promise<void>((r) => {
     readyResolve = r;
   });
 
-  queueMicrotask(() => {
-    try {
-      ws()
-        .send({ action: "open", doc: name })
-        .then((state) => {
-          data.set(state as T);
-          readyResolve();
-        });
-    } catch (err: any) {
-      log.error(`openDoc("${name}"): ${err.message}`);
+  const entry: OpenDocEntry = {
+    data,
+    dataVersion,
+    opsHandlers,
+    onOpen: (state: any) => {
+      data.set(state as T);
+      dataVersion.set(dataVersion.peek() + 1);
+      readyResolve();
+    },
+  };
+
+  let wsc: WsClient | null = client ?? null;
+
+  function register(c: WsClient): void {
+    wsc = c;
+    c._docs.set(name, entry);
+    // If the socket is already open when we register, kick off the initial
+    // open now. Otherwise the `open`-event handler inside connectWs will
+    // fire the open for every tracked doc once the socket is up.
+    if (c.connected.peek()) {
+      c.send({ action: "open", doc: name })
+        .then(entry.onOpen)
+        .catch((err: any) => docLog.error(`openDoc("${name}"): ${err.message}`));
     }
-  });
+  }
+
+  if (client) {
+    register(client);
+  } else {
+    // Defer DI resolution so openDoc can be called at module load before
+    // `provide(WS, ...)` has run.
+    queueMicrotask(() => {
+      try { register(inject(WS)); }
+      catch (err: any) { docLog.error(`openDoc("${name}"): ${err.message}`); }
+    });
+  }
 
   return {
     data,
     dataVersion,
     ready,
     send(ops: DeltaOp[]) {
-      return ws().send({ action: "delta", doc: name, ops });
+      const c = wsc ?? (wsc = client ?? inject(WS));
+      return c.send({ action: "delta", doc: name, ops });
     },
     onOps(handler) {
       opsHandlers.add(handler);
@@ -286,7 +346,8 @@ export function openDoc<T>(name: string): Doc<T> {
   };
 }
 
-/** Call a stateless RPC method. */
-export function call<T>(method: string, params?: any): Promise<T> {
-  return ws().send({ action: "call", method, params });
+/** Call a stateless RPC method. Accepts an explicit client for multi-client scripts. */
+export function call<T>(method: string, params?: any, client?: WsClient): Promise<T> {
+  const c = client ?? inject(WS);
+  return c.send({ action: "call", method, params });
 }
