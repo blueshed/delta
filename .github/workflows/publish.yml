@@ -1,0 +1,63 @@
+name: publish
+
+# Fires when a `v*` tag is pushed to origin — the explicit "make public"
+# moment in the release flow (see .claude/commands/publish.md). Runs the
+# same CI gate as ci.yml, verifies the tag matches package.json, then
+# publishes to npm.
+#
+# Required secrets:
+#   NPM_TOKEN — npm automation token with publish access to @blueshed/delta.
+#               Create at npmjs.com → Access Tokens → Granular; scope to the
+#               @blueshed org / delta package with Publish permission.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Start Postgres
+        run: docker compose up -d --wait
+
+      - name: Type check
+        run: bunx tsc --noEmit
+
+      - name: Run tests
+        run: bun test tests/
+
+      - name: Stop Postgres
+        if: always()
+        run: docker compose down -v
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Verify tag matches package.json version
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag v$TAG_VERSION does not match package.json version $PKG_VERSION"
+            exit 1
+          fi
+
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

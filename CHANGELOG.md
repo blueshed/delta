@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **GitHub Actions publish workflow** (`.github/workflows/publish.yml`) — fires on `v*` tag push, spins up Postgres 18 via `docker compose`, runs `bunx tsc --noEmit` + `bun test tests/`, verifies the pushed tag matches `package.json` version (catches tag/version drift before it hits the registry), and publishes to npm with `NPM_TOKEN` from repo secrets. The tag push on `git push --follow-tags` is now the explicit "make public" moment; the rest is automated.
+
+### Changed
+
+- **Tarball trim** — `.claude/commands/publish.md` is no longer shipped in the npm tarball. Each project adopting `@blueshed/delta` should copy the publish skill into their own `.claude/commands/` and tune the release cadence to fit (different preflight checks, CI gates, auth). The skill stays in-repo for our own releases.
+
 ## [0.4.0] — 2026-04-20
 
 ### Added
