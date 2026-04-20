@@ -25,7 +25,6 @@
     "src/sql/**/*.sql",
     ".claude/skills/delta-doc/SKILL.md",
     ".claude/skills/delta-doc/reference.md",
-    ".claude/commands/publish.md",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"
