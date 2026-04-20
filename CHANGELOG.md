@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Publish workflow** — rewritten to match the pattern used in `@blueshed/railroad`: trigger on `release: published`, Node 24, `NODE_AUTH_TOKEN=""` prefix to force OIDC Trusted Publishing over the token fallback `setup-node` otherwise configures, tests + publish inline. Tags `v0.4.1` / `v0.4.2` / `v0.4.3` exist in git but never reached npm; `0.4.4` is the first tag to ship through the automated pipeline. Users jumping from `0.4.0` → `0.4.4` on npm miss nothing — the intermediate versions were stuck-in-transit, not deliberately skipped.
+
 ## [0.4.3] — 2026-04-20
 
 ### Fixed
