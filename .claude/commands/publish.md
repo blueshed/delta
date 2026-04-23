@@ -67,20 +67,44 @@ Run:
 git push origin main --follow-tags
 ```
 
-This is the moment the release goes public. If the push fails (non-fast-forward, auth rejection, hook failure), report the exact error and stop — do NOT retry with `--force`, `--no-verify`, or any other bypass flag. The local commit and tag remain; the user can investigate and decide how to recover.
+If the push fails (non-fast-forward, auth rejection, hook failure), report the exact error and stop — do NOT retry with `--force`, `--no-verify`, or any other bypass flag. The local commit and tag remain; the user can investigate and decide how to recover.
 
-## 9. Report
+## 9. Create GitHub Release — this is what actually triggers npm publish
+
+`.github/workflows/publish.yml` fires on `release: published`, not on tag push. A tag alone runs CI but does NOT publish to npm. This step is mandatory; skipping it is the release silently failing.
+
+```
+gh release create v<new-version> -t v<new-version> --notes-from-tag
+```
+
+If `gh` is missing or auth fails, report the exact error and stop. Do NOT fall back to the GitHub UI silently — the user needs to know manual intervention is required.
+
+## 10. Wait for the publish workflow and confirm npm
+
+```
+gh run watch $(gh run list --workflow=publish.yml --limit 1 --json databaseId --jq '.[0].databaseId') --exit-status
+```
+
+Then verify the new version is actually on the registry:
+
+```
+bun info @blueshed/delta version
+```
+
+The reported version must equal `<new-version>`. If the workflow fails or npm still shows the prior version, report the failure with the run URL and stop.
+
+## 11. Report
 
 Report to the user in this shape:
 
 ```
-Released and pushed v<new-version>.
+Released and published @blueshed/delta@<new-version>.
 
-  commit  <short-sha> "Release v<new-version>"
-  tag     v<new-version>
+  commit   <short-sha>
+  tag      v<new-version>
+  release  https://github.com/blueshed/delta/releases/tag/v<new-version>
+  npm      @blueshed/delta@<new-version>
 
 Inspect:
   git show v<new-version>
 ```
-
-CI will now pick up the tag and run the publish workflow.
