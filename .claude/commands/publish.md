@@ -7,7 +7,7 @@ argument-hint: "patch | minor | major"
 
 Release pipeline. The bump level is `$ARGUMENTS` (one of `patch`, `minor`, `major`).
 
-Execute the steps below **in order**. Abort on any failure without making further changes. Never push at the end — that stays an explicit user action.
+Execute the steps below **in order**. Abort on any failure without making further changes. Running this skill IS the authorisation to publish — complete it end-to-end, including the push, without pausing for mid-flight confirmation.
 
 ## 1. Validate arguments
 
@@ -59,22 +59,28 @@ git commit -m "Release v<new-version>"
 git tag -a v<new-version> -m "Release v<new-version>"
 ```
 
-## 8. Report — do not push
+## 8. Push
+
+Run:
+
+```
+git push origin main --follow-tags
+```
+
+This is the moment the release goes public. If the push fails (non-fast-forward, auth rejection, hook failure), report the exact error and stop — do NOT retry with `--force`, `--no-verify`, or any other bypass flag. The local commit and tag remain; the user can investigate and decide how to recover.
+
+## 9. Report
 
 Report to the user in this shape:
 
 ```
-Released v<new-version> locally.
+Released and pushed v<new-version>.
 
   commit  <short-sha> "Release v<new-version>"
   tag     v<new-version>
 
 Inspect:
-  git show HEAD
   git show v<new-version>
-
-Publish (requires your explicit approval):
-  git push origin main --follow-tags
 ```
 
-**Do not push** — wait for the user to either ask for the push or run it themselves. A release is public; the publish step is always a separate, intentional action.
+CI will now pick up the tag and run the publish workflow.
