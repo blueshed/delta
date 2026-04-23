@@ -40,7 +40,7 @@
     "ci": "bun run db:up && bun run check && bun run test:all; code=$?; bun run db:down; exit $code"
   },
   "peerDependencies": {
-    "@blueshed/railroad": "^0.6.0",
+    "@blueshed/railroad": "^0.7.0",
     "pg": "^8.20.0",
     "jose": "^6.0.0"
   },
@@ -56,7 +56,7 @@
     }
   },
   "devDependencies": {
-    "@blueshed/railroad": "^0.6.3",
+    "@blueshed/railroad": "^0.7.1",
     "@types/bun": "^1.3.12",
     "@types/pg": "^8.20.0",
     "jose": "^6.2.2",

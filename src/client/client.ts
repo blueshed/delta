@@ -223,10 +223,13 @@ export function connectWs(
             }
             const current = entry.data.peek();
             if (current) {
-              const updated = structuredClone(current);
-              applyOps(updated, msg.ops);
-              entry.data.set(updated);
+              // Mutate in place so captured child refs (e.g. a row object
+              // bound into a drag-handler closure) stay valid across echoes.
+              // `set(sameRef)` is a no-op under Object.is — `touch()` is the
+              // escape hatch that fires subscribers.
+              applyOps(current, msg.ops);
               entry.dataVersion.set(entry.dataVersion.peek() + 1);
+              entry.data.touch();
             }
           }
         }

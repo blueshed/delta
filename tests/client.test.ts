@@ -105,6 +105,34 @@ describe("openDoc per-client state", () => {
   });
 });
 
+describe("echoed ops preserve reference identity", () => {
+  test("captured child refs see updates without re-reading doc.data", async () => {
+    const url = startFakeDeltaServer({ shapes: { s1: { x: 0, y: 0 } } });
+    const client = connectWs(url);
+    const doc = openDoc<{ shapes: Record<string, { x: number; y: number }> }>(
+      "shapes:",
+      client,
+    );
+    await doc.ready;
+
+    const rootBefore   = doc.data.peek()!;
+    const shapesBefore = doc.data.peek()!.shapes;
+    const shapeBefore  = doc.data.peek()!.shapes.s1;
+    expect(shapeBefore.x).toBe(0);
+
+    await doc.send([{ op: "replace", path: "/shapes/s1/x", value: 42 }]);
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Mutation lands on the SAME refs — the whole raison d'être of the fix.
+    expect(doc.data.peek()).toBe(rootBefore);
+    expect(doc.data.peek()!.shapes).toBe(shapesBefore);
+    expect(doc.data.peek()!.shapes.s1).toBe(shapeBefore);
+    expect(shapeBefore.x).toBe(42);
+
+    client.close();
+  });
+});
+
 describe("connectWs.close()", () => {
   test("suppresses reconnect after the server stops", async () => {
     const url = startEchoServer();

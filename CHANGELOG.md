@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Client echo applies ops in place** (`src/client/client.ts`) — `structuredClone` is gone from the hot path. Server → client op broadcasts now mutate `doc.data.peek()` directly via `applyOps`, then `entry.data.touch()` fires subscribers. This matches the server's documented in-place semantics (`core.ts:48`) and fixes a class of silent UI bugs where captured child references (e.g. a shape row bound into a drag-handler closure) went stale on every echo — first interaction correct, second interaction reading mount-time coords. Performance upside too: a 1000-row collection receiving a single-field update no longer clones 1000 rows per op.
+
+### Requires
+
+- **`@blueshed/railroad` ≥ 0.7.0** (peer) — needed for `Signal.touch()`, which the client now uses to notify subscribers after in-place mutation. `set(sameRef)` is a no-op under `Object.is`, so `touch()` is the escape hatch. Consumers pinned to railroad 0.6.x must upgrade alongside this release.
+
 ## [0.4.4] — 2026-04-20
 
 ### Fixed
