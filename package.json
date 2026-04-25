@@ -1,6 +1,6 @@
 {
   "name": "@blueshed/delta",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "Delta-doc — JSON-Patch document sync with SQLite and Postgres backends, WebSocket transport, and reactive client signals",
   "type": "module",
   "main": "src/core.ts",
@@ -70,5 +70,12 @@
     "type": "git",
     "url": "https://github.com/blueshed/delta"
   },
-  "keywords": ["delta-doc", "json-patch", "websocket", "postgres", "sqlite", "realtime"]
+  "keywords": [
+    "delta-doc",
+    "json-patch",
+    "websocket",
+    "postgres",
+    "sqlite",
+    "realtime"
+  ]
 }
