@@ -336,59 +336,50 @@ describe("postgres custom docs — predicate-based membership", () => {
   });
 
   test("lazy-tracked source doc does NOT replay history to custom subscribers", async () => {
-    // Scenario: a source doc accumulates writes while it has a direct subscriber.
-    // The subscriber leaves, deleting the tracked entry. A custom doc is then
-    // open, and a fresh write to the (now-untracked) source fires NOTIFY. Without
-    // the v-1 baseline, the lazy-recreate would fetch since=0 and replay every
-    // historical op from `_delta_ops_log` into customFanOut → duplicate adds.
+    // The bug: when a NOTIFY arrives for a docName with no eager `tracked`
+    // entry (no direct WS subscriber), the listener used to create a lazy
+    // entry at version=0 and re-fetch every historical op, replaying each
+    // through customFanOut. With the v-1 fix, only the current notification's
+    // ops are processed.
+    //
+    // To exercise the lazy path deterministically — without timing assumptions
+    // about WS open vs NOTIFY ordering — we drive delta_apply via pool.query
+    // directly. No socket ever opens the source doc, so no eager tracked
+    // entry can be created.
+    const sourceDoc = `world:${worldId}`;
 
-    // 1) Source doc has a few historical writes via a direct WS subscriber.
-    const writer = makeClient("writer");
-    await sendAndAwait(ws, writer, { action: "open", doc: `world:${worldId}` });
-    await sendAndAwait(ws, writer, {
-      action: "delta", doc: `world:${worldId}`,
-      ops: [{ op: "add", path: "/sites/501", value: { name: "S501", lat: 10, lng: 20 } }],
-    });
-    await sendAndAwait(ws, writer, {
-      action: "delta", doc: `world:${worldId}`,
-      ops: [{ op: "add", path: "/sites/502", value: { name: "S502", lat: 11, lng: 21 } }],
-    });
+    async function applyOps(ops: any[]): Promise<void> {
+      await pool.query("SELECT delta_apply($1, $2::jsonb)", [sourceDoc, JSON.stringify(ops)]);
+    }
 
-    // 2) Direct subscriber leaves — eager tracked entry is removed by the
-    //    close handler, leaving the source's version state to be re-derived
-    //    lazily on the next NOTIFY.
-    await sendAndAwait(ws, writer, { action: "close", doc: `world:${worldId}` });
+    // 1) Two historical writes happen while no custom subscriber exists.
+    //    Each NOTIFY lazy-creates a tracked entry, processes its row, and
+    //    pruneDoc deletes the entry (no subscribers).
+    await applyOps([{ op: "add", path: "/sites/501", value: { name: "S501", lat: 10, lng: 20 } }]);
+    await applyOps([{ op: "add", path: "/sites/502", value: { name: "S502", lat: 11, lng: 21 } }]);
+    await new Promise((r) => setTimeout(r, 200));
 
-    // 3) Custom-doc subscriber arrives after the historical writes.
+    // 2) Custom-doc subscriber arrives. Initial query loads both historical sites.
     const viewer = makeClient("viewer");
     const open = await sendAndAwait(ws, viewer, {
       action: "open", doc: "sites-in-bbox:0,0,50,50",
     });
-    // The initial query already loaded both historical sites.
     expect(Object.keys(open.result.sites).sort()).toEqual(["501", "502"]);
+    viewer.sent.length = 0;
 
-    viewer.sent.length = 0;       // ignore the open response
-
-    // 4) A new write fires NOTIFY; tracked must lazy-create with v-1, not 0.
-    const writer2 = makeClient("writer2");
-    await sendAndAwait(ws, writer2, { action: "open", doc: `world:${worldId}` });
-    await sendAndAwait(ws, writer2, {
-      action: "delta", doc: `world:${worldId}`,
-      ops: [{ op: "add", path: "/sites/503", value: { name: "S503", lat: 12, lng: 22 } }],
-    });
-
-    // 5) Wait for the LISTEN/NOTIFY round-trip and any (incorrect) replay.
+    // 3) A new write — the source still has no direct subscriber, so the
+    //    lazy path runs again. With the fix: fetch since=v-1=2, return v=3,
+    //    emit a single `add /sites/503`. Without the fix: fetch since=0,
+    //    return v=1+v=2+v=3, emit `replace 501, replace 502, add 503`.
+    await applyOps([{ op: "add", path: "/sites/503", value: { name: "S503", lat: 12, lng: 22 } }]);
     await new Promise((r) => setTimeout(r, 300));
 
-    const broadcasts = viewer.sent.filter(
-      (m: any) => m.doc === "sites-in-bbox:0,0,50,50",
-    );
+    const broadcasts = viewer.sent.filter((m: any) => m.doc === "sites-in-bbox:0,0,50,50");
     const allOps = broadcasts.flatMap((m: any) => m.ops);
+    const paths = allOps.map((o: any) => `${o.op} ${o.path}`).sort();
 
-    // Only the new site should arrive — historical ones must NOT replay.
-    expect(allOps.filter((o: any) => o.path === "/sites/503")).toHaveLength(1);
-    expect(allOps.filter((o: any) => o.path === "/sites/501")).toEqual([]);
-    expect(allOps.filter((o: any) => o.path === "/sites/502")).toEqual([]);
+    // Equality, not contains — historical ops must not replay at all.
+    expect(paths).toEqual(["add /sites/503"]);
   });
 
   test("delta against a custom doc is rejected as read-only", async () => {

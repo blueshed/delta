@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Flaky `lazy-tracked source doc does NOT replay history` test** — the original assertion opened the source doc over WS before applying the new write, which created an eager `tracked` entry and bypassed the lazy path the test was supposed to exercise. The remaining timing-dependent op count flaked in CI. Rewritten to drive `delta_apply` directly via `pool.query` so no eager entry can be created; the assertion is now a deterministic equality on the full op list. v0.4.6 was tagged and released on GitHub but the publish workflow's test gate failed before npm publish could run, so npm shows 0.4.5; v0.4.7 is the recovery release.
+
 ## [0.4.6] — 2026-04-25
 
 ### Fixed
