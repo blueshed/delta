@@ -38,3 +38,6 @@ handoff.md
 *.db
 *.db-shm
 *.db-wal
+
+# Demo persistence files
+examples/shared-state/chat-room.json

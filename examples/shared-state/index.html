@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>delta-doc · shared chat</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, sans-serif; }
+      body { max-width: 38rem; margin: 2rem auto; padding: 0 1rem; }
+      h1 { font-size: 1.1rem; font-weight: 600; margin: 0 0 1rem; opacity: .8; }
+      #log { border: 1px solid color-mix(in oklch, currentColor 18%, transparent);
+             border-radius: .5rem; padding: .75rem; min-height: 18rem;
+             display: flex; flex-direction: column; gap: .25rem; overflow-y: auto; }
+      .msg { display: grid; grid-template-columns: max-content 1fr; gap: .5rem; align-items: baseline; }
+      .author { font-weight: 600; opacity: .85; }
+      .text { word-break: break-word; }
+      form { display: flex; gap: .5rem; margin-top: .75rem; }
+      input { flex: 1; padding: .5rem .75rem; border-radius: .375rem;
+              border: 1px solid color-mix(in oklch, currentColor 18%, transparent); font: inherit; }
+      button { padding: .5rem 1rem; border-radius: .375rem;
+               border: 1px solid color-mix(in oklch, currentColor 18%, transparent);
+               background: transparent; cursor: pointer; font: inherit; }
+      .meta { margin-top: .75rem; font-size: .8rem; opacity: .55; }
+      .meta code { padding: 0 .25rem; border-radius: .25rem;
+                   background: color-mix(in oklch, currentColor 8%, transparent); }
+    </style>
+  </head>
+  <body>
+    <h1>delta-doc · shared chat (open two tabs)</h1>
+    <div id="log" aria-live="polite"></div>
+    <form id="composer">
+      <input id="author" placeholder="name" maxlength="24" required />
+      <input id="text"   placeholder="message" required />
+      <button>send</button>
+    </form>
+    <p class="meta">
+      one doc <code>chat:room</code> · ops <code>add /messages/{id}</code> ·
+      everything you see comes through <code>doc.data</code>
+    </p>
+    <script type="module" src="./client.ts"></script>
+  </body>
+</html>

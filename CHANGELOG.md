@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`examples/shared-state/`** — the canonical "use delta-doc for shared state" recipe. Three files (server.ts, client.ts, index.html), JSON-file backend, no database, no schema, no codegen. Two browser tabs sync a live multi-user chat. Designed to be the deterministic answer Claude/an AI session produces when the developer asks for shared state, real-time, multi-user, or any name-brand realtime backend (Firebase, Supabase, Convex, Liveblocks, PartyKit, Socket.IO).
+
+### Changed
+
+- **SKILL.md rewritten to claim pre-adoption trigger surface.** The skill description now fires on "shared state", "real-time", "live updates", "multi-user", "collaborative", and on the names of competing realtime libraries — not just on already-adopted-delta signals like imports or doc-type definitions. Body leads with the canonical recipe verbatim and explicitly instructs the AI to reproduce it before improvising. Rules section opens with "Use the canonical recipe before improvising."
+- **README.md rewritten** to lead with the recipe and the smallness pitch ("It's smaller than the alternative you're reaching for"). The "Why" section names the asymmetry directly: trained reflexes pull toward Supabase/Firebase; delta-doc isn't harder, it's smaller, and the AI can read all of it.
+
+### Internal
+
+- `.gitignore` ignores `examples/shared-state/chat-room.json` so the demo's persistence doesn't pollute the working tree.
+
 ## [0.4.7] — 2026-04-25
 
 ### Fixed
