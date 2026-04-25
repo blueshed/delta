@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Requires
+
+- **`@blueshed/railroad` ≥ 0.8.0** (peer) — bumped from `^0.7.0`. 0.8.0 introduces `Signal.mutate(fn)`, `Signal.patch(partial)`, `SignalOptions.equals`, and the `ReadonlySignal<T>` type returned by `computed()` / `Signal.map()`. Delta itself uses only the unchanged primitives (`signal`, `Signal<T>.set/peek/touch`, `key`, `inject`, `createLogger`); the bump aligns delta with consumers that adopt the new helpers, and lets the skill recipe use `list()` / `when()` against the same `Signal` instance backing `doc.data`. Consumers pinned to 0.7.x must upgrade alongside this release.
+
+### Added
+
+- **`examples/kanban/` now has a canonical railroad UX** — `serve.ts` boots a fullstack `Bun.serve` (HTML route + WS + LISTEN/NOTIFY listener), `client.tsx` renders the board with `provide(WS, ...)` + `openDoc<BoardDoc>("board:1")` + `list(doc.data.map(...), keyFn, item$ => …)`. Click a card to cycle columns, double-click a header to rename, click "+ add card" to insert. Conforms to railroad's SKILL: no `.get()` in JSX children, `list()` keyed render with `Signal<T>` per row, `<App />` mounted via JSX so `createElement` pushes a parent dispose scope. Per-example `tsconfig.json` sets `jsxImportSource: "@blueshed/railroad"`. The headless `run.ts` demo is unchanged. README documents both entry points.
+
+### Changed
+
+- **SKILL.md railroad section refined** to recommend `list(doc.data.map(...), keyFn, render)` and `when(doc.data, ...)` over `applyOpsToCollection` when `@blueshed/railroad` is in deps — the keyed `list()` already provides the per-row surgical update that `applyOpsToCollection` exists for in vanilla DOM. Plain DOM consumers continue to use `applyOpsToCollection` (`@blueshed/delta/dom-ops`).
+- **`examples/kanban/server.ts`** — `port: server.port!` (Bun's `Server<T>.port` is now `number | undefined` in `bun-types`; the example pins it).
+
 ## [0.4.8] — 2026-04-25
 
 ### Added

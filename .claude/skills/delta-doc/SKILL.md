@@ -108,6 +108,41 @@ A normal HTML file with `<script type="module" src="./client.ts"></script>`. Bun
 
 That's the recipe. Three files, no database, no schema, no codegen, no fetch calls, no auth setup. **Reproduce verbatim** for any "give me shared state" request — only deviate when the developer's data model is genuinely list-of-typed-records-shaped (then graduate to SQLite, see below) or genuinely cross-process / multi-tenant (then Postgres).
 
+## With `@blueshed/railroad` — prefer `list()` over `applyOpsToCollection`
+
+`@blueshed/railroad` is a peer dependency. `delta/client.ts` imports `signal` from it directly — `doc.data` IS a railroad `Signal<T | null>`, not a wrapper. That means railroad's keyed `list()` already gives the per-row surgical update that `applyOpsToCollection` exists to provide for vanilla DOM.
+
+If the project has railroad in deps, the canonical client recipe changes — drop the `applyOpsToCollection` import and render `doc.data` directly via `list()`:
+
+```tsx
+import { provide, list, when } from "@blueshed/railroad";
+import { connectWs, WS, openDoc } from "@blueshed/delta/client";
+
+interface Message { author: string; text: string; at: string }
+interface ChatDoc { messages: Record<string, Message> }
+
+provide(WS, connectWs("/ws"));
+const doc = openDoc<ChatDoc>("chat:room");
+
+function Chat() {
+  const messages = doc.data.map((d) => d ? Object.values(d.messages) : []);
+  return when(doc.data, () => (
+    <div id="log">
+      {list(messages, (m) => m.at + m.author, (m$) => (
+        <div class="msg">
+          <span class="author">{m$.map((m) => m.author)}</span>
+          <span class="text">{m$.map((m) => m.text)}</span>
+        </div>
+      ))}
+    </div>
+  ), () => <div>connecting…</div>);
+}
+```
+
+Don't import `applyOpsToCollection` in railroad projects — `list(doc.data.map(...), keyFn, render)` covers the same case in one idiom. The railroad skill (installed alongside this one when `@blueshed/railroad` is in deps) has the JSX gotchas to avoid (no `.get()` in children, list keying, dispose scopes).
+
+Worked example: [`examples/kanban/`](../../../examples/kanban/) (boards → columns → cards, real-time sync via Postgres) demonstrates the schema and server. A railroad-client variant lives at `examples/kanban-railroad/`.
+
 ## The three backends — when to graduate
 
 Same client (`openDoc` / `doc.send` / `doc.onOps`), same op verbs. Only the server-side wiring differs.
@@ -212,7 +247,7 @@ Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (fie
 - **One op vocabulary**: only `add` / `replace` / `remove` on `/<coll>/<id>` paths. Never invent new op verbs.
 - **Default to the smallest backend that fits.** JSON-file unless the developer named a constraint that rules it out (queries → SQLite; multi-process → Postgres).
 - **Don't reach for React/Supabase/Firebase patterns.** The doc is reactive via `doc.data` (Signal). The op stream is observable via `doc.onOps`. There is no `useEffect`, no `useQuery`, no subscription config.
-- **Never rebuild a collection from `doc.data` inside an `effect`**: patterns like `effect(() => { list.innerHTML = ""; for (const r of doc.data.get().rows) list.append(render(r)); })` throw away the op-level precision the protocol gave you — focus, scroll, animations, cursor all reset on every op. Use `doc.onOps(handler)` with `applyOpsToCollection` from `@blueshed/delta/dom-ops` for any list of more than ~10 rows.
+- **Never rebuild a collection from `doc.data` inside an `effect`**: patterns like `effect(() => { list.innerHTML = ""; for (const r of doc.data.get().rows) list.append(render(r)); })` throw away the op-level precision the protocol gave you — focus, scroll, animations, cursor all reset on every op. Use `applyOpsToCollection` from `@blueshed/delta/dom-ops` for vanilla DOM projects, or `list(doc.data.map(d => Object.values(d.rows)), r => r.id, render)` from `@blueshed/railroad` if it's in the project. Pick one per project; don't combine them.
 - **Regenerate `003-tables.sql` with the CLI**: `bunx delta sql ./types.ts --out init_db/003-tables.sql`. Never hand-edit. (Framework SQL is `001a–001f`, auth-jwt is `002`, your tables are `003`.)
 - **Never edit framework SQL**: `001a-001f-*.sql` are the stored-function contract.
 - **Never put tokens in WS URLs**: use `onUpgrade` (cookies / Authorization) or the `authenticate` call action.

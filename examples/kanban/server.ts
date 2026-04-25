@@ -23,7 +23,7 @@ import {
 import { docs } from "./schema";
 
 export interface KanbanServer {
-  server: Server;
+  server: Server<unknown>;
   port:   number;
   wsUrl:  string;
   stop(): Promise<void>;
@@ -46,7 +46,7 @@ export async function startServer(pool: Pool): Promise<KanbanServer> {
   });
   ws.setServer(server);
 
-  const port  = server.port;
+  const port  = server.port!;
   const wsUrl = `ws://localhost:${port}${ws.path}`;
 
   return {

@@ -1,15 +1,41 @@
 # examples/kanban
 
-A minimal, runnable delta-doc server and three WebSocket clients sharing
-one document in real time. Every line in the write path goes through the
-library — no hand-rolled SQL, no direct `pg_notify`, no custom listener.
-When one client mutates, every other subscribed client receives the
-materialised ops as part of the same commit.
+A minimal, runnable delta-doc server with two flavours of client:
 
-That's the whole pitch of delta-doc in one screen. State in Postgres,
-views on every device, ops are the sync vocabulary.
+- **`serve.ts` + `client.tsx`** — the canonical railroad UX. A real fullstack page (`Bun.serve` + HTML import + JSX), reactive board with click-to-move cards and double-click-to-rename columns. **Open two tabs, see them sync.** This is the reference UX pattern for any `@blueshed/railroad` + `@blueshed/delta` project.
+- **`server.ts` + `run.ts`** — the headless demo. Three WebSocket clients in one process, transcript printed to the terminal so you can read exactly which ops fan out where.
 
-## What actually runs
+Every line in the write path goes through the library — no hand-rolled SQL, no direct `pg_notify`, no custom listener. When one client mutates, every other subscribed client receives the materialised ops as part of the same commit.
+
+## Run the UX (browser, the canonical demo)
+
+```sh
+bun run db:up
+bun examples/kanban/serve.ts                   # default port 3100
+PORT=3199 bun examples/kanban/serve.ts         # override if 3100 is busy
+```
+
+Open <http://localhost:3100> in two browser tabs. Click a card — it cycles to the next column in both tabs. Double-click a column title to rename. Click "+ add card" to insert a row. Every action is one delta op (`replace` for moves and renames, `add` for new rows); the server commits to Postgres, fans out via `LISTEN/NOTIFY`, and every open tab updates without rebuilding the DOM (railroad's `list()` keeps per-card identity by id).
+
+What's worth reading in `client.tsx`:
+
+```tsx
+provide(WS, connectWs("/ws"));                          // DI: openDoc finds the WS
+const doc = openDoc<BoardDoc>("board:1");                // doc.data is a railroad Signal
+
+// list(items$, keyFn, item$ => <Component>) — keyed render with per-row identity
+{list<Card>(cards$, (c) => c.id, (c$) => <CardItem card$={c$} />)}
+
+// Inside the row, signal.map() drives reactive text — never .get() in JSX children
+<span>{card$.map((c) => c.title)}</span>
+
+// Sending: one verb, one path
+await doc.send([{ op: "replace", path: `/kanban_cards/${id}/kanban_columns_id`, value: nextId }]);
+```
+
+That's the railroad-with-delta canonical UX. No `useState`, no `applyOpsToCollection` (railroad's keyed `list()` covers it), no fetch.
+
+## Run the headless demo (terminal)
 
 ```
 bun run db:up

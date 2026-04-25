@@ -1,0 +1,84 @@
+:root {
+  color-scheme: light dark;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  --line: color-mix(in oklch, currentColor 18%, transparent);
+  --soft: color-mix(in oklch, currentColor 6%, transparent);
+}
+
+body { margin: 1.5rem; }
+
+h1 {
+  font-size: 1.4rem;
+  margin: 0 0 1rem;
+}
+
+.board {
+  display: grid;
+  gap: 1rem;
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 1rem;
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+  padding: .75rem;
+  border: 1px solid var(--line);
+  border-radius: .5rem;
+  background: var(--soft);
+}
+
+.column h3 {
+  margin: 0 0 .25rem;
+  font-size: .95rem;
+  cursor: text;
+}
+
+.card {
+  padding: .5rem .75rem;
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: .375rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.card:hover {
+  background: color-mix(in oklch, currentColor 12%, transparent);
+}
+
+button {
+  padding: .375rem .625rem;
+  font: inherit;
+  cursor: pointer;
+  border: 1px dashed var(--line);
+  border-radius: .375rem;
+  background: transparent;
+  color: inherit;
+  opacity: .7;
+  text-align: left;
+}
+
+button:hover { opacity: 1; }
+
+.meta {
+  margin-top: 1rem;
+  opacity: .55;
+  font-size: .8rem;
+}
+
+.meta code {
+  padding: 0 .25rem;
+  border-radius: .25rem;
+  background: color-mix(in oklch, currentColor 8%, transparent);
+}
+
+.pending {
+  padding: 1rem;
+  opacity: .55;
+}
