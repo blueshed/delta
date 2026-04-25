@@ -1,9 +1,15 @@
 ---
 name: delta-doc
-description: "Delta-doc — JSON-Patch document sync over WebSocket with Postgres or SQLite. Use when importing @blueshed/delta, defining doc types, writing ops against a delta-doc backend, or wiring authentication."
+description: "Delta-doc — JSON-Patch document sync over WebSocket with three backends (JSON file, SQLite, Postgres). Use when picking a backend, importing @blueshed/delta, defining doc or custom-doc types, writing ops, wiring authentication, or driving a running server from the CLI."
 ---
 
-Narrow AI-native primitive. Mutations are JSON-Patch ops on `/collection/id`. Transport is WebSocket. Backends are Postgres (stored functions + LISTEN/NOTIFY + temporal tables) or SQLite. Clients get reactive signals via `@blueshed/railroad`.
+Narrow AI-native primitive. Mutations are JSON-Patch ops on `/collection/id`. Transport is WebSocket. Three server-side backends, same client and same op vocabulary across all of them:
+
+1. **JSON file** — `registerDoc(ws, name, { file, empty })` from `@blueshed/delta/server`. One doc per file, single process. Right for prototyping, single-doc apps, config-shaped state.
+2. **SQLite** — `registerDocs(ws, db, schema, docs, customDocs?)` from `@blueshed/delta/sqlite`. Many docs, relational queries, temporal history. Single process.
+3. **Postgres** — `createDocListener(ws, pool, { custom? })` + `registerDocType(docTypeFromDef(...))` from `@blueshed/delta/postgres`. Cross-process fan-out via LISTEN/NOTIFY, scope operators, stored-function auth.
+
+Move up the ladder when you outgrow the tier you're on; the browser code does not change. Custom doc types (predicate-based membership views) are supported on SQLite and Postgres via `defineCustomDoc`.
 
 **For the full API, patterns, and recipes: read `reference.md` (in this skill directory).** This file is the router; reference.md is the manual.
 
@@ -14,23 +20,36 @@ Narrow AI-native primitive. Mutations are JSON-Patch ops on `/collection/id`. Tr
 | `@blueshed/delta/core` | anywhere | `applyOps`, `DeltaOp` |
 | `@blueshed/delta/client` | browser | `connectWs` (with `close()`), `openDoc`, `call`, `WS` |
 | `@blueshed/delta/dom-ops` | browser | `applyOpsToCollection` — route ops to keyed DOM nodes without rebuilding |
-| `@blueshed/delta/server` | Bun | `createWs`, `registerDoc`, `registerMethod` |
-| `@blueshed/delta/sqlite` | Bun | `defineSchema`, `defineDoc`, `registerDocs`, snapshots |
-| `@blueshed/delta/postgres` | Bun + pg | `defineSchema`, `defineDoc`, `generateSql`, `applyFramework`, `createDocListener`, `registerDocType`, `docTypeFromDef`, `withAppAuth` |
+| `@blueshed/delta/server` | Bun | `createWs`, `registerDoc` (JSON-file backend), `registerMethod` |
+| `@blueshed/delta/sqlite` | Bun | `defineSchema`, `defineDoc`, `defineCustomDoc`, `registerDocs(..., customDocs?)`, snapshots |
+| `@blueshed/delta/postgres` | Bun + pg | `defineSchema`, `defineDoc`, `defineCustomDoc`, `generateSql`, `applyFramework`, `createDocListener(ws, pool, { custom? })`, `registerDocType`, `docTypeFromDef`, `withAppAuth` |
 | `@blueshed/delta/auth` | Bun | `DeltaAuth` contract, `wireAuth`, `upgradeWithAuth` |
 | `@blueshed/delta/auth-jwt` | Bun + pg + jose | `jwtAuth({ pool, secret })`, `applyAuthJwtSchema(pool)` |
 
 ## CLI
 
-`bunx @blueshed/delta` (available after `bun install`):
+The package ships a `delta` bin; invoke it via `bunx delta`.
+
+**Build-time:**
 
 ```bash
 # Copy framework SQL (001a–001e) into init_db/. Add --with-auth for the users schema.
-bunx @blueshed/delta init init_db --with-auth
+bunx delta init init_db --with-auth
 
 # Regenerate your table SQL from types.ts (must export `schema` and `docs`).
-bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql
+bunx delta sql ./types.ts --out init_db/003-tables.sql
 ```
+
+**Runtime — talk to a running delta server:**
+
+```bash
+bunx delta open  <docName>             # one-shot: open + print state + exit
+bunx delta watch <docName>             # open, then stream broadcast ops
+bunx delta delta <docName> <opsJSON>   # opens + applies ops + prints ack
+bunx delta call  <method>  [paramsJSON]  # invokes an RPC method
+```
+
+URL resolution (in order): `--url <url>` → `DELTA_WS_URL` → `.delta` file in cwd → `ws://localhost:${PORT:-3100}/ws`.
 
 ## Bootstrap (two ways)
 
@@ -51,11 +70,40 @@ await applySql(pool, generateSql(schema, docs));  // your 002-tables equivalent
 **File-based** (when `docker-entrypoint-initdb.d` or a migration tool owns the DB):
 
 ```bash
-bunx @blueshed/delta init init_db --with-auth
-bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql
+bunx delta init init_db --with-auth
+bunx delta sql ./types.ts --out init_db/003-tables.sql
 ```
 
 Everything is idempotent — safe to re-apply on every boot.
+
+## Custom doc types — predicate-based membership views
+
+`defineCustomDoc` declares a read-only doc whose contents are decided by a
+user-supplied predicate over a watched collection. Writes still go through
+the standard doc; the framework evaluates membership for every open custom
+doc on each commit and emits transition ops (`add` / `replace` / `remove`)
+on the custom doc's own shape.
+
+```ts
+import { defineCustomDoc } from "@blueshed/delta/sqlite";   // or .../postgres
+
+const sitesInBbox = defineCustomDoc<BBox>("sites-in-bbox:", {
+  watch: ["sites"],
+  parse:   (docId) => parseBbox(docId),                      // docId → criteria
+  query:   (db, c) => ({ sites: db.query("...").all(...) }), // initial load
+  matches: (_coll, row, c) => inBbox(row, c),                // membership predicate
+});
+
+// SQLite: 5th arg of registerDocs.
+registerDocs(ws, db, schema, [worldDoc], [sitesInBbox]);
+
+// Postgres: opts.custom on createDocListener.
+await createDocListener(ws, pool, { custom: [sitesInBbox] });
+```
+
+Custom docs are read-only — `delta` against a custom doc returns 403; write
+through the source doc instead. The full worked example lives in
+`examples/sites-bbox/`.
 
 ## Files to read when deeper detail is needed
 
@@ -77,7 +125,7 @@ Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (fie
 ## Rules
 
 - **One op vocabulary**: only `add` / `replace` / `remove` on `/<coll>/<id>` paths. Never invent new op verbs.
-- **Regenerate `003-tables.sql` with the CLI**: `bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql`. Never hand-edit. (Framework SQL is `001a–001f`, auth-jwt is `002`, your tables are `003`.)
+- **Regenerate `003-tables.sql` with the CLI**: `bunx delta sql ./types.ts --out init_db/003-tables.sql`. Never hand-edit. (Framework SQL is `001a–001f`, auth-jwt is `002`, your tables are `003`.)
 - **Never edit framework SQL**: `001a-001e-*.sql` are the stored-function contract.
 - **Never put tokens in WS URLs**: use `onUpgrade` (cookies / Authorization) or the `authenticate` call action.
 - **No bare `pool.query` when auth is enabled**: let `docTypeFromDef({ auth })` route through `withAppAuth`.

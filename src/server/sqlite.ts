@@ -43,6 +43,30 @@ export const defineSchema = defineSchemaShared;
 export const defineDoc = defineDocShared;
 
 // ---------------------------------------------------------------------------
+// Custom doc definition — predicate-based membership over watched collections.
+// ---------------------------------------------------------------------------
+
+export interface CustomDocDef<C = unknown> {
+  /** Doc name prefix (e.g. "sites-in-bbox:"). */
+  prefix: string;
+  /** Collections the doc watches for cross-pollination. */
+  watch: string[];
+  /** Parse the portion of docName after prefix into criteria. */
+  parse: (docId: string) => C;
+  /** Initial load. Return the rows this doc should expose, keyed by collection. */
+  query: (db: any, criteria: C) => Record<string, any[]>;
+  /** True when `row` belongs in a doc opened under `criteria`. */
+  matches: (collection: string, row: any, criteria: C) => boolean;
+}
+
+export function defineCustomDoc<C>(
+  prefix: string,
+  opts: Omit<CustomDocDef<C>, "prefix">,
+): CustomDocDef<C> {
+  return { prefix, ...opts };
+}
+
+// ---------------------------------------------------------------------------
 // createTables
 // ---------------------------------------------------------------------------
 
@@ -119,21 +143,51 @@ function sqlDefault(value: unknown): string {
 const log = createLogger("[delta-sqlite]");
 
 /** Register all doc definitions with the WebSocket server. */
-export function registerDocs(ws: WsServer, db: any, schema: Schema, docs: DocDef[]) {
+export function registerDocs(
+  ws: WsServer,
+  db: any,
+  schema: Schema,
+  docs: DocDef[],
+  customDocs: CustomDocDef<any>[] = [],
+) {
   // Build lookup: prefix → DocDef
   const docByPrefix = new Map<string, DocDef>();
   for (const doc of docs) {
     docByPrefix.set(doc.prefix, doc);
   }
 
+  // Custom doc lookup: prefix → CustomDocDef
+  const customByPrefix = new Map<string, CustomDocDef<any>>();
+  for (const cd of customDocs) {
+    customByPrefix.set(cd.prefix, cd);
+  }
+
+  // Which collections are watched by any custom doc type.
+  const watchedCollections = new Set<string>();
+  for (const cd of customDocs) {
+    for (const coll of cd.watch) watchedCollections.add(coll);
+  }
+
   // In-memory doc cache: docName → loaded doc object
   const cache = new Map<string, any>();
+
+  // Parsed criteria per open custom doc name (shared across clients of the same name).
+  const customCriteria = new Map<string, unknown>();
 
   // Track which doc names are subscribed (for scoped fan-out)
   const subscriptions = new Map<string, Set<any>>(); // docName → Set<ws clients>
 
   function findDoc(docName: string): { def: DocDef; docId: string } | null {
     for (const [prefix, def] of docByPrefix) {
+      if (docName.startsWith(prefix)) {
+        return { def, docId: docName.slice(prefix.length) };
+      }
+    }
+    return null;
+  }
+
+  function findCustom(docName: string): { def: CustomDocDef<any>; docId: string } | null {
+    for (const [prefix, def] of customByPrefix) {
       if (docName.startsWith(prefix)) {
         return { def, docId: docName.slice(prefix.length) };
       }
@@ -319,6 +373,30 @@ export function registerDocs(ws: WsServer, db: any, schema: Schema, docs: DocDef
 
   ws.on("open", (msg, client, respond) => {
     const docName = msg.doc as string;
+
+    // Custom doc path first (independent prefix space).
+    const customMatch = findCustom(docName);
+    if (customMatch) {
+      const { def, docId } = customMatch;
+      let doc = cache.get(docName);
+      if (!doc) {
+        const criteria = def.parse(docId);
+        const rowsByColl = def.query(db, criteria);
+        doc = {};
+        for (const coll of def.watch) doc[coll] = toMap(rowsByColl[coll] ?? []);
+        cache.set(docName, doc);
+        customCriteria.set(docName, criteria);
+      }
+
+      client.subscribe(docName);
+      if (!subscriptions.has(docName)) subscriptions.set(docName, new Set());
+      subscriptions.get(docName)!.add(client);
+
+      respond({ result: doc });
+      log.info(`opened ${docName} (custom)`);
+      return;
+    }
+
     const match = findDoc(docName);
     if (!match) return;
 
@@ -344,6 +422,12 @@ export function registerDocs(ws: WsServer, db: any, schema: Schema, docs: DocDef
 
   ws.on("delta", (msg, _client, respond) => {
     const docName = msg.doc as string;
+
+    if (findCustom(docName)) {
+      respond({ error: { code: 403, message: "Custom docs are read-only; write through the source doc." } });
+      return;
+    }
+
     const match = findDoc(docName);
     if (!match) return;
 
@@ -368,6 +452,9 @@ export function registerDocs(ws: WsServer, db: any, schema: Schema, docs: DocDef
       // Cross-doc fan-out: find other open docs affected by these changes
       fanOut(ws, broadcastOps, docName);
 
+      // Custom-doc cross-pollination: predicate-based membership.
+      customFanOut(broadcastOps);
+
       respond({ result: { ack: true } });
       log.info(`delta ${docName} [${(msg.ops as DeltaOp[]).map((o: DeltaOp) => `${o.op} ${o.path}`).join(", ")}]`);
     } catch (err: any) {
@@ -381,14 +468,16 @@ export function registerDocs(ws: WsServer, db: any, schema: Schema, docs: DocDef
 
   ws.on("close", (msg, client, respond) => {
     const docName = msg.doc as string;
-    const match = findDoc(docName);
-    if (!match) return;
+    const isCustom = findCustom(docName) != null;
+    const isStandard = findDoc(docName) != null;
+    if (!isCustom && !isStandard) return;
 
     client.unsubscribe(docName);
     subscriptions.get(docName)?.delete(client);
     if (subscriptions.get(docName)?.size === 0) {
       subscriptions.delete(docName);
       cache.delete(docName); // evict when no subscribers
+      if (isCustom) customCriteria.delete(docName);
     }
 
     respond({ result: { ack: true } });
@@ -399,6 +488,32 @@ export function registerDocs(ws: WsServer, db: any, schema: Schema, docs: DocDef
   // Cross-doc fan-out
   // ---------------------------------------------------------------------------
 
+  /**
+   * True if `row` (in `coll`) belongs to the doc identified by (`def`,`docId`),
+   * tracing the parent-FK chain. For grandchildren, walks up via `cached` —
+   * the target doc's own cache — because each link of the chain must already
+   * be in scope for the row itself to be in scope.
+   */
+  function rowInScope(
+    coll: string,
+    row: any,
+    def: DocDef,
+    docId: string,
+    cached: any,
+  ): boolean {
+    if (!row) return false;
+    if (coll === def.root) return String(row.id) === docId;
+    const table = schema.tables[coll];
+    if (!table?.parent) return true;                  // unscoped collection — preserve existing behaviour
+    const fkVal = row[table.parent.fkColumn];
+    if (fkVal == null) return false;
+    const parentColl = table.parent.collection;
+    if (parentColl === def.root) return String(fkVal) === docId;
+    const parentRow = cached?.[parentColl]?.[String(fkVal)];
+    if (!parentRow) return false;                     // parent isn't in this doc's scope
+    return rowInScope(parentColl, parentRow, def, docId, cached);
+  }
+
   /** Forward relevant delta ops to other subscribed docs that share affected collections. */
   function fanOut(ws: WsServer, ops: DeltaOp[], sourceDocName: string) {
     for (const [docName] of subscriptions) {
@@ -406,18 +521,36 @@ export function registerDocs(ws: WsServer, db: any, schema: Schema, docs: DocDef
 
       const match = findDoc(docName);
       if (!match) continue;
-      const { def } = match;
+      const { def, docId } = match;
+      const cached = cache.get(docName);
 
-      // Filter to ops affecting collections this doc includes
+      // Filter to ops that (a) affect a collection this doc includes AND
+      // (b) belong to this doc's scope by parent-FK lineage.
       const relevantOps = ops.filter((op) => {
-        const collKey = op.path.split("/").filter(Boolean)[0];
-        return collKey && (def.include.includes(collKey) || collKey === def.root);
+        const parts = op.path.split("/").filter(Boolean);
+        const collKey = parts[0];
+        if (!collKey) return false;
+        if (!def.include.includes(collKey) && collKey !== def.root) return false;
+
+        const id = parts[1];
+
+        if (op.op === "remove") {
+          // Forward removes only if the id is currently in the target's cache.
+          // If we don't have it, this row was never in the target's scope.
+          return id != null && cached?.[collKey]?.[id] != null;
+        }
+
+        // add / replace — `value` is the full row (per applyOps' broadcastOps).
+        const row = (op as any).value;
+        if (collKey === def.root && parts.length === 1) {
+          return row && String(row.id) === docId;       // root-level replace
+        }
+        return rowInScope(collKey, row, def, docId, cached);
       });
 
       if (relevantOps.length === 0) continue;
 
       // Apply deltas to cached doc
-      const cached = cache.get(docName);
       if (cached) deltaApplyOps(cached, relevantOps);
 
       // Broadcast the deltas
@@ -425,10 +558,76 @@ export function registerDocs(ws: WsServer, db: any, schema: Schema, docs: DocDef
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Custom-doc cross-pollination
+  // ---------------------------------------------------------------------------
+
+  /**
+   * For each broadcast op, test membership against every open custom doc whose
+   * `watch` includes the affected collection. Emit transition ops
+   * (add / replace / remove) on the custom doc's own shape.
+   */
+  function customFanOut(ops: DeltaOp[]) {
+    if (customByPrefix.size === 0) return;
+
+    for (const op of ops) {
+      const parts = op.path.split("/").filter(Boolean);
+      // We only handle /<coll>/<id> with a full row value (or a plain remove).
+      // Root-level or field-level paths are ignored — the writer's broadcastOps
+      // always carry full row values for add/replace.
+      if (parts.length < 2) continue;
+      const coll = parts[0]!;
+      const id = parts[1]!;
+      if (!watchedCollections.has(coll)) continue;
+
+      const row = (op as any).value as any | undefined;
+
+      // Bucket open docs by custom type.
+      for (const [prefix, def] of customByPrefix) {
+        if (!def.watch.includes(coll)) continue;
+
+        // Memoize the membership decision per distinct criteria for this op.
+        const decisionByCriteria = new Map<unknown, boolean>();
+
+        for (const [docName] of subscriptions) {
+          if (!docName.startsWith(prefix)) continue;
+          const criteria = customCriteria.get(docName);
+          if (criteria === undefined) continue;
+          const cached = cache.get(docName);
+          if (!cached) continue;
+
+          let shouldBeIn = decisionByCriteria.get(criteria);
+          if (shouldBeIn === undefined) {
+            shouldBeIn = row == null ? false : def.matches(coll, row, criteria);
+            decisionByCriteria.set(criteria, shouldBeIn);
+          }
+
+          const wasIn = cached[coll]?.[id] != null;
+          const emitted: DeltaOp[] = [];
+
+          if (!wasIn && shouldBeIn) {
+            cached[coll][id] = row;
+            emitted.push({ op: "add", path: `/${coll}/${id}`, value: row });
+          } else if (wasIn && shouldBeIn) {
+            cached[coll][id] = row;
+            emitted.push({ op: "replace", path: `/${coll}/${id}`, value: row });
+          } else if (wasIn && !shouldBeIn) {
+            delete cached[coll][id];
+            emitted.push({ op: "remove", path: `/${coll}/${id}` });
+          }
+          // else: neither in nor becoming in — ignore.
+
+          if (emitted.length) ws.publish(docName, { doc: docName, ops: emitted });
+        }
+      }
+    }
+  }
+
   return {
     /** Evict a doc from cache. */
     evict(docName: string) {
       cache.delete(docName);
+      customCriteria.delete(docName);
     },
   };
 }

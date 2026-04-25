@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **SQLite cross-doc leak in `registerDocs`/`fanOut`** — sibling docs sharing a prefix (e.g. `customer:alice` / `customer:bob`) leaked each other's child-row ops both live and into the server-side cache, so subsequent `open` calls served cross-scope rows. `fanOut` now scope-checks every op against the target doc's parent-FK chain via a new `rowInScope` helper (root id, child FK, grandchild via cached parent walk). Standard `remove` ops only forward when the row is currently in the target's cache. Regression suite added (`tests/sqlite-fanout-scope.test.ts`).
+- **Postgres listener history replay** — when a `NOTIFY` arrived for a docName with no `tracked` entry (no direct subscribers, or after a close), the lazy entry initialised at `version: 0` and `delta_fetch_ops` returned every historical op for that doc (capped at 1000), replaying them through `customFanOut`. Now initialised at `Math.max(0, v - 1)` so only the current notification's ops are processed; custom docs already loaded prior state via `def.query`. Regression test in `tests/postgres-custom.test.ts`.
+
+### Added
+
+- **Custom doc types — predicate-based membership views** (`defineCustomDoc`). A custom doc declares a `prefix`, the `watch`ed collections, a `parse(docId)` for criteria, an initial `query(db|pool, criteria)`, and a `matches(coll, row, criteria)` predicate. Writes still go through standard docs; the framework evaluates membership on each commit and emits `add` / `replace` / `remove` ops on the custom doc's own shape (memoised per distinct criteria). Read-only — `delta` against a custom doc returns 403. Available on both backends:
+  - SQLite: optional 5th arg `customDocs` to `registerDocs(ws, db, schema, docs, customDocs?)`.
+  - Postgres: `opts.custom` to `createDocListener(ws, pool, { custom })`.
+- **Runtime CLI commands** — `bunx delta open|watch|delta|call` for talking to a running delta server. URL resolution: `--url` → `DELTA_WS_URL` → `.delta` file in cwd → `ws://localhost:${PORT:-3100}/ws`. The `delta` subcommand opens the doc on the same socket before applying so it works against SQLite's cache-required apply path.
+- **Backend-agnostic isolation property** (`tests/helpers/isolation.ts`) plus three suites that apply it (`tests/sqlite-isolation.test.ts`, `tests/postgres-isolation.test.ts`, `tests/sqlite-fanout-scope.test.ts`). Pins per-doc isolation against both backends so the leak fixed above can't regress.
+- **`examples/sites-bbox/`** — worked example of a custom doc (sites within a bounding box) with both SQLite (`server.ts`) and Postgres (`server-pg.ts`) wirings. Same client code; only the server-side wiring differs.
+- **Listener cleanup on destroy** (`src/server/postgres/listener.ts`) — `notification` and `error` listeners are now removed from the released pg client to prevent stale handlers firing on recycled pool connections (uncovered while running the per-test custom-doc suite).
+
+### Documentation
+
+- README now leads with three backends (JSON file / SQLite / Postgres) and includes a "Choosing a backend" section, runtime CLI block, and custom-doc pointer. Skill description (`SKILL.md` frontmatter) and exports tables updated to match.
+
+### Internal
+
+- `.gitignore` now ignores `*.sqlite{,-shm,-wal}` and `*.db{,-shm,-wal}` so example/test runs don't pollute the working tree.
+
 ## [0.4.5] — 2026-04-23
 
 ### Changed

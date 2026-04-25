@@ -52,7 +52,8 @@ export {
   frameworkSqlFiles,
 } from "./bootstrap";
 
-export { createDocListener } from "./listener";
+export { createDocListener, defineCustomDoc } from "./listener";
+export type { CustomDocDef } from "./listener";
 
 export {
   registerDocType,

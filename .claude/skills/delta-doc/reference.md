@@ -26,8 +26,8 @@ await applySql(pool, generateSql(schema, docs));   // your tables
 **CLI** (docker-entrypoint-initdb.d or a migration tool owns the DB):
 
 ```bash
-bunx @blueshed/delta init init_db --with-auth
-bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql
+bunx delta init init_db --with-auth
+bunx delta sql ./types.ts --out init_db/003-tables.sql
 ```
 
 `init` copies `001a-001e-*.sql` (and optionally `002-users.sql` from auth-jwt) into your directory. `sql` runs the codegen. Everything is idempotent.

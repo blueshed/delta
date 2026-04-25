@@ -30,3 +30,11 @@ yarn-error.log*
 test-results/
 playwright-report/
 handoff.md
+
+# SQLite databases (examples / test runs)
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.db-shm
+*.db-wal

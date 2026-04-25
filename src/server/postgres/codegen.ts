@@ -20,7 +20,7 @@
  *
  * Or from the bundled CLI:
  *
- *   bunx @blueshed/delta sql ./types.ts --out init_db/002-tables.sql
+ *   bunx delta sql ./types.ts --out init_db/002-tables.sql
  */
 import type { Schema, DocDef } from "./schema";
 import { q, columnSqlType, sqlDefault, findCascadeOn } from "./sql";
@@ -40,7 +40,7 @@ export function generateSql(
   const today = new Date().toISOString().slice(0, 10);
   const header =
     opts.header ?? "GENERATED FROM types.ts — DO NOT EDIT";
-  const regen = opts.regenerate ?? "bunx @blueshed/delta sql ./types.ts";
+  const regen = opts.regenerate ?? "bunx delta sql ./types.ts";
 
   const lines: string[] = [
     "-- =========================================================================",

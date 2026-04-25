@@ -38,9 +38,161 @@ function usage(code = 0): never {
   stream.write(
     `Usage:\n` +
     `  delta sql <module> [--out <file>] [--schema-export <name>] [--docs-export <name>]\n` +
-    `  delta init <dir> [--with-auth] [--upgrade]\n`,
+    `  delta init <dir> [--with-auth] [--upgrade]\n` +
+    `\n` +
+    `  delta open  <docName>                  Open a doc, print its state, exit.\n` +
+    `  delta watch <docName>                  Open a doc, then stream broadcast ops.\n` +
+    `  delta delta <docName> <opsJSON>        Apply JSON-Patch ops to a doc.\n` +
+    `  delta call  <method>  [paramsJSON]     Invoke an RPC method.\n` +
+    `\n` +
+    `URL resolution for runtime commands (in order):\n` +
+    `  --url <url>  |  DELTA_WS_URL  |  .delta file  |  ws://localhost:\${PORT:-3100}/ws\n`,
   );
   process.exit(code);
+}
+
+// ---------------------------------------------------------------------------
+// Runtime CLI — open / watch / delta / call against a running delta server.
+// ---------------------------------------------------------------------------
+
+function resolveWsUrl(values: Record<string, unknown>): string {
+  const flag = values.url as string | undefined;
+  if (flag) return flag;
+  if (process.env.DELTA_WS_URL) return process.env.DELTA_WS_URL;
+  try {
+    const fromFile = readFileSync(resolve(process.cwd(), ".delta"), "utf8").trim();
+    if (fromFile) return fromFile;
+  } catch {}
+  return `ws://localhost:${process.env.PORT ?? "3100"}/ws`;
+}
+
+interface PendingResolver {
+  resolve: (v: any) => void;
+  reject: (e: any) => void;
+}
+
+async function withWs<T>(
+  url: string,
+  fn: (api: {
+    send: (msg: any) => Promise<any>;
+    onBroadcast: (handler: (msg: any) => void) => void;
+  }) => Promise<T>,
+): Promise<T> {
+  const ws = new WebSocket(url);
+  const pending = new Map<number, PendingResolver>();
+  const broadcastHandlers = new Set<(msg: any) => void>();
+  let nextId = 1;
+
+  await new Promise<void>((resolve, reject) => {
+    ws.onopen = () => resolve();
+    ws.onerror = (e: any) => reject(new Error(`WebSocket error: ${e?.message ?? "connection failed"}`));
+  });
+
+  ws.onmessage = (ev: MessageEvent) => {
+    const msg = JSON.parse(String(ev.data));
+    if (msg.id != null && pending.has(msg.id)) {
+      const p = pending.get(msg.id)!;
+      pending.delete(msg.id);
+      if (msg.error) p.reject(msg.error);
+      else p.resolve(msg.result);
+      return;
+    }
+    // Unsolicited broadcast (no id).
+    for (const h of broadcastHandlers) h(msg);
+  };
+
+  ws.onclose = () => {
+    for (const p of pending.values()) p.reject(new Error("socket closed"));
+    pending.clear();
+  };
+
+  const api = {
+    send(msg: any): Promise<any> {
+      const id = nextId++;
+      return new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+        ws.send(JSON.stringify({ ...msg, id }));
+      });
+    },
+    onBroadcast(handler: (msg: any) => void) { broadcastHandlers.add(handler); },
+  };
+
+  try {
+    return await fn(api);
+  } finally {
+    try { ws.close(); } catch {}
+  }
+}
+
+function parseJsonArg(s: string | undefined, label: string): unknown {
+  if (s === undefined) return undefined;
+  try { return JSON.parse(s); }
+  catch (err) {
+    process.stderr.write(`delta: ${label} is not valid JSON: ${(err as Error).message}\n`);
+    process.exit(2);
+  }
+}
+
+async function cmdOpen(docName: string | undefined, values: Record<string, unknown>) {
+  if (!docName) usage(1);
+  const url = resolveWsUrl(values);
+  const result = await withWs(url, ({ send }) =>
+    send({ action: "open", doc: docName }),
+  );
+  process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+}
+
+async function cmdWatch(docName: string | undefined, values: Record<string, unknown>) {
+  if (!docName) usage(1);
+  const url = resolveWsUrl(values);
+  process.stderr.write(`watching ${docName} on ${url} (Ctrl-C to stop)\n`);
+  await withWs(url, ({ send, onBroadcast }) =>
+    new Promise<never>(async (_, reject) => {
+      onBroadcast((msg) => {
+        if (msg.doc === docName) process.stdout.write(JSON.stringify(msg) + "\n");
+      });
+      try {
+        const result = await send({ action: "open", doc: docName });
+        process.stderr.write(`opened ${docName}\n`);
+        process.stdout.write(JSON.stringify({ doc: docName, state: result }) + "\n");
+      } catch (err) { reject(err); }
+    }),
+  );
+}
+
+async function cmdDelta(
+  docName: string | undefined,
+  opsJson: string | undefined,
+  values: Record<string, unknown>,
+) {
+  if (!docName || !opsJson) usage(1);
+  const ops = parseJsonArg(opsJson, "ops") as unknown;
+  if (!Array.isArray(ops)) {
+    process.stderr.write(`delta: ops must be a JSON array\n`);
+    process.exit(2);
+  }
+  const url = resolveWsUrl(values);
+  const result = await withWs(url, async ({ send }) => {
+    // SQLite's registerDocs requires the doc to be cached before delta;
+    // opening on the same socket is the cheapest way to guarantee it.
+    await send({ action: "open", doc: docName });
+    return send({ action: "delta", doc: docName, ops });
+  });
+  process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+}
+
+async function cmdCall(
+  method: string | undefined,
+  paramsJson: string | undefined,
+  values: Record<string, unknown>,
+) {
+  if (!method) usage(1);
+  const params = parseJsonArg(paramsJson, "params");
+  const url = resolveWsUrl(values);
+  const result = await withWs(url, ({ send }) =>
+    send({ action: "call", method, params: params ?? {} }),
+  );
+  process.stdout.write(JSON.stringify(result, null, 2) + "\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -199,7 +351,7 @@ function cmdInit(dir: string | undefined, values: Record<string, unknown>) {
   if (created.length || upgraded.length) {
     process.stderr.write(
       `\nNext: regenerate your table SQL from types.ts:\n` +
-      `  bunx @blueshed/delta sql ./types.ts --out ${dir}/003-tables.sql\n`,
+      `  bunx delta sql ./types.ts --out ${dir}/003-tables.sql\n`,
     );
   }
 }
@@ -227,6 +379,7 @@ async function main() {
       "docs-export": { type: "string", default: "docs" },
       "with-auth": { type: "boolean", default: false },
       upgrade: { type: "boolean", default: false },
+      url: { type: "string" },
       help: { type: "boolean", short: "h", default: false },
     },
     allowPositionals: true,
@@ -237,15 +390,24 @@ async function main() {
 
   const cmd = positionals[0];
   const arg = positionals[1];
+  const arg2 = positionals[2];
 
   switch (cmd) {
-    case "sql":  return cmdSql(arg, values);
-    case "init": return cmdInit(arg, values);
-    default:     usage(1);
+    case "sql":   return cmdSql(arg, values);
+    case "init":  return cmdInit(arg, values);
+    case "open":  return cmdOpen(arg, values);
+    case "watch": return cmdWatch(arg, values);
+    case "delta": return cmdDelta(arg, arg2, values);
+    case "call":  return cmdCall(arg, arg2, values);
+    default:      usage(1);
   }
 }
 
 main().catch((err) => {
-  process.stderr.write(`delta: ${err instanceof Error ? err.message : String(err)}\n`);
+  let msg: string;
+  if (err instanceof Error) msg = err.message;
+  else if (err && typeof err === "object") msg = JSON.stringify(err);
+  else msg = String(err);
+  process.stderr.write(`delta: ${msg}\n`);
   process.exit(1);
 });
