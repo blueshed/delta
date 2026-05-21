@@ -25,11 +25,17 @@ export type DeltaOp =
 // Apply
 // ---------------------------------------------------------------------------
 
-function parsePath(path: string): (string | number)[] {
+export function splitPath(path: string): string[] {
   return path
     .split("/")
     .filter(Boolean)
-    .map((s) => (/^\d+$/.test(s) ? Number(s) : s));
+    .map((s) => s.replace(/~1/g, "/").replace(/~0/g, "~"));
+}
+
+function parsePath(path: string): (string | number)[] {
+  return splitPath(path).map((unescaped) => {
+    return /^\d+$/.test(unescaped) ? Number(unescaped) : unescaped;
+  });
 }
 
 function walk(

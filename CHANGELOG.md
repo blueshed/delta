@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **RFC 6901 JSON Pointer path escaping** — path segments now unescape `~1` → `/` and `~0` → `~` via a shared `splitPath` helper exported from `src/core.ts`, applied uniformly across the SQLite (`src/server/sqlite.ts`) and Postgres (`src/server/postgres/{listener,schema}.ts`) backends. Row ids and field names containing `/` or `~` can now round-trip through delta ops without ambiguity.
+- **Schema type-drift warnings in `migrateSchema`** — the SQLite migrator now reads existing column metadata via `PRAGMA table_info` and emits a `console.warn` when a declared column type differs from the schema definition, so drift surfaces at startup instead of silently mis-coercing reads.
+
+### Changed
+
+- **SKILL.md** documents JSON Pointer path escaping under the op vocabulary and adds a Type-drift warning bullet to the Footguns list.
+
 ## [0.4.9] — 2026-04-25
 
 ### Requires

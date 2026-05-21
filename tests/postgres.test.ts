@@ -8,7 +8,7 @@
  *   bun test tests/postgres.test.ts
  *   docker compose down -v
  */
-import { describe, test, expect, beforeAll, beforeEach, afterAll } from "bun:test";
+import { describe, test, expect, beforeAll, beforeEach, afterAll, afterEach } from "bun:test";
 import { Pool } from "pg";
 import {
   createDocListener,

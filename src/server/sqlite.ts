@@ -17,7 +17,7 @@
  * the backend is a JSON file or SQLite.
  */
 import type { WsServer } from "./server";
-import { applyOps as deltaApplyOps, type DeltaOp } from "../core";
+import { applyOps as deltaApplyOps, type DeltaOp, splitPath } from "../core";
 import { createLogger } from "./logger";
 import {
   type ColumnDef,
@@ -294,7 +294,7 @@ export function registerDocs(
     const rowFieldBatches = new Map<string, { table: ResolvedTable; id: string; fields: Map<string, unknown> }>();
 
     for (const op of ops) {
-      const parts = op.path.split("/").filter(Boolean);
+      const parts = splitPath(op.path);
       const collKey = parts[0]!;
       const table = schema.tables[collKey];
 
@@ -527,7 +527,7 @@ export function registerDocs(
       // Filter to ops that (a) affect a collection this doc includes AND
       // (b) belong to this doc's scope by parent-FK lineage.
       const relevantOps = ops.filter((op) => {
-        const parts = op.path.split("/").filter(Boolean);
+        const parts = splitPath(op.path);
         const collKey = parts[0];
         if (!collKey) return false;
         if (!def.include.includes(collKey) && collKey !== def.root) return false;
@@ -571,7 +571,7 @@ export function registerDocs(
     if (customByPrefix.size === 0) return;
 
     for (const op of ops) {
-      const parts = op.path.split("/").filter(Boolean);
+      const parts = splitPath(op.path);
       // We only handle /<coll>/<id> with a full row value (or a plain remove).
       // Root-level or field-level paths are ignored — the writer's broadcastOps
       // always carry full row values for add/replace.
@@ -722,6 +722,20 @@ export function migrateSchema(db: any, schema: Schema): string[] {
 
     const existingCols = new Set(info.map((c: any) => c.name));
 
+    // Warn on column type mismatches
+    for (const c of info) {
+      const def = table.columns[c.name];
+      if (def) {
+        const expectedType = columnSqlType(def).toUpperCase();
+        const actualType = c.type.toUpperCase();
+        if (actualType !== expectedType) {
+          console.warn(
+            `[delta-sqlite] Type mismatch for ${table.name}.${c.name}: schema expects ${expectedType} (${def.type}), database has ${actualType}`,
+          );
+        }
+      }
+    }
+
     // Check for FK column from parent
     if (table.parent && !existingCols.has(table.parent.fkColumn)) {
       const sql = `ALTER TABLE ${table.name} ADD COLUMN ${table.parent.fkColumn} TEXT`;
@@ -754,7 +768,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
   const errors: ValidationError[] = [];
 
   for (const op of ops) {
-    const parts = op.path.split("/").filter(Boolean);
+    const parts = splitPath(op.path);
     const collKey = parts[0];
     if (!collKey) {
       errors.push({ path: op.path, message: "Empty path" });

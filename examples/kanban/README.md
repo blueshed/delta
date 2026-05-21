@@ -127,9 +127,12 @@ ids and filters `kanban_columns_id = ANY($parent_ids)`).
 
 The shape is flat — collections keyed by id — because that's what
 `delta_open` emits. A UI that wants cards nested inside columns does
-that client-side by grouping on `kanban_columns_id`. See
-[dom-ops.ts](../../src/client/dom-ops.ts) and `doc.onOps` for how to
-keep the DOM in sync without re-rendering the whole tree on every op.
+that client-side by grouping on `kanban_columns_id`. See `client.tsx`
+in this directory for the railroad pattern (`doc.data.map(...)` + keyed
+`list()` keeps per-row identity; only changed rows re-render). For
+vanilla DOM clients without railroad, use
+[dom-ops.ts](../../src/client/dom-ops.ts) → `applyOpsToCollection` with
+`doc.onOps` instead.
 
 ## What a delta batch looks like on the wire
 
@@ -167,11 +170,12 @@ writes, broadcasts, and the framework's on-disk `_delta_ops_log`.
 
 - **Auth + RLS.** One user, no identity, no team scoping — see
   [../todos-vs-rls/](../todos-vs-rls/).
-- **A browser UI.** All three clients run in-process. In a browser the
-  same `openDoc("board:1")` call returns the same reactive `data` signal,
-  ready for whatever rendering library you use. Pair with
-  `@blueshed/delta/dom-ops` → `applyOpsToCollection` for surgical DOM
-  updates.
+- **Drag-and-drop.** The browser UX uses click-to-cycle and double-click
+  to rename so the example stays focused on the signal/op wiring rather
+  than HTML5 DnD plumbing. The op vocabulary supports it — a drop
+  handler would just send a `replace` on `kanban_columns_id` plus
+  position re-numbering, the same shape as the click handler in
+  `client.tsx`.
 - **Temporal reads.** `temporal: false` on the schema. Flip it to `true`
   and you get `valid_from`/`valid_to` + `delta_open_at("board:1", at)`
   out of the box.

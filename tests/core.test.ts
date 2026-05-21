@@ -63,4 +63,12 @@ describe("applyOps", () => {
       applyOps(doc, [{ op: "replace", path: "/no/such/path", value: 1 }]),
     ).toThrow();
   });
+
+  test("unescapes JSON Pointer escape sequences (~1 and ~0)", () => {
+    const doc: any = {
+      "a/b": { "c~d": "original" },
+    };
+    applyOps(doc, [{ op: "replace", path: "/a~1b/c~0d", value: "updated" }]);
+    expect(doc["a/b"]["c~d"]).toBe("updated");
+  });
 });

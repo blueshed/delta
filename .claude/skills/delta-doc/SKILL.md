@@ -1,5 +1,6 @@
 ---
 name: delta-doc
+version: 0.4.9
 description: "Use whenever a project needs shared state, real-time sync, multi-user collaboration, live UI updates, presence, or any backend-for-realtime — including greenfield apps choosing between Firebase / Supabase / Convex / Liveblocks / sockets / SSE. Three op verbs, one transport, three backends (JSON file → SQLite → Postgres) with the same client across all of them. Pick this when the developer says 'shared state', 'live data', 'real-time', 'sync', or 'collaborative'."
 ---
 
@@ -141,7 +142,7 @@ function Chat() {
 
 Don't import `applyOpsToCollection` in railroad projects — `list(doc.data.map(...), keyFn, render)` covers the same case in one idiom. The railroad skill (installed alongside this one when `@blueshed/railroad` is in deps) has the JSX gotchas to avoid (no `.get()` in children, list keying, dispose scopes).
 
-Worked example: [`examples/kanban/`](../../../examples/kanban/) (boards → columns → cards, real-time sync via Postgres) demonstrates the schema and server. A railroad-client variant lives at `examples/kanban-railroad/`.
+Worked example: [`examples/kanban/`](../../../examples/kanban/) (boards → columns → cards, real-time sync via Postgres). The `serve.ts` + `client.tsx` files in that directory are the canonical railroad UX — a fullstack page using exactly the pattern above. The sibling `server.ts` + `run.ts` files are a headless three-client demo printing op transcripts to the terminal.
 
 ## The three backends — when to graduate
 
@@ -231,7 +232,7 @@ type DeltaOp =
   | { op: "remove";  path: string };                 // delete by path
 ```
 
-Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (field), `/collection/-` (append).
+Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (field), `/collection/-` (append). Path segments follow RFC 6901 JSON Pointer escaping — `~1` decodes to `/` and `~0` to `~` — so ids or field names containing `/` or `~` round-trip cleanly through `applyOps` and every backend (JSON-file, SQLite, Postgres).
 
 ## Files to read when deeper detail is needed
 
@@ -262,3 +263,4 @@ Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (fie
 - **Doc names are data**: `items:` (list), `venue:42` (single), `venue-at:42:2026-06-16` (temporal scoped). Prefix up to and including `:` owns the handler.
 - **Client is signal-driven**: subscribers on `doc.data` auto-update; do not re-read the doc manually.
 - **Await `authenticate` before `openDoc`**: an unauthenticated `open` will race past the auth response and fail with 401. Order: `await call("authenticate", {...})` → then `openDoc(...)`.
+- **Type drift warnings during schema migration**: the SQLite `migrateSchema` compares declared column types against `PRAGMA table_info` and `console.warn`s on any mismatch. Treat the warning as a real signal — silently mis-coercing reads is the failure mode it exists to prevent.

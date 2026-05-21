@@ -8,7 +8,7 @@
  * (time-travel, snapshots, ops-log pruning, op validation).
  */
 import type { Pool } from "pg";
-import type { DeltaOp } from "../../core";
+import { type DeltaOp, splitPath } from "../../core";
 import {
   type ColumnDef,
   type Schema,
@@ -65,7 +65,7 @@ export async function pruneOpsLog(pool: Pool, keepInterval = "1 hour"): Promise<
 export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): ValidationError[] {
   const errors: ValidationError[] = [];
   for (const op of ops) {
-    const parts = op.path.split("/").filter(Boolean);
+    const parts = splitPath(op.path);
     const collKey = parts[0];
     if (!collKey) { errors.push({ path: op.path, message: "Empty path" }); continue; }
     if (collKey !== def.root && !def.include.includes(collKey)) {

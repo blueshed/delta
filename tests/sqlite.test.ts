@@ -1477,3 +1477,107 @@ describe("validateOps", () => {
     expect(errors[0]!.message).toContain("must be an object");
   });
 });
+
+describe("SQLite path escaping TDD", () => {
+  let db: InstanceType<typeof Database>;
+  let ws: ReturnType<typeof createWs>;
+
+  const PAST = "2020-01-01 00:00:00";
+
+  function seedProject(id: string, name: string, status: string) {
+    db.run(
+      "INSERT INTO projects (id, name, status, valid_from) VALUES (?, ?, ?, ?)",
+      [id, name, status, PAST],
+    );
+  }
+
+  function seedTask(id: string, projectId: string, title: string, done: boolean) {
+    db.run(
+      "INSERT INTO tasks (id, project_id, title, done, valid_from) VALUES (?, ?, ?, ?, ?)",
+      [id, projectId, title, done ? 1 : 0, PAST],
+    );
+  }
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    createTables(db, schema);
+    ws = createWs();
+    registerDocs(ws, db, schema, [projectDoc]);
+  });
+
+  test("handles JSON Pointer path escaping in delta ops", async () => {
+    seedProject("p1", "Alpha", "active");
+    // Seed tasks with literal ID containing a slash: "t/1" and "t/2"
+    seedTask("t/1", "p1", "Task One", false);
+    seedTask("t/2", "p1", "Task Two", false);
+
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+
+    // Add a task with an ID containing standard escaped characters.
+    // "t~1add" in JSON Pointer path represents the ID "t/add".
+    await ws.websocket.message(sock, JSON.stringify({
+      id: 2,
+      action: "delta",
+      doc: "project:p1",
+      ops: [{ op: "add", path: "/tasks/t~1add", value: { title: "Slash ID Task", done: false } }],
+    }));
+
+    expect(sock.sent[1].result).toEqual({ ack: true });
+
+    // Verify task with ID "t/add" exists in the database
+    const rows = db.query("SELECT * FROM current_tasks WHERE id = 't/add'").all() as any[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].title).toBe("Slash ID Task");
+
+    // Replace field on "t/1" using escaped ID "t~11"
+    await ws.websocket.message(sock, JSON.stringify({
+      id: 3,
+      action: "delta",
+      doc: "project:p1",
+      ops: [{ op: "replace", path: "/tasks/t~11/done", value: true }],
+    }));
+
+    expect(sock.sent[2].result).toEqual({ ack: true });
+
+    const updated = db.query("SELECT * FROM current_tasks WHERE id = 't/1'").get() as any;
+    expect(updated.done).toBe(1);
+
+    // Remove task "t/2" using escaped ID "t~12"
+    await ws.websocket.message(sock, JSON.stringify({
+      id: 4,
+      action: "delta",
+      doc: "project:p1",
+      ops: [{ op: "remove", path: "/tasks/t~12" }],
+    }));
+
+    expect(sock.sent[3].result).toEqual({ ack: true });
+
+    const remaining = db.query("SELECT * FROM current_tasks WHERE id = 't/2'").all();
+    expect(remaining).toHaveLength(0);
+  });
+});
+
+describe("migrateSchema type mismatch warning TDD", () => {
+  test("warns when column types mismatch between database and schema", () => {
+    const db = new Database(":memory:");
+    // Create a table with 'name' as INTEGER instead of TEXT as schema expects
+    db.run("CREATE TABLE projects (id TEXT PRIMARY KEY, name INTEGER, status TEXT, valid_from TEXT)");
+
+    const warnings: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.join(" "));
+    };
+
+    try {
+      migrateSchema(db, schema);
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(warnings.some(w => w.includes("Type mismatch for projects.name"))).toBe(true);
+    expect(warnings.some(w => w.includes("expects TEXT"))).toBe(true);
+    expect(warnings.some(w => w.includes("database has INTEGER"))).toBe(true);
+  });
+});

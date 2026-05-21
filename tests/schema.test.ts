@@ -189,4 +189,21 @@ describe("validateOps", () => {
     ]);
     expect(errs).toEqual([]);
   });
+
+  test("handles JSON Pointer escape sequences (~1 and ~0) in paths", () => {
+    const customSchema = defineSchema({
+      items: {
+        columns: {
+          name: "text",
+          "c/d": "text",
+          "e~f": "text",
+        },
+      },
+    });
+    const errs = validateOps(customSchema, def, [
+      { op: "replace", path: "/items/t~11/c~1d", value: "ok" },
+      { op: "replace", path: "/items/t~11/e~0f", value: "ok" },
+    ]);
+    expect(errs).toEqual([]);
+  });
 });

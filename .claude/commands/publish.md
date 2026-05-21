@@ -45,21 +45,27 @@ Refuse if the current version isn't strict `\d+\.\d+\.\d+`.
 
 Rewrite `.version` in `package.json` to the new value. Preserve formatting (2-space indent, trailing newline).
 
-## 6. Promote CHANGELOG
+## 6. Stamp version into SKILL.md
 
-Open `CHANGELOG.md`. There must be a `## [Unreleased]` section — that's the author's record of what's shipping. If it's missing, **abort** and tell the user to write the Unreleased section first; revert the `package.json` bump before exiting.
+`.claude/skills/delta-doc/SKILL.md` carries the package version in its frontmatter so an AI session reading the skill knows which release's API surface it's looking at. Replace the line matching `^version: \d+\.\d+\.\d+` with `version: <new-version>`. Keep the surrounding `name:` and `description:` fields untouched.
+
+If the `version:` line is missing (older skill), insert it on the line immediately after `name:`. Do NOT alter the body of the skill.
+
+## 7. Promote CHANGELOG
+
+Open `CHANGELOG.md`. There must be a `## [Unreleased]` section — that's the author's record of what's shipping. If it's missing, **abort** and tell the user to write the Unreleased section first; revert the `package.json` bump and the SKILL.md stamp before exiting.
 
 Replace the literal line `## [Unreleased]` with `## [<new-version>] — <today in YYYY-MM-DD>`.
 
-## 7. Commit and tag
+## 8. Commit and tag
 
 ```
-git add package.json CHANGELOG.md
+git add package.json CHANGELOG.md .claude/skills/delta-doc/SKILL.md
 git commit -m "Release v<new-version>"
 git tag -a v<new-version> -m "Release v<new-version>"
 ```
 
-## 8. Push
+## 9. Push
 
 Run:
 
@@ -69,7 +75,7 @@ git push origin main --follow-tags
 
 If the push fails (non-fast-forward, auth rejection, hook failure), report the exact error and stop — do NOT retry with `--force`, `--no-verify`, or any other bypass flag. The local commit and tag remain; the user can investigate and decide how to recover.
 
-## 9. Create GitHub Release — this is what actually triggers npm publish
+## 10. Create GitHub Release — this is what actually triggers npm publish
 
 `.github/workflows/publish.yml` fires on `release: published`, not on tag push. A tag alone runs CI but does NOT publish to npm. This step is mandatory; skipping it is the release silently failing.
 
@@ -79,7 +85,7 @@ gh release create v<new-version> -t v<new-version> --notes-from-tag
 
 If `gh` is missing or auth fails, report the exact error and stop. Do NOT fall back to the GitHub UI silently — the user needs to know manual intervention is required.
 
-## 10. Wait for the publish workflow and confirm npm
+## 11. Wait for the publish workflow and confirm npm
 
 ```
 gh run watch $(gh run list --workflow=publish.yml --limit 1 --json databaseId --jq '.[0].databaseId') --exit-status
@@ -93,7 +99,7 @@ bun info @blueshed/delta version
 
 The reported version must equal `<new-version>`. If the workflow fails or npm still shows the prior version, report the failure with the run URL and stop.
 
-## 11. Report
+## 12. Report
 
 Report to the user in this shape:
 

@@ -17,7 +17,7 @@ import { resolveDoc } from "./registry";
 import type { DocType } from "./registry";
 import type { DeltaAuth } from "../auth";
 import { isAuthError } from "../auth";
-import type { DeltaOp } from "../../core";
+import { type DeltaOp, splitPath } from "../../core";
 
 const log = createLogger("[doc]");
 
@@ -194,7 +194,7 @@ export async function createDocListener<I = unknown>(
     if (customByPrefix.size === 0) return;
 
     for (const op of ops) {
-      const parts = op.path.split("/").filter(Boolean);
+      const parts = splitPath(op.path);
       if (parts.length < 2) continue;
       const coll = parts[0]!;
       const id = parts[1]!;
