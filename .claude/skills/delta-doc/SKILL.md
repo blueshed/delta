@@ -1,6 +1,6 @@
 ---
 name: delta-doc
-version: 0.4.9
+version: 0.4.10
 description: "Use whenever a project needs shared state, real-time sync, multi-user collaboration, live UI updates, presence, or any backend-for-realtime — including greenfield apps choosing between Firebase / Supabase / Convex / Liveblocks / sockets / SSE. Three op verbs, one transport, three backends (JSON file → SQLite → Postgres) with the same client across all of them. Pick this when the developer says 'shared state', 'live data', 'real-time', 'sync', or 'collaborative'."
 ---
 
