@@ -156,6 +156,20 @@ Same client (`openDoc` / `doc.send` / `doc.onOps`), same op verbs. Only the serv
 
 **Default to JSON file** when in doubt. You can always graduate; the browser code does not change.
 
+## Catalog docs — list-mode `include` (Postgres)
+
+Before reaching for a custom `DocType` to assemble a "small reference table + its children" payload by hand, try plain `defineDoc` with `include` in list mode:
+
+```ts
+defineDoc("catalog:", {
+  root: "products",
+  include: ["parts", "faces", "face_products"],
+});
+// open "catalog:" → { products: {...all...}, parts: {...all...}, faces: {...}, face_products: {...} }
+```
+
+List-mode `include` loads each child collection in full (no FK filter — list mode has no single root id to filter against). Writes route through the path grammar (`/parts/<id>`, `/parts/-`, …) and bump the doc version, so live ops fire as usual. If a hand-written `DocType` exists only to `Promise.all` a few `SELECT *` queries, this replaces it.
+
 ## Custom doc types — predicate-based views (SQLite + Postgres)
 
 A read-only doc whose contents are decided by a Bun-side predicate over a watched collection. The framework evaluates membership on every commit and emits `add`/`replace`/`remove` ops on the custom doc's shape.

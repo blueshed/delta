@@ -228,6 +228,19 @@ defineDoc("items:", { root: "items", include: [] });
 // open "items:" → { items: { "1": { id: 1, ... }, "2": { ... } } }
 ```
 
+**Catalog doc** — list-mode root + included child collections loaded in full. Postgres only. The right shape when a small reference table and its children all open together (e.g. a product catalog with parts, faces, face_products).
+
+```ts
+defineDoc("catalog:", {
+  root: "products",
+  include: ["parts", "faces", "face_products"],
+});
+// open "catalog:" → { products: {...all...}, parts: {...all...},
+//                     faces: {...all...}, face_products: {...all...} }
+```
+
+List-mode `include` has no FK filter — list mode has no single root id to filter against, so "include" means "load it all" (single-mode `include` still travels `parent_fk`). Writes route through the existing path grammar (`/parts/<id>`, `/parts/-` etc.) and bump the doc version, so ops broadcast as you'd expect. If a custom `DocType` exists only to read each related collection in parallel and assemble the payload by hand, replace it with this.
+
 **Scoped single doc** — prefix + id; the `scope` filters the *root* collection, and `include` collections travel along their declared `parent_fk` relationships (from `defineSchema`).
 
 ```ts

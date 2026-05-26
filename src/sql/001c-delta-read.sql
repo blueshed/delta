@@ -113,6 +113,44 @@ END;
 $$ LANGUAGE plpgsql STABLE;
 
 -- ---------------------------------------------------------------------------
+-- _delta_load_collection_all: load every row of a collection as a JSONB map.
+-- Used by list-mode docs' `include` traversal (no FK filter — list mode has
+-- no single root id to filter against, so "include" means "load it all").
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION _delta_load_collection_all(
+  p_collection_key TEXT,
+  p_at TIMESTAMPTZ DEFAULT NULL
+) RETURNS JSONB AS $$
+DECLARE
+  v_coll   RECORD;
+  v_source TEXT;
+  v_result JSONB;
+BEGIN
+  SELECT * INTO v_coll FROM _delta_collections
+   WHERE collection_key = p_collection_key;
+  IF NOT FOUND THEN RETURN '{}'::jsonb; END IF;
+
+  v_source := _delta_source_view(v_coll.table_name, v_coll.temporal, p_at);
+
+  IF v_coll.temporal THEN
+    EXECUTE format(
+      'SELECT COALESCE(jsonb_object_agg(t.id, _delta_strip_temporal(to_jsonb(t))), ''{}''::jsonb) FROM %I t WHERE %s',
+      v_source,
+      CASE WHEN p_at IS NOT NULL THEN _delta_temporal_where(p_at) ELSE 'TRUE' END
+    ) INTO v_result;
+  ELSE
+    EXECUTE format(
+      'SELECT COALESCE(jsonb_object_agg(t.id, to_jsonb(t)), ''{}''::jsonb) FROM %I t',
+      v_source
+    ) INTO v_result;
+  END IF;
+
+  RETURN v_result;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+-- ---------------------------------------------------------------------------
 -- delta_open: load a doc from relational tables, return JSONB + version
 -- ---------------------------------------------------------------------------
 
@@ -173,6 +211,18 @@ BEGIN
     END IF;
 
     v_result := jsonb_build_object(v_def.root_collection, v_root_map);
+
+    -- Each included collection is loaded in full (no FK filter): list mode
+    -- has no single root id to filter against, so "include" means "load it
+    -- all" — catalog-shaped docs (small reference table + its children) can
+    -- be expressed declaratively instead of via a custom DocType.
+    FOREACH v_coll_key IN ARRAY v_def.include
+    LOOP
+      v_result := v_result || jsonb_build_object(
+        v_coll_key,
+        _delta_load_collection_all(v_coll_key, v_at)
+      );
+    END LOOP;
 
   ELSE
     -- Single mode: one root row + included collections

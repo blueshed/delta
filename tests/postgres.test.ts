@@ -535,3 +535,166 @@ describe("scope DSL operators", () => {
     } finally { await cleanup("endto:"); }
   });
 });
+
+// ---------------------------------------------------------------------------
+// List-mode `include` — catalog-shaped docs (root + child collections loaded
+// in full, no FK filter). Lets a small reference table + its children open
+// as a single doc via plain defineDoc() instead of a hand-written DocType.
+// ---------------------------------------------------------------------------
+
+describe("list-mode include", () => {
+  beforeEach(async () => {
+    await pool.query(`
+      CREATE SEQUENCE IF NOT EXISTS seq_products;
+      CREATE SEQUENCE IF NOT EXISTS seq_parts;
+
+      CREATE TABLE IF NOT EXISTS products (
+        id   BIGINT NOT NULL DEFAULT nextval('seq_products'),
+        name TEXT   NOT NULL,
+        PRIMARY KEY (id)
+      );
+
+      CREATE TABLE IF NOT EXISTS parts (
+        id          BIGINT NOT NULL DEFAULT nextval('seq_parts'),
+        products_id BIGINT NOT NULL,
+        label       TEXT   NOT NULL,
+        PRIMARY KEY (id)
+      );
+
+      INSERT INTO _delta_collections (collection_key, table_name, columns_def, temporal)
+      VALUES
+        ('products', 'products',
+         '{"name":{"type":"text","nullable":false}}'::jsonb, FALSE),
+        ('parts', 'parts',
+         '{"products_id":{"type":"integer","nullable":false},
+           "label":{"type":"text","nullable":false}}'::jsonb, FALSE)
+      ON CONFLICT (collection_key) DO UPDATE SET
+        table_name  = EXCLUDED.table_name,
+        columns_def = EXCLUDED.columns_def,
+        temporal    = EXCLUDED.temporal;
+
+      UPDATE _delta_collections
+         SET parent_collection = 'products', parent_fk = 'products_id'
+       WHERE collection_key = 'parts';
+
+      INSERT INTO _delta_docs (prefix, root_collection, include, scope)
+      VALUES ('catalog:', 'products', ARRAY['parts']::text[], '{}'::jsonb)
+      ON CONFLICT (prefix) DO UPDATE SET
+        root_collection = EXCLUDED.root_collection,
+        include         = EXCLUDED.include,
+        scope           = EXCLUDED.scope;
+    `);
+  });
+
+  afterEach(async () => {
+    await pool.query(`
+      DELETE FROM _delta_docs WHERE prefix = 'catalog:';
+      DELETE FROM _delta_collections WHERE collection_key IN ('parts', 'products');
+      DROP TABLE IF EXISTS parts;
+      DROP TABLE IF EXISTS products;
+      DROP SEQUENCE IF EXISTS seq_parts;
+      DROP SEQUENCE IF EXISTS seq_products;
+    `);
+  });
+
+  test("delta_open returns root AND every included collection in full", async () => {
+    await pool.query(`
+      INSERT INTO products (id, name) VALUES (1, 'widget'), (2, 'gadget');
+      INSERT INTO parts (id, products_id, label) VALUES
+        (10, 1, 'screw'),
+        (11, 1, 'spring'),
+        (20, 2, 'gear');
+    `);
+
+    const { rows } = await pool.query("SELECT delta_open($1) AS doc", ["catalog:"]);
+    const doc = rows[0].doc;
+
+    expect(doc.products).toBeDefined();
+    expect(Object.keys(doc.products).sort()).toEqual(["1", "2"]);
+
+    // Children load unfiltered: every parts row appears, not just children of
+    // any one product. This is the whole point of list-mode include.
+    expect(doc.parts).toBeDefined();
+    expect(Object.keys(doc.parts).sort()).toEqual(["10", "11", "20"]);
+    expect(doc.parts["10"].label).toBe("screw");
+    expect(doc.parts["20"].label).toBe("gear");
+  });
+
+  test("empty include is unchanged (backwards-compat: only root)", async () => {
+    await pool.query(
+      "UPDATE _delta_docs SET include = ARRAY[]::text[] WHERE prefix = 'catalog:'",
+    );
+    await pool.query(`
+      INSERT INTO products (id, name) VALUES (1, 'widget');
+      INSERT INTO parts (id, products_id, label) VALUES (10, 1, 'screw');
+    `);
+
+    const { rows } = await pool.query("SELECT delta_open($1) AS doc", ["catalog:"]);
+    const doc = rows[0].doc;
+
+    expect(doc.products).toBeDefined();
+    expect(doc.parts).toBeUndefined();
+  });
+
+  test("write to an included collection bumps the doc version", async () => {
+    await pool.query("INSERT INTO products (id, name) VALUES (1, 'widget')");
+
+    const def = defineDoc("catalog:", { root: "products", include: ["parts"] });
+    const type = docTypeFromDef(def, pool);
+
+    const before = await type.open({}, "catalog:");
+    const v0 = before!.version;
+
+    // Add a `parts` row through the list-mode doc — the path-based router in
+    // delta_apply already knows how to route this; we're just confirming the
+    // doc version bumps so live ops will fire.
+    const applied = await type.apply({}, "catalog:", [
+      { op: "add", path: "/parts/-", value: { products_id: 1, label: "screw" } },
+    ]);
+    expect(applied.version).toBeGreaterThan(v0);
+    expect(applied.ops.length).toBe(1);
+    expect(applied.ops[0].op).toBe("add");
+    expect(applied.ops[0].path).toMatch(/^\/parts\/\d+$/);
+
+    // Re-opening sees the new parts row in the list-mode payload.
+    const after = await type.open({}, "catalog:");
+    const parts = after!.result.parts as Record<string, { label: string }>;
+    expect(Object.values(parts).map((p) => p.label)).toContain("screw");
+  });
+
+  test("temporal include passes v_at through (current rows for current open)", async () => {
+    // Replace `parts` with a temporal variant to exercise the temporal branch
+    // of _delta_load_collection_all. Drop the non-temporal version first.
+    await pool.query(`
+      DROP TABLE IF EXISTS parts;
+      DROP SEQUENCE IF EXISTS seq_parts;
+      CREATE SEQUENCE seq_parts;
+      CREATE TABLE parts (
+        id          BIGINT NOT NULL DEFAULT nextval('seq_parts'),
+        products_id BIGINT NOT NULL,
+        label       TEXT   NOT NULL,
+        valid_from  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        valid_to    TIMESTAMPTZ,
+        PRIMARY KEY (id, valid_from)
+      );
+      CREATE OR REPLACE VIEW current_parts AS
+        SELECT * FROM parts WHERE valid_to IS NULL;
+      UPDATE _delta_collections SET temporal = TRUE WHERE collection_key = 'parts';
+
+      INSERT INTO products (id, name) VALUES (1, 'widget');
+      INSERT INTO parts (id, products_id, label, valid_from)
+      VALUES (10, 1, 'screw', NOW());
+    `);
+
+    const { rows } = await pool.query("SELECT delta_open($1) AS doc", ["catalog:"]);
+    const doc = rows[0].doc;
+
+    expect(doc.parts["10"].label).toBe("screw");
+    // Temporal columns are stripped on the way out.
+    expect(doc.parts["10"].valid_from).toBeUndefined();
+    expect(doc.parts["10"].valid_to).toBeUndefined();
+
+    // Clean up the view we created (afterEach drops the table).
+    await pool.query("DROP VIEW IF EXISTS current_parts");
+  });
+});

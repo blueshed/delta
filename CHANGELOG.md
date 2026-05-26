@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **List-mode docs honour `include`** (`src/sql/001c-delta-read.sql`). A doc opened in list mode (`defineDoc("catalog:", { root: "products", include: ["parts", "faces"] })`) now returns every included collection in full alongside the root, with no FK filter — the answer to "catalog-shaped" workloads where a small reference table plus its children wants to open as a single doc. Previously the list branch silently dropped `include`, forcing apps to write custom `DocType` handlers that read each collection by hand. New helper `_delta_load_collection_all(key, at)` does the unfiltered load and is temporal-aware. Single-mode docs are unchanged (children still filter by `parent_fk = root.id`); writes already routed by path so `delta_apply` needed no change. Backwards-compatible: list docs declared with `include: []` keep returning only the root.
+
 ## [0.4.10] — 2026-05-21
 
 ### Added
