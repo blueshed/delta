@@ -652,9 +652,10 @@ describe("list-mode include", () => {
       { op: "add", path: "/parts/-", value: { products_id: 1, label: "screw" } },
     ]);
     expect(applied.version).toBeGreaterThan(v0);
-    expect(applied.ops.length).toBe(1);
-    expect(applied.ops[0].op).toBe("add");
-    expect(applied.ops[0].path).toMatch(/^\/parts\/\d+$/);
+    const ops = applied.ops!;
+    expect(ops.length).toBe(1);
+    expect(ops[0]!.op).toBe("add");
+    expect(ops[0]!.path).toMatch(/^\/parts\/\d+$/);
 
     // Re-opening sees the new parts row in the list-mode payload.
     const after = await type.open({}, "catalog:");
