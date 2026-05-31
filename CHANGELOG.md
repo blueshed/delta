@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.12] — 2026-05-31
+
+### Changed
+
+- **delta-doc skill — write loop documented** (`.claude/skills/delta-doc/SKILL.md`, `.claude/skills/delta-doc/reference.md`). `doc.send` echoes the same op back to the sender, which is what patches `doc.data` and fires `onOps` — so optimistic updates double-apply on echo (rows added twice, counters landing at +2, chat lines appearing twice), and reloads/re-opens after a write are pointless because `doc.data` is already the live in-place-patched state. Adds a non-negotiable rule to SKILL.md, a reinforcing comment in the canonical recipe's `send()`, and a dedicated "The write loop" section in reference.md (with the latency tradeoff and the transient-feedback escape hatch).
+- **delta-doc skill — "no brute-force reload" framed as categorical** (`.claude/skills/delta-doc/SKILL.md`, `.claude/skills/delta-doc/reference.md`). A reload is never necessary under any trigger, because the framework owns the only two full reads that ever happen — the initial open and an automatic re-open of every tracked doc on every reconnect (`client.ts:178`, so outages self-heal). Reframes both the SKILL.md rule and the reference.md section away from "after a write" to unconditional, and adds a table walking through each tempting trigger (post-write, reconnect, refocus, "might be out of sync", "force-refresh to be safe") and why none of them needs a manual read.
+
 ## [0.4.11] — 2026-05-26
 
 ### Added
