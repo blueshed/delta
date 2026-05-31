@@ -515,6 +515,45 @@ doc.onOps((ops) => applyOpsToCollection(list, "todos", ops, renderer, nodes));
 
 **When `doc.data` is still fine:** the whole doc fits in one card, no keyboard focus to preserve, < ~10 rows.
 
+## The write loop — send, don't touch (no optimistic updates, no reloads)
+
+`doc.send(ops)` does **not** update your local view. It ships the ops to the server, which applies them and broadcasts the *same* ops to every connected client — **including the one that sent them**. That broadcast is what updates your UI. In the client (`client.ts`), an incoming op broadcast for an open doc:
+
+1. fires every `doc.onOps(handler)` first (DOM patchers run here), then
+2. applies the ops **in place** to `doc.data.peek()` and calls `data.touch()`, so subscribers (railroad `list()`, `effect`, …) re-run.
+
+The sender is just another subscriber receiving its own op back (the code calls these "echoes"). Two consequences trip up anyone arriving from REST/Firebase/optimistic-UI habits:
+
+**Don't optimistically update.** Do not mutate the DOM or push into your local collection right after `send`. The echo already does it — doing it yourself double-applies: an `add` shows the row twice, a `replace` counter you also bump locally lands at +2, a chat line appears once optimistically and again on echo. The send path and the render path are the same path; keep all rendering on the render path.
+
+```ts
+// WRONG — double-applies when the op echoes back
+log.append(renderMessage(m));                                  // optimistic
+await doc.send([{ op: "add", path: `/messages/${id}`, value: m }]);
+
+// RIGHT — send only; onOps / doc.data render it when it echoes back
+await doc.send([{ op: "add", path: `/messages/${id}`, value: m }]);
+```
+
+**A brute-force reload is never necessary — not after a write, not ever.** The framework issues exactly two full reads, both automatic, and a developer-issued one is always either redundant or actively harmful (it rebuilds the DOM and throws away the op-level precision the protocol gave you):
+
+- **Initial load** — the `open` resolves with full state into `doc.data` (you render once after `doc.ready`).
+- **Reconnect** — on *every* socket `open` event, initial connect and post-outage alike, `connectWs` re-issues `open` for every entry in its `_docs` map and `onOpen` resets `doc.data` to fresh full state (`client.ts:178`). An outage self-heals; you do nothing.
+
+Everything between those two arrives as ordered, versioned ops on the live socket. So none of the triggers that make you reach for a reload actually need one:
+
+| Tempting trigger | Why no reload | What actually happens |
+|---|---|---|
+| "I just wrote — show the result" | the write echoes back as an op | `onOps` / `doc.data` patch in place |
+| "I reconnected after dropping" | re-open is automatic | `doc.data` reset to fresh state on the `open` event |
+| "the tab refocused / became visible" | nothing was missed | the socket stayed subscribed; any ops already applied |
+| "I might be out of sync" | you can't silently be | ops carry versions; reconnect re-reads full state |
+| "force-refresh to be safe" | there is nothing newer to fetch | `doc.data` *is* the latest |
+
+If you catch yourself calling `openDoc` a second time, `fetch`-ing the doc over HTTP, or rebuilding the collection from `doc.data` "to be safe," stop — it's a category error. There is no staleness to chase: the socket is the live read, and it never stopped being one.
+
+**About latency.** Optimistic updates exist to hide round-trip time. Over delta's WebSocket the echo is typically sub-frame, so the honest default is to render from the echo and leave it. If a specific interaction genuinely needs instant local feedback, give *transient* feedback that isn't the data — disable the button, dim the row, show a spinner — and still let the authoritative collection update from the broadcast. Never fork the collection's source of truth into a local optimistic copy you then have to reconcile.
+
 ## Stored functions (read-only contract)
 
 Apply `postgres/sql/001a-001e-*.sql` alphabetically to every database — idempotent. Key functions:

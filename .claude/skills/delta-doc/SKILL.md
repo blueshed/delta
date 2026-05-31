@@ -93,7 +93,10 @@ doc.onOps((ops) =>
   }),
 );
 
-// Sending: one op, one verb, one path.
+// Sending: one op, one verb, one path. Note what's NOT here — no
+// `log.append(...)`, no local push. The op echoes back through `onOps`
+// above and renders itself. Touch the DOM here too and the message
+// appears twice. Send, then let the broadcast render.
 async function send(author: string, text: string) {
   await doc.send([{
     op: "add",
@@ -263,6 +266,7 @@ Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (fie
 - **Default to the smallest backend that fits.** JSON-file unless the developer named a constraint that rules it out (queries → SQLite; multi-process → Postgres).
 - **Don't reach for React/Supabase/Firebase patterns.** The doc is reactive via `doc.data` (Signal). The op stream is observable via `doc.onOps`. There is no `useEffect`, no `useQuery`, no subscription config.
 - **Never rebuild a collection from `doc.data` inside an `effect`**: patterns like `effect(() => { list.innerHTML = ""; for (const r of doc.data.get().rows) list.append(render(r)); })` throw away the op-level precision the protocol gave you — focus, scroll, animations, cursor all reset on every op. Use `applyOpsToCollection` from `@blueshed/delta/dom-ops` for vanilla DOM projects, or `list(doc.data.map(d => Object.values(d.rows)), r => r.id, render)` from `@blueshed/railroad` if it's in the project. Pick one per project; don't combine them.
+- **Never optimistically update, never brute-force reload.** `doc.send(ops)` does not update your view — it ships the ops to the server, which applies them and broadcasts the *same* ops back to every client, **including the sender**. That echo is what fires `doc.onOps` and patches `doc.data`. So: (1) don't also mutate the DOM/state yourself after `send` — the echo will, and you'd double-apply (a row added twice, a counter that lands at +2, a chat line that appears once optimistically then again on echo); (2) **a reload is never necessary — not after a write, not on reconnect, not on tab refocus, not "to be safe."** The framework does exactly two full reads, both automatic: the initial `open` (you render once after `doc.ready`) and a re-`open` of every tracked doc on *every* socket reconnect (`client.ts:178` — an outage self-heals). Everything else arrives as ordered, versioned ops on the live socket, so there is never staleness to chase. If you catch yourself calling `openDoc` twice, `fetch`-ing the doc, or rebuilding the list "to refresh," stop — it's a category error. Send the op, render from the broadcast — never both. See reference.md → "The write loop".
 - **Regenerate `003-tables.sql` with the CLI**: `bunx delta sql ./types.ts --out init_db/003-tables.sql`. Never hand-edit. (Framework SQL is `001a–001f`, auth-jwt is `002`, your tables are `003`.)
 - **Never edit framework SQL**: `001a-001f-*.sql` are the stored-function contract.
 - **Never put tokens in WS URLs**: use `onUpgrade` (cookies / Authorization) or the `authenticate` call action.
