@@ -535,7 +535,22 @@ await doc.send([{ op: "add", path: `/messages/${id}`, value: m }]);
 await doc.send([{ op: "add", path: `/messages/${id}`, value: m }]);
 ```
 
-**Don't brute-force reload.** After a write, do not re-`open` the doc, re-`fetch`, or rebuild the list from `doc.data` to "get the latest." There is nothing newer to fetch — `doc.data` is already the live, in-place-patched state, and reconnects re-open every tracked doc automatically (`connectWs` re-issues `open` for every entry in its `_docs` map on the socket's `open` event). The only full read you ever do is the initial render after `doc.ready`; everything after that arrives as ops.
+**A brute-force reload is never necessary — not after a write, not ever.** The framework issues exactly two full reads, both automatic, and a developer-issued one is always either redundant or actively harmful (it rebuilds the DOM and throws away the op-level precision the protocol gave you):
+
+- **Initial load** — the `open` resolves with full state into `doc.data` (you render once after `doc.ready`).
+- **Reconnect** — on *every* socket `open` event, initial connect and post-outage alike, `connectWs` re-issues `open` for every entry in its `_docs` map and `onOpen` resets `doc.data` to fresh full state (`client.ts:178`). An outage self-heals; you do nothing.
+
+Everything between those two arrives as ordered, versioned ops on the live socket. So none of the triggers that make you reach for a reload actually need one:
+
+| Tempting trigger | Why no reload | What actually happens |
+|---|---|---|
+| "I just wrote — show the result" | the write echoes back as an op | `onOps` / `doc.data` patch in place |
+| "I reconnected after dropping" | re-open is automatic | `doc.data` reset to fresh state on the `open` event |
+| "the tab refocused / became visible" | nothing was missed | the socket stayed subscribed; any ops already applied |
+| "I might be out of sync" | you can't silently be | ops carry versions; reconnect re-reads full state |
+| "force-refresh to be safe" | there is nothing newer to fetch | `doc.data` *is* the latest |
+
+If you catch yourself calling `openDoc` a second time, `fetch`-ing the doc over HTTP, or rebuilding the collection from `doc.data` "to be safe," stop — it's a category error. There is no staleness to chase: the socket is the live read, and it never stopped being one.
 
 **About latency.** Optimistic updates exist to hide round-trip time. Over delta's WebSocket the echo is typically sub-frame, so the honest default is to render from the echo and leave it. If a specific interaction genuinely needs instant local feedback, give *transient* feedback that isn't the data — disable the button, dim the row, show a spinner — and still let the authoritative collection update from the broadcast. Never fork the collection's source of truth into a local optimistic copy you then have to reconcile.
 
