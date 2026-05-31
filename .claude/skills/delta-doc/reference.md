@@ -515,6 +515,30 @@ doc.onOps((ops) => applyOpsToCollection(list, "todos", ops, renderer, nodes));
 
 **When `doc.data` is still fine:** the whole doc fits in one card, no keyboard focus to preserve, < ~10 rows.
 
+## The write loop — send, don't touch (no optimistic updates, no reloads)
+
+`doc.send(ops)` does **not** update your local view. It ships the ops to the server, which applies them and broadcasts the *same* ops to every connected client — **including the one that sent them**. That broadcast is what updates your UI. In the client (`client.ts`), an incoming op broadcast for an open doc:
+
+1. fires every `doc.onOps(handler)` first (DOM patchers run here), then
+2. applies the ops **in place** to `doc.data.peek()` and calls `data.touch()`, so subscribers (railroad `list()`, `effect`, …) re-run.
+
+The sender is just another subscriber receiving its own op back (the code calls these "echoes"). Two consequences trip up anyone arriving from REST/Firebase/optimistic-UI habits:
+
+**Don't optimistically update.** Do not mutate the DOM or push into your local collection right after `send`. The echo already does it — doing it yourself double-applies: an `add` shows the row twice, a `replace` counter you also bump locally lands at +2, a chat line appears once optimistically and again on echo. The send path and the render path are the same path; keep all rendering on the render path.
+
+```ts
+// WRONG — double-applies when the op echoes back
+log.append(renderMessage(m));                                  // optimistic
+await doc.send([{ op: "add", path: `/messages/${id}`, value: m }]);
+
+// RIGHT — send only; onOps / doc.data render it when it echoes back
+await doc.send([{ op: "add", path: `/messages/${id}`, value: m }]);
+```
+
+**Don't brute-force reload.** After a write, do not re-`open` the doc, re-`fetch`, or rebuild the list from `doc.data` to "get the latest." There is nothing newer to fetch — `doc.data` is already the live, in-place-patched state, and reconnects re-open every tracked doc automatically (`connectWs` re-issues `open` for every entry in its `_docs` map on the socket's `open` event). The only full read you ever do is the initial render after `doc.ready`; everything after that arrives as ops.
+
+**About latency.** Optimistic updates exist to hide round-trip time. Over delta's WebSocket the echo is typically sub-frame, so the honest default is to render from the echo and leave it. If a specific interaction genuinely needs instant local feedback, give *transient* feedback that isn't the data — disable the button, dim the row, show a spinner — and still let the authoritative collection update from the broadcast. Never fork the collection's source of truth into a local optimistic copy you then have to reconcile.
+
 ## Stored functions (read-only contract)
 
 Apply `postgres/sql/001a-001e-*.sql` alphabetically to every database — idempotent. Key functions:
