@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`bunx delta install-skills` — vendor Claude Code skills into the consumer repo** (`cli.ts`). Discovers `.claude/skills/*` from this package and from any sibling package in `node_modules` (e.g. `@blueshed/railroad` ships `railroad` and `bun-route`), then copies each skill into `./.claude/skills/<name>/` so Claude Code's project-skill autodiscovery picks them up. Flags: `--user` writes to `~/.claude/skills/` instead; `--dry-run` previews without touching disk. Re-runs are idempotent: byte-identical destinations are skipped; locally edited copies are overwritten with a `.bak` backup of the previous contents. Closes the gap where skills bundled with an npm package weren't discoverable until the consumer manually copied them out of `node_modules`.
+
+### Changed
+
+- **delta-doc skill refactor — SKILL.md trimmed from ~285 to ~172 lines, reference.md absorbs the moved content** (`.claude/skills/delta-doc/SKILL.md`, `.claude/skills/delta-doc/reference.md`). SKILL.md is now the router: canonical recipe + rules-as-one-liners + pointer index. Reference.md is the manual: railroad recipe (moved), CLI section (moved), and the existing in-depth sections. Every Rules bullet that used to carry a paragraph of detail now ends with `→ reference.md → <section>`. Principle stated up front: "this file is the router; reference.md is the manual." Reduces the per-session context cost of loading the skill without losing protection against any footgun.
+- **Bumped `@blueshed/railroad` devDependency from `0.8.0` to `0.8.2`**. Peer range (`^0.8.0`) unchanged. Patch-level on the same minor; the four railroad primitives delta uses (`signal`, `peek`/`touch`, `key`, `inject`) are unchanged.
+- **`package.json` `files` widened to `.claude/skills/delta-doc/**`** (was listing `SKILL.md` and `reference.md` individually) so future additions to the skill directory ship without needing a `files` update.
+
 ## [0.4.12] — 2026-05-31
 
 ### Changed

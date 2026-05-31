@@ -79,6 +79,11 @@ bunx delta call  <method>  [paramsJSON]
 # Postgres setup
 bunx delta init init_db --with-auth
 bunx delta sql ./types.ts --out init_db/003-tables.sql
+
+# Claude Code skills (delta-doc + any sibling @scope/pkg that ships skills,
+# e.g. @blueshed/railroad ships `railroad` and `bun-route`)
+bunx delta install-skills              # → ./.claude/skills/
+bunx delta install-skills --user       # → ~/.claude/skills/
 ```
 
 URL resolution: `--url` → `DELTA_WS_URL` → `.delta` file in cwd → `ws://localhost:${PORT:-3100}/ws`.

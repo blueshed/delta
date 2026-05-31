@@ -515,6 +515,41 @@ doc.onOps((ops) => applyOpsToCollection(list, "todos", ops, renderer, nodes));
 
 **When `doc.data` is still fine:** the whole doc fits in one card, no keyboard focus to preserve, < ~10 rows.
 
+## Railroad recipe — `list()` over `applyOpsToCollection`
+
+`@blueshed/railroad` is a peer dependency. `delta/client.ts` imports `signal` from it directly — `doc.data` IS a railroad `Signal<T | null>`, not a wrapper. That means railroad's keyed `list()` already gives the per-row surgical update that `applyOpsToCollection` exists to provide for vanilla DOM.
+
+If the project has railroad in deps, the canonical client recipe changes — drop the `applyOpsToCollection` import and render `doc.data` directly via `list()`:
+
+```tsx
+import { provide, list, when } from "@blueshed/railroad";
+import { connectWs, WS, openDoc } from "@blueshed/delta/client";
+
+interface Message { author: string; text: string; at: string }
+interface ChatDoc { messages: Record<string, Message> }
+
+provide(WS, connectWs("/ws"));
+const doc = openDoc<ChatDoc>("chat:room");
+
+function Chat() {
+  const messages = doc.data.map((d) => d ? Object.values(d.messages) : []);
+  return when(doc.data, () => (
+    <div id="log">
+      {list(messages, (m) => m.at + m.author, (m$) => (
+        <div class="msg">
+          <span class="author">{m$.map((m) => m.author)}</span>
+          <span class="text">{m$.map((m) => m.text)}</span>
+        </div>
+      ))}
+    </div>
+  ), () => <div>connecting…</div>);
+}
+```
+
+Don't import `applyOpsToCollection` in railroad projects — `list(doc.data.map(...), keyFn, render)` covers the same case in one idiom. The railroad skill (installed alongside this one when `@blueshed/railroad` is in deps) has the JSX gotchas to avoid (no `.get()` in children, list keying, dispose scopes).
+
+Worked example: [`examples/kanban/`](../../../examples/kanban/) (boards → columns → cards, real-time sync via Postgres). The `serve.ts` + `client.tsx` files in that directory are the canonical railroad UX — a fullstack page using exactly the pattern above. The sibling `server.ts` + `run.ts` files are a headless three-client demo printing op transcripts to the terminal.
+
 ## The write loop — send, don't touch (no optimistic updates, no reloads)
 
 `doc.send(ops)` does **not** update your local view. It ships the ops to the server, which applies them and broadcasts the *same* ops to every connected client — **including the one that sent them**. That broadcast is what updates your UI. In the client (`client.ts`), an incoming op broadcast for an open doc:
@@ -574,6 +609,38 @@ Apply `postgres/sql/001a-001e-*.sql` alphabetically to every database — idempo
 The `*_as` variants collapse the four identity-scoping round-trips (`BEGIN` → `set_config` → call → `COMMIT`) into one `SELECT`. The implicit transaction around the SELECT scopes `set_config(..., true)` to that statement, and RLS policies read it back exactly the same way. `docTypeFromDef({ auth })` uses them automatically — there's no opt-in. For arbitrary queries under an identity (escape hatch), `withAppAuth(pool, sqlArg, fn)` still exists and pays the extra RTTs.
 
 Collections register themselves via `_delta_collections` (`columns_def`, `parent`, `temporal`); docs via `_delta_docs` (`prefix`, `root`, `include`, `scope`). Populated by your generated `002-tables.sql` — never hand-edited.
+
+## CLI
+
+Runtime — talk to a running server:
+
+```bash
+bunx delta open  <docName>             # one-shot open + print + exit
+bunx delta watch <docName>             # stream broadcast ops live
+bunx delta delta <docName> <opsJSON>   # apply ops
+bunx delta call  <method>  [paramsJSON]  # invoke RPC
+```
+
+URL resolution: `--url` → `DELTA_WS_URL` → `.delta` file in cwd → `ws://localhost:${PORT:-3100}/ws`.
+
+Build-time — Postgres only:
+
+```bash
+bunx delta init init_db --with-auth                      # vendor framework SQL
+bunx delta sql ./types.ts --out init_db/003-tables.sql   # codegen tables from schema
+```
+
+`init` copies `001a-001e-*.sql` (and optionally `002-users.sql` from auth-jwt) into the target directory. `sql` runs the codegen. Both are idempotent.
+
+Vendor Claude Code skills — copies `.claude/skills/*` from this package and from any sibling package in `node_modules` that ships skills (e.g. `@blueshed/railroad` ships `railroad` and `bun-route`) into the consumer's `.claude/skills/` so Claude Code's project-skill autodiscovery picks them up:
+
+```bash
+bunx delta install-skills              # → ./.claude/skills/
+bunx delta install-skills --user       # → ~/.claude/skills/
+bunx delta install-skills --dry-run    # preview, touch nothing
+```
+
+Re-runs are idempotent: byte-identical destinations skip; locally edited copies are overwritten with a `.bak` backup. Re-run after upgrading `@blueshed/delta` (or any sibling that ships a skill) to pull in the latest skill text.
 
 ## Testing
 

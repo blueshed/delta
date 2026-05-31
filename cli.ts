@@ -16,7 +16,8 @@
  */
 import { parseArgs } from "node:util";
 import { resolve, basename, join, dirname } from "node:path";
-import { mkdirSync, copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { mkdirSync, copyFileSync, existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { generateSql } from "./src/server/postgres/codegen";
 import { frameworkSqlFiles } from "./src/server/postgres/bootstrap";
 import { authJwtSqlFile } from "./src/server/auth-jwt-sql";
@@ -39,6 +40,7 @@ function usage(code = 0): never {
     `Usage:\n` +
     `  delta sql <module> [--out <file>] [--schema-export <name>] [--docs-export <name>]\n` +
     `  delta init <dir> [--with-auth] [--upgrade]\n` +
+    `  delta install-skills [--user] [--dry-run]\n` +
     `\n` +
     `  delta open  <docName>                  Open a doc, print its state, exit.\n` +
     `  delta watch <docName>                  Open a doc, then stream broadcast ops.\n` +
@@ -356,6 +358,178 @@ function cmdInit(dir: string | undefined, values: Record<string, unknown>) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// delta install-skills
+//
+// Vendor Claude Code skills into the consumer's .claude/skills/ directory.
+// Discovers skills from:
+//   - this package itself  (delta-doc)
+//   - any sibling package in node_modules with `.claude/skills/<name>/SKILL.md`
+//     (e.g. @blueshed/railroad ships `railroad` and `bun-route`)
+//
+// Skills aren't versioned like SQL — we always overwrite, but back up the
+// existing file as `.bak` so a consumer who edited their copy doesn't lose
+// it. Bytewise-identical destinations are skipped.
+// ---------------------------------------------------------------------------
+
+interface SkillSource {
+  name: string;     // e.g. "delta-doc", "railroad", "bun-route"
+  srcDir: string;   // absolute path to the skill directory
+  origin: string;   // e.g. "@blueshed/delta", "@blueshed/railroad" — for the log
+}
+
+function listSkillsIn(skillsRoot: string, origin: string): SkillSource[] {
+  if (!existsSync(skillsRoot)) return [];
+  const out: SkillSource[] = [];
+  for (const entry of readdirSync(skillsRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const dir = join(skillsRoot, entry.name);
+    if (existsSync(join(dir, "SKILL.md"))) {
+      out.push({ name: entry.name, srcDir: dir, origin });
+    }
+  }
+  return out;
+}
+
+function findNodeModulesDir(start: string): string | null {
+  // Walk up looking for the first node_modules dir that contains us.
+  // This handles dev (running from the delta repo, where ./node_modules holds
+  // sibling packages like railroad) and consumer use (where the consumer's
+  // node_modules holds @blueshed/delta and any other sibling packages).
+  let cur = resolve(start);
+  while (true) {
+    const candidate = join(cur, "node_modules");
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(cur);
+    if (parent === cur) return null;
+    cur = parent;
+  }
+}
+
+function discoverSkillSources(): SkillSource[] {
+  const sources: SkillSource[] = [];
+  const seenNames = new Set<string>();
+
+  // Our own skill — always present, ships in this package.
+  const ownRoot = resolve(import.meta.dir, ".claude/skills");
+  for (const s of listSkillsIn(ownRoot, "@blueshed/delta")) {
+    if (!seenNames.has(s.name)) { sources.push(s); seenNames.add(s.name); }
+  }
+
+  // Sibling packages. Look in both: the package the CLI lives in (its own
+  // node_modules during dev) AND the consumer's cwd-rooted node_modules.
+  const candidateRoots = new Set<string>();
+  for (const start of [import.meta.dir, process.cwd()]) {
+    const nm = findNodeModulesDir(start);
+    if (nm) candidateRoots.add(nm);
+  }
+
+  for (const nm of candidateRoots) {
+    // Walk node_modules: scoped (@scope/pkg) AND unscoped (pkg).
+    let entries: import("node:fs").Dirent[];
+    try { entries = readdirSync(nm, { withFileTypes: true }); }
+    catch { continue; }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const pkgDirs: { name: string; dir: string }[] = [];
+      if (entry.name.startsWith("@")) {
+        let subEntries: import("node:fs").Dirent[];
+        try { subEntries = readdirSync(join(nm, entry.name), { withFileTypes: true }); }
+        catch { continue; }
+        for (const sub of subEntries) {
+          if (sub.isDirectory()) {
+            pkgDirs.push({ name: `${entry.name}/${sub.name}`, dir: join(nm, entry.name, sub.name) });
+          }
+        }
+      } else {
+        pkgDirs.push({ name: entry.name, dir: join(nm, entry.name) });
+      }
+      for (const { name, dir } of pkgDirs) {
+        // Skip ourselves (we already added via ownRoot above).
+        if (name === "@blueshed/delta") continue;
+        const skillsRoot = join(dir, ".claude/skills");
+        for (const s of listSkillsIn(skillsRoot, name)) {
+          if (!seenNames.has(s.name)) { sources.push(s); seenNames.add(s.name); }
+        }
+      }
+    }
+  }
+
+  return sources;
+}
+
+type CopyAction = "created" | "upgraded" | "unchanged";
+
+function copyDirWithBackup(
+  src: string,
+  dest: string,
+  dryRun: boolean,
+  onFile: (relPath: string, action: CopyAction) => void,
+  prefix = "",
+): void {
+  if (!dryRun) mkdirSync(dest, { recursive: true });
+  for (const entry of readdirSync(src, { withFileTypes: true })) {
+    const srcPath = join(src, entry.name);
+    const destPath = join(dest, entry.name);
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) {
+      copyDirWithBackup(srcPath, destPath, dryRun, onFile, rel);
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    if (existsSync(destPath)) {
+      const a = readFileSync(srcPath);
+      const b = readFileSync(destPath);
+      if (a.equals(b)) { onFile(rel, "unchanged"); continue; }
+      if (!dryRun) {
+        copyFileSync(destPath, destPath + ".bak");
+        copyFileSync(srcPath, destPath);
+      }
+      onFile(rel, "upgraded");
+    } else {
+      if (!dryRun) copyFileSync(srcPath, destPath);
+      onFile(rel, "created");
+    }
+  }
+}
+
+function cmdInstallSkills(values: Record<string, unknown>): void {
+  const user = !!values.user;
+  const dryRun = !!values["dry-run"];
+  const root = user
+    ? join(homedir(), ".claude/skills")
+    : resolve(process.cwd(), ".claude/skills");
+
+  const sources = discoverSkillSources();
+  if (sources.length === 0) {
+    process.stderr.write(
+      `install-skills: no skills found (expected delta-doc bundled with this package).\n`,
+    );
+    process.exit(2);
+  }
+
+  process.stderr.write(
+    `${dryRun ? "[dry-run] " : ""}Installing ${sources.length} skill(s) → ${root}\n`,
+  );
+
+  for (const { name, srcDir, origin } of sources) {
+    const destDir = join(root, name);
+    const created: string[] = [];
+    const upgraded: string[] = [];
+    const unchanged: string[] = [];
+    copyDirWithBackup(srcDir, destDir, dryRun, (rel, action) => {
+      if (action === "created") created.push(rel);
+      else if (action === "upgraded") upgraded.push(rel);
+      else unchanged.push(rel);
+    });
+    const parts: string[] = [];
+    if (created.length) parts.push(`+${created.join(", ")}`);
+    if (upgraded.length) parts.push(`~${upgraded.join(", ")} (.bak)`);
+    if (unchanged.length) parts.push(`=${unchanged.join(", ")}`);
+    process.stderr.write(`  ${name}  [${origin}]  ${parts.join("  ") || "nothing to do"}\n`);
+  }
+}
+
 function compareVersion(a: string, b: string): number {
   const pa = a.split(".").map(Number);
   const pb = b.split(".").map(Number);
@@ -379,6 +553,8 @@ async function main() {
       "docs-export": { type: "string", default: "docs" },
       "with-auth": { type: "boolean", default: false },
       upgrade: { type: "boolean", default: false },
+      user: { type: "boolean", default: false },
+      "dry-run": { type: "boolean", default: false },
       url: { type: "string" },
       help: { type: "boolean", short: "h", default: false },
     },
@@ -393,13 +569,14 @@ async function main() {
   const arg2 = positionals[2];
 
   switch (cmd) {
-    case "sql":   return cmdSql(arg, values);
-    case "init":  return cmdInit(arg, values);
-    case "open":  return cmdOpen(arg, values);
-    case "watch": return cmdWatch(arg, values);
-    case "delta": return cmdDelta(arg, arg2, values);
-    case "call":  return cmdCall(arg, arg2, values);
-    default:      usage(1);
+    case "sql":             return cmdSql(arg, values);
+    case "init":            return cmdInit(arg, values);
+    case "install-skills":  return cmdInstallSkills(values);
+    case "open":            return cmdOpen(arg, values);
+    case "watch":           return cmdWatch(arg, values);
+    case "delta":           return cmdDelta(arg, arg2, values);
+    case "call":            return cmdCall(arg, arg2, values);
+    default:                usage(1);
   }
 }
 
