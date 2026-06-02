@@ -287,6 +287,37 @@ describe("registerMethod", () => {
     await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "call", method: "slow" }));
     expect(sock.sent[0]).toEqual({ id: 1, result: "done" });
   });
+
+  test("call to a private (_) method is denied before any handler runs", async () => {
+    const ws = createWs();
+    // a catch-all call handler that would leak if the gate didn't run first
+    ws.on("call", (_msg, _ws, respond) => respond({ result: "leaked!" }));
+
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "call", method: "_secret" }));
+    expect(sock.sent[0].error.message).toContain("Private method: _secret");
+  });
+
+  test("private method call without id is silent", async () => {
+    const ws = createWs();
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ action: "call", method: "_secret" }));
+    expect(sock.sent).toEqual([]);
+  });
+
+  test("registerMethod refuses to register a private (_) name", () => {
+    const ws = createWs();
+    expect(() => registerMethod(ws, "_helper", () => 1)).toThrow(/private/);
+  });
+
+  test("public methods are unaffected by the private gate", async () => {
+    const ws = createWs();
+    registerMethod(ws, "ok", () => "fine");
+
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "call", method: "ok" }));
+    expect(sock.sent[0]).toEqual({ id: 1, result: "fine" });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -367,6 +398,13 @@ describe("integration", () => {
     const sock = await connect();
     const res = await request(sock, { action: "call", method: "ping" });
     expect(res.result).toBe("pong");
+    sock.close();
+  });
+
+  test("private (_) method call is denied over WebSocket", async () => {
+    const sock = await connect();
+    const res = await request(sock, { action: "call", method: "_secret" });
+    expect(res.error.message).toContain("Private method");
     sock.close();
   });
 

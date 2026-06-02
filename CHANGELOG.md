@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Private RPC methods — `_`-prefixed names are never callable from the WebSocket** (`src/server/server.ts`). The `call` dispatcher now rejects any inbound method whose name starts with `_`, responding with `{ error: { message: "Private method: <name>" } }` *before* any registered handler runs — so the gate can't be bypassed by a catch-all `ws.on("call", …)` and also covers names that were never registered. `registerMethod` complements this by throwing if asked to register a `_`-name, since such a method could never be reached over the wire (a programming error). Establishes the public/private boundary for the method surface: public methods are the sanctioned wire API; `_`-helpers are internal building blocks meant to be composed inside other handlers' bodies (e.g. generated precondition/guard predicates reused across commands). Id-less calls to a private method stay silent, consistent with the existing unknown-action behaviour.
+
 ## [0.4.13] — 2026-05-31
 
 ### Added

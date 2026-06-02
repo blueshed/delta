@@ -4,7 +4,8 @@
  * Provides the server half of the delta-doc system:
  *   - createWs()       — shared WebSocket infrastructure (action routing, pub/sub, upgrade)
  *   - registerDoc()    — persist a typed JSON document, sync via delta ops
- *   - registerMethod() — expose a stateless RPC handler
+ *   - registerMethod() — expose a stateless RPC handler (public; names
+ *                        starting with `_` are private and never wire-callable)
  *
  * Usage:
  *   import { createWs, registerDoc, registerMethod } from "@blueshed/railroad/delta-server";
@@ -131,6 +132,25 @@ export function createWs(opts?: WsOptions): WsServer {
         }
 
         try {
+          // Private methods (leading `_`) are internal helpers: composable
+          // within other handlers' bodies, never reachable from the wire.
+          // Reject before any handler runs, so the gate can't be bypassed and
+          // covers unregistered `_` names too.
+          if (
+            action === "call" &&
+            typeof msg.method === "string" &&
+            msg.method.startsWith("_")
+          ) {
+            if (id)
+              ws.send(
+                JSON.stringify({
+                  id,
+                  error: { code: -1, message: `Private method: ${msg.method}` },
+                }),
+              );
+            return;
+          }
+
           const handlers = actions.get(action);
           if (!handlers?.length) {
             if (id)
@@ -234,12 +254,22 @@ export async function registerDoc<T>(
 // Method registration
 // ---------------------------------------------------------------------------
 
-/** Register a stateless RPC method with the WebSocket server. */
+/**
+ * Register a stateless RPC method with the WebSocket server.
+ *
+ * Method names starting with `_` are reserved for private helpers and are
+ * rejected by the dispatcher (never callable from the wire), so registering
+ * one here is a programming error and throws.
+ */
 export function registerMethod(
   ws: Pick<WsServer, "on">,
   name: string,
   handler: (params: any, client: any) => any | Promise<any>,
 ) {
+  if (name.startsWith("_"))
+    throw new Error(
+      `registerMethod: "${name}" is private (leading "_") and can never be called from the WebSocket`,
+    );
   ws.on("call", async (msg, client, respond) => {
     if (msg.method !== name) return;
     const log = createLogger(`[${name}]`);
