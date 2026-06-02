@@ -143,6 +143,7 @@ Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (fie
 - **Never put tokens in WS URLs**: use `onUpgrade` (cookies / Authorization) or `call("authenticate", ...)`. → `reference.md` → *Authentication*.
 - **Await `authenticate` before `openDoc`** — an unauthenticated `open` races past the auth response and 401s.
 - **No bare `pool.query` when auth is enabled**: route through `docTypeFromDef({ auth })` so `withAppAuth` binds `app.user_id`. → `reference.md` → *RLS*.
+- **Compose doc ops from SQL via the `*_as` functions, never raw table access.** A custom `plpgsql` evaluator reads with `delta_open_as` (binds `app.user_id`, so RLS applies to what it reads) and a stored write mutates-and-broadcasts with `delta_apply_as` — a bare `delta_open`/`SELECT` on an RLS table scopes to nothing (and throws on `app.user_id=''`), and a raw `INSERT` won't NOTIFY. `SECURITY DEFINER` bypasses RLS, so such a function must enforce its own guards. → `reference.md` → *Composing doc operations from SQL*.
 - **Scope keys must be real columns of the root collection** — `scope: { "items.id": ":id" }` raises; use `scope: { id: ":id" }` or omit `scope` for single-mode. → `reference.md` → *`scope` syntax*.
 - **`delta_open` raises on config errors** (unknown prefix / root collection). NULL only means "single-mode row doesn't exist yet" — listener maps to 404.
 - **Custom `DocType` parses its own prefix** — don't put prefix logic elsewhere in the app.
@@ -168,5 +169,6 @@ Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (fie
 - *Railroad recipe* — `list()` / `when()` for railroad projects
 - *CLI* — `bunx delta` runtime + build-time commands
 - *Stored functions* — `delta_open`, `delta_apply`, `*_as` 1-RTT variants
+- *Composing doc operations from SQL* — call `delta_open_as` / `delta_apply_as` from your own `plpgsql`; identity-binding + `SECURITY DEFINER` caveats
 - *Testing* — `setup.ts` helpers, integration pattern
 - *Wire-level protocol* — message shapes

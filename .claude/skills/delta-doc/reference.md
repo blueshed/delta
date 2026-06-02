@@ -608,6 +608,32 @@ Apply `postgres/sql/001a-001e-*.sql` alphabetically to every database — idempo
 
 The `*_as` variants collapse the four identity-scoping round-trips (`BEGIN` → `set_config` → call → `COMMIT`) into one `SELECT`. The implicit transaction around the SELECT scopes `set_config(..., true)` to that statement, and RLS policies read it back exactly the same way. `docTypeFromDef({ auth })` uses them automatically — there's no opt-in. For arbitrary queries under an identity (escape hatch), `withAppAuth(pool, sqlArg, fn)` still exists and pays the extra RTTs.
 
+### Composing doc operations from SQL
+
+These functions aren't only for the Bun layer — they're **callable from inside your own `plpgsql`/SQL functions**, so a custom read evaluator can assemble several docs, and a stored write can mutate-and-broadcast, without leaving Postgres. All are `LANGUAGE plpgsql`, `SECURITY INVOKER`; `delta_apply`/`delta_apply_as` always write `_delta_ops_log` + NOTIFY, so **a write that originates inside Postgres still broadcasts** to every subscriber.
+
+```sql
+-- a custom read evaluator composing two docs under the caller's identity
+CREATE FUNCTION my_dashboard(p_user_id text) RETURNS jsonb LANGUAGE plpgsql STABLE AS $$
+BEGIN
+  RETURN jsonb_build_object(
+    'account', delta_open_as(p_user_id, 'my-account:' || p_user_id),
+    'orgs',    delta_open_as(p_user_id, 'org-workspace:')
+  );  -- _as binds app.user_id one-shot, so RLS on every table it reads applies
+END $$;
+
+-- a stored write that mutates AND broadcasts (not a raw INSERT)
+CREATE FUNCTION accept_thing(p_user_id text, p_id bigint) RETURNS jsonb LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN delta_apply_as(p_user_id, 'invite:' || p_id,
+    jsonb_build_array(jsonb_build_object('op','replace','path','/status','value','"accepted"')));
+END $$;
+```
+
+- **Read under the caller's identity** with `delta_open_as` (or `set_config('app.user_id', …, true)` then `delta_open`) — *never* a bare `delta_open`/`SELECT` on an RLS table. Unbound, RLS sees `app.user_id = ''` and the row scopes to nothing (and a `::bigint` cast on `''` *throws*). The binding must follow **what the function reads**, not whether `:user_id` appears in the query.
+- **Write through `delta_apply`/`delta_apply_as`**, never a direct `INSERT`/`UPDATE` on a delta-managed table — only that path bumps the version, logs the ops, and NOTIFYs, so subscribers stay live.
+- **`SECURITY DEFINER` bypasses RLS.** delta is a persistence + broadcast layer, *not* an authorization one — a `DEFINER` function runs as its owner, so RLS won't gate it. If you escalate privilege, the function must enforce its own preconditions/ownership checks (compose `_`-prefixed guard helpers — never wire-callable — for this).
+
 Collections register themselves via `_delta_collections` (`columns_def`, `parent`, `temporal`); docs via `_delta_docs` (`prefix`, `root`, `include`, `scope`). Populated by your generated `002-tables.sql` — never hand-edited.
 
 ## CLI

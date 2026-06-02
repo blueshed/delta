@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **delta-doc skill: documented the SQL-side doc-ops composition API** (`.claude/skills/delta-doc/reference.md`). The stored functions (`delta_open`/`delta_open_as`, `delta_apply`/`delta_apply_as`) were always callable from inside custom `plpgsql`/SQL, but the reference framed them only as the Bun layer's contract. Added a "Composing doc operations from SQL" recipe: a custom read evaluator composes docs via `delta_open_as` (identity bound one-shot, so RLS applies to every table it reads — avoiding the silent `app.user_id = ''` scope-to-nothing and the `::bigint`-on-`''` throw); a stored write mutates-and-broadcasts via `delta_apply_as` (never a raw `INSERT`, which wouldn't NOTIFY); and the `SECURITY DEFINER`-bypasses-RLS caveat (delta is persistence + broadcast, not authorization — a privilege-escalating function must enforce its own guards). Docs only, no code change — turns a supported-but-undocumented pattern into a documented one that generators (e.g. hjeli) can target.
+
 ## [0.4.14] — 2026-06-02
 
 ### Added
