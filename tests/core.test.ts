@@ -8,6 +8,24 @@ describe("applyOps", () => {
     expect(doc.name).toBe("bob");
   });
 
+  test("root replace ('' path) swaps the whole object in place", () => {
+    const doc: any = { a: 1, b: 2 };
+    applyOps(doc, [{ op: "replace", path: "", value: { x: 9 } }]);
+    expect(doc).toEqual({ x: 9 }); // same reference, new contents — the in-place whole-doc refresh
+  });
+
+  test("root replace ('/' path) swaps an array doc in place", () => {
+    const doc: any[] = [1, 2, 3];
+    applyOps(doc, [{ op: "replace", path: "/", value: [9] }]);
+    expect(doc).toEqual([9]);
+  });
+
+  test("root remove clears the doc in place", () => {
+    const doc: any = { a: 1 };
+    applyOps(doc, [{ op: "remove", path: "" }]);
+    expect(doc).toEqual({});
+  });
+
   test("replace a nested field", () => {
     const doc = { user: { name: "alice", age: 30 } };
     applyOps(doc, [{ op: "replace", path: "/user/name", value: "bob" }]);

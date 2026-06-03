@@ -55,6 +55,26 @@ function walk(
 export function applyOps(doc: any, ops: DeltaOp[]): void {
   for (const op of ops) {
     const segments = parsePath(op.path);
+    // Root op (empty path "" or "/"): replace/clear the WHOLE doc IN PLACE. The value
+    // reference is fixed — the server's doc tracking and the client both hold `doc` by
+    // reference and notify on mutation (the client bumps dataVersion after applyOps) — so
+    // we mutate the container rather than reassign. Enables a whole-doc refresh for
+    // evaluator-backed docs (e.g. a recomputed custom read) without a fragile nested diff.
+    if (segments.length === 0) {
+      if (op.op === "remove") {
+        if (Array.isArray(doc)) doc.length = 0;
+        else for (const k of Object.keys(doc)) delete doc[k];
+      } else if (Array.isArray(doc) && Array.isArray(op.value)) {
+        doc.length = 0;
+        (doc as unknown[]).push(...(op.value as unknown[]));
+      } else if (!Array.isArray(doc) && op.value && typeof op.value === "object") {
+        for (const k of Object.keys(doc)) delete doc[k];
+        Object.assign(doc, op.value as Record<string, unknown>);
+      } else {
+        throw new Error("root replace requires a matching container (object↔object / array↔array)");
+      }
+      continue;
+    }
     const { parent, key } = walk(doc, segments);
     switch (op.op) {
       case "replace":
