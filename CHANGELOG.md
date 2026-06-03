@@ -5,6 +5,108 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+A correctness, security, and documentation hardening pass: 56 findings from a
+multi-agent review, each adversarially verified against the source. +35
+regression tests (full suite 263 → 298, typecheck clean). No breaking public-API
+changes — additions are an opt-in `verifyUser` auth hook, a `delta sql --force`
+flag, and an on-reconnect `onOps` reconciliation signal.
+
+### Fixed
+
+- **SQLite temporal PK collisions** (`src/server/sqlite.ts`). `now()` truncated to
+  whole seconds against a `(id, valid_from)` primary key, so two writes to a row
+  within one second — including a multi-field edit in a single delta, and the
+  common create-then-edit — collided and rolled the delta back. `now()` is now
+  strictly-monotonic millisecond resolution, root-field replaces are batched into
+  one close+reinsert per delta, and the close shares the reinsert's timestamp so a
+  closed version's `valid_to` exactly equals the new version's `valid_from` (no
+  time-travel overlap).
+- **Postgres dropped LISTEN notifications under concurrent writes**
+  (`src/server/postgres/listener.ts`). A notification arriving while a fetch was
+  in flight was silently dropped, leaving subscribers stale until the next write.
+  The handler now coalesces (re-drains on a pending flag), pages past
+  `delta_fetch_ops`' 1000-row LIMIT, and re-syncs every tracked doc after a
+  reconnect (ops committed during the outage were NOTIFY'd to nobody).
+- **Client in-flight requests hung forever on an unexpected disconnect**
+  (`src/client/client.ts`). The transport `close` handler never rejected pending
+  `send`/`call` promises; they now reject with a retryable `disconnected` error.
+- **Listener reconnect leaked handlers / could double-reconnect**
+  (`src/server/postgres/listener.ts`). Reconnect now detaches the old
+  connection's notification/error listeners before release and holds a
+  concurrency guard across the whole reconnect+resync.
+- **Recompute custom-doc fan-out delivered stale snapshots out of order**. Per-doc
+  recomputes are now serialized so a slower earlier recompute can't land after a
+  later one.
+- **SQLite post-COMMIT fan-out error masked the real error / aborted the handler**.
+  ROLLBACK is now scoped to the `BEGIN..COMMIT` region; fan-out runs after commit
+  and its failures are logged, not surfaced as a failed write.
+- **SQLite cross-doc fan-out could clobber an included collection map** — a source
+  root-level `replace /<coll>` is rewritten to a keyed `/<coll>/<id>` when the
+  target treats that collection as a map.
+- **dom-ops** (`src/client/dom-ops.ts`): removed a dead field-level-replace branch
+  that silently did nothing; added a null-value guard on the explicit-id `add`.
+- **core** (`src/core.ts`): `splitPath` no longer drops empty RFC-6901 reference
+  tokens; documented that `add` to a numeric array index overwrites (not inserts).
+- **`migrateSchema`** retrofits `valid_from`/`valid_to` + the `current_` view when a
+  table gains `temporal: true` (and warns about the composite-PK rebuild).
+
+### Security
+
+- **Custom-doc `open` bypassed the auth gate** (`src/server/postgres/listener.ts`).
+  The custom-doc handler registered before — and short-circuited — the gated
+  standard handler, so an unauthenticated client could read scoped data. It now
+  runs `auth.gate()` and returns 401 before `query`/`recompute`; the recompute
+  fan-out skips any subscriber whose gate fails.
+- **logout / identity switch now tears down doc subscriptions**
+  (`src/server/server.ts`, `auth-jwt.ts`). Previously a socket kept receiving the
+  prior identity's scoped broadcasts until it disconnected. Subscriptions are
+  tracked per socket (`trackSubscribe`) and dropped on logout/switch.
+- **`login` user-enumeration timing oracle + weak bcrypt cost** (`src/sql/auth-jwt.sql`).
+  `login` now performs one bcrypt comparison on every call (a dummy hash when the
+  email is unknown), and `register` uses `gen_salt('bf', 12)`.
+- **`delta_apply` collection-scope guard** (`src/sql/001d-delta-write.sql`). An op
+  may only target the doc's root or an included collection — defence-in-depth
+  against writing to an unrelated collection through a doc.
+- **Codegen identifier escaping + validation** (`src/server/postgres/codegen.ts`,
+  `sql.ts`, `src/schema.ts`): single-quoted SQL literals, the `include[]` array
+  literal, and `q()` double-quotes are escaped; `defineSchema`/`defineDoc` reject
+  illegal identifiers early.
+- **JWT algorithm pinned** to HS256 on verify (alg-confusion); **email PII removed**
+  from login/register logs.
+
+### Changed
+
+- **`@blueshed/railroad` 0.8.2 → 0.9.0** (peer `^0.9.0`). API-compatible with
+  delta's usage. `delta install-skills` vendors railroad's `railroad` and
+  `bun-route` skills via sibling-package discovery.
+- **`validateOps` is wired into the SQLite write path** and strengthened to reject
+  unknown collections/fields (returns 400 instead of silently acking and diverging
+  cache/broadcast from disk).
+- **`_delta_find_doc`** matches by exact prefix (`left(name, len) = prefix`) rather
+  than `LIKE`, so a `_`/`%` in a prefix can't over-match.
+- **CLI**: `delta sql --out` refuses to overwrite a non-generated file without
+  `--force` and backs up generated files; a bad module path prints a friendly
+  error; `.bak` files are no longer clobbered; malformed WS frames don't crash.
+
+### Added
+
+- **`jwtAuth({ verifyUser })`** — optional hook to re-validate the identity against
+  the database on `authenticate` (closes the stateless-JWT "deleted user keeps
+  access" gap when desired).
+- **`onOps` reconnect reconciliation** — on every reconnect the client emits a
+  synthetic whole-doc `replace` op so `applyOpsToCollection` reconciles a
+  drifted collection; the vanilla-DOM path now self-heals like the railroad path.
+
+### Docs
+
+- delta-doc skill/reference: canonical recipes now compile (`DomCollection.key`)
+  and broadcast (`ws.setServer`); the scope-operator DSL is marked Postgres-only
+  with the SQLite behaviour documented; framework-SQL is `001a–001f`, generated
+  tables are `003-tables.sql`, framework path is `src/sql/`; `DeltaError` listed in
+  the client exports. Example fixes (sites-bbox predicate signature + port).
+
 ## [0.4.15] — 2026-06-03
 
 ### Added
