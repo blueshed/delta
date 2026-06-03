@@ -88,8 +88,17 @@ export function wireAuth<I>(ws: WsServer, auth: DeltaAuth<I>): void {
   const actions = auth.actions;
 
   ws.on("call", async (msg, client, respond) => {
+    // Index by own-property only: `msg.method` is client-supplied, so a bare
+    // `actions[msg.method]` would resolve inherited members like
+    // "constructor" / "hasOwnProperty" to functions and dispatch them.
+    if (
+      typeof msg.method !== "string" ||
+      !Object.prototype.hasOwnProperty.call(actions, msg.method)
+    ) {
+      return;
+    }
     const fn = actions[msg.method];
-    if (!fn) return;
+    if (typeof fn !== "function") return;
     const outcome = await fn(msg.params ?? {}, client);
     if (isAuthError(outcome)) {
       respond({ error: { code: 401, message: outcome.error } });

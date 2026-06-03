@@ -171,6 +171,87 @@ describe("applyOpsToCollection", () => {
     expect(parent.children.length).toBe(0);
   });
 
+  test("root replace ('' path) reconciles the keyed nodes against the snapshot", () => {
+    const parent = new MockNode();
+    const updates: string[] = [];
+    const removes: string[] = [];
+    const col = makeCollection(updates, removes);
+
+    // Build an initial set: rows 1, 2, 3.
+    const nodes = applyOpsToCollection<Row>(
+      parent as unknown as Node,
+      "todos",
+      [
+        { op: "add", path: "/todos/-", value: { id: 1, name: "one" } },
+        { op: "add", path: "/todos/-", value: { id: 2, name: "two" } },
+        { op: "add", path: "/todos/-", value: { id: 3, name: "three" } },
+      ],
+      col,
+    );
+    expect(parent.children.length).toBe(3);
+    const node2 = nodes.get("2");
+
+    // Reconnect snapshot: row 1 dropped, row 2 unchanged-shape (updated in
+    // place), row 3 changed, row 4 new.
+    applyOpsToCollection<Row>(
+      parent as unknown as Node,
+      "todos",
+      [
+        {
+          op: "replace",
+          path: "",
+          value: {
+            todos: {
+              "2": { id: 2, name: "two" },
+              "3": { id: 3, name: "three-edited" },
+              "4": { id: 4, name: "four" },
+            },
+          },
+        },
+      ],
+      col,
+      nodes,
+    );
+
+    // Row 1 removed; 2,3,4 present.
+    expect(removes).toContain("1");
+    expect(nodes.has("1")).toBe(false);
+    expect(nodes.has("2")).toBe(true);
+    expect(nodes.has("3")).toBe(true);
+    expect(nodes.has("4")).toBe(true);
+    expect(parent.children.length).toBe(3);
+
+    // Existing node 2 preserved (not churned) — updated in place via col.update.
+    expect(nodes.get("2")).toBe(node2);
+    expect((nodes.get("3") as unknown as MockNode).payload.name).toBe("three-edited");
+    expect((nodes.get("4") as unknown as MockNode).payload.name).toBe("four");
+  });
+
+  test("root replace with missing collection key clears all nodes", () => {
+    const parent = new MockNode();
+    const removes: string[] = [];
+    const col = makeCollection([], removes);
+    const nodes = applyOpsToCollection<Row>(
+      parent as unknown as Node,
+      "todos",
+      [{ op: "add", path: "/todos/-", value: { id: 1, name: "one" } }],
+      col,
+    );
+    expect(parent.children.length).toBe(1);
+
+    // Snapshot has no `todos` key → treat as empty set → remove everything.
+    applyOpsToCollection<Row>(
+      parent as unknown as Node,
+      "todos",
+      [{ op: "replace", path: "", value: { other: {} } }],
+      col,
+      nodes,
+    );
+    expect(parent.children.length).toBe(0);
+    expect(nodes.size).toBe(0);
+    expect(removes).toEqual(["1"]);
+  });
+
   test("add /coll/id upserts idempotently (no duplicate on replay)", () => {
     const parent = new MockNode();
     const col = makeCollection();

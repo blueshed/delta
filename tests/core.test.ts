@@ -45,10 +45,13 @@ describe("applyOps", () => {
     expect(doc.items).toEqual([1, 2, 3]);
   });
 
-  test("add at array index", () => {
+  test("add at array index OVERWRITES (not an RFC-6902 insert)", () => {
     const doc = { items: ["a", "b", "c"] };
     applyOps(doc, [{ op: "add", path: "/items/1", value: "x" }]);
+    // Assignment semantics: "b" is replaced, length is unchanged (NOT spliced).
     expect(doc.items[1]).toBe("x");
+    expect(doc.items).toEqual(["a", "x", "c"]);
+    expect(doc.items.length).toBe(3);
   });
 
   test("remove a field", () => {
@@ -88,5 +91,20 @@ describe("applyOps", () => {
     };
     applyOps(doc, [{ op: "replace", path: "/a~1b/c~0d", value: "updated" }]);
     expect(doc["a/b"]["c~d"]).toBe("updated");
+  });
+
+  test("preserves empty reference tokens (RFC-6901 empty keys)", () => {
+    // "/a//b" → ["a", "", "b"]: the empty middle token is a genuine key, not
+    // dropped. (Regression for the old `.filter(Boolean)` in splitPath.)
+    const doc: any = { a: { "": { b: "original" } } };
+    applyOps(doc, [{ op: "replace", path: "/a//b", value: "updated" }]);
+    expect(doc.a[""].b).toBe("updated");
+  });
+
+  test("preserves a trailing empty reference token", () => {
+    // "/a/" → ["a", ""]: trailing empty key is preserved.
+    const doc: any = { a: { "": "original" } };
+    applyOps(doc, [{ op: "replace", path: "/a/", value: "updated" }]);
+    expect(doc.a[""]).toBe("updated");
   });
 });

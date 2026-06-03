@@ -41,7 +41,7 @@ const doc = openDoc("chat:room", connectWs("/ws"));
 
 await doc.ready;
 // ... initial paint from doc.data.get() ...
-doc.onOps((ops) => applyOpsToCollection(log, "messages", ops, { create, update }));
+doc.onOps((ops) => applyOpsToCollection(log, "messages", ops, { key, create, update }));
 
 // Send: one verb, one path.
 await doc.send([{ op: "add", path: `/messages/${crypto.randomUUID()}`, value: { author, text } }]);
@@ -61,9 +61,9 @@ Same client (`openDoc` / `doc.send` / `doc.onOps`), same op verbs across all thr
 
 Browser code does not change when you graduate.
 
-## Custom doc types — predicate-based views
+## Custom doc types — derived views
 
-`defineCustomDoc(prefix, opts)` declares a read-only doc whose contents are decided by a Bun-side predicate over a watched collection. Useful for bbox queries, tag filters, anything you'd express as `WHERE` in a live materialised view. SQLite and Postgres only. See [`examples/sites-bbox/`](examples/sites-bbox/) for both backends.
+`defineCustomDoc(prefix, opts)` declares a read-only doc whose contents are a Bun-side derived view over one or more watched collections. Two modes: **membership** (`query` + `matches`) for a flat predicate view — bbox queries, tag filters, anything you'd express as `WHERE` in a live materialised view (SQLite and Postgres); and **recompute** (`recompute`) for a whole-doc view that's nested, joined, or identity-dependent — re-evaluated per subscriber and republished on each watched write (Postgres only). See [`examples/sites-bbox/`](examples/sites-bbox/) for the membership backends.
 
 ## CLI
 

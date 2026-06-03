@@ -1,5 +1,8 @@
 import { describe, test, expect, afterAll } from "bun:test";
-import { createWs, registerDoc, registerMethod } from "../src/server/server";
+import {
+  createWs, registerDoc, registerMethod,
+  trackSubscribe, trackUnsubscribe, dropClientSubscriptions,
+} from "../src/server/server";
 import { setLogLevel } from "../src/server/logger";
 import { unlinkSync } from "fs";
 
@@ -454,5 +457,70 @@ describe("integration", () => {
     });
     expect(msg).toEqual({ custom: true });
     sock.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review fixes — subscription teardown (#5) + clientId collision (#24)
+// ---------------------------------------------------------------------------
+
+describe("subscription tracking + teardown", () => {
+  test("dropClientSubscriptions unsubscribes every tracked channel (logout teardown)", () => {
+    const client = mockSocket("c1");
+    trackSubscribe(client, "doc:a");
+    trackSubscribe(client, "doc:b");
+    expect(client.subscriptions.has("doc:a")).toBe(true);
+    expect(client.subscriptions.has("doc:b")).toBe(true);
+    expect([...(client.data as any).channels]).toEqual(["doc:a", "doc:b"]);
+
+    dropClientSubscriptions(client);
+    expect(client.subscriptions.size).toBe(0);
+    expect((client.data as any).channels.size).toBe(0);
+  });
+
+  test("trackUnsubscribe forgets a single channel", () => {
+    const client = mockSocket("c1");
+    trackSubscribe(client, "doc:a");
+    trackSubscribe(client, "doc:b");
+    trackUnsubscribe(client, "doc:a");
+    expect(client.subscriptions.has("doc:a")).toBe(false);
+    expect(client.subscriptions.has("doc:b")).toBe(true);
+    expect((client.data as any).channels.has("doc:a")).toBe(false);
+  });
+});
+
+describe("clientId collision (#24)", () => {
+  test("reconnect with same clientId reclaims sendTo addressing once the old socket is gone", () => {
+    const ws = createWs();
+    const ws1 = mockSocket("foo");
+    ws.websocket.open(ws1);
+    ws.sendTo("foo", { n: 1 });
+    expect(ws1.sent.at(-1)).toEqual({ n: 1 });
+
+    // ws1 drops (dead). ws2 reconnects reusing "foo" — should reclaim it.
+    (ws1 as any).readyState = 3; // CLOSED
+    const ws2 = mockSocket("foo");
+    ws.websocket.open(ws2);
+    expect(ws2.data.clientId).toBe("foo");
+    ws.sendTo("foo", { n: 2 });
+    expect(ws2.sent.at(-1)).toEqual({ n: 2 });
+    expect(ws1.sent.at(-1)).toEqual({ n: 1 }); // dead socket got nothing new
+
+    // ws1's late close must NOT delete ws2's mapping.
+    ws.websocket.close(ws1);
+    ws.sendTo("foo", { n: 3 });
+    expect(ws2.sent.at(-1)).toEqual({ n: 3 });
+  });
+
+  test("a different LIVE socket colliding on a clientId is given a fresh id (no hijack)", () => {
+    const ws = createWs();
+    const a = mockSocket("shared");
+    ws.websocket.open(a);
+    const b = mockSocket("shared"); // live, collides with live `a`
+    ws.websocket.open(b);
+    expect(b.data.clientId).not.toBe("shared");
+    // `a` still owns "shared".
+    ws.sendTo("shared", { to: "a" });
+    expect(a.sent.at(-1)).toEqual({ to: "a" });
   });
 });

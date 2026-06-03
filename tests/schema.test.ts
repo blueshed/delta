@@ -190,6 +190,43 @@ describe("validateOps", () => {
     expect(errs).toEqual([]);
   });
 
+  test("unknown field in an add value → error", () => {
+    const errs = validateOps(schema, def, [
+      { op: "add", path: "/items/-", value: { name: "a", value: 1, meta: {}, bogus: 9 } },
+    ]);
+    expect(errs.some((e) => /Unknown field: bogus/.test(e.message))).toBe(true);
+  });
+
+  test("unknown field in a whole-row replace value → error", () => {
+    const errs = validateOps(schema, def, [
+      { op: "replace", path: "/items/3", value: { name: "a", bogus: 1 } },
+    ]);
+    expect(errs.some((e) => /Unknown field: bogus/.test(e.message))).toBe(true);
+  });
+
+  test("whole-row replace with only known fields is accepted", () => {
+    const errs = validateOps(schema, def, [
+      { op: "replace", path: "/items/3", value: { name: "a", value: 1 } },
+    ]);
+    expect(errs).toEqual([]);
+  });
+
+  test("id and parent fk column are allowed keys in whole-row writes", () => {
+    const childSchema = defineSchema({
+      lists: { columns: { title: "text" } },
+      cards: {
+        columns: { body: "text" },
+        parent: "lists",
+      },
+    });
+    const childDef = defineDoc("list:", { root: "lists", include: ["cards"] });
+    // `cards` has parent `lists` → fk column `lists_id`; `id` is implicit.
+    const errs = validateOps(childSchema, childDef, [
+      { op: "add", path: "/cards/-", value: { id: 7, lists_id: 1, body: "hi" } },
+    ]);
+    expect(errs).toEqual([]);
+  });
+
   test("handles JSON Pointer escape sequences (~1 and ~0) in paths", () => {
     const customSchema = defineSchema({
       items: {
@@ -205,5 +242,56 @@ describe("validateOps", () => {
       { op: "replace", path: "/items/t~11/e~0f", value: "ok" },
     ]);
     expect(errs).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Identifier validation — illegal names fail fast (defence-in-depth).
+// ---------------------------------------------------------------------------
+
+describe("identifier validation", () => {
+  test("rejects a schema key with a single quote", () => {
+    expect(() =>
+      defineSchema({ "bad'name": { columns: { a: "text" } } }),
+    ).toThrow(/schema key/);
+  });
+
+  test("rejects an explicit table name with a double quote", () => {
+    expect(() =>
+      defineSchema({ items: { table: 'ev"il', columns: { a: "text" } } }),
+    ).toThrow(/table name/);
+  });
+
+  test("rejects a column name containing a quote or whitespace", () => {
+    expect(() =>
+      defineSchema({ items: { columns: { "a'b": "text" } } }),
+    ).toThrow(/column name/);
+    expect(() =>
+      defineSchema({ items: { columns: { "a b": "text" } } }),
+    ).toThrow(/column name/);
+  });
+
+  test("allows JSON-Pointer-ish column names (slash, tilde)", () => {
+    expect(() =>
+      defineSchema({ items: { columns: { "c/d": "text", "e~f": "text" } } }),
+    ).not.toThrow();
+  });
+
+  test("rejects a doc prefix or root with illegal characters", () => {
+    expect(() =>
+      defineDoc("bad prefix", { root: "items", include: [] }),
+    ).toThrow(/doc prefix/);
+    expect(() =>
+      defineDoc("items:", { root: 'ev"il', include: [] }),
+    ).toThrow(/doc root/);
+  });
+
+  test("accepts the conventional prefix shapes (items:, venue:)", () => {
+    expect(() =>
+      defineDoc("items:", { root: "items", include: [] }),
+    ).not.toThrow();
+    expect(() =>
+      defineDoc("venue:", { root: "venues", include: [] }),
+    ).not.toThrow();
   });
 });

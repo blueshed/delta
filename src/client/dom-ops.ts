@@ -67,6 +67,47 @@ export function applyOpsToCollection<T>(
 ): Map<string, Node> {
   const prefix = `/${collection}/`;
   for (const op of ops) {
+    // Whole-doc root replace (path "") — emitted on reconnect so onOps
+    // consumers can RECONCILE against the authoritative snapshot. Treat
+    // `value[collection]` (an id → row map, possibly absent → {}) as the full
+    // desired set and diff the keyed `nodes` map against it, preserving
+    // unchanged nodes (no whole-DOM churn).
+    if (op.op === "replace" && op.path === "") {
+      const value = (op as any).value as Record<string, unknown> | undefined;
+      const next = (value?.[collection] ?? {}) as Record<string, T>;
+      const desiredIds = new Set<string>();
+      for (const row of Object.values(next)) {
+        if (row == null) continue;
+        desiredIds.add(col.key(row));
+      }
+      // Remove nodes no longer present in the snapshot.
+      for (const [id, node] of nodes) {
+        if (desiredIds.has(id)) continue;
+        col.remove?.(node);
+        nodes.delete(id);
+        if (node.parentNode) node.parentNode.removeChild(node);
+      }
+      // Update existing rows and create+append new ones.
+      for (const row of Object.values(next)) {
+        if (row == null) continue;
+        const id = col.key(row);
+        const existing = nodes.get(id);
+        if (existing) {
+          if (col.update) col.update(existing, row);
+          else {
+            const fresh = col.create(row);
+            if (existing.parentNode) existing.parentNode.replaceChild(fresh, existing);
+            else parent.appendChild(fresh);
+            nodes.set(id, fresh);
+          }
+        } else {
+          const node = col.create(row);
+          nodes.set(id, node);
+          parent.appendChild(node);
+        }
+      }
+      continue;
+    }
     if (op.path === `/${collection}` || !op.path.startsWith(prefix)) continue;
     const rest = op.path.slice(prefix.length);
     const slash = rest.indexOf("/");
@@ -90,7 +131,8 @@ export function applyOpsToCollection<T>(
     switch (op.op) {
       case "add": {
         // `/coll/<id>` add — an explicit upsert (e.g. after backend id assignment).
-        const value = (op as any).value as T;
+        const value = (op as any).value as T | undefined;
+        if (value == null) break;  // symmetric with the /- append guard above
         if (nodes.has(idPart)) break;  // row already mounted
         const node = col.create(value);
         nodes.set(idPart, node);
@@ -115,18 +157,15 @@ export function applyOpsToCollection<T>(
             parent.replaceChild(fresh, node);
             nodes.set(idPart, fresh);
           }
-        } else {
-          // Field-level replace: the whole-row shape isn't in the op. Caller
-          // must provide `update` that reads from a projected state if they
-          // want to handle these; otherwise the full-state signal path on
-          // `doc.data` still updates correctly.
-          if (col.update) {
-            // Best effort — pass the value as if it were a whole row; the
-            // update callback can ignore or patch a specific field. If the
-            // caller needs the field path, wire a handler via `doc.onOps`
-            // that inspects op.path directly.
-          }
         }
+        // Field-level replace (`/coll/<id>/<field>`) is intentionally NOT
+        // applied here: the op carries only the field value, not the whole-row
+        // shape that `col.create`/`col.update` expect. In practice the SQLite
+        // and Postgres backends rewrite field writes to whole-row replace ops,
+        // so this only arises with the JSON-file backend — and there the
+        // full-state `doc.data` path applies the change correctly. Callers who
+        // need DOM-level handling of field ops should inspect `op.path` in
+        // their own `doc.onOps` handler.
         break;
       }
       case "remove": {

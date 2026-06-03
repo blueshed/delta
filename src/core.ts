@@ -26,9 +26,15 @@ export type DeltaOp =
 // ---------------------------------------------------------------------------
 
 export function splitPath(path: string): string[] {
+  // Root op: "" and "/" both address the whole document → no reference tokens.
+  if (path === "" || path === "/") return [];
+  // RFC-6901: a JSON Pointer is "/" + each reference token. Empty middle or
+  // trailing tokens are GENUINE keys ("/a//b" → ["a", "", "b"], "/a/" →
+  // ["a", ""]), so we must NOT drop them with `.filter(Boolean)`. We slice off
+  // the leading "" produced by the first "/" and unescape (~1→/, ~0→~).
   return path
     .split("/")
-    .filter(Boolean)
+    .slice(1)
     .map((s) => s.replace(/~1/g, "/").replace(/~0/g, "~"));
 }
 
@@ -79,6 +85,12 @@ export function applyOps(doc: any, ops: DeltaOp[]): void {
     switch (op.op) {
       case "replace":
       case "add":
+        // NOTE: `add` to an array INDEX (e.g. "/items/1") is an OVERWRITE
+        // (plain assignment), NOT an RFC-6902 splice-insert. The framework
+        // keys collections by id-maps, so insert-by-index is rarely hit;
+        // changing this to splice could regress those callers. Array append
+        // uses "/-" (handled below); RFC-6902 index insertion is intentionally
+        // unsupported.
         if (Array.isArray(parent) && key === "-") parent.push(op.value);
         else parent[key] = op.value;
         break;

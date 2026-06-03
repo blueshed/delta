@@ -2,8 +2,10 @@
 /**
  * @blueshed/delta CLI.
  *
- *   delta sql <module> [--out <file>] [--schema-export <name>] [--docs-export <name>]
+ *   delta sql <module> [--out <file>] [--force] [--schema-export <name>] [--docs-export <name>]
  *     Regenerate a tables SQL file from a TypeScript schema module.
+ *     Refuses to overwrite an existing --out file that wasn't produced by
+ *     delta sql (no generated-file header) unless --force is given.
  *
  *   delta init <dir> [--with-auth] [--upgrade]
  *     Copy the framework SQL files into <dir> (typically your init_db/).
@@ -38,7 +40,7 @@ function usage(code = 0): never {
   const stream = code === 0 ? process.stdout : process.stderr;
   stream.write(
     `Usage:\n` +
-    `  delta sql <module> [--out <file>] [--schema-export <name>] [--docs-export <name>]\n` +
+    `  delta sql <module> [--out <file>] [--force] [--schema-export <name>] [--docs-export <name>]\n` +
     `  delta init <dir> [--with-auth] [--upgrade]\n` +
     `  delta install-skills [--user] [--dry-run]\n` +
     `\n` +
@@ -91,16 +93,31 @@ async function withWs<T>(
   });
 
   ws.onmessage = (ev: MessageEvent) => {
-    const msg = JSON.parse(String(ev.data));
-    if (msg.id != null && pending.has(msg.id)) {
-      const p = pending.get(msg.id)!;
-      pending.delete(msg.id);
-      if (msg.error) p.reject(msg.error);
-      else p.resolve(msg.result);
+    let msg: any;
+    try {
+      msg = JSON.parse(String(ev.data));
+    } catch (err) {
+      // A malformed frame shouldn't crash the command — warn and keep going.
+      process.stderr.write(
+        `delta: ignoring malformed frame: ${(err as Error).message}\n`,
+      );
       return;
     }
-    // Unsolicited broadcast (no id).
-    for (const h of broadcastHandlers) h(msg);
+    try {
+      if (msg.id != null && pending.has(msg.id)) {
+        const p = pending.get(msg.id)!;
+        pending.delete(msg.id);
+        if (msg.error) p.reject(msg.error);
+        else p.resolve(msg.result);
+        return;
+      }
+      // Unsolicited broadcast (no id).
+      for (const h of broadcastHandlers) h(msg);
+    } catch (err) {
+      process.stderr.write(
+        `delta: error handling frame: ${(err as Error).message}\n`,
+      );
+    }
   };
 
   ws.onclose = () => {
@@ -223,15 +240,52 @@ function writeWithHeader(src: string, dest: string, kind: "framework" | "auth-jw
   writeFileSync(dest, headerFor(kind) + body);
 }
 
+/**
+ * Back up `dest` to `dest + ".bak"` without destroying a pre-existing backup.
+ * If `dest.bak` already exists, fall back to `.bak.1`, `.bak.2`, … so an
+ * earlier backup the user may still need is preserved. Returns the path the
+ * backup was written to.
+ */
+function backupFile(dest: string): string {
+  let bak = dest + ".bak";
+  if (existsSync(bak)) {
+    let n = 1;
+    while (existsSync(`${dest}.bak.${n}`)) n++;
+    bak = `${dest}.bak.${n}`;
+    process.stderr.write(
+      `Note: ${basename(dest)}.bak already exists; backing up to ${basename(bak)} instead.\n`,
+    );
+  }
+  copyFileSync(dest, bak);
+  return bak;
+}
+
 // ---------------------------------------------------------------------------
 // delta sql
 // ---------------------------------------------------------------------------
+
+// Stable substring of the codegen header (see src/server/postgres/codegen.ts:
+// "GENERATED FROM types.ts — DO NOT EDIT"). Matching on the leading words
+// avoids depending on the em-dash byte sequence.
+const GENERATED_MARKER = "GENERATED FROM";
 
 async function cmdSql(modulePath: string | undefined, values: Record<string, unknown>) {
   if (!modulePath) usage(1);
 
   const abs = resolve(process.cwd(), modulePath);
-  const mod = await import(abs);
+  let mod: Record<string, unknown>;
+  try {
+    mod = await import(abs);
+  } catch (err) {
+    // Bun surfaces a `ResolveMessage` whose `.message` is a single useful line
+    // (e.g. "Cannot find module '…'") but is fronted by the class-name prefix;
+    // strip it to a clean one-liner instead of dumping the raw object/stack.
+    const raw =
+      err instanceof Error ? err.message.split("\n", 1)[0] : String(err);
+    const reason = raw.replace(/^(ResolveMessage|BuildMessage|Error):\s*/, "");
+    process.stderr.write(`Cannot load module "${modulePath}": ${reason}\n`);
+    process.exit(2);
+  }
 
   const schemaExport = (values["schema-export"] as string | undefined) ?? "schema";
   const docsExport = (values["docs-export"] as string | undefined) ?? "docs";
@@ -255,10 +309,28 @@ async function cmdSql(modulePath: string | undefined, values: Record<string, unk
 
   const sql = generateSql(schema, docs);
   const out = values.out as string | undefined;
+  const force = !!values.force;
 
   if (out) {
-    if (!existsSync(dirname(resolve(out)))) {
-      mkdirSync(dirname(resolve(out)), { recursive: true });
+    const absOut = resolve(out);
+    // Guard: never silently clobber a file we didn't generate. A previously
+    // generated file carries the codegen header marker and is safe to replace;
+    // anything else needs --force.
+    if (existsSync(absOut) && !force) {
+      const existing = readFileSync(absOut, "utf8");
+      if (!existing.includes(GENERATED_MARKER)) {
+        process.stderr.write(
+          `Refusing to overwrite ${out}: it has no generated-file header ` +
+          `(not produced by 'delta sql').\n` +
+          `Pass --force to overwrite it anyway.\n`,
+        );
+        process.exit(3);
+      }
+      // It's a previously generated file — back it up before replacing.
+      backupFile(absOut);
+    }
+    if (!existsSync(dirname(absOut))) {
+      mkdirSync(dirname(absOut), { recursive: true });
     }
     await Bun.write(out, sql);
     process.stderr.write(`Wrote ${out} (${sql.length} bytes)\n`);
@@ -335,9 +407,9 @@ function cmdInit(dir: string | undefined, values: Record<string, unknown>) {
         unchanged.push(basename(dest));
         continue;
       }
-      copyFileSync(dest, dest + ".bak");
+      const bak = backupFile(dest);
       writeWithHeader(src, dest, kind);
-      upgraded.push(`${basename(dest)} (backup at ${basename(dest)}.bak)`);
+      upgraded.push(`${basename(dest)} (backup at ${basename(bak)})`);
     } else {
       writeWithHeader(src, dest, kind);
       created.push(basename(dest));
@@ -482,7 +554,7 @@ function copyDirWithBackup(
       const b = readFileSync(destPath);
       if (a.equals(b)) { onFile(rel, "unchanged"); continue; }
       if (!dryRun) {
-        copyFileSync(destPath, destPath + ".bak");
+        backupFile(destPath);
         copyFileSync(srcPath, destPath);
       }
       onFile(rel, "upgraded");
@@ -549,6 +621,7 @@ async function main() {
     args: process.argv.slice(2),
     options: {
       out: { type: "string", short: "o" },
+      force: { type: "boolean", default: false },
       "schema-export": { type: "string", default: "schema" },
       "docs-export": { type: "string", default: "docs" },
       "with-auth": { type: "boolean", default: false },

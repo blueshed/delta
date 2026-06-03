@@ -63,6 +63,44 @@ export interface DocOptions<T> {
 }
 
 // ---------------------------------------------------------------------------
+// Subscription tracking
+// ---------------------------------------------------------------------------
+//
+// Bun's pub/sub gives us `ws.subscribe`/`ws.unsubscribe` but no way to list a
+// socket's current subscriptions. Backends therefore route every subscribe
+// through `trackSubscribe`, which records the channel on `ws.data.channels`.
+// That lets `dropClientSubscriptions` tear them all down on logout / identity
+// switch (otherwise a socket keeps receiving a prior user's scoped doc ops
+// until it physically disconnects).
+
+/** Subscribe a socket to a channel and record it for later teardown. */
+export function trackSubscribe(client: any, channel: string): void {
+  if (!client.data) client.data = {};
+  (client.data.channels ??= new Set<string>()).add(channel);
+  client.subscribe(channel);
+}
+
+/** Unsubscribe a socket from a channel and forget it. */
+export function trackUnsubscribe(client: any, channel: string): void {
+  client.data?.channels?.delete(channel);
+  client.unsubscribe(channel);
+}
+
+/**
+ * Unsubscribe a socket from every channel it joined via `trackSubscribe`.
+ * Called on logout / identity switch so the previous identity's live doc
+ * streams stop immediately rather than leaking until disconnect.
+ */
+export function dropClientSubscriptions(client: any): void {
+  const channels = client.data?.channels as Set<string> | undefined;
+  if (!channels) return;
+  for (const ch of channels) {
+    try { client.unsubscribe(ch); } catch { /* socket may be closing */ }
+  }
+  channels.clear();
+}
+
+// ---------------------------------------------------------------------------
 // WebSocket server
 // ---------------------------------------------------------------------------
 
@@ -115,10 +153,22 @@ export function createWs(opts?: WsOptions): WsServer {
       sendPings: opts?.sendPings ?? true,
       publishToSelf: true,
       open(ws: any) {
-        const clientId = ws.data?.clientId;
-        if (clientId) clients.set(clientId, ws);
+        if (!ws.data) ws.data = {};
+        // The clientId arrives from the upgrade query string and is therefore
+        // client-controlled. Mint a fresh id ONLY when a DIFFERENT, still-open
+        // socket already holds it (a genuine live collision — never let one
+        // client clobber/hijack another's `sendTo` mapping). A socket
+        // reconnecting with its own stable clientId reclaims the id once the
+        // old connection is gone/closing, preserving sendTo across reconnects.
+        let clientId = ws.data.clientId;
+        const existing = clientId ? clients.get(clientId) : undefined;
+        if (!clientId || (existing && existing !== ws && existing.readyState === 1)) {
+          clientId = crypto.randomUUID();
+        }
+        ws.data.clientId = clientId;
+        clients.set(clientId, ws);
         for (const ch of ws.data?.channels ?? []) ws.subscribe(ch);
-        log.debug(`open id=${clientId ?? "?"}`);
+        log.debug(`open id=${clientId}`);
       },
       async message(ws: any, raw: any) {
         const msg = JSON.parse(String(raw));
@@ -191,7 +241,9 @@ export function createWs(opts?: WsOptions): WsServer {
       },
       close(ws: any) {
         const clientId = ws.data?.clientId;
-        if (clientId) clients.delete(clientId);
+        // Only delete our own mapping — a collision-replaced socket may now
+        // own this id.
+        if (clientId && clients.get(clientId) === ws) clients.delete(clientId);
         log.debug(`close id=${clientId ?? "?"}`);
       },
     },
@@ -229,7 +281,7 @@ export async function registerDoc<T>(
 
   ws.on("open", (msg, client, respond) => {
     if (msg.doc !== name) return;
-    client.subscribe(name);
+    trackSubscribe(client, name);
     respond({ result: doc });
     log.debug("opened");
   });
@@ -242,7 +294,7 @@ export async function registerDoc<T>(
 
   ws.on("close", (msg, client, respond) => {
     if (msg.doc !== name) return;
-    client.unsubscribe(name);
+    trackUnsubscribe(client, name);
     respond({ result: { ack: true } });
     log.debug("closed");
   });

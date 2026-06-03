@@ -5,10 +5,10 @@
  * Docker-free local setup). Each test below pins a specific reviewed
  * behaviour so a future change is forced to acknowledge it:
  *
- *   Finding #2 (security) — custom docs bypass `auth.gate()`. Expressed as
- *     a `test.failing` asserting the DESIRED secure behaviour: it stays green
- *     while the bypass exists, and flips to a hard failure the moment the
- *     gate is enforced — at which point the marker should be removed.
+ *   Finding #2 (security) — custom docs used to bypass `auth.gate()`. FIXED:
+ *     the custom-doc open handler now runs the same gate as the standard path,
+ *     so an unauthenticated open is rejected with 401. The tests below pin the
+ *     enforced behaviour.
  *
  *   Finding #1 (consistency) — concurrent writes to the same field are
  *     last-writer-wins with no conflict signal. This is the protocol's
@@ -150,27 +150,20 @@ describe("Finding #2: custom docs and auth.gate()", () => {
     expect(res.result).toBeUndefined();
   });
 
-  // DESIRED behaviour, marked `.failing` because the bypass still exists.
-  // An unauthenticated open of a custom-doc prefix SHOULD be rejected the
-  // same way the standard path is. Today the custom handler responds before
-  // ever calling auth.gate() and runs def.query on the bare pool, so the
-  // open succeeds and this assertion fails — which keeps the suite green.
-  // When the gate is added to the custom path, this starts passing and Bun
-  // reports it as "expected to fail but passed": remove `.failing` then.
-  test.failing("custom-doc open should ALSO enforce the gate (currently bypassed)", async () => {
+  // FIXED: an unauthenticated open of a custom-doc prefix is now rejected the
+  // same way the standard path is — the custom handler runs auth.gate() before
+  // ever touching def.query/def.recompute.
+  test("custom-doc open enforces the gate (401 unauthenticated)", async () => {
     const anon = makeClient("anon");
     const res = await sendAndAwait(ws, anon, { action: "open", doc: "sites-in-bbox:0,0,50,50" });
     expect(res.error?.code).toBe(401);
   });
 
-  // Green companion that nails down exactly what happens today, so the gap
-  // is visible in a passing test and not only in a `.failing` marker.
-  test("documents the gap: unauthenticated custom-doc open returns data", async () => {
+  // And no payload is served to an unauthenticated client.
+  test("unauthenticated custom-doc open returns no data", async () => {
     const anon = makeClient("anon");
     const res = await sendAndAwait(ws, anon, { action: "open", doc: "sites-in-bbox:0,0,50,50" });
-    expect(res.error).toBeUndefined();
-    expect(res.result).toBeDefined();
-    expect(res.result.sites).toEqual({}); // no rows yet, but a payload was served
+    expect(res.result).toBeUndefined();
   });
 });
 
@@ -255,5 +248,47 @@ describe("Finding #1: concurrent writes to the same field", () => {
     const reader = makeClient("reader");
     const open = await sendAndAwait(ws, reader, { action: "open", doc });
     expect(open.result.sites["800"].name).toBe("v3-from-stale-base");
+  });
+});
+
+// ===========================================================================
+// M3 — delta_apply rejects ops outside the doc's root/include collections
+// ===========================================================================
+
+describe("M3: delta_apply collection scoping", () => {
+  let worldId: string;
+
+  beforeEach(async () => {
+    clearRegistry();
+    await resetSites();
+    // A doc exposing ONLY the world root — `sites` is a registered collection
+    // but intentionally NOT in this doc's include.
+    await pool.query(`
+      INSERT INTO _delta_docs (prefix, root_collection, include, scope)
+      VALUES ('world-bare:', 'worlds', ARRAY[]::text[], '{}'::jsonb)
+      ON CONFLICT (prefix) DO UPDATE SET include = EXCLUDED.include, scope = EXCLUDED.scope
+    `);
+    registerDocType(
+      docTypeFromDef(defineDoc("world-bare:", { root: "worlds", include: [] }), pool),
+    );
+    await startListener({});
+    worldId = await seedWorld();
+  });
+
+  afterEach(async () => {
+    await pool.query("DELETE FROM _delta_docs WHERE prefix = 'world-bare:'");
+  });
+
+  test("writing to a collection outside the doc's scope is rejected", async () => {
+    const doc = `world-bare:${worldId}`;
+    const c = makeClient("c");
+    await sendAndAwait(ws, c, { action: "open", doc });
+    const res = await sendAndAwait(ws, c, {
+      action: "delta", doc,
+      ops: [{ op: "add", path: "/sites/-", value: { name: "x", lat: 1, lng: 2 } }],
+    });
+    expect(res.result).toBeUndefined();
+    expect(res.error).toBeDefined();
+    expect(res.error.message).toContain("not part of doc");
   });
 });

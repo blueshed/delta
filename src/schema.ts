@@ -73,11 +73,53 @@ export interface DocDef {
 // defineSchema — build a resolved Schema from a table-def record.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Identifier validation — defence-in-depth for the SQL codegen, which
+// interpolates these names into DDL. Names must be plain SQL identifiers so a
+// quote/backslash/space can never reach the generated SQL.
+// ---------------------------------------------------------------------------
+
+/** Plain SQL identifier: starts with a letter/underscore, then word chars. */
+const SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** Doc prefix: identifier-ish, also allowing the `:` and `-` used in doc names. */
+const DOC_PREFIX = /^[A-Za-z_][A-Za-z0-9_:-]*$/;
+/**
+ * Column names are also quoted into DDL via `q()`, which escapes embedded
+ * double quotes — but to fail fast we still forbid the chars that could break
+ * out of a quoted identifier or an array/JSON literal. We deliberately allow
+ * `/` and `~` here (JSON Pointer reference tokens unescape to these), so a
+ * column named `c/d` or `e~f` is legal; we only reject quotes, backslash,
+ * whitespace, and control characters.
+ */
+const COLUMN_NAME = /^[^"'\\\s\x00-\x1f]+$/;
+
+function assertIdentifier(value: string, role: string): void {
+  if (!SQL_IDENTIFIER.test(value)) {
+    throw new Error(
+      `Invalid ${role}: ${JSON.stringify(value)} — must match ${SQL_IDENTIFIER}`,
+    );
+  }
+}
+
+function assertColumnName(value: string): void {
+  if (value.length === 0 || !COLUMN_NAME.test(value)) {
+    throw new Error(
+      `Invalid column name: ${JSON.stringify(value)} — must not contain ` +
+        `quotes, backslashes, or whitespace`,
+    );
+  }
+}
+
 export function defineSchema(defs: Record<string, TableDef>): Schema {
   const tables: Record<string, ResolvedTable> = {};
 
   // First pass: resolve columns and basic properties.
   for (const [key, def] of Object.entries(defs)) {
+    assertIdentifier(key, "schema key");
+    if (def.table !== undefined) assertIdentifier(def.table, "table name");
+    for (const col of Object.keys(def.columns)) {
+      assertColumnName(col);
+    }
     const columns: Record<string, ColumnDef> = {};
     for (const [col, shorthand] of Object.entries(def.columns)) {
       if (typeof shorthand === "string") {
@@ -147,6 +189,12 @@ export function defineDoc(
   prefix: string,
   opts: { root: string; include: string[]; scope?: Record<string, string> },
 ): DocDef {
+  if (!DOC_PREFIX.test(prefix)) {
+    throw new Error(
+      `Invalid doc prefix: ${JSON.stringify(prefix)} — must match ${DOC_PREFIX}`,
+    );
+  }
+  assertIdentifier(opts.root, "doc root");
   return {
     prefix,
     root: opts.root,

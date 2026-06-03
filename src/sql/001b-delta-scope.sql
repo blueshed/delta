@@ -8,8 +8,11 @@
 
 CREATE OR REPLACE FUNCTION _delta_find_doc(p_doc_name TEXT)
 RETURNS _delta_docs AS $$
+  -- Exact prefix match (NOT LIKE): a prefix containing `_` or `%` would
+  -- otherwise be treated as a LIKE wildcard and over-match. Mirrors the
+  -- TypeScript resolver's startsWith.
   SELECT * FROM _delta_docs
-   WHERE p_doc_name LIKE prefix || '%'
+   WHERE left(p_doc_name, length(prefix)) = prefix
    ORDER BY length(prefix) DESC
    LIMIT 1;
 $$ LANGUAGE sql STABLE;

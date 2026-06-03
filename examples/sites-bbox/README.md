@@ -11,8 +11,8 @@ Two doc types coexist on the same WebSocket server:
 | `sites-in-bbox:<minLng>,<minLat>,<maxLng>,<maxLat>` | custom | Read-only live view of sites inside a bounding box. |
 
 When a client writes to `world:earth` (adds, moves, or removes a site), the
-server evaluates every open bbox doc's `matches(row, criteria)` predicate
-and fans out the right op on that doc's own shape:
+server evaluates every open bbox doc's `matches(collection, row, criteria)`
+predicate and fans out the right op on that doc's own shape:
 
 - row moves **into** the bbox → `add /sites/{id}`
 - row moves **within** the bbox → `replace /sites/{id}`
@@ -48,7 +48,7 @@ bbox view on every process running `createDocListener` with the same
 ```ts
 import { connectWs, openDoc, WS } from "@blueshed/delta/client";
 
-const ws = connectWs("ws://localhost:3000/ws");
+const ws = connectWs("ws://localhost:3100/ws");
 
 // Viewer of a bbox.
 const view = openDoc("sites-in-bbox:0,0,50,50", ws);
@@ -78,9 +78,21 @@ The custom-doc API has parallel implementations in both backends:
 - SQLite: `src/server/sqlite.ts` — `defineCustomDoc`, `registerDocs(..., customDocs)`, `customFanOut`.
 - Postgres: `src/server/postgres/listener.ts` — `defineCustomDoc`, `createDocListener(ws, pool, { custom })`, `customFanOut`.
 
-Both share the same `{ prefix, watch, parse, query, matches }` shape. The Postgres
-version piggybacks on the existing `NOTIFY delta_changes` + `delta_fetch_ops`
-path: after fetching the ops for a source doc, the listener runs the custom
-fan-out loop against every open predicate doc on this process.
+Both share the same membership def shape: `{ prefix, watch, parse, query, matches }`.
+The signatures match what `server.ts` / `server-pg.ts` use:
+
+- `parse(docId)` → criteria object.
+- `query(handle, criteria)` is **2-arg** — `handle` is a `bun:sqlite` `Database`
+  (synchronous) on SQLite, a pg `Pool` (awaited) on Postgres. Returns the
+  initial rows per watched collection.
+- `matches(collection, row, criteria)` is **3-arg** — the live per-row
+  membership predicate, identical on both backends.
+
+The Postgres version piggybacks on the existing `NOTIFY delta_changes` +
+`delta_fetch_ops` path: after fetching the ops for a source doc, the listener
+runs the custom fan-out loop against every open predicate doc on this process.
+
+(Postgres additionally supports a whole-doc `recompute` mode in place of
+`query`+`matches`; this example uses the membership mode on both backends.)
 
 Tests: `tests/sqlite-custom.test.ts` and `tests/postgres-custom.test.ts`.

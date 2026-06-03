@@ -629,7 +629,8 @@ describe("registerDocs", () => {
       }));
 
       expect(sock.sent[1].error).toBeDefined();
-      expect(sock.sent[1].error.code).toBe(500);
+      // Caught pre-flight by validateOps → 400 client error (not a 500 throw).
+      expect(sock.sent[1].error.code).toBe(400);
     });
 
     test("delta on unopened doc returns 404", async () => {
@@ -1396,10 +1397,12 @@ describe("validateOps", () => {
   });
 
   test("add missing required field (json type)", () => {
+    // `items` is an INCLUDED collection (a row add), not the single-mode root.
     const s = defineSchema({
-      items: { columns: { data: "json", name: "text" } },
+      box: { columns: { label: "text" } },
+      items: { parent: "box", columns: { data: "json", name: "text" } },
     });
-    const doc = defineDoc("item:", { root: "items", include: [] });
+    const doc = defineDoc("box:", { root: "box", include: ["items"] });
 
     const errors = validateOps(s, doc, [
       { op: "add", path: "/items/x", value: { data: { a: 1 } } },
@@ -1579,5 +1582,117 @@ describe("migrateSchema type mismatch warning TDD", () => {
     expect(warnings.some(w => w.includes("Type mismatch for projects.name"))).toBe(true);
     expect(warnings.some(w => w.includes("expects TEXT"))).toBe(true);
     expect(warnings.some(w => w.includes("database has INTEGER"))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review fixes — temporal timestamp resolution (#1/#8) + validateOps wiring (#19)
+// ---------------------------------------------------------------------------
+
+describe("review fixes: temporal timestamps + op validation", () => {
+  let db: InstanceType<typeof Database>;
+  let ws: ReturnType<typeof createWs>;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    createTables(db, schema);
+    ws = createWs();
+    registerDocs(ws, db, schema, [projectDoc]);
+    db.run("INSERT INTO projects (id, name, status) VALUES ('p1', 'Alpha', 'active')");
+  });
+
+  // open with a truthy id so the response is recorded at sent[0]
+  // (the respond guard skips falsy ids).
+  async function open(sock: any) {
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+  }
+
+  test("#1: two root-field replaces in one delta both apply (no temporal PK collision)", async () => {
+    const sock = mockSocket();
+    await open(sock);
+    await ws.websocket.message(sock, JSON.stringify({
+      id: 2, action: "delta", doc: "project:p1",
+      ops: [
+        { op: "replace", path: "/projects/name", value: "Beta" },
+        { op: "replace", path: "/projects/status", value: "done" },
+      ],
+    }));
+    expect(sock.sent[1].error).toBeUndefined();
+    expect(sock.sent[1].result?.ack).toBe(true);
+    const row = db.query("SELECT name, status FROM current_projects WHERE id = 'p1'").get() as any;
+    expect(row.name).toBe("Beta");
+    expect(row.status).toBe("done");
+  });
+
+  test("#8: create-then-edit in the same instant both apply (monotonic valid_from)", async () => {
+    const sock = mockSocket();
+    await open(sock);
+    // add a task, then immediately replace a field — back-to-back, same wall second.
+    await ws.websocket.message(sock, JSON.stringify({
+      id: 2, action: "delta", doc: "project:p1",
+      ops: [{ op: "add", path: "/tasks/t1", value: { title: "Ship", done: false } }],
+    }));
+    await ws.websocket.message(sock, JSON.stringify({
+      id: 3, action: "delta", doc: "project:p1",
+      ops: [{ op: "replace", path: "/tasks/t1/title", value: "Ship it" }],
+    }));
+    expect(sock.sent[1].result?.ack).toBe(true);
+    expect(sock.sent[2].error).toBeUndefined();
+    expect(sock.sent[2].result?.ack).toBe(true);
+    const row = db.query("SELECT title FROM current_tasks WHERE id = 't1'").get() as any;
+    expect(row.title).toBe("Ship it");
+    // exactly one current row (old version closed, not collided)
+    const live = db.query("SELECT COUNT(*) AS n FROM current_tasks WHERE id = 't1'").get() as any;
+    expect(live.n).toBe(1);
+  });
+
+  test("#19: replace of an unknown field is rejected (400), not silently acked", async () => {
+    const sock = mockSocket();
+    await open(sock);
+    await ws.websocket.message(sock, JSON.stringify({
+      id: 2, action: "delta", doc: "project:p1",
+      ops: [{ op: "replace", path: "/projects/bogus", value: "x" }],
+    }));
+    expect(sock.sent[1].result).toBeUndefined();
+    expect(sock.sent[1].error?.code).toBe(400);
+    expect(sock.sent[1].error?.message).toContain("bogus");
+  });
+
+  test("#19: unknown field inside a whole-row add value is rejected (400)", async () => {
+    const sock = mockSocket();
+    await open(sock);
+    await ws.websocket.message(sock, JSON.stringify({
+      id: 2, action: "delta", doc: "project:p1",
+      ops: [{ op: "add", path: "/tasks/t9", value: { title: "ok", done: false, bogus: 1 } }],
+    }));
+    expect(sock.sent[1].error?.code).toBe(400);
+    expect(sock.sent[1].error?.message).toContain("bogus");
+  });
+
+  test("#1/#8: no temporal overlap — close.valid_to == reinsert.valid_from, time-travel is exact", async () => {
+    const sock = mockSocket();
+    await open(sock);
+    await ws.websocket.message(sock, JSON.stringify({
+      id: 2, action: "delta", doc: "project:p1",
+      ops: [{ op: "replace", path: "/projects/name", value: "Beta" }],
+    }));
+    const rows = db.query(
+      "SELECT name, valid_from, valid_to FROM projects WHERE id = 'p1' ORDER BY valid_from",
+    ).all() as any[];
+    expect(rows).toHaveLength(2);
+    // The old version's valid_to must EXACTLY equal the new version's valid_from
+    // (a clean half-open boundary) — a monotonic now() that didn't share the
+    // timestamp would leave a ~1ms overlap.
+    expect(rows[0].valid_to).toBe(rows[1].valid_from);
+    expect(rows[1].valid_to).toBeNull();
+
+    // Exactly one version is live at the edit instant, and it's the new one.
+    const at = rows[1].valid_from as string;
+    const live = db.query(
+      "SELECT COUNT(*) AS n FROM projects WHERE id = 'p1' AND valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)",
+    ).get(at, at) as any;
+    expect(live.n).toBe(1);
+    const doc = loadDocAt(db, schema, projectDoc, "p1", at);
+    expect(doc.projects.name).toBe("Beta");
   });
 });

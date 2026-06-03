@@ -69,11 +69,13 @@ for (const [id, m] of Object.entries(doc.data.get()?.messages ?? {})) {
 }
 
 doc.onOps((ops) =>
-  applyOpsToCollection(log, "messages", ops, {
+  applyOpsToCollection<Message>(log, "messages", ops, {
+    key: (m) => `${m.author}:${m.at}`,
     create: renderMessage,
     update: (node, m) => {
-      (node.firstElementChild as HTMLElement).textContent = m.author;
-      (node.lastElementChild  as HTMLElement).textContent = m.text;
+      const el = node as HTMLElement;
+      (el.firstElementChild as HTMLElement).textContent = m.author;
+      (el.lastElementChild  as HTMLElement).textContent = m.text;
     },
   }),
 );
@@ -114,14 +116,14 @@ type DeltaOp =
   | { op: "remove";  path: string };                 // delete by path
 ```
 
-Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (field), `/collection/-` (append). Path segments follow RFC 6901 JSON Pointer escaping — `~1` decodes to `/` and `~0` to `~` — so ids or field names containing `/` or `~` round-trip cleanly through `applyOps` and every backend.
+Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (field), `/collection/-` (append). Path segments follow RFC 6901 JSON Pointer escaping — `~1` decodes to `/` and `~0` to `~` — so ids or field names containing `/` or `~` round-trip cleanly through `applyOps` and every backend. An **empty/root path** (`""` or `"/"`) on `replace`/`remove` swaps or clears the **whole doc in place** (object↔object, array↔array) — the primitive behind recompute custom docs. → `reference.md` → *Custom read docs*.
 
 ## Exports
 
 | Subpath | Runs | Purpose |
 |---|---|---|
 | `@blueshed/delta/core` | anywhere | `applyOps`, `DeltaOp` |
-| `@blueshed/delta/client` | browser | `connectWs` (with `close()`), `openDoc`, `call`, `WS` |
+| `@blueshed/delta/client` | browser | `connectWs` (with `close()`), `openDoc`, `call`, `WS`, `DeltaError` |
 | `@blueshed/delta/dom-ops` | browser | `applyOpsToCollection` — keyed-DOM op routing |
 | `@blueshed/delta/server` | Bun | `createWs`, `registerDoc` (JSON-file backend), `registerMethod` |
 | `@blueshed/delta/sqlite` | Bun | `defineSchema`, `defineDoc`, `defineCustomDoc`, `registerDocs(..., customDocs?)`, snapshots |
@@ -135,7 +137,7 @@ Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (fie
 - **One op vocabulary**: only `add` / `replace` / `remove` on `/<coll>/<id>` paths. Never invent new op verbs.
 - **Default to the smallest backend that fits.** JSON-file unless a named constraint rules it out (queries → SQLite; multi-process → Postgres).
 - **Don't reach for React/Supabase/Firebase patterns.** `doc.data` is a Signal; `doc.onOps` is the stream. No `useEffect`, no `useQuery`, no subscription config.
-- **Never optimistically update, never brute-force reload.** `doc.send` echoes the same op back through `onOps` / `doc.data` — local mutation double-applies, and a reload is *never* necessary (the framework re-opens every tracked doc on every reconnect). → `reference.md` → *The write loop*.
+- **Never optimistically update, never brute-force reload.** `doc.send` echoes the same op back through `onOps` / `doc.data` — local mutation double-applies, and a reload is *never* necessary (the framework re-opens every tracked doc on every reconnect, and on each reconnect `onOps` consumers also receive a synthetic whole-doc replace op — `{op:"replace", path:"", value:<full state>}` — that `applyOpsToCollection` reconciles, so the vanilla-DOM path self-heals too, not just `doc.data`). → `reference.md` → *The write loop*.
 - **Never rebuild a collection from `doc.data` inside an `effect`.** Use `applyOpsToCollection` (vanilla DOM) or `list()` (railroad). One per project; don't combine. → `reference.md` → *Rendering collections*.
 - **If `@blueshed/railroad` is in deps, use `list()` not `applyOpsToCollection`.** `doc.data` IS a railroad `Signal<T>`. → `reference.md` → *Railroad recipe*.
 - **Never edit framework SQL** (`001a-001f-*.sql`). They are the stored-function contract.
@@ -146,6 +148,7 @@ Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (fie
 - **Compose doc ops from SQL via the `*_as` functions, never raw table access.** A custom `plpgsql` evaluator reads with `delta_open_as` (binds `app.user_id`, so RLS applies to what it reads) and a stored write mutates-and-broadcasts with `delta_apply_as` — a bare `delta_open`/`SELECT` on an RLS table scopes to nothing (and throws on `app.user_id=''`), and a raw `INSERT` won't NOTIFY. `SECURITY DEFINER` bypasses RLS, so such a function must enforce its own guards. → `reference.md` → *Composing doc operations from SQL*.
 - **Scope keys must be real columns of the root collection** — `scope: { "items.id": ":id" }` raises; use `scope: { id: ":id" }` or omit `scope` for single-mode. → `reference.md` → *`scope` syntax*.
 - **`delta_open` raises on config errors** (unknown prefix / root collection). NULL only means "single-mode row doesn't exist yet" — listener maps to 404.
+- **`defineCustomDoc` has two modes — pick by shape.** Flat per-row view → `query` + `matches` (membership; SQLite + Postgres; cached & shared across subscribers, so criteria-scoped only). Nested/joined/identity-dependent view → `recompute` (whole-doc; **Postgres only**; re-evaluated per subscriber under their identity, **not** cached; republished as a root-replace op). Never mix the two field sets. → `reference.md` → *Custom read docs*.
 - **Custom `DocType` parses its own prefix** — don't put prefix logic elsewhere in the app.
 - **Doc names are data**: `items:` (list), `venue:42` (single), `venue-at:42:2026-06-16` (temporal scoped). Prefix up to `:` owns the handler.
 - **Close sockets with `wsClient.close()` in tests/scripts** — `connectWs` reconnects forever otherwise.
@@ -162,6 +165,7 @@ Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (fie
 - *Schema generation* — `defineSchema`, column shorthands, `validateOps`
 - *`scope` syntax* — the colon DSL, operators, footguns
 - *Doc patterns* — list, catalog (list-mode `include`), scoped-single, per-user isolation, custom DocType
+- *Custom read docs* — `defineCustomDoc` membership (`query`+`matches`) vs recompute (whole-doc, Postgres); root-replace primitive
 - *Authentication* — `DeltaAuth`, JWT impl, token flow, identity switching
 - *RLS with `app.user_id`* — policies, two-pool setup, error-leak rules
 - *Rendering collections* — `applyOpsToCollection` recipe

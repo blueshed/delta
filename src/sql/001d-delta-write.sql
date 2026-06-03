@@ -144,6 +144,19 @@ BEGIN
       RAISE EXCEPTION 'unknown collection: %', v_coll_key;
     END IF;
 
+    -- Scope guard: an op may only target the doc's root or an included
+    -- collection. Defence-in-depth — a client that opened doc A must not write
+    -- to an unrelated collection through it. (The TS validateOps enforces the
+    -- same pre-flight, but this guards every path into delta_apply, including
+    -- SQL-side composition via delta_apply_as.)
+    IF v_coll_key IS DISTINCT FROM v_def.root_collection
+       AND NOT (v_coll_key = ANY(COALESCE(v_def.include, ARRAY[]::text[]))) THEN
+      RAISE EXCEPTION
+        'op collection "%" is not part of doc "%" (root: %, include: %)',
+        v_coll_key, v_def.prefix, v_def.root_collection, v_def.include
+        USING ERRCODE = 'P0001';
+    END IF;
+
     v_view := _delta_source_view(v_coll.table_name, v_coll.temporal);
 
     -- ---------------------------------------------------------------
@@ -237,11 +250,15 @@ BEGIN
       SELECT v_new_row || COALESCE(jsonb_object_agg(
         col_key,
         CASE col_def->>'type'
-          WHEN 'text'    THEN to_jsonb(COALESCE(col_def->>'default', ''))
-          WHEN 'integer' THEN COALESCE(col_def->'default', '0'::jsonb)
-          WHEN 'real'    THEN COALESCE(col_def->'default', '0'::jsonb)
-          WHEN 'boolean' THEN COALESCE(col_def->'default', 'false'::jsonb)
-          WHEN 'json'    THEN COALESCE(col_def->'default', 'null'::jsonb)
+          WHEN 'text'        THEN to_jsonb(COALESCE(col_def->>'default', ''))
+          WHEN 'integer'     THEN COALESCE(col_def->'default', '0'::jsonb)
+          WHEN 'real'        THEN COALESCE(col_def->'default', '0'::jsonb)
+          WHEN 'boolean'     THEN COALESCE(col_def->'default', 'false'::jsonb)
+          WHEN 'json'        THEN COALESCE(col_def->'default', 'null'::jsonb)
+          -- A required timestamptz has no sensible empty default; emit its
+          -- declared default or NULL (→ a clear NOT NULL violation) rather than
+          -- '' (which fails with an opaque "invalid input syntax" cast error).
+          WHEN 'timestamptz' THEN COALESCE(col_def->'default', 'null'::jsonb)
           ELSE to_jsonb(''::text)
         END
       ), '{}'::jsonb)

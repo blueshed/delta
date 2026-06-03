@@ -30,7 +30,7 @@ bunx delta init init_db --with-auth
 bunx delta sql ./types.ts --out init_db/003-tables.sql
 ```
 
-`init` copies `001a-001e-*.sql` (and optionally `002-users.sql` from auth-jwt) into your directory. `sql` runs the codegen. Everything is idempotent.
+`init` copies `001a-001f-*.sql` (and optionally `002-users.sql` from auth-jwt) into your directory. `sql` runs the codegen. Everything is idempotent.
 
 **`docker-entrypoint-initdb.d`** — the cleanest setup for a fresh volume: mount your `init_db/` into the Postgres image and let it apply the SQL on first start. No boot-time application code.
 
@@ -78,10 +78,11 @@ registerDocType(
 
 await createDocListener(ws, pool, { auth });
 
-Bun.serve({
+const server = Bun.serve({
   routes: { [ws.path]: ws.upgrade },
   websocket: ws.websocket,
 });
+ws.setServer(server);   // REQUIRED — without it ws.publish() is a no-op and broadcasts never reach clients
 ```
 
 ```tsx
@@ -202,6 +203,8 @@ if (errors.length) throw new Error(errors.map(e => e.message).join("\n"));
 
 ## `scope` syntax
 
+> **Postgres-only DSL.** The rich operator DSL below is implemented in the Postgres SQL resolver (`src/sql/001b-delta-scope.sql`). The **SQLite** backend uses a simpler positional scheme — see *SQLite scope behaviour* at the end of this section. Don't copy `":id"`, `"<=:end"`, `"like:prefix"` etc. into a SQLite `defineDoc`; they won't resolve.
+
 `defineDoc`'s `scope` map uses a compact DSL. Values with a leading colon read **from the doc-name context** (positional params extracted after the prefix). Plain strings are literal captures (normally just `"id"` — the first positional param from the doc name). **The leading `:` matters.**
 
 | Value | Meaning |
@@ -218,6 +221,13 @@ if (errors.length) throw new Error(errors.map(e => e.message).join("\n"));
 Named params are resolved positionally from the colon-separated doc id. `id` always takes position 1; other names are alphabetical. `todos:5` has one param; `venue-at:42:2026-06-16` has two (`id=42`, second positional).
 
 **Scope keys must be real columns of the root collection.** `scope: { id: ":id" }` works; `scope: { "items.id": ":id" }` raises at open time with `scope key "items.id" is not a column of "items" (valid keys: id, …)`. For a scoped-single doc, you can omit `scope` entirely — the framework defaults to `WHERE id = <doc-id>`.
+
+**SQLite scope behaviour (not the DSL above).** The SQLite backend (`src/server/sqlite.ts`, `resolveScope`) does **not** implement the operator DSL. It is positional and literal:
+
+- **Empty scope** → `WHERE id = <doc-id>` (same default as Postgres single-mode).
+- **Otherwise**, the only dynamic placeholder is the literal string `":docId"`. The doc-id is split on `:` into positional parts, and each `":docId"` binding consumes the next part. **Any other binding value is treated as a literal column match** — it is not parsed for operators or param names.
+
+So on SQLite a Postgres-style `scope: { user_id: ":id" }` does **not** read from the doc name — it produces `WHERE user_id = ':id'` (the literal string `:id`). To scope a SQLite doc by the doc-id, use `scope: { user_id: ":docId" }`; to pin a static value, use a plain literal like `scope: { tenant: "acme" }`.
 
 ## Doc patterns
 
@@ -329,6 +339,65 @@ const myTodos = openDoc<{ todos: Record<string, Todo> }>(`todos:${me}`);
 
 *Why inject `owner_id` AND have RLS `WITH CHECK`?* Two layers, each catches different failures cheaply. The policy is the authoritative guarantee — even a buggy server can't leak across users because the database refuses. The injection is an ergonomic wrapper: clients don't need to send `owner_id`, and a forged payload fails locally with a clear `Forbidden` rather than a round-trip to Postgres with a cryptic RLS error. Defence in depth, plus cleaner error surface.
 
+### Custom read docs — `defineCustomDoc`
+
+`defineCustomDoc(prefix, opts)` declares a **read-only** doc whose contents are a *derived view* over one or more watched collections — a bbox query, a tag filter, a joined summary — rather than a plain collection slice. Clients open it like any doc (`openDoc("sites-in-bbox:...")`); writes still travel the underlying collections' normal paths. Register them with `registerDocs(ws, db, schema, docs, customDocs)` (SQLite) or `createDocListener(ws, pool, { custom })` (Postgres). Two modes, selected by which fields you provide:
+
+**Membership — `query` + `matches` (SQLite + Postgres).** A *flat* view: each watched collection becomes a keyed map, and the framework decides **per row** whether a changed row belongs. `query` does the initial load; `matches` is the live fan-out predicate.
+
+```ts
+const sitesInBbox = defineCustomDoc<BBox>("sites-in-bbox:", {
+  watch: ["sites"],
+  parse: (id) => { const [minLng, minLat, maxLng, maxLat] = id.split(",").map(Number); return { minLng, minLat, maxLng, maxLat }; },
+  query: async (pool, c) => ({
+    sites: (await pool.query(
+      "SELECT id::text, name, lat, lng FROM sites WHERE lng BETWEEN $1 AND $2 AND lat BETWEEN $3 AND $4",
+      [c.minLng, c.maxLng, c.minLat, c.maxLat])).rows,
+  }),
+  matches: (_coll, row, c) =>                      // does this changed row still belong?
+    row.lng >= c.minLng && row.lng <= c.maxLng && row.lat >= c.minLat && row.lat <= c.maxLat,
+});
+```
+
+- Doc shape is `{ [collection]: { [id]: row } }` — the framework keys rows by `id`. On a watched write it diffs membership: a row that now matches is `add`/`replace`d into the map, one that no longer matches is `remove`d — single ops, never a whole-doc resend.
+- **The `query` result is cached per doc name and shared across all subscribers**, so a membership doc must be *criteria-scoped, not identity-scoped* (`query` isn't even passed an identity). If two clients opening the same name must see different rows, use recompute — not membership.
+- **The callback shape differs by backend.** Postgres: `query: async (pool, criteria) => …` — a `Pool`, awaited (the shape above). SQLite: `query: (db, criteria) => …` — a synchronous `bun:sqlite` handle, no `await`. `matches` is identical on both.
+
+**Recompute — `recompute` (Postgres only).** A *whole-doc* view for shapes a per-row predicate can't express — nested, joined, aggregated, or identity-dependent. No `matches`; instead, on open and on **any** write to a watched collection, the framework re-evaluates the entire doc and republishes it.
+
+```ts
+import { withAppAuth } from "@blueshed/delta/postgres";
+
+const dashboard = defineCustomDoc<{ userId: string }>("dashboard:", {
+  watch: ["orders", "invoices"],
+  parse: (id) => ({ userId: id }),
+  recompute: async (pool, c, identity) => {         // re-evaluated PER SUBSCRIBER, under their identity
+    const me = (identity as { id: number } | undefined)?.id;
+    if (me == null || String(me) !== c.userId) return null;  // doc-name id is untrusted — verify it → 404 / skip
+    return withAppAuth(pool, me, async (db) => {             // bind app.user_id, so RLS scopes every read below
+      const orders   = (await db.query("SELECT * FROM orders   WHERE user_id = $1", [me])).rows;
+      const invoices = (await db.query("SELECT * FROM invoices WHERE user_id = $1", [me])).rows;
+      return { orders, invoices, total: invoices.reduce((s, i) => s + i.amount, 0) };  // ANY shape
+    });
+  },
+});
+```
+
+- Returns the **whole doc** (any JSON shape, object or array). Return `null` for "doesn't exist": a 404 on open, a silent skip on fan-out.
+- **Re-evaluated once per subscriber, under that client's gated identity** (the third arg). Bind it yourself — `withAppAuth(pool, id, …)` or a `*_as` stored function (see *Composing doc operations from SQL*) — so RLS scopes each subscriber's view. `identity` is `undefined` on an unauthenticated connection; **guard it** (the example returns `null` rather than dereferencing it — a recompute that throws is caught, logged, and silently drops that subscriber's update).
+- **The doc-name id is untrusted.** `parse` reads whatever name the client asked to open, so a raw `WHERE … = c.userId` is a confused-deputy: verify the parsed id against the identity (return `null` → 404) and/or treat RLS as the authoritative tenant guard. Delta is persistence + broadcast, not authorization.
+- **No relevance gate.** Unlike membership's `matches`, recompute re-evaluates on *any* write to *any* watched collection, for *every* subscriber of *every* doc under the prefix — there's no per-doc filter. Cost ≈ (subscribers under the prefix) × (writes to any watched collection); it is **not** cached. Keep `watch` tight and `recompute` cheap.
+- The recomputed doc reaches each client as a single **root-replace** op — see below.
+
+**Root-replace — the client-side primitive recompute rides on.** `applyOps` treats an empty/root path (`""` or `"/"`) as "swap or clear the whole doc, in place":
+
+```ts
+applyOps(doc, [{ op: "replace", path: "", value: next }]);  // object↔object / array↔array
+applyOps(doc, [{ op: "remove",  path: "" }]);               // clear to {} or []
+```
+
+The container is mutated **in place** (keys cleared then re-assigned; array spliced then refilled) rather than reassigned, because the server's doc tracking and the client's reactive `doc.data` both hold the value by reference — the client bumps `dataVersion` after `applyOps`, so a root-replace re-renders end-to-end. Containers must match kind (object↔object, array↔array) or `applyOps` throws. This is what lets recompute's whole-doc refresh ride the same op channel as every other change; you can also emit it yourself from a custom `DocType`.
+
 **Custom DocType** — when the lens isn't expressible as `DocDef`:
 
 ```ts
@@ -392,13 +461,18 @@ createDocListener(ws, pool, { auth });         // gate every open / delta
 1. **Upgrade-time** — cookie / `Authorization` header via `onUpgrade`.
 2. **In-message** — send `{ action: "call", method: "authenticate", params: { token } }` after connecting unauthenticated.
 
-**Identity switching on a live socket.** `jwtAuth` ships a `logout` action that clears `client.data.identity`. Client usage:
+**Identity switching on a live socket.** `jwtAuth` ships a `logout` action that clears `client.data.identity`. Logout also **unsubscribes the socket from every doc it currently has open** — the previous user's live streams stop immediately, not just on the next open. Client usage:
 
 ```ts
 await call("logout");              // server-side: delete client.data.identity
+                                   // AND tear down all open doc subscriptions —
+                                   // the old user's live streams stop at once.
 localStorage.removeItem("token");
-// Next open/delta will fail the gate with 401 until the user re-authenticates.
+// Any future open/delta also fails the gate with 401 until the user re-authenticates.
+// Re-opening a doc after switching identity re-subscribes under the new user.
 ```
+
+The same teardown happens on an identity switch (a fresh `authenticate` after a `logout`): the old subscriptions are gone, so you must re-`openDoc` the docs the new user should see — their streams won't silently carry over from the previous identity.
 
 ## RLS with `app.user_id`
 
@@ -573,14 +647,14 @@ await doc.send([{ op: "add", path: `/messages/${id}`, value: m }]);
 **A brute-force reload is never necessary — not after a write, not ever.** The framework issues exactly two full reads, both automatic, and a developer-issued one is always either redundant or actively harmful (it rebuilds the DOM and throws away the op-level precision the protocol gave you):
 
 - **Initial load** — the `open` resolves with full state into `doc.data` (you render once after `doc.ready`).
-- **Reconnect** — on *every* socket `open` event, initial connect and post-outage alike, `connectWs` re-issues `open` for every entry in its `_docs` map and `onOpen` resets `doc.data` to fresh full state (`client.ts:178`). An outage self-heals; you do nothing.
+- **Reconnect** — on *every* socket `open` event, initial connect and post-outage alike, `connectWs` re-issues `open` for every entry in its `_docs` map. `onOpen` resets `doc.data` to fresh full state **and** emits a synthetic whole-doc replace op — `{ op: "replace", path: "", value: <full doc state> }` — to every `doc.onOps` consumer. `applyOpsToCollection` handles that root-replace by reconciling the keyed collection against the fresh state (adding/replacing/removing nodes to match), so an outage self-heals on **both** render paths — the `doc.data`/railroad path *and* the vanilla-DOM `onOps`/`applyOpsToCollection` path. You do nothing.
 
 Everything between those two arrives as ordered, versioned ops on the live socket. So none of the triggers that make you reach for a reload actually need one:
 
 | Tempting trigger | Why no reload | What actually happens |
 |---|---|---|
 | "I just wrote — show the result" | the write echoes back as an op | `onOps` / `doc.data` patch in place |
-| "I reconnected after dropping" | re-open is automatic | `doc.data` reset to fresh state on the `open` event |
+| "I reconnected after dropping" | re-open is automatic | `doc.data` reset to fresh state, and `onOps` gets a root-replace to reconcile, on the `open` event |
 | "the tab refocused / became visible" | nothing was missed | the socket stayed subscribed; any ops already applied |
 | "I might be out of sync" | you can't silently be | ops carry versions; reconnect re-reads full state |
 | "force-refresh to be safe" | there is nothing newer to fetch | `doc.data` *is* the latest |
@@ -591,7 +665,7 @@ If you catch yourself calling `openDoc` a second time, `fetch`-ing the doc over 
 
 ## Stored functions (read-only contract)
 
-Apply `postgres/sql/001a-001e-*.sql` alphabetically to every database — idempotent. Key functions:
+Apply `src/sql/001a-001f-*.sql` alphabetically to every database — idempotent. Key functions:
 
 | Function | Purpose |
 |---|---|
@@ -610,7 +684,7 @@ The `*_as` variants collapse the four identity-scoping round-trips (`BEGIN` → 
 
 ### Composing doc operations from SQL
 
-These functions aren't only for the Bun layer — they're **callable from inside your own `plpgsql`/SQL functions**, so a custom read evaluator can assemble several docs, and a stored write can mutate-and-broadcast, without leaving Postgres. All are `LANGUAGE plpgsql`, `SECURITY INVOKER`; `delta_apply`/`delta_apply_as` always write `_delta_ops_log` + NOTIFY, so **a write that originates inside Postgres still broadcasts** to every subscriber.
+These functions aren't only for the Bun layer — they're **callable from inside your own `plpgsql`/SQL functions**, so a custom read evaluator can assemble several docs, and a stored write can mutate-and-broadcast, without leaving Postgres. Most are `LANGUAGE plpgsql` (`delta_fetch_ops` and `delta_resolve_snapshot` are `LANGUAGE sql`), all `SECURITY INVOKER`; `delta_apply`/`delta_apply_as` always write `_delta_ops_log` + NOTIFY, so **a write that originates inside Postgres still broadcasts** to every subscriber.
 
 ```sql
 -- a custom read evaluator composing two docs under the caller's identity
@@ -634,7 +708,7 @@ END $$;
 - **Write through `delta_apply`/`delta_apply_as`**, never a direct `INSERT`/`UPDATE` on a delta-managed table — only that path bumps the version, logs the ops, and NOTIFYs, so subscribers stay live.
 - **`SECURITY DEFINER` bypasses RLS.** delta is a persistence + broadcast layer, *not* an authorization one — a `DEFINER` function runs as its owner, so RLS won't gate it. If you escalate privilege, the function must enforce its own preconditions/ownership checks (compose `_`-prefixed guard helpers — never wire-callable — for this).
 
-Collections register themselves via `_delta_collections` (`columns_def`, `parent`, `temporal`); docs via `_delta_docs` (`prefix`, `root`, `include`, `scope`). Populated by your generated `002-tables.sql` — never hand-edited.
+Collections register themselves via `_delta_collections` (`columns_def`, `parent`, `temporal`); docs via `_delta_docs` (`prefix`, `root`, `include`, `scope`). Populated by your generated `003-tables.sql` — never hand-edited.
 
 ## CLI
 
@@ -656,7 +730,7 @@ bunx delta init init_db --with-auth                      # vendor framework SQL
 bunx delta sql ./types.ts --out init_db/003-tables.sql   # codegen tables from schema
 ```
 
-`init` copies `001a-001e-*.sql` (and optionally `002-users.sql` from auth-jwt) into the target directory. `sql` runs the codegen. Both are idempotent.
+`init` copies `001a-001f-*.sql` (and optionally `002-users.sql` from auth-jwt) into the target directory. `sql` runs the codegen. Both are idempotent.
 
 Vendor Claude Code skills — copies `.claude/skills/*` from this package and from any sibling package in `node_modules` that ships skills (e.g. `@blueshed/railroad` ships `railroad` and `bun-route`) into the consumer's `.claude/skills/` so Claude Code's project-skill autodiscovery picks them up:
 

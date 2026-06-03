@@ -17,6 +17,7 @@
  * the backend is a JSON file or SQLite.
  */
 import type { WsServer } from "./server";
+import { trackSubscribe, trackUnsubscribe } from "./server";
 import { applyOps as deltaApplyOps, type DeltaOp, splitPath } from "../core";
 import { createLogger } from "./logger";
 import {
@@ -231,6 +232,14 @@ export function registerDocs(
 
     const rows = db.query(`SELECT * FROM ${viewName} WHERE ${whereParts.join(" AND ")}`).all(...whereParams);
     if (rows.length === 0) return null;
+    if (rows.length > 1) {
+      // A single-mode doc exposes exactly one root row. A scope that matches
+      // several (e.g. a non-unique column) silently drops all but the first
+      // here AND only loads the first row's children — surface it.
+      console.warn(
+        `[delta-sqlite] scope for doc root "${def.root}" matched ${rows.length} rows; using the first only. A single-mode doc's scope must match at most one row.`,
+      );
+    }
     const rootRow = rows[0];
     decodeRow(rootTable, rootRow);
 
@@ -292,6 +301,11 @@ export function registerDocs(
 
     // Separate row-field updates for batching
     const rowFieldBatches = new Map<string, { table: ResolvedTable; id: string; fields: Map<string, unknown> }>();
+    // Root-level field updates are batched too: applying them one-at-a-time
+    // did closeRow+insert per op, so two root-field replaces in one delta
+    // collided on the temporal PK (same valid_from). Accumulate and emit one
+    // close+insert for the whole delta.
+    const rootFieldUpdates = new Map<string, unknown>();
 
     for (const op of ops) {
       const parts = splitPath(op.path);
@@ -301,15 +315,7 @@ export function registerDocs(
       // Root-level field update: /<root>/fieldName
       if (collKey === def.root && parts.length === 2) {
         if (op.op !== "replace") throw new Error(`Root fields only support replace`);
-        const field = parts[1]!;
-        const rootTable = schema.tables[def.root]!;
-        const ts = now();
-        if (rootTable.temporal) closeRow(db, rootTable, rootId);
-        const updated = { ...doc[def.root], [field]: (op as any).value };
-        if (rootTable.temporal) { updated.valid_from = ts; updated.valid_to = null; }
-        insertRootRow(db, rootTable, updated, ts);
-        doc[def.root] = updated;
-        broadcastOps.push({ op: "replace", path: `/${def.root}`, value: updated });
+        rootFieldUpdates.set(parts[1]!, (op as any).value);
         continue;
       }
 
@@ -345,6 +351,19 @@ export function registerDocs(
       }
     }
 
+    // Apply batched root-field updates as a single close + reinsert.
+    if (rootFieldUpdates.size > 0) {
+      const rootTable = schema.tables[def.root]!;
+      const ts = now();
+      if (rootTable.temporal) closeRow(db, rootTable, rootId, ts);
+      const updated = { ...doc[def.root] };
+      for (const [field, value] of rootFieldUpdates) updated[field] = value;
+      if (rootTable.temporal) { updated.valid_from = ts; updated.valid_to = null; }
+      insertRootRow(db, rootTable, updated, ts);
+      doc[def.root] = updated;
+      broadcastOps.push({ op: "replace", path: `/${def.root}`, value: updated });
+    }
+
     // Apply batched field updates
     for (const [, batch] of rowFieldBatches) {
       const collKey = batch.table.docKey;
@@ -352,7 +371,7 @@ export function registerDocs(
       if (!current) throw new Error(`Row not found: ${collKey}/${batch.id}`);
 
       const ts = now();
-      if (batch.table.temporal) closeRow(db, batch.table, batch.id);
+      if (batch.table.temporal) closeRow(db, batch.table, batch.id, ts);
 
       const updated = { ...current };
       if (batch.table.temporal) { updated.valid_from = ts; updated.valid_to = null; }
@@ -388,7 +407,7 @@ export function registerDocs(
         customCriteria.set(docName, criteria);
       }
 
-      client.subscribe(docName);
+      trackSubscribe(client, docName);
       if (!subscriptions.has(docName)) subscriptions.set(docName, new Set());
       subscriptions.get(docName)!.add(client);
 
@@ -412,7 +431,7 @@ export function registerDocs(
       cache.set(docName, doc);
     }
 
-    client.subscribe(docName);
+    trackSubscribe(client, docName);
     if (!subscriptions.has(docName)) subscriptions.set(docName, new Set());
     subscriptions.get(docName)!.add(client);
 
@@ -438,32 +457,53 @@ export function registerDocs(
       return;
     }
 
+    // Pre-flight validation — reject unknown collections/fields and bad types
+    // up front instead of silently acking an op that diverges cache/broadcast
+    // from what the DB can persist.
+    const validationErrors = validateOps(schema, def, msg.ops as DeltaOp[]);
+    if (validationErrors.length) {
+      respond({
+        error: {
+          code: 400,
+          message: validationErrors.map((e) => `${e.path}: ${e.message}`).join("; "),
+        },
+      });
+      return;
+    }
+
     // Snapshot cache for rollback
     const snapshot = structuredClone(doc);
 
+    let broadcastOps: DeltaOp[];
     try {
       db.run("BEGIN");
-      const broadcastOps = applyOps(docName, def, doc, msg.ops as DeltaOp[]);
+      broadcastOps = applyOps(docName, def, doc, msg.ops as DeltaOp[]);
       db.run("COMMIT");
-
-      // Primary broadcast: to the doc's own subscribers
-      ws.publish(docName, { doc: docName, ops: broadcastOps });
-
-      // Cross-doc fan-out: find other open docs affected by these changes
-      fanOut(ws, broadcastOps, docName);
-
-      // Custom-doc cross-pollination: predicate-based membership.
-      customFanOut(broadcastOps);
-
-      respond({ result: { ack: true } });
-      log.info(`delta ${docName} [${(msg.ops as DeltaOp[]).map((o: DeltaOp) => `${o.op} ${o.path}`).join(", ")}]`);
     } catch (err: any) {
-      db.run("ROLLBACK");
-      // Restore in-memory cache from snapshot
-      cache.set(docName, snapshot);
+      // Rollback owns ONLY the BEGIN..COMMIT region. (A bare ROLLBACK after a
+      // successful COMMIT throws "no transaction is active", which would mask
+      // the real error and abort the handler — see the post-commit block.)
+      try { db.run("ROLLBACK"); } catch { /* no active tx */ }
+      cache.set(docName, snapshot); // restore in-memory cache
       log.error(`delta failed: ${err.message}`);
       respond({ error: { code: 500, message: err.message } });
+      return;
     }
+
+    // Committed. Fan-out is a post-commit side effect: a failure here must not
+    // roll back (the write is durable) nor masquerade as a write error.
+    respond({ result: { ack: true } });
+    try {
+      // Primary broadcast: to the doc's own subscribers
+      ws.publish(docName, { doc: docName, ops: broadcastOps });
+      // Cross-doc fan-out: find other open docs affected by these changes
+      fanOut(ws, broadcastOps, docName);
+      // Custom-doc cross-pollination: predicate-based membership.
+      customFanOut(broadcastOps);
+    } catch (err: any) {
+      log.error(`delta fan-out failed (write committed): ${err.message}`);
+    }
+    log.info(`delta ${docName} [${(msg.ops as DeltaOp[]).map((o: DeltaOp) => `${o.op} ${o.path}`).join(", ")}]`);
   });
 
   ws.on("close", (msg, client, respond) => {
@@ -472,7 +512,7 @@ export function registerDocs(
     const isStandard = findDoc(docName) != null;
     if (!isCustom && !isStandard) return;
 
-    client.unsubscribe(docName);
+    trackUnsubscribe(client, docName);
     subscriptions.get(docName)?.delete(client);
     if (subscriptions.get(docName)?.size === 0) {
       subscriptions.delete(docName);
@@ -525,28 +565,42 @@ export function registerDocs(
       const cached = cache.get(docName);
 
       // Filter to ops that (a) affect a collection this doc includes AND
-      // (b) belong to this doc's scope by parent-FK lineage.
-      const relevantOps = ops.filter((op) => {
+      // (b) belong to this doc's scope by parent-FK lineage. A root-level
+      // `replace /<coll>` from the source (its single-object root) must be
+      // REWRITTEN to a keyed `/<coll>/<id>` when the target treats <coll> as
+      // an included map — otherwise applying `/<coll>` would clobber the whole
+      // collection map with one row object.
+      const relevantOps: DeltaOp[] = [];
+      for (const op of ops) {
         const parts = splitPath(op.path);
         const collKey = parts[0];
-        if (!collKey) return false;
-        if (!def.include.includes(collKey) && collKey !== def.root) return false;
+        if (!collKey) continue;
+        if (!def.include.includes(collKey) && collKey !== def.root) continue;
 
         const id = parts[1];
 
         if (op.op === "remove") {
           // Forward removes only if the id is currently in the target's cache.
           // If we don't have it, this row was never in the target's scope.
-          return id != null && cached?.[collKey]?.[id] != null;
+          if (id != null && cached?.[collKey]?.[id] != null) relevantOps.push(op);
+          continue;
         }
 
         // add / replace — `value` is the full row (per applyOps' broadcastOps).
         const row = (op as any).value;
-        if (collKey === def.root && parts.length === 1) {
-          return row && String(row.id) === docId;       // root-level replace
+        if (parts.length === 1) {
+          // Source root-level replace.
+          if (collKey === def.root) {
+            // Target also treats this collection as its single-object root.
+            if (row && String(row.id) === docId) relevantOps.push(op);
+          } else if (row && rowInScope(collKey, row, def, docId, cached)) {
+            // Target treats it as an included map — rewrite to a keyed op.
+            relevantOps.push({ op: "replace", path: `/${collKey}/${row.id}`, value: row });
+          }
+          continue;
         }
-        return rowInScope(collKey, row, def, docId, cached);
-      });
+        if (rowInScope(collKey, row, def, docId, cached)) relevantOps.push(op);
+      }
 
       if (relevantOps.length === 0) continue;
 
@@ -754,6 +808,34 @@ export function migrateSchema(db: any, schema: Schema): string[] {
       db.run(sql);
       applied.push(sql);
     }
+
+    // Retrofit temporal scaffolding when a table gained `temporal: true`.
+    // Without this the reads target a current_<table> view that doesn't exist
+    // ("no such table") after a non-temporal→temporal flag flip.
+    if (table.temporal) {
+      if (!existingCols.has("valid_from")) {
+        const sql = `ALTER TABLE ${table.name} ADD COLUMN valid_from TEXT NOT NULL DEFAULT (datetime('now'))`;
+        db.run(sql);
+        applied.push(sql);
+      }
+      if (!existingCols.has("valid_to")) {
+        const sql = `ALTER TABLE ${table.name} ADD COLUMN valid_to TEXT`;
+        db.run(sql);
+        applied.push(sql);
+      }
+      db.run(`CREATE VIEW IF NOT EXISTS current_${table.name} AS SELECT * FROM ${table.name} WHERE valid_to IS NULL`);
+      db.run(`CREATE INDEX IF NOT EXISTS idx_${table.name}_id_valid ON ${table.name} (id, valid_to)`);
+      if (!existingCols.has("valid_from")) {
+        // NOTE: SQLite can't alter the PRIMARY KEY in place. A real
+        // non-temporal→temporal migration of EXISTING data needs the composite
+        // (id, valid_from) PK, which requires rebuilding the table. The columns
+        // and view above unblock reads, but historical versioning of rows that
+        // predate the flip requires a manual table rebuild + backfill.
+        console.warn(
+          `[delta-sqlite] table "${table.name}" became temporal: added valid_from/valid_to + current_ view, but the composite (id, valid_from) PRIMARY KEY cannot be added by ALTER. Rebuild the table to fully enable temporal versioning.`,
+        );
+      }
+    }
   }
 
   return applied;
@@ -787,33 +869,63 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
       continue;
     }
 
-    // Validate add ops — check required fields and types
-    if (op.op === "add" && parts.length === 2) {
+    const fkCol = table.parent?.fkColumn;
+    const isKnownKey = (k: string) =>
+      k === "id" || k === fkCol || table.columns[k] !== undefined;
+
+    // Root collection is single-mode: /<root>/<field> is a FIELD replace
+    // (not /<root>/<id> row), so validate parts[1] as a column name.
+    if (collKey === def.root && parts.length === 2) {
+      if (op.op !== "replace") {
+        errors.push({ path: op.path, message: "Root fields only support replace" });
+        continue;
+      }
+      const field = parts[1]!;
+      const colDef = table.columns[field];
+      if (!colDef) {
+        errors.push({ path: op.path, message: `Unknown field: ${field}` });
+        continue;
+      }
+      const typeErr = validateFieldType(colDef, field, (op as any).value);
+      if (typeErr) errors.push({ path: op.path, message: typeErr });
+      continue;
+    }
+
+    // Whole-row add / replace on an included collection: /<coll>/<id> (or /<coll>/- for add).
+    if ((op.op === "add" || op.op === "replace") && parts.length === 2) {
       const value = (op as any).value as Record<string, unknown> | undefined;
-      if (!value || typeof value !== "object") {
-        errors.push({ path: op.path, message: "Add value must be an object" });
+      if (value == null || typeof value !== "object") {
+        if (op.op === "add") errors.push({ path: op.path, message: "Add value must be an object" });
         continue;
       }
 
-      for (const [col, colDef] of Object.entries(table.columns)) {
-        if (!colDef.nullable && colDef.default === undefined && value[col] === undefined) {
-          // Check if it has a type default
-          if (defaultForType(colDef.type) === null) {
-            errors.push({ path: op.path, message: `Required field missing: ${col}` });
+      // Unknown fields are rejected: otherwise the op acks, rides the broadcast
+      // and cache, but is dropped by the DB write — diverging clients from disk.
+      for (const key of Object.keys(value)) {
+        if (!isKnownKey(key)) errors.push({ path: op.path, message: `Unknown field: ${key}` });
+      }
+
+      // Required-field check applies to adds only.
+      if (op.op === "add") {
+        for (const [col, colDef] of Object.entries(table.columns)) {
+          if (!colDef.nullable && colDef.default === undefined && value[col] === undefined) {
+            if (defaultForType(colDef.type) === null) {
+              errors.push({ path: op.path, message: `Required field missing: ${col}` });
+            }
           }
         }
       }
 
-      // Validate field types
+      // Type-check the fields that map to declared columns.
       for (const [field, fieldValue] of Object.entries(value)) {
         const colDef = table.columns[field];
-        if (!colDef) continue; // FK or extra field — skip
+        if (!colDef) continue; // id / FK — not schema-typed
         const typeErr = validateFieldType(colDef, field, fieldValue);
         if (typeErr) errors.push({ path: `${op.path}/${field}`, message: typeErr });
       }
     }
 
-    // Validate replace ops — check field exists and type
+    // Field-level replace: /<coll>/<id>/field
     if (op.op === "replace" && parts.length === 3) {
       const field = parts[2]!;
       const colDef = table.columns[field];
@@ -862,8 +974,19 @@ function validateFieldType(def: ColumnDef, field: string, value: unknown): strin
 // SQL helpers
 // ---------------------------------------------------------------------------
 
+// Strictly-monotonic, millisecond-resolution timestamp. The temporal PK is
+// (id, valid_from); whole-second timestamps made any two writes to the same
+// row within one wall-clock second — including the common create-then-edit —
+// collide on the PK and roll the delta back. Millisecond precision plus a
+// per-process monotonic bump guarantees every call yields a distinct,
+// lexicographically-sortable valid_from. Format "YYYY-MM-DD HH:MM:SS.mmm"
+// stays comparable with the `datetime('now')` column default.
+let _lastNowMs = 0;
 function now(): string {
-  return new Date().toISOString().replace("T", " ").slice(0, 19);
+  let ms = Date.now();
+  if (ms <= _lastNowMs) ms = _lastNowMs + 1;
+  _lastNowMs = ms;
+  return new Date(ms).toISOString().replace("T", " ").replace("Z", "");
 }
 
 function toMap(arr: any[]): Record<string, any> {
@@ -872,8 +995,12 @@ function toMap(arr: any[]): Record<string, any> {
   return m;
 }
 
-function closeRow(db: any, table: ResolvedTable, id: string) {
-  const ts = now();
+// Close the live version of a row. When a reinsert follows, the caller MUST
+// pass the reinsert's `ts` so the old row's valid_to EXACTLY equals the new
+// row's valid_from — otherwise (with monotonic sub-second now()) the close
+// lands a tick later than the reinsert, leaving a temporal overlap that makes
+// half-open time-travel reads (valid_to > at) match two versions at once.
+function closeRow(db: any, table: ResolvedTable, id: string, ts: string = now()) {
   db.run(`UPDATE ${table.name} SET valid_to = ? WHERE id = ? AND valid_to IS NULL`, [ts, id]);
   return ts;
 }

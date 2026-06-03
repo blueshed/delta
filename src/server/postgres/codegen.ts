@@ -16,14 +16,14 @@
  *
  *   import { generateSql } from "@blueshed/delta/postgres";
  *   import { schema, docs } from "./types";
- *   await Bun.write("init_db/002-tables.sql", generateSql(schema, docs));
+ *   await Bun.write("init_db/003-tables.sql", generateSql(schema, docs));
  *
  * Or from the bundled CLI:
  *
- *   bunx delta sql ./types.ts --out init_db/002-tables.sql
+ *   bunx delta sql ./types.ts --out init_db/003-tables.sql
  */
 import type { Schema, DocDef } from "./schema";
-import { q, columnSqlType, sqlDefault, findCascadeOn } from "./sql";
+import { q, lit, columnSqlType, sqlDefault, findCascadeOn } from "./sql";
 
 export interface GenerateSqlOptions {
   /** Header comment included at the top of the file. */
@@ -58,7 +58,7 @@ export function generateSql(
     lines.push("");
 
     const cols: string[] = [
-      `id BIGINT NOT NULL DEFAULT nextval('${seqName}')`,
+      `id BIGINT NOT NULL DEFAULT nextval(${lit(seqName)})`,
     ];
     if (table.parent) {
       cols.push(`${q(table.parent.fkColumn)} BIGINT NOT NULL`);
@@ -107,15 +107,15 @@ export function generateSql(
   // Collection metadata
   lines.push("-- Collection metadata");
   for (const [key, table] of Object.entries(schema.tables)) {
-    const cascadeOn = JSON.stringify(findCascadeOn(key, schema));
-    const colsDef = JSON.stringify(table.columns).replace(/'/g, "''");
-    const parent = table.parent ? `'${table.parent.collection}'` : "NULL";
-    const parentFk = table.parent ? `'${table.parent.fkColumn}'` : "NULL";
+    const cascadeOn = lit(JSON.stringify(findCascadeOn(key, schema)));
+    const colsDef = lit(JSON.stringify(table.columns));
+    const parent = table.parent ? lit(table.parent.collection) : "NULL";
+    const parentFk = table.parent ? lit(table.parent.fkColumn) : "NULL";
     lines.push(
       `INSERT INTO _delta_collections (collection_key, table_name, columns_def, parent_collection, parent_fk, temporal, cascade_on)`,
     );
     lines.push(
-      `  VALUES ('${key}', '${table.name}', '${colsDef}', ${parent}, ${parentFk}, ${table.temporal}, '${cascadeOn}')`,
+      `  VALUES (${lit(key)}, ${lit(table.name)}, ${colsDef}, ${parent}, ${parentFk}, ${table.temporal}, ${cascadeOn})`,
     );
     lines.push(
       `  ON CONFLICT (collection_key) DO UPDATE SET table_name = EXCLUDED.table_name, columns_def = EXCLUDED.columns_def,`,
@@ -129,15 +129,22 @@ export function generateSql(
   // Doc definitions
   lines.push("-- Doc definitions");
   for (const doc of docs) {
+    // Build a proper Postgres text[] array literal: each element is wrapped in
+    // double quotes with embedded `"` and `\` backslash-escaped, so a comma or
+    // quote inside a collection key can't corrupt the array.
     const include = doc.include.length
-      ? `'{${doc.include.join(",")}}'`
+      ? lit(
+          `{${doc.include
+            .map((e) => `"${e.replace(/(["\\])/g, "\\$1")}"`)
+            .join(",")}}`,
+        )
       : "'{}'";
-    const scope = JSON.stringify(doc.scope).replace(/'/g, "''");
+    const scope = lit(JSON.stringify(doc.scope));
     lines.push(
       `INSERT INTO _delta_docs (prefix, root_collection, include, scope)`,
     );
     lines.push(
-      `  VALUES ('${doc.prefix}', '${doc.root}', ${include}, '${scope}')`,
+      `  VALUES (${lit(doc.prefix)}, ${lit(doc.root)}, ${include}, ${scope})`,
     );
     lines.push(
       `  ON CONFLICT (prefix) DO UPDATE SET root_collection = EXCLUDED.root_collection, include = EXCLUDED.include, scope = EXCLUDED.scope;`,

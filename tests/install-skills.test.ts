@@ -23,8 +23,8 @@ function makeSkill(root: string, pkgName: string, skillName: string, files: Reco
   }
 }
 
-async function runInstall(cwd: string, ...extra: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
-  const proc = Bun.spawn(["bun", CLI, "install-skills", ...extra], {
+async function runCli(cwd: string, ...args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
+  const proc = Bun.spawn(["bun", CLI, ...args], {
     cwd,
     stdout: "pipe",
     stderr: "pipe",
@@ -33,6 +33,10 @@ async function runInstall(cwd: string, ...extra: string[]): Promise<{ stdout: st
   const stderr = await new Response(proc.stderr).text();
   const code = await proc.exited;
   return { stdout, stderr, code };
+}
+
+async function runInstall(cwd: string, ...extra: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
+  return runCli(cwd, "install-skills", ...extra);
 }
 
 describe("install-skills", () => {
@@ -129,5 +133,97 @@ describe("install-skills", () => {
     expect(res.code).toBe(0);
     // Only the bundled delta-doc appears; boring-lib is silently skipped.
     expect(res.stderr).not.toContain("boring-lib");
+  });
+
+  test("does not clobber a pre-existing .bak when re-upgrading", async () => {
+    await runInstall(dir);
+    const target = join(dir, ".claude/skills/delta-doc/SKILL.md");
+    const original = readFileSync(target, "utf8");
+
+    // First local edit → upgrade leaves the edit in .bak.
+    writeFileSync(target, "edit one\n");
+    await runInstall(dir);
+    expect(readFileSync(target + ".bak", "utf8")).toBe("edit one\n");
+
+    // Second local edit → upgrade must NOT destroy the first .bak; the new
+    // backup lands at .bak.1 instead.
+    writeFileSync(target, "edit two\n");
+    const res = await runInstall(dir);
+    expect(res.code).toBe(0);
+    expect(readFileSync(target, "utf8")).toBe(original);
+    // Original backup preserved.
+    expect(readFileSync(target + ".bak", "utf8")).toBe("edit one\n");
+    // New backup written to a non-colliding name.
+    expect(readFileSync(target + ".bak.1", "utf8")).toBe("edit two\n");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// delta sql --out guard + bad-module error (CLI regressions)
+// ---------------------------------------------------------------------------
+
+const REPO_POSTGRES = resolve(import.meta.dir, "..", "src", "server", "postgres");
+
+const TYPES_MODULE =
+  `import { defineSchema, defineDoc } from ${JSON.stringify(REPO_POSTGRES)};\n` +
+  `export const schema = defineSchema({ todos: { columns: { text: "text" }, temporal: false } });\n` +
+  `export const docs = [defineDoc("todos:", { root: "todos", include: [] })];\n`;
+
+describe("delta sql --out", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "delta-sql-out-"));
+    writeFileSync(join(dir, "types.ts"), TYPES_MODULE);
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("writes a fresh --out file and stamps the generated header", async () => {
+    const out = join(dir, "003-tables.sql");
+    const res = await runCli(dir, "sql", "./types.ts", "--out", out);
+    expect(res.code).toBe(0);
+    expect(existsSync(out)).toBe(true);
+    expect(readFileSync(out, "utf8")).toContain("GENERATED FROM");
+  });
+
+  test("refuses to overwrite a non-generated --out file without --force", async () => {
+    const out = join(dir, "hand-written.sql");
+    writeFileSync(out, "-- my own SQL\nSELECT 1;\n");
+    const res = await runCli(dir, "sql", "./types.ts", "--out", out);
+    expect(res.code).not.toBe(0);
+    expect(res.stderr).toContain("Refusing to overwrite");
+    expect(res.stderr).toContain("--force");
+    // File left untouched.
+    expect(readFileSync(out, "utf8")).toBe("-- my own SQL\nSELECT 1;\n");
+  });
+
+  test("--force overwrites a non-generated --out file", async () => {
+    const out = join(dir, "hand-written.sql");
+    writeFileSync(out, "-- my own SQL\nSELECT 1;\n");
+    const res = await runCli(dir, "sql", "./types.ts", "--out", out, "--force");
+    expect(res.code).toBe(0);
+    expect(readFileSync(out, "utf8")).toContain("GENERATED FROM");
+  });
+
+  test("overwrites a previously generated --out file and keeps a backup", async () => {
+    const out = join(dir, "003-tables.sql");
+    await runCli(dir, "sql", "./types.ts", "--out", out);
+    const res = await runCli(dir, "sql", "./types.ts", "--out", out);
+    expect(res.code).toBe(0);
+    // Re-generated in place, with the prior generated copy backed up.
+    expect(readFileSync(out, "utf8")).toContain("GENERATED FROM");
+    expect(existsSync(out + ".bak")).toBe(true);
+  });
+
+  test("prints a friendly one-line error for a missing module path", async () => {
+    const res = await runCli(dir, "sql", "./does-not-exist.ts");
+    expect(res.code).not.toBe(0);
+    expect(res.stderr).toContain('Cannot load module "./does-not-exist.ts"');
+    // No raw ResolveMessage JSON blob / stack.
+    expect(res.stderr).not.toContain("ResolveMessage");
+    expect(res.stderr).not.toContain('"specifier"');
   });
 });

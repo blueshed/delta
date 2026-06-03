@@ -106,9 +106,10 @@ export interface WsClient {
   send(msg: any): Promise<any>;
   on(event: string, handler: NotifyHandler): () => void;
   /**
-   * Close the socket and suppress reconnection. Pending `send` promises
-   * remain unresolved — callers should await them before calling close.
-   * Idempotent.
+   * Close the socket and suppress reconnection. Any in-flight `send` promises
+   * are rejected: explicit close() rejects with `{code:0, message:"closed"}`,
+   * and an unexpected transport drop (which may reconnect) rejects with
+   * `{code:0, message:"disconnected"}`. Idempotent.
    */
   close(): void;
   /**
@@ -191,6 +192,12 @@ export function connectWs(
     ready = new Promise<void>((r) => {
       readyResolve = r;
     });
+    // Drain in-flight requests on EVERY socket drop (including those that will
+    // reconnect) so outstanding `send`/`call` awaits fail fast instead of
+    // hanging forever. Use a DISTINCT message ("disconnected") so callers can
+    // tell a retryable transport drop from an explicit close() ("closed").
+    pending.forEach(({ reject }) => reject({ code: 0, message: "disconnected" }));
+    pending.clear();
     listeners.get("close")?.forEach((fn) => fn({}));
   });
 
@@ -297,6 +304,11 @@ export function openDoc<T>(name: string, client?: WsClient): Doc<T> {
     readyResolve = r;
   });
 
+  // First open renders from the caller reading `doc.data`; subsequent opens
+  // are reconnects, where onOps consumers (a DOM built from
+  // applyOpsToCollection) need a reconciliation signal because state may have
+  // drifted during the outage.
+  let opened = false;
   const entry: OpenDocEntry = {
     data,
     dataVersion,
@@ -304,6 +316,19 @@ export function openDoc<T>(name: string, client?: WsClient): Doc<T> {
     onOpen: (state: any) => {
       data.set(state as T);
       dataVersion.set(dataVersion.peek() + 1);
+      if (opened) {
+        // RECONNECT: emit a synthetic whole-doc replace so onOps consumers can
+        // reconcile against the authoritative post-reconnect snapshot. (No
+        // emission on the FIRST open — initial render is the caller's job.)
+        const reconcileOps: DeltaOp[] = [{ op: "replace", path: "", value: state }];
+        for (const handler of opsHandlers) {
+          // Mirror the broadcast dispatch: one throwing handler must not break
+          // the others.
+          try { handler(reconcileOps); }
+          catch (err: any) { docLog.error(`onOps reconcile handler threw: ${err.message}`); }
+        }
+      }
+      opened = true;
       readyResolve();
     },
   };

@@ -5,7 +5,16 @@
 import type { ColumnDef, Schema } from "./schema";
 
 export function q(id: string): string {
-  return `"${id}"`;
+  return `"${id.replace(/"/g, '""')}"`;
+}
+
+/**
+ * Emit a single-quoted SQL string literal with embedded quotes escaped.
+ * Use for ANY value interpolated into a `'…'` literal position so an
+ * apostrophe in a name can't terminate the literal or inject SQL.
+ */
+export function lit(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
 }
 
 export function columnSqlType(def: ColumnDef): string {

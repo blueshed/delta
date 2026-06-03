@@ -42,11 +42,13 @@ log.scrollTop = log.scrollHeight;
 
 // 2. Live ops — patch keyed DOM nodes without rebuilding the list.
 doc.onOps((ops) =>
-  applyOpsToCollection(log, "messages", ops, {
+  applyOpsToCollection<Message>(log, "messages", ops, {
+    key: (m) => `${m.author}:${m.at}`,
     create: renderMessage,
     update: (node, m) => {
-      (node.firstElementChild as HTMLElement).textContent = m.author;
-      (node.lastElementChild  as HTMLElement).textContent = m.text;
+      const el = node as HTMLElement;
+      (el.firstElementChild as HTMLElement).textContent = m.author;
+      (el.lastElementChild  as HTMLElement).textContent = m.text;
     },
   }),
 );

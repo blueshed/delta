@@ -11,6 +11,7 @@
  * undefined — delta itself has no opinion on authentication.
  */
 import type { WsServer } from "../server";
+import { trackSubscribe, trackUnsubscribe } from "../server";
 import { createLogger } from "../logger";
 import type { Pool } from "pg";
 import { resolveDoc } from "./registry";
@@ -34,8 +35,11 @@ export interface CustomDocDef<C = unknown> {
   parse: (docId: string) => C;
   /**
    * MEMBERSHIP def (flat, per-row fan-out) — provide `query` + `matches`.
-   * Initial load: rows this doc exposes, keyed by collection. Receives the Pool so callers
-   * can use `withAppAuth` when RLS is enabled.
+   * Initial load: rows this doc exposes, keyed by collection. NOTE: `query`
+   * runs once per doc name and its result is SHARED across all subscribers —
+   * it is NOT identity-aware (no per-client identity is passed). If a doc must
+   * be scoped per identity (RLS), use a `recompute` def instead, which is
+   * re-evaluated per subscriber under that client's identity.
    */
   query?: (pool: Pool, criteria: C) => Promise<Record<string, any[]>>;
   /** True when `row` belongs in a doc opened under `criteria` (membership def). */
@@ -70,7 +74,12 @@ interface DocState {
   version: number;
   subscribers: Set<any>;
   notifying: boolean;
+  /** A notification arrived while a fetch was in flight — re-drain when it ends. */
+  pending: boolean;
 }
+
+/** delta_fetch_ops caps each call at this many rows; a full page means there may be more. */
+const FETCH_PAGE = 1000;
 
 export async function createDocListener<I = unknown>(
   ws: WsServer,
@@ -90,6 +99,10 @@ export async function createDocListener<I = unknown>(
   const customCache = new Map<string, Record<string, Record<string, any>>>();
   const customCriteria = new Map<string, unknown>();
   const customSubs = new Map<string, Set<any>>();
+  // Serialize recompute pushes per doc name: a write's recompute chains after
+  // the previous one for the same doc, so a slower earlier recompute can't land
+  // after a later one and settle the client on stale data.
+  const recomputeChains = new Map<string, Promise<void>>();
 
   function findCustom(docName: string): { def: CustomDocDef<any>; docId: string } | null {
     for (const [prefix, def] of customByPrefix) {
@@ -109,8 +122,19 @@ export async function createDocListener<I = unknown>(
   // Single LISTEN connection with auto-reconnect
   let listener = await pool.connect();
   let destroyed = false;
+  let reconnecting = false;
 
   let errorHandler: ((err: Error) => void) | null = null;
+
+  // Detach our handlers before releasing a connection — released connections
+  // are recycled by the pool, and a stale listener would fire against this
+  // closure's state (and spuriously trigger reconnect) on a future checkout.
+  function detachListener(client: any) {
+    try { client.removeListener?.("notification", onNotification); } catch {}
+    if (errorHandler) {
+      try { client.removeListener?.("error", errorHandler); } catch {}
+    }
+  }
 
   async function setupListener(client: any) {
     await client.query("LISTEN delta_changes");
@@ -123,25 +147,51 @@ export async function createDocListener<I = unknown>(
   }
 
   async function reconnect() {
-    log.info("listener reconnecting...");
-    try { listener.release(); } catch {}
-    const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
-    for (let attempt = 1; !destroyed; attempt++) {
-      try {
-        await delay(Math.min(attempt * 1000, 10000));
-        listener = await pool.connect();
-        await setupListener(listener);
-        log.info("listener reconnected");
-        return;
-      } catch (err) {
-        log.error(`reconnect attempt ${attempt} failed: ${errMsg(err)}`);
+    if (reconnecting || destroyed) return; // a single error event runs the loop
+    reconnecting = true;
+    // `reconnecting` stays true for the WHOLE operation, including the resync,
+    // so an error fired by the freshly-connected listener during resync can't
+    // spawn a second concurrent reconnect that releases the connection resync
+    // is using. The finally guarantees the flag is always cleared.
+    try {
+      log.info("listener reconnecting...");
+      detachListener(listener);
+      try { listener.release(); } catch {}
+      const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+      for (let attempt = 1; !destroyed; attempt++) {
+        try {
+          await delay(Math.min(attempt * 1000, 10000));
+          listener = await pool.connect();
+          await setupListener(listener);
+          log.info("listener reconnected");
+          // Catch up: ops committed while we were disconnected were NOTIFY'd to
+          // nobody, so re-drain every tracked doc from its last seen version.
+          await resyncTracked();
+          return;
+        } catch (err) {
+          log.error(`reconnect attempt ${attempt} failed: ${errMsg(err)}`);
+        }
       }
+    } finally {
+      reconnecting = false;
+    }
+  }
+
+  // Re-drain all tracked docs (used after a reconnect to recover missed ops).
+  async function resyncTracked() {
+    for (const [docName, state] of tracked) {
+      if (state.notifying) { state.pending = true; continue; }
+      state.notifying = true;
+      try { await drainDoc(docName, state); }
+      catch (err) { log.error(`resync ${docName}: ${errMsg(err)}`); }
+      finally { state.notifying = false; }
     }
   }
 
   try {
     await setupListener(listener);
   } catch (err) {
+    detachListener(listener);
     listener.release();
     throw err;
   }
@@ -163,20 +213,43 @@ export async function createDocListener<I = unknown>(
         // Custom docs loaded their initial state via `def.query` on open, so
         // pre-existing ops are already reflected — replaying history would
         // duplicate them. Same logic protects close-then-reopen.
-        state = { version: Math.max(0, v - 1), subscribers: new Set(), notifying: false };
+        state = { version: Math.max(0, v - 1), subscribers: new Set(), notifying: false, pending: false };
         tracked.set(docName, state);
       }
 
       if (v <= state.version) return;
-      if (state.notifying) return;
+      if (state.notifying) {
+        // A fetch is already running for this doc. Coalesce instead of dropping:
+        // dropping here lost ops when a concurrent write's NOTIFY landed mid-fetch.
+        state.pending = true;
+        return;
+      }
 
       state.notifying = true;
       try {
+        await drainDoc(docName, state);
+      } finally {
+        state.notifying = false;
+      }
+    } catch (err) {
+      log.error(`notify error: ${errMsg(err)}`);
+    }
+  }
+
+  // Drain a doc's ops to its subscribers. Loops while a full page comes back
+  // (a backlog larger than delta_fetch_ops' LIMIT) and re-runs if another
+  // notification arrived mid-drain (the coalesced `pending` flag). Caller owns
+  // the `notifying` guard.
+  async function drainDoc(docName: string, state: DocState) {
+    do {
+      state.pending = false;
+      let pageRows = FETCH_PAGE;
+      while (pageRows >= FETCH_PAGE) {
         const { rows } = await pool.query(
           "SELECT version, ops FROM delta_fetch_ops($1, $2)",
           [docName, state.version],
         );
-
+        pageRows = rows.length;
         for (const row of rows) {
           if (state.subscribers.size > 0) {
             ws.publish(docName, { doc: docName, ops: row.ops });
@@ -184,16 +257,11 @@ export async function createDocListener<I = unknown>(
           state.version = row.version;
           customFanOut(row.ops as DeltaOp[]);
         }
-
-        pruneDoc(docName);
-
-        log.debug(`notify ${docName} v${state.version}`);
-      } finally {
-        state.notifying = false;
       }
-    } catch (err) {
-      log.error(`notify error: ${errMsg(err)}`);
-    }
+    } while (state.pending);
+
+    pruneDoc(docName);
+    log.debug(`notify ${docName} v${state.version}`);
   }
 
   // ---------------------------------------------------------------------------
@@ -206,7 +274,13 @@ export async function createDocListener<I = unknown>(
     for (const client of subs) {
       try {
         let identity: I | undefined;
-        if (auth) { const g = auth.gate(client); identity = isAuthError(g) ? undefined : (g as I); }
+        if (auth) {
+          const g = auth.gate(client);
+          // Unauthenticated (e.g. after logout) — never push scoped recompute
+          // data to a client that has dropped its identity.
+          if (isAuthError(g)) continue;
+          identity = g as I;
+        }
         const doc = await def.recompute!(pool, criteria, identity);
         if (doc == null) continue;
         if (client.readyState === undefined || client.readyState === 1) {
@@ -216,6 +290,19 @@ export async function createDocListener<I = unknown>(
         log.error(`recompute ${docName}: ${errMsg(err)}`);
       }
     }
+  }
+
+  // Chain a recompute after the previous one for the same doc — preserves
+  // NOTIFY order so out-of-order resolution can't deliver a stale snapshot last.
+  function scheduleRecompute(def: CustomDocDef<any>, docName: string, criteria: unknown, subs: Set<any>) {
+    const prev = recomputeChains.get(docName) ?? Promise.resolve();
+    const next = prev
+      .catch(() => {})
+      .then(() => recomputeAndPush(def, docName, criteria, subs));
+    recomputeChains.set(docName, next);
+    next.finally(() => {
+      if (recomputeChains.get(docName) === next) recomputeChains.delete(docName);
+    });
   }
 
   function customFanOut(ops: DeltaOp[]) {
@@ -233,7 +320,7 @@ export async function createDocListener<I = unknown>(
           if (!docName.startsWith(prefix) || subs.size === 0) continue;
           const criteria = customCriteria.get(docName);
           if (criteria === undefined) continue;
-          void recomputeAndPush(def, docName, criteria, subs);
+          scheduleRecompute(def, docName, criteria, subs);
         }
       }
     }
@@ -355,6 +442,18 @@ export async function createDocListener<I = unknown>(
       const match = findCustom(docName);
       if (!match) return;                                     // fall through to standard
 
+      // Gate custom docs exactly like standard docs (withDoc). Without this the
+      // custom open handler — which registers before and short-circuits the
+      // standard gated handler — let an unauthenticated client read scoped data.
+      let identity: I | undefined;
+      if (auth) {
+        const gated = auth.gate(client);
+        if (isAuthError(gated)) {
+          return respond({ error: { code: 401, message: gated.error } });
+        }
+        identity = gated as I;
+      }
+
       const { def, docId } = match;
       try {
         const criteria = customCriteria.get(docName) ?? def.parse(docId);
@@ -362,8 +461,6 @@ export async function createDocListener<I = unknown>(
         let doc: any;
         if (def.recompute) {
           // Whole-doc, identity-aware: re-evaluate under THIS client's identity (RLS).
-          let identity: I | undefined;
-          if (auth) { const g = auth.gate(client); identity = isAuthError(g) ? undefined : (g as I); }
           doc = await def.recompute(pool, criteria, identity);
           if (doc == null) return respond({ error: { code: 404, message: "Not found" } });
           // No customCache — each open/fan-out re-evals per identity (don't share across clients).
@@ -379,7 +476,7 @@ export async function createDocListener<I = unknown>(
 
         if (!customSubs.has(docName)) customSubs.set(docName, new Set());
         customSubs.get(docName)!.add(client);
-        client.subscribe(docName);
+        trackSubscribe(client, docName);
 
         respond({ result: doc });
         log.info(`opened ${docName} (custom${def.recompute ? ", recompute" : ""})`);
@@ -401,7 +498,7 @@ export async function createDocListener<I = unknown>(
       if (!docName) return;
       if (!findCustom(docName)) return;                       // fall through to standard
 
-      client.unsubscribe(docName);
+      trackUnsubscribe(client, docName);
       const subs = customSubs.get(docName);
       if (subs) {
         subs.delete(client);
@@ -423,14 +520,14 @@ export async function createDocListener<I = unknown>(
     pruneDoc(docName);
     let state = tracked.get(docName);
     if (!state) {
-      state = { version: result.version, subscribers: new Set(), notifying: false };
+      state = { version: result.version, subscribers: new Set(), notifying: false, pending: false };
       tracked.set(docName, state);
     } else {
       state.version = Math.max(state.version, result.version);
     }
 
     state.subscribers.add(client);
-    client.subscribe(docName);
+    trackSubscribe(client, docName);
     respond({ result: result.result });
     log.info(`opened ${docName} v${state.version}`);
   }));
@@ -454,7 +551,7 @@ export async function createDocListener<I = unknown>(
   }));
 
   ws.on("close", withDoc("close", ({ docName, client, respond }) => {
-    client.unsubscribe(docName);
+    trackUnsubscribe(client, docName);
     const state = tracked.get(docName);
     if (state) {
       state.subscribers.delete(client);
@@ -475,10 +572,7 @@ export async function createDocListener<I = unknown>(
       } catch {}
       // Released connections are recycled by the pool; stale listeners would
       // fire against this closure's state on future pooled connections.
-      try { (listener as any).removeListener?.("notification", onNotification); } catch {}
-      if (errorHandler) {
-        try { (listener as any).removeListener?.("error", errorHandler); } catch {}
-      }
+      detachListener(listener);
       try { listener.release(); } catch {}
     },
   };

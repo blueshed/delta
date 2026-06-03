@@ -19,8 +19,8 @@ server, refresh the page, the history is still there.
 
 ## What it costs
 
-- `server.ts` — 27 lines.
-- `client.ts` — 47 lines.
+- `server.ts` — a few dozen lines: one `registerDoc`, one `Bun.serve`.
+- `client.ts` — a few dozen lines: connect, open, initial paint, `onOps`, send.
 - `index.html` — markup + a little CSS.
 
 That's the whole sync layer. No backend SDK, no live-query subscription

@@ -98,6 +98,47 @@ describe("generateSql", () => {
     );
   });
 
+  test("escapes single quotes in values interpolated into SQL literals", () => {
+    // A default value containing an apostrophe must be doubled in BOTH the
+    // column DEFAULT clause and the columns_def JSON literal so it can't
+    // terminate the surrounding '…' literal.
+    const schema = defineSchema({
+      notes: {
+        columns: { label: { type: "text", default: "O'Brien" } },
+        temporal: false,
+      },
+    });
+    const sql = generateSql(schema, []);
+
+    // DEFAULT clause: sqlDefault already escapes → 'O''Brien'.
+    expect(sql).toContain("DEFAULT 'O''Brien'");
+    // columns_def JSON literal: lit() escapes the apostrophe inside the JSON.
+    expect(sql).toContain("O''Brien");
+    // No un-doubled apostrophe survives that could break the literal.
+    expect(sql).not.toContain("'O'Brien'");
+  });
+
+  test("include is emitted as a valid quoted text[] array literal", () => {
+    const schema = defineSchema({
+      posts: { columns: { body: "text" }, temporal: false },
+      comments: { columns: { body: "text" }, parent: "posts", temporal: false },
+    });
+    const docs = [
+      defineDoc("post:", { root: "posts", include: ["comments"] }),
+    ];
+    const sql = generateSql(schema, docs);
+    // Each element double-quoted inside the braces: '{"comments"}'.
+    expect(sql).toContain(`'{"comments"}'`);
+  });
+
+  test("empty include is an empty array literal", () => {
+    const sql = generateSql(
+      defineSchema({ x: { columns: { a: "text" }, temporal: false } }),
+      [defineDoc("x:", { root: "x", include: [] })],
+    );
+    expect(sql).toContain("'{}'");
+  });
+
   test("custom header / regenerate hint are honoured", () => {
     const sql = generateSql(defineSchema({ x: { columns: { a: "text" } } }), [], {
       header: "CUSTOM HEADER",

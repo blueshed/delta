@@ -32,6 +32,10 @@ import { SignJWT, jwtVerify } from "jose";
 import type { Pool } from "pg";
 import { createLogger } from "./logger";
 import type { DeltaAuth } from "./auth";
+import { dropClientSubscriptions } from "./server";
+
+/** Algorithm this module signs with — pinned on verify to prevent alg-confusion. */
+const JWT_ALG = "HS256";
 
 export {
   authJwtSqlFile,
@@ -54,6 +58,27 @@ export interface JwtAuthOpts {
   expirationTime?: string;
   loginSql?: string;
   registerSql?: string;
+  /**
+   * Optional re-validation hook for `authenticate`. A JWT is stateless: by
+   * default a signed, unexpired token grants access even if the user was
+   * since deleted or disabled (the documented trade-off of stateless auth).
+   * Provide `verifyUser` to re-check the identity against the database on
+   * each `authenticate`; return the (possibly refreshed) user to allow, or
+   * `null` to reject. Not called on `login` / `register` (those just hit the DB).
+   */
+  verifyUser?: (user: User, pool: Pool) => Promise<User | null>;
+}
+
+/** Set the socket's identity, tearing down a prior *different* identity's
+ *  live subscriptions so an identity switch on one socket can't keep
+ *  receiving the previous user's scoped docs. */
+function switchIdentity(client: any, user: User): void {
+  const prev = client.data?.identity as User | undefined;
+  if (prev && String(prev.id) !== String(user.id)) {
+    dropClientSubscriptions(client);
+  }
+  if (!client.data) client.data = {};
+  client.data.identity = user;
 }
 
 export function jwtAuth(opts: JwtAuthOpts): DeltaAuth<User> {
@@ -71,7 +96,7 @@ export function jwtAuth(opts: JwtAuthOpts): DeltaAuth<User> {
       name: user.name,
       email: user.email,
     })
-      .setProtectedHeader({ alg: "HS256" })
+      .setProtectedHeader({ alg: JWT_ALG })
       .setIssuedAt()
       .setExpirationTime(expirationTime)
       .sign(secret);
@@ -79,7 +104,9 @@ export function jwtAuth(opts: JwtAuthOpts): DeltaAuth<User> {
 
   async function verifyToken(token: string): Promise<User | null> {
     try {
-      const { payload } = await jwtVerify(token, secret);
+      // Pin the algorithm allowlist — without it, jose accepts any alg the
+      // token header claims, opening an alg-confusion vector.
+      const { payload } = await jwtVerify(token, secret, { algorithms: [JWT_ALG] });
       const id = payload.sub;
       if (id === undefined) return null;
       return {
@@ -100,9 +127,9 @@ export function jwtAuth(opts: JwtAuthOpts): DeltaAuth<User> {
         const { rows } = await opts.pool.query(loginSql, [email, password]);
         const user = rows[0]?.result as User | null;
         if (!user) return { error: "Invalid credentials" };
-        client.data.identity = user;
+        switchIdentity(client, user);
         const token = await signToken(user);
-        log.info(`login user=${user.id} email=${user.email ?? ""}`);
+        log.info(`login user=${user.id}`);
         return { result: { ...user, token } };
       },
 
@@ -114,9 +141,9 @@ export function jwtAuth(opts: JwtAuthOpts): DeltaAuth<User> {
         try {
           const { rows } = await opts.pool.query(registerSql, [name, email, password]);
           const user = rows[0]?.result as User;
-          client.data.identity = user;
+          switchIdentity(client, user);
           const token = await signToken(user);
-          log.info(`register user=${user.id} email=${user.email ?? ""}`);
+          log.info(`register user=${user.id}`);
           return { result: { ...user, token } };
         } catch (err: any) {
           if (err.code === "23505") return { error: "Email already registered" };
@@ -127,16 +154,24 @@ export function jwtAuth(opts: JwtAuthOpts): DeltaAuth<User> {
       async authenticate(params, client) {
         const { token } = params ?? {};
         if (!token) return { error: "token required" };
-        const user = await verifyToken(token);
+        let user = await verifyToken(token);
         if (!user) return { error: "Invalid token" };
-        client.data.identity = user;
+        if (opts.verifyUser) {
+          const checked = await opts.verifyUser(user, opts.pool);
+          if (!checked) return { error: "Invalid token" };
+          user = checked;
+        }
+        switchIdentity(client, user);
         log.info(`authenticate user=${user.id}`);
         return { result: user };
       },
 
       async logout(_params, client) {
         const prev = client.data?.identity as User | undefined;
-        delete client.data.identity;
+        if (client.data) delete client.data.identity;
+        // Tear down the prior identity's live doc subscriptions so its scoped
+        // ops stop streaming to this socket immediately.
+        dropClientSubscriptions(client);
         if (prev) log.info(`logout user=${prev.id}`);
         return { result: { ack: true } };
       },

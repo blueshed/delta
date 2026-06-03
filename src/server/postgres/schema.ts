@@ -73,15 +73,33 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
     }
     const table = schema.tables[collKey];
     if (!table) { errors.push({ path: op.path, message: `No table for collection: ${collKey}` }); continue; }
-    if (op.op === "add" && parts.length === 2) {
+    // Whole-row writes: `add` to /coll/- or /coll/<id>, and `replace` of an
+    // entire row at /coll/<id>. Both carry an object VALUE whose keys must all
+    // be declared columns, the implicit "id", or the parent FK column.
+    if ((op.op === "add" || op.op === "replace") && parts.length === 2) {
       const value = (op as any).value as Record<string, unknown> | undefined;
       if (!value || typeof value !== "object") {
-        errors.push({ path: op.path, message: "Add value must be an object" }); continue;
+        if (op.op === "add") {
+          errors.push({ path: op.path, message: "Add value must be an object" });
+        }
+        continue;
       }
-      for (const [col, colDef] of Object.entries(table.columns)) {
-        if (!colDef.nullable && colDef.default === undefined && value[col] === undefined) {
-          if (defaultForType((colDef as ColumnDef).type) === null) {
-            errors.push({ path: op.path, message: `Required field missing: ${col}` });
+      const fkColumn = table.parent?.fkColumn;
+      for (const key of Object.keys(value)) {
+        if (
+          !table.columns[key] &&
+          key !== "id" &&
+          (fkColumn === undefined || key !== fkColumn)
+        ) {
+          errors.push({ path: op.path, message: `Unknown field: ${key}` });
+        }
+      }
+      if (op.op === "add") {
+        for (const [col, colDef] of Object.entries(table.columns)) {
+          if (!colDef.nullable && colDef.default === undefined && value[col] === undefined) {
+            if (defaultForType((colDef as ColumnDef).type) === null) {
+              errors.push({ path: op.path, message: `Required field missing: ${col}` });
+            }
           }
         }
       }
