@@ -112,6 +112,23 @@ describe("install-skills", () => {
     expect(res.stderr).toContain("@acme/widgets");
   });
 
+  test("a sibling shipping multiple skills installs ALL of them (not just one)", async () => {
+    // The exact @blueshed/railroad shape: one package, two skills. Installing
+    // `railroad` without `bun-route` would be a regression — discovery is
+    // per-skill-directory, not one-skill-per-package.
+    makeSkill(dir, "@blueshed/railroad", "railroad", { "SKILL.md": "# railroad\n" });
+    makeSkill(dir, "@blueshed/railroad", "bun-route", {
+      "SKILL.md": "# bun-route\n",
+      "reference.md": "bun-route reference\n",
+    });
+
+    const res = await runInstall(dir);
+    expect(res.code).toBe(0);
+    expect(existsSync(join(dir, ".claude/skills/railroad/SKILL.md"))).toBe(true);
+    expect(existsSync(join(dir, ".claude/skills/bun-route/SKILL.md"))).toBe(true);
+    expect(existsSync(join(dir, ".claude/skills/bun-route/reference.md"))).toBe(true);
+  });
+
   test("discovers a third-party skill from an unscoped sibling package", async () => {
     makeSkill(dir, "single-pkg", "single-skill", {
       "SKILL.md": "# single\n",
