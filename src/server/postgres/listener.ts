@@ -28,17 +28,27 @@ const log = createLogger("[doc]");
 export interface CustomDocDef<C = unknown> {
   /** Doc name prefix (e.g. "sites-in-bbox:"). */
   prefix: string;
-  /** Collections the doc watches for row-level fan-out. */
+  /** Collections whose writes trigger fan-out (per-row for a membership def, whole-doc for a recompute def). */
   watch: string[];
   /** Parse the portion of docName after prefix into criteria. */
   parse: (docId: string) => C;
   /**
-   * Initial load. Return the rows this doc should expose, keyed by collection.
-   * Receives the Pool so callers can use `withAppAuth` when RLS is enabled.
+   * MEMBERSHIP def (flat, per-row fan-out) — provide `query` + `matches`.
+   * Initial load: rows this doc exposes, keyed by collection. Receives the Pool so callers
+   * can use `withAppAuth` when RLS is enabled.
    */
-  query: (pool: Pool, criteria: C) => Promise<Record<string, any[]>>;
-  /** True when `row` belongs in a doc opened under `criteria`. */
-  matches: (collection: string, row: any, criteria: C) => boolean;
+  query?: (pool: Pool, criteria: C) => Promise<Record<string, any[]>>;
+  /** True when `row` belongs in a doc opened under `criteria` (membership def). */
+  matches?: (collection: string, row: any, criteria: C) => boolean;
+  /**
+   * RECOMPUTE def (whole-doc, identity-aware) — provide `recompute` INSTEAD of query/matches.
+   * On open, and on any write to a watched collection, the WHOLE doc is re-evaluated and
+   * republished to each subscriber as a root-replace op — for nested/joined reads a per-row
+   * `matches` can't express. Re-evaluated PER SUBSCRIBER under that client's identity (so RLS
+   * applies correctly), hence the evaluator binds `app.user_id` itself (e.g. via `withAppAuth`).
+   * `identity` is the gated WS identity, or undefined when unauthenticated.
+   */
+  recompute?: (pool: Pool, criteria: C, identity?: unknown) => Promise<any>;
 }
 
 export function defineCustomDoc<C>(
@@ -190,9 +200,45 @@ export async function createDocListener<I = unknown>(
   // Custom-doc cross-pollination
   // ---------------------------------------------------------------------------
 
+  // Recompute defs: a write to a watched collection re-evaluates the WHOLE doc per subscriber
+  // (under that client's identity, so RLS applies) and republishes it as a root-replace op.
+  async function recomputeAndPush(def: CustomDocDef<any>, docName: string, criteria: unknown, subs: Set<any>) {
+    for (const client of subs) {
+      try {
+        let identity: I | undefined;
+        if (auth) { const g = auth.gate(client); identity = isAuthError(g) ? undefined : (g as I); }
+        const doc = await def.recompute!(pool, criteria, identity);
+        if (doc == null) continue;
+        if (client.readyState === undefined || client.readyState === 1) {
+          client.send(JSON.stringify({ doc: docName, ops: [{ op: "replace", path: "", value: doc }] }));
+        }
+      } catch (err) {
+        log.error(`recompute ${docName}: ${errMsg(err)}`);
+      }
+    }
+  }
+
   function customFanOut(ops: DeltaOp[]) {
     if (customByPrefix.size === 0) return;
 
+    // Recompute defs — whole-doc, once per affected doc (any watched collection touched this batch).
+    let hasRecompute = false;
+    for (const def of customByPrefix.values()) if (def.recompute) { hasRecompute = true; break; }
+    if (hasRecompute) {
+      const touched = new Set<string>();
+      for (const op of ops) { const p = splitPath(op.path); if (p.length >= 1) touched.add(p[0]!); }
+      for (const [prefix, def] of customByPrefix) {
+        if (!def.recompute || !def.watch.some((c) => touched.has(c))) continue;
+        for (const [docName, subs] of customSubs) {
+          if (!docName.startsWith(prefix) || subs.size === 0) continue;
+          const criteria = customCriteria.get(docName);
+          if (criteria === undefined) continue;
+          void recomputeAndPush(def, docName, criteria, subs);
+        }
+      }
+    }
+
+    // Membership defs — per-row add/replace/remove.
     for (const op of ops) {
       const parts = splitPath(op.path);
       if (parts.length < 2) continue;
@@ -203,6 +249,7 @@ export async function createDocListener<I = unknown>(
       const row = (op as any).value as any | undefined;
 
       for (const [prefix, def] of customByPrefix) {
+        if (!def.matches) continue; // recompute defs handled above
         if (!def.watch.includes(coll)) continue;
 
         // Memoize membership per distinct criteria for this op.
@@ -218,7 +265,7 @@ export async function createDocListener<I = unknown>(
 
           let shouldBeIn = decisionByCriteria.get(criteria);
           if (shouldBeIn === undefined) {
-            shouldBeIn = row == null ? false : def.matches(coll, row, criteria);
+            shouldBeIn = row == null ? false : def.matches!(coll, row, criteria);
             decisionByCriteria.set(criteria, shouldBeIn);
           }
 
@@ -310,14 +357,24 @@ export async function createDocListener<I = unknown>(
 
       const { def, docId } = match;
       try {
-        let doc = customCache.get(docName);
-        if (!doc) {
-          const criteria = def.parse(docId);
-          const rowsByColl = await def.query(pool, criteria);
-          doc = {};
-          for (const coll of def.watch) doc[coll] = toMap(rowsByColl[coll] ?? []);
-          customCache.set(docName, doc);
-          customCriteria.set(docName, criteria);
+        const criteria = customCriteria.get(docName) ?? def.parse(docId);
+        customCriteria.set(docName, criteria);
+        let doc: any;
+        if (def.recompute) {
+          // Whole-doc, identity-aware: re-evaluate under THIS client's identity (RLS).
+          let identity: I | undefined;
+          if (auth) { const g = auth.gate(client); identity = isAuthError(g) ? undefined : (g as I); }
+          doc = await def.recompute(pool, criteria, identity);
+          if (doc == null) return respond({ error: { code: 404, message: "Not found" } });
+          // No customCache — each open/fan-out re-evals per identity (don't share across clients).
+        } else {
+          doc = customCache.get(docName);
+          if (!doc) {
+            const rowsByColl = await def.query!(pool, criteria);
+            doc = {};
+            for (const coll of def.watch) doc[coll] = toMap(rowsByColl[coll] ?? []);
+            customCache.set(docName, doc);
+          }
         }
 
         if (!customSubs.has(docName)) customSubs.set(docName, new Set());
@@ -325,7 +382,7 @@ export async function createDocListener<I = unknown>(
         client.subscribe(docName);
 
         respond({ result: doc });
-        log.info(`opened ${docName} (custom)`);
+        log.info(`opened ${docName} (custom${def.recompute ? ", recompute" : ""})`);
       } catch (err) {
         log.error(`open custom ${docName} failed: ${errMsg(err)}`);
         respond({ error: { code: 500, message: errMsg(err) } });

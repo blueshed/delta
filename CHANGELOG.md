@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Live custom reads via whole-doc recompute** (`src/server/postgres/listener.ts`). A `CustomDocDef` may now provide `recompute(pool, criteria, identity?)` *instead of* `query` + `matches`: on open, and on any write to a `watch`ed collection, the whole doc is re-evaluated **per subscriber** (under that client's gated identity, so RLS applies) and republished as a single root-replace op. This makes **nested/joined** custom reads live — the case the flat per-row `matches` model can't express — without a fragile nested diff. Membership defs (`query` + `matches`) are unchanged. (PG integration test in `tests/postgres-custom.test.ts`.)
+- **`applyOps` whole-doc root replace** (`src/core.ts`). An empty/root path (`""` or `"/"`) on `replace`/`remove` now swaps or clears the whole doc **in place** (object↔object, array↔array). Because the client applies ops in place and bumps `dataVersion`, this works end-to-end (server + client) from the one core change — the primitive the recompute republish builds on. +unit tests.
+
 ### Changed
 
 - **delta-doc skill: documented the SQL-side doc-ops composition API** (`.claude/skills/delta-doc/reference.md`). The stored functions (`delta_open`/`delta_open_as`, `delta_apply`/`delta_apply_as`) were always callable from inside custom `plpgsql`/SQL, but the reference framed them only as the Bun layer's contract. Added a "Composing doc operations from SQL" recipe: a custom read evaluator composes docs via `delta_open_as` (identity bound one-shot, so RLS applies to every table it reads — avoiding the silent `app.user_id = ''` scope-to-nothing and the `::bigint`-on-`''` throw); a stored write mutates-and-broadcasts via `delta_apply_as` (never a raw `INSERT`, which wouldn't NOTIFY); and the `SECURITY DEFINER`-bypasses-RLS caveat (delta is persistence + broadcast, not authorization — a privilege-escalating function must enforce its own guards). Docs only, no code change — turns a supported-but-undocumented pattern into a documented one that generators (e.g. hjeli) can target.

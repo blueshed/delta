@@ -88,6 +88,21 @@ const sitesInBbox: CustomDocDef<BBox> = defineCustomDoc<BBox>("sites-in-bbox:", 
     row.lat >= c.minLat && row.lat <= c.maxLat,
 });
 
+// A RECOMPUTE def — a whole-doc view (nested shape a per-row `matches` can't express).
+// On open and on any write to `sites`, the whole doc is re-evaluated and republished
+// (root-replace) to each subscriber.
+const worldSummary: CustomDocDef<{ worldId: string }> = defineCustomDoc<{ worldId: string }>("world-summary:", {
+  watch: ["sites"],
+  parse: (docId) => ({ worldId: docId }),
+  recompute: async (pool, c) => {
+    const { rows } = await pool.query(
+      "SELECT id::text, name, lat, lng FROM sites WHERE world_id = $1 ORDER BY id",
+      [c.worldId],
+    );
+    return { worldId: c.worldId, siteCount: rows.length, sites: rows };
+  },
+});
+
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
@@ -133,7 +148,7 @@ beforeEach(async () => {
     },
   });
 
-  listener = await createDocListener(ws, pool, { custom: [sitesInBbox] });
+  listener = await createDocListener(ws, pool, { custom: [sitesInBbox, worldSummary] });
   worldId = await seedWorld();
   clients.length = 0;
 });
@@ -217,6 +232,32 @@ describe("postgres custom docs — predicate-based membership", () => {
     await new Promise((r) => setTimeout(r, 300));
     const forViewer = viewer.sent.filter((m: any) => m.doc === "sites-in-bbox:0,0,50,50");
     expect(forViewer).toHaveLength(0);
+  });
+
+  test("recompute def: a watched write re-evaluates and republishes the whole doc", async () => {
+    const world = makeClient("w");
+    await sendAndAwait(ws, world, { action: "open", doc: `world:${worldId}` });
+
+    const viewer = makeClient("v");
+    const openRes = await sendAndAwait(ws, viewer, { action: "open", doc: `world-summary:${worldId}` });
+    expect(openRes.result.siteCount).toBe(0); // initial recompute on open
+
+    await sendAndAwait(ws, world, {
+      action: "delta", doc: `world:${worldId}`,
+      ops: [{ op: "add", path: "/sites/1", value: { name: "Alpha", lat: 10, lng: 20 } }],
+    });
+
+    // the whole doc is recomputed + republished as a root-replace (path "")
+    const msg = await waitFor(
+      () => viewer.sent.find(
+        (m: any) => m.doc === `world-summary:${worldId}` &&
+                    m.ops?.some((o: any) => o.op === "replace" && o.path === ""),
+      ),
+    );
+    expect(msg).toBeDefined();
+    const rootOp = msg.ops.find((o: any) => o.path === "");
+    expect(rootOp.value.siteCount).toBe(1);
+    expect(rootOp.value.sites[0].name).toBe("Alpha");
   });
 
   test("update moves row into bbox → add", async () => {
