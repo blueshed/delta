@@ -292,3 +292,47 @@ describe("M3: delta_apply collection scoping", () => {
     expect(res.error.message).toContain("not part of doc");
   });
 });
+
+// ===========================================================================
+// Version sequence on the wire — supports client-side gap detection / resync
+// ===========================================================================
+
+describe("version sequence: open carries _v, broadcasts carry contiguous v", () => {
+  beforeEach(async () => {
+    clearRegistry();
+    await resetSites();
+    registerDocType(
+      docTypeFromDef(defineDoc("world:", { root: "worlds", include: ["sites"] }), pool),
+    );
+    await startListener({});
+  });
+
+  test("open returns _v and the delta's broadcast carries v === ack version === _v + 1", async () => {
+    const worldId = await seedWorld();
+    const doc = `world:${worldId}`;
+    const c = makeClient("c");
+
+    const opened = await sendAndAwait(ws, c, { action: "open", doc });
+    // `_v` is normalized to a number on the wire (so the client's strict
+    // version comparison works regardless of pg's BIGINT-as-string quirk).
+    expect(typeof opened.result._v).toBe("number");
+    const v0 = opened.result._v as number;
+
+    const before = c.sent.length;
+    const ack = await sendAndAwait(ws, c, {
+      action: "delta", doc,
+      ops: [{ op: "add", path: "/sites/-", value: { name: "s", lat: 1, lng: 2 } }],
+    });
+    expect(ack.result.ack).toBe(true);
+    const v1 = Number(ack.result.version);
+    expect(v1).toBe(v0 + 1); // contiguous
+
+    // The fan-out broadcast (via LISTEN/NOTIFY) carries the same version — as a
+    // number, matching `_v`.
+    const bcast: any = await waitFor(
+      () => c.sent.slice(before).find((m: any) => m.doc === doc && m.ops && m.id == null),
+    );
+    expect(typeof bcast.v).toBe("number");
+    expect(bcast.v).toBe(v1);
+  });
+});

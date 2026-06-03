@@ -128,6 +128,18 @@ export interface OpenDocEntry {
   opsHandlers: Set<OpsHandler>;
   /** Called with the full doc state on open and every reconnect. */
   onOpen: (state: any) => void;
+  /**
+   * Last authoritative server doc version applied — seeded from `_v` on the
+   * open snapshot and advanced by `v` on each broadcast. `undefined` means the
+   * backend doesn't version this doc (SQLite/JSON today, custom docs), so no
+   * gap detection runs and ops apply as-is.
+   */
+  serverVersion?: number;
+  /** True while a gap-triggered re-open is in flight (de-dupes resyncs). */
+  resyncing?: boolean;
+  /** True once the first open response has landed. Broadcasts arriving before
+   *  that are dropped — the open snapshot is the authoritative starting state. */
+  opened?: boolean;
 }
 
 export const WS = key<WsClient>("ws");
@@ -168,6 +180,37 @@ export function connectWs(
       log.debug(`#${id} ${msg.action} ${msg.doc ?? msg.method ?? ""}`);
       ws.send(JSON.stringify({ ...msg, id }));
     });
+  }
+
+  // Apply a broadcast's ops: fire onOps subscribers FIRST (so DOM patchers see
+  // the op that matches the state change about to land), then patch `data`.
+  function applyBroadcast(entry: OpenDocEntry, ops: DeltaOp[]): void {
+    for (const handler of entry.opsHandlers) {
+      try { handler(ops); }
+      catch (err: any) { docLog.error(`onOps handler threw: ${err.message}`); }
+    }
+    const current = entry.data.peek();
+    if (current) {
+      // Mutate in place so captured child refs (e.g. a row object bound into a
+      // drag-handler closure) stay valid across echoes. `set(sameRef)` is a
+      // no-op under Object.is — `touch()` is the escape hatch that fires subs.
+      applyOps(current, ops);
+      entry.dataVersion.set(entry.dataVersion.peek() + 1);
+      entry.data.touch();
+    }
+  }
+
+  // A versioned broadcast arrived out of sequence (we missed at least one op).
+  // Applying it would corrupt state, so re-open the doc to get an authoritative
+  // snapshot; onOpen's synthetic root-replace lets onOps consumers reconcile.
+  // De-duped: only one re-open in flight per doc.
+  function resyncDoc(name: string, entry: OpenDocEntry): void {
+    if (entry.resyncing) return;
+    entry.resyncing = true;
+    docLog.debug(`version gap on ${name} — resyncing`);
+    sendInternal({ action: "open", doc: name })
+      .then((state) => { entry.resyncing = false; entry.onOpen(state); })
+      .catch((err: any) => { entry.resyncing = false; docLog.error(`resync ${name}: ${err.message}`); });
   }
 
   ws.addEventListener("open", () => {
@@ -221,22 +264,36 @@ export function connectWs(
         // Doc op broadcast — dispatch to the matching entry if any.
         if (msg.doc && msg.ops) {
           const entry = docs.get(msg.doc);
-          if (entry) {
-            // Fire op subscribers FIRST, so DOM patchers see the op that
-            // matches the state change about to land on `data`.
-            for (const handler of entry.opsHandlers) {
-              try { handler(msg.ops); }
-              catch (err: any) { docLog.error(`onOps handler threw: ${err.message}`); }
-            }
-            const current = entry.data.peek();
-            if (current) {
-              // Mutate in place so captured child refs (e.g. a row object
-              // bound into a drag-handler closure) stay valid across echoes.
-              // `set(sameRef)` is a no-op under Object.is — `touch()` is the
-              // escape hatch that fires subscribers.
-              applyOps(current, msg.ops);
-              entry.dataVersion.set(entry.dataVersion.peek() + 1);
-              entry.data.touch();
+          // Drop broadcasts that arrive before the first open response: the
+          // snapshot is the authoritative starting state, and firing onOps
+          // against a not-yet-rendered doc (or seeding a version the snapshot
+          // then resets) would diverge the onOps DOM from doc.data.
+          if (entry && entry.opened) {
+            // Coerce defensively — a versioning backend may send the number as
+            // a string (e.g. pg BIGINT columns), and strict comparison below
+            // must not silently mis-classify a string vs the numeric baseline.
+            // A non-numeric/NaN `v` falls into the unversioned path rather than
+            // poisoning serverVersion (NaN comparisons are always false).
+            const n = Number(msg.v);
+            const v: number | undefined = (msg.v == null || Number.isNaN(n)) ? undefined : n;
+            const sv = entry.serverVersion;
+            if (v != null && sv != null) {
+              // Versioned doc — validate the server sequence.
+              if (v <= sv) {
+                // Duplicate / superseded echo — already applied. Ignore.
+              } else if (v > sv + 1) {
+                // GAP: at least one op was missed. Don't apply out of order —
+                // re-open to resync from an authoritative snapshot.
+                resyncDoc(msg.doc, entry);
+              } else {
+                // Contiguous (v === sv + 1) — apply and advance.
+                applyBroadcast(entry, msg.ops);
+                entry.serverVersion = v;
+              }
+            } else {
+              // Unversioned backend (or no baseline yet) — apply as-is.
+              applyBroadcast(entry, msg.ops);
+              if (v != null) entry.serverVersion = v;
             }
           }
         }
@@ -307,16 +364,27 @@ export function openDoc<T>(name: string, client?: WsClient): Doc<T> {
   // First open renders from the caller reading `doc.data`; subsequent opens
   // are reconnects, where onOps consumers (a DOM built from
   // applyOpsToCollection) need a reconciliation signal because state may have
-  // drifted during the outage.
-  let opened = false;
+  // drifted during the outage. `opened` lives on the entry so the broadcast
+  // handler can drop ops that arrive before the first open lands.
   const entry: OpenDocEntry = {
     data,
     dataVersion,
     opsHandlers,
+    opened: false,
     onOpen: (state: any) => {
+      // (Re)establish the authoritative version SOLELY from this snapshot: seed
+      // from `_v` (added by versioning backends) and strip it so it never leaks
+      // into `doc.data`; clear it when absent so a stale baseline (possibly set
+      // from a broadcast) can't survive a re-open and cause a false gap.
+      if (state && typeof state === "object" && "_v" in state) {
+        entry.serverVersion = Number((state as any)._v);
+        delete (state as any)._v;
+      } else {
+        entry.serverVersion = undefined;
+      }
       data.set(state as T);
       dataVersion.set(dataVersion.peek() + 1);
-      if (opened) {
+      if (entry.opened) {
         // RECONNECT: emit a synthetic whole-doc replace so onOps consumers can
         // reconcile against the authoritative post-reconnect snapshot. (No
         // emission on the FIRST open — initial render is the caller's job.)
@@ -328,7 +396,7 @@ export function openDoc<T>(name: string, client?: WsClient): Doc<T> {
           catch (err: any) { docLog.error(`onOps reconcile handler threw: ${err.message}`); }
         }
       }
-      opened = true;
+      entry.opened = true;
       readyResolve();
     },
   };

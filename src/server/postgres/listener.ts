@@ -252,7 +252,12 @@ export async function createDocListener<I = unknown>(
         pageRows = rows.length;
         for (const row of rows) {
           if (state.subscribers.size > 0) {
-            ws.publish(docName, { doc: docName, ops: row.ops });
+            // `v` lets the client validate the per-doc sequence and re-open on
+            // a gap. delta_fetch_ops rows are contiguous and ascending per doc.
+            // Number(): pg returns a top-level BIGINT column as a string, but
+            // the open snapshot's `_v` (from JSONB) is a number — the client
+            // compares them strictly, so both must be numbers.
+            ws.publish(docName, { doc: docName, ops: row.ops, v: Number(row.version) });
           }
           state.version = row.version;
           customFanOut(row.ops as DeltaOp[]);

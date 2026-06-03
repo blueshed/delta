@@ -134,6 +134,11 @@ export function docTypeFromDef<I = unknown>(
       if (!doc) return null;
       const version = doc._version ?? 0;
       delete doc._version;
+      // Forward the version to the client as `_v` so it can detect a missed
+      // broadcast (gap) and re-open to resync. The client strips `_v` before
+      // it reaches `doc.data`. Number() keeps it consistent with the broadcast
+      // `v` (which pg yields as a string from a BIGINT column).
+      doc._v = Number(version);
       return { result: doc, version };
     },
 
