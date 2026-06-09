@@ -250,6 +250,26 @@ export async function createDocListener<I = unknown>(
           [docName, state.version],
         );
         pageRows = rows.length;
+
+        // Gap check: the first fetchable row being more than one version
+        // ahead means the intermediate ops were pruned from _delta_ops_log
+        // (delta_prune_ops) while nobody was listening. Publishing only the
+        // tail would leave subscribers silently missing the gap, so push each
+        // one a fresh identity-scoped snapshot instead.
+        if (rows.length > 0 && Number(rows[0].version) > Number(state.version) + 1) {
+          log.warn(
+            `ops gap for ${docName} (have v${state.version}, log starts at v${rows[0].version}) — resnapshotting subscribers`,
+          );
+          await resnapshotSubscribers(docName, state);
+          // The snapshot reflects everything up to (at least) the last fetched
+          // row; ops landing after the fetch re-notify and drain normally.
+          state.version = rows[rows.length - 1].version;
+          // Membership custom docs still get the tail ops we did fetch; the
+          // pruned gap may leave their caches stale until their next open.
+          for (const row of rows) customFanOut(row.ops as DeltaOp[]);
+          continue;
+        }
+
         for (const row of rows) {
           if (state.subscribers.size > 0) {
             ws.publish(docName, { doc: docName, ops: row.ops });
@@ -262,6 +282,34 @@ export async function createDocListener<I = unknown>(
 
     pruneDoc(docName);
     log.debug(`notify ${docName} v${state.version}`);
+  }
+
+  // After an ops-log gap, re-open the doc per subscriber (under that client's
+  // gated identity, so RLS scoping holds) and push the authoritative state as
+  // a root-replace op — the same reconcile signal the client emits on
+  // reconnect, so both render paths self-heal.
+  async function resnapshotSubscribers(docName: string, state: DocState) {
+    if (state.subscribers.size === 0) return;
+    const found = resolveDoc(docName);
+    if (!found) return;
+    for (const client of state.subscribers) {
+      if (client.readyState !== undefined && client.readyState !== 1) continue;
+      try {
+        let identity: I | undefined;
+        if (auth) {
+          const g = auth.gate(client);
+          if (isAuthError(g)) continue;
+          identity = g as I;
+        }
+        const result = await found.type.open(found.ctx, docName, undefined, identity);
+        if (!result) continue;
+        client.send(
+          JSON.stringify({ doc: docName, ops: [{ op: "replace", path: "", value: result.result }] }),
+        );
+      } catch (err) {
+        log.error(`resnapshot ${docName}: ${errMsg(err)}`);
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------

@@ -521,7 +521,23 @@ function discoverSkillSources(): SkillSource[] {
         if (name === "@blueshed/delta") continue;
         const skillsRoot = join(dir, ".claude/skills");
         for (const s of listSkillsIn(skillsRoot, name)) {
-          if (!seenNames.has(s.name)) { sources.push(s); seenNames.add(s.name); }
+          if (!seenNames.has(s.name)) {
+            sources.push(s);
+            seenNames.add(s.name);
+            continue;
+          }
+          // Already collected from our own root. Own root keeps PRECEDENCE
+          // (a sibling must never shadow a bundled skill), but when the own
+          // copy is a byte-identical vendored duplicate of this sibling's
+          // skill, credit the sibling as the origin in the log.
+          const own = sources.find((x) => x.name === s.name);
+          if (own && own.origin === "@blueshed/delta") {
+            try {
+              const a = readFileSync(join(own.srcDir, "SKILL.md"));
+              const b = readFileSync(join(s.srcDir, "SKILL.md"));
+              if (a.equals(b)) own.origin = name;
+            } catch { /* unreadable sibling copy — keep own attribution */ }
+          }
         }
       }
     }

@@ -439,6 +439,45 @@ describe("registerDocs", () => {
       expect(row.done).toBe(0);
       expect(row.priority).toBeNull();
     });
+
+    test("`/tasks/-` append assigns a server id (never a literal '-') and broadcasts it", async () => {
+      seedProject("p1", "Alpha", "active");
+      const published: any[] = [];
+      ws.setServer({ publish: (_ch: string, raw: string) => published.push(JSON.parse(raw)) });
+
+      const sock = mockSocket();
+      await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+      await ws.websocket.message(sock, JSON.stringify({
+        id: 2,
+        action: "delta",
+        doc: "project:p1",
+        ops: [{ op: "add", path: "/tasks/-", value: { title: "Appended", done: false } }],
+      }));
+      expect(sock.sent[1].result).toEqual({ ack: true });
+
+      const rows = db.query("SELECT * FROM current_tasks WHERE project_id = 'p1'").all() as any[];
+      expect(rows).toHaveLength(1);
+      expect(rows[0].id).not.toBe("-");
+      expect(rows[0].title).toBe("Appended");
+
+      // The broadcast op carries the real id, not "-".
+      const addOp = published
+        .find((m) => m.doc === "project:p1")
+        ?.ops?.find((o: any) => o.op === "add");
+      expect(addOp.path).toBe(`/tasks/${rows[0].id}`);
+      expect(addOp.value.id).toBe(rows[0].id);
+
+      // A second append mints a distinct id — no PK collision.
+      await ws.websocket.message(sock, JSON.stringify({
+        id: 3,
+        action: "delta",
+        doc: "project:p1",
+        ops: [{ op: "add", path: "/tasks/-", value: { title: "Second", done: false } }],
+      }));
+      expect(sock.sent[2].result).toEqual({ ack: true });
+      const after = db.query("SELECT * FROM current_tasks WHERE project_id = 'p1'").all() as any[];
+      expect(after).toHaveLength(2);
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -1171,6 +1210,34 @@ describe("registerDocs", () => {
       await ws.websocket.message(sock, JSON.stringify({ id: 3, action: "open", doc: "project:p1" }));
       expect(Object.keys(sock.sent[2].result.tasks)).toHaveLength(1);
       expect(sock.sent[2].result.tasks["t1"]).toBeDefined();
+    });
+  });
+
+  describe("subscriber pruning", () => {
+    test("dead sockets are pruned and the doc cache evicted, so the next open reloads from SQL", async () => {
+      seedProject("p1", "Alpha", "active");
+
+      const a = mockSocket("a");
+      await ws.websocket.message(a, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+      expect(a.sent[0].result.projects.name).toBe("Alpha");
+
+      // Mutate the row OUTSIDE the framework — invisible while the doc stays cached.
+      db.run("UPDATE projects SET name = 'Changed' WHERE id = 'p1' AND valid_to IS NULL");
+
+      // While `a` is alive the cache is (correctly) served as-is.
+      const b = mockSocket("b");
+      await ws.websocket.message(b, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+      expect(b.sent[0].result.projects.name).toBe("Alpha");
+
+      // Both sockets die WITHOUT sending `close` (killed tab / network drop).
+      a.readyState = 3;
+      b.readyState = 3;
+
+      // The next open prunes the dead subscribers, evicts the stale cache,
+      // and loads fresh state from SQL.
+      const c = mockSocket("c");
+      await ws.websocket.message(c, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+      expect(c.sent[0].result.projects.name).toBe("Changed");
     });
   });
 });

@@ -524,3 +524,51 @@ describe("clientId collision (#24)", () => {
     expect(a.sent.at(-1)).toEqual({ to: "a" });
   });
 });
+
+// ---------------------------------------------------------------------------
+// 0.4.16 review follow-ups — frame robustness + persist durability
+// ---------------------------------------------------------------------------
+
+describe("malformed frames", () => {
+  test("a non-JSON frame is dropped without throwing, and the socket keeps working", async () => {
+    const ws = createWs();
+    const echoed: any[] = [];
+    ws.on("echo", (msg, _ws, respond) => { echoed.push(msg.value); respond({ result: msg.value }); });
+
+    const sock = mockSocket();
+    // Must resolve (not reject) — the parse failure is contained.
+    await ws.websocket.message(sock, "definitely-not-json{");
+    expect(sock.sent).toEqual([]);
+
+    // The same socket still dispatches normally afterwards.
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "echo", value: 42 }));
+    expect(echoed).toEqual([42]);
+    expect(sock.sent[0]).toEqual({ id: 1, result: 42 });
+  });
+});
+
+describe("persist serialization", () => {
+  const tmpFile = `/tmp/delta-persist-test-${Date.now()}.json`;
+
+  afterAll(() => {
+    try { unlinkSync(tmpFile); } catch {}
+  });
+
+  test("rapid deltas serialize disk writes; awaiting persist() sees the final state", async () => {
+    const ws = createWs();
+    const handle = await registerDoc(ws, "counter", {
+      file: tmpFile,
+      empty: { items: [] as string[] },
+    });
+
+    // Fire several broadcasts back-to-back — each schedules a persist; the
+    // chain guarantees they don't interleave and the last write wins.
+    for (let i = 0; i < 5; i++) {
+      handle.applyAndBroadcast([{ op: "add", path: "/items/-", value: `v${i}` }]);
+    }
+    await handle.persist();
+
+    const onDisk = await Bun.file(tmpFile).json();
+    expect(onDisk).toEqual({ items: ["v0", "v1", "v2", "v3", "v4"] });
+  });
+});

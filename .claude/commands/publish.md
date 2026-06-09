@@ -31,6 +31,12 @@ Run these checks. If any fails, report the problem and stop.
 
 Run `bun run ci` (compose up → type check → full test → compose down). If it exits non-zero, abort — do not edit any files.
 
+**Remote sandbox note:** in Claude Code on the web (`CLAUDE_CODE_REMOTE=true`) there is no Docker daemon, so `bun run ci` always fails at `db:up`. Run the equivalent gate against the bundled cluster instead (see CLAUDE.md):
+
+```
+bun run check && DELTA_TEST_PG_URL="postgres://delta:delta@localhost:5432/delta_test" bun test tests/
+```
+
 ## 4. Compute next version
 
 Read `package.json` and parse `.version` as semver `x.y.z`. Compute:

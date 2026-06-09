@@ -178,6 +178,28 @@ export function registerDocs(
   // Track which doc names are subscribed (for scoped fan-out)
   const subscriptions = new Map<string, Set<any>>(); // docName → Set<ws clients>
 
+  /**
+   * Drop subscribers whose socket is no longer open, evicting a doc's cache
+   * when it loses its last subscriber. A socket that dies without sending
+   * `close` (killed tab, network drop) otherwise pins the cache — and the
+   * per-write fan-out work — forever. Mirrors the Postgres listener's
+   * pruneDoc; sockets without a readyState (tests) are treated as alive.
+   */
+  function pruneSubscribers() {
+    for (const [docName, subs] of subscriptions) {
+      for (const client of subs) {
+        if (client.readyState !== undefined && client.readyState !== 1) {
+          subs.delete(client);
+        }
+      }
+      if (subs.size === 0) {
+        subscriptions.delete(docName);
+        cache.delete(docName);
+        customCriteria.delete(docName);
+      }
+    }
+  }
+
   function findDoc(docName: string): { def: DocDef; docId: string } | null {
     for (const [prefix, def] of docByPrefix) {
       if (docName.startsWith(prefix)) {
@@ -326,12 +348,15 @@ export function registerDocs(
       if (parts.length === 2) {
         const id = parts[1]!;
         if (op.op === "add") {
-          // Add row
+          // Add row. `/<coll>/-` means "server assigns the id" (the Postgres
+          // backend mints one from seq_<table>); SQLite ids are TEXT, so mint
+          // a UUID. The broadcast op carries the real id, never the "-".
+          const rowId = id === "-" ? crypto.randomUUID() : id;
           const row = (op as any).value as Record<string, unknown>;
           const ts = now();
-          const fullRow = insertCollectionRow(db, schema, table, id, rootId, def, row, ts);
-          doc[collKey][id] = fullRow;
-          broadcastOps.push({ op: "add", path: `/${collKey}/${id}`, value: fullRow });
+          const fullRow = insertCollectionRow(db, schema, table, rowId, rootId, def, row, ts);
+          doc[collKey][rowId] = fullRow;
+          broadcastOps.push({ op: "add", path: `/${collKey}/${rowId}`, value: fullRow });
         } else if (op.op === "remove") {
           // Remove row + cascades
           const cascadeOps = removeRow(db, schema, table, collKey, id, doc, def);
@@ -392,6 +417,7 @@ export function registerDocs(
 
   ws.on("open", (msg, client, respond) => {
     const docName = msg.doc as string;
+    pruneSubscribers();
 
     // Custom doc path first (independent prefix space).
     const customMatch = findCustom(docName);
@@ -441,6 +467,7 @@ export function registerDocs(
 
   ws.on("delta", (msg, _client, respond) => {
     const docName = msg.doc as string;
+    pruneSubscribers();
 
     if (findCustom(docName)) {
       respond({ error: { code: 403, message: "Custom docs are read-only; write through the source doc." } });

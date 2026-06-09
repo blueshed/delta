@@ -45,13 +45,17 @@ ws.setServer(server);
 import { connectWs, openDoc, type Doc } from "@blueshed/delta/client";
 import { applyOpsToCollection } from "@blueshed/delta/dom-ops";
 
-interface Message { author: string; text: string; at: string }
+interface Message { id: string; author: string; text: string; at: string }
 interface ChatDoc { messages: Record<string, Message> }
 
 const ws = connectWs("/ws");
 const doc: Doc<ChatDoc> = openDoc<ChatDoc>("chat:room", ws);
 
 const log = document.getElementById("log") as HTMLDivElement;
+// ONE long-lived id → node map, shared by the initial paint and every
+// applyOpsToCollection call. A fresh map per call would re-append every
+// row on the reconnect reconcile and make replace/remove miss their nodes.
+const nodes = new Map<string, Node>();
 
 function renderMessage(m: Message): HTMLDivElement {
   const row = document.createElement("div");
@@ -62,33 +66,35 @@ function renderMessage(m: Message): HTMLDivElement {
 }
 
 await doc.ready;
-for (const [id, m] of Object.entries(doc.data.get()?.messages ?? {})) {
+for (const m of Object.values(doc.data.get()?.messages ?? {})) {
   const node = renderMessage(m);
-  node.dataset.id = id;
+  nodes.set(m.id, node);
   log.append(node);
 }
 
 doc.onOps((ops) =>
   applyOpsToCollection<Message>(log, "messages", ops, {
-    key: (m) => `${m.author}:${m.at}`,
+    key: (m) => m.id,   // MUST equal the id in the op path (the map key)
     create: renderMessage,
     update: (node, m) => {
       const el = node as HTMLElement;
       (el.firstElementChild as HTMLElement).textContent = m.author;
       (el.lastElementChild  as HTMLElement).textContent = m.text;
     },
-  }),
+  }, nodes),
 );
 
-// Sending: one op, one verb, one path. Note what's NOT here — no
-// `log.append(...)`, no local push. The op echoes back through `onOps`
-// above and renders itself. Touch the DOM here too and the message
-// appears twice. Send, then let the broadcast render.
+// Sending: one op, one verb, one path. The value carries the SAME id used
+// in the path, so every render path keys the row identically. Note what's
+// NOT here — no `log.append(...)`, no local push. The op echoes back
+// through `onOps` above and renders itself. Touch the DOM here too and
+// the message appears twice. Send, then let the broadcast render.
 async function send(author: string, text: string) {
+  const id = crypto.randomUUID();
   await doc.send([{
     op: "add",
-    path: `/messages/${crypto.randomUUID()}`,
-    value: { author, text, at: new Date().toISOString() },
+    path: `/messages/${id}`,
+    value: { id, author, text, at: new Date().toISOString() },
   }]);
 }
 ```
@@ -116,7 +122,7 @@ type DeltaOp =
   | { op: "remove";  path: string };                 // delete by path
 ```
 
-Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (field), `/collection/-` (append). Path segments follow RFC 6901 JSON Pointer escaping — `~1` decodes to `/` and `~0` to `~` — so ids or field names containing `/` or `~` round-trip cleanly through `applyOps` and every backend. An **empty/root path** (`""` or `"/"`) on `replace`/`remove` swaps or clears the **whole doc in place** (object↔object, array↔array) — the primitive behind recompute custom docs. → `reference.md` → *Custom read docs*.
+Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (field), `/collection/-` (append — the server assigns the id on SQLite/Postgres and the broadcast op carries it; on the JSON-file backend `-` is a literal array push, so map-shaped collections there use an explicit `/collection/<id>` add instead). Path segments follow RFC 6901 JSON Pointer escaping — `~1` decodes to `/` and `~0` to `~` — so ids or field names containing `/` or `~` round-trip cleanly through `applyOps` and every backend. An **empty/root path** (`""` or `"/"`) on `replace`/`remove` swaps or clears the **whole doc in place** (object↔object, array↔array) — the primitive behind recompute custom docs. → `reference.md` → *Custom read docs*.
 
 ## Exports
 
@@ -130,6 +136,7 @@ Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (fie
 | `@blueshed/delta/postgres` | Bun + pg | `defineSchema`, `defineDoc`, `defineCustomDoc`, `generateSql`, `applyFramework`, `createDocListener`, `registerDocType`, `docTypeFromDef`, `withAppAuth` |
 | `@blueshed/delta/auth` | Bun | `DeltaAuth` contract, `wireAuth`, `upgradeWithAuth` |
 | `@blueshed/delta/auth-jwt` | Bun + pg + jose | `jwtAuth({ pool, secret })`, `applyAuthJwtSchema(pool)` |
+| `@blueshed/delta/logger` | Bun | `createLogger`, `setLogLevel`, `loggedRequest` |
 
 ## Rules — non-negotiable, in order of importance
 
@@ -139,9 +146,11 @@ Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (fie
 - **Don't reach for React/Supabase/Firebase patterns.** `doc.data` is a Signal; `doc.onOps` is the stream. No `useEffect`, no `useQuery`, no subscription config.
 - **Never optimistically update, never brute-force reload.** `doc.send` echoes the same op back through `onOps` / `doc.data` — local mutation double-applies, and a reload is *never* necessary (the framework re-opens every tracked doc on every reconnect, and on each reconnect `onOps` consumers also receive a synthetic whole-doc replace op — `{op:"replace", path:"", value:<full state>}` — that `applyOpsToCollection` reconciles, so the vanilla-DOM path self-heals too, not just `doc.data`). → `reference.md` → *The write loop*.
 - **Never rebuild a collection from `doc.data` inside an `effect`.** Use `applyOpsToCollection` (vanilla DOM) or `list()` (railroad). One per project; don't combine. → `reference.md` → *Rendering collections*.
+- **`applyOpsToCollection` needs ONE long-lived `nodes` map** (hoisted, seeded during the initial paint, passed on every call) and a `key` that returns the id used in op paths. A fresh map per call duplicates every row on the reconnect reconcile and makes replace/remove silently miss. → `reference.md` → *Rendering collections*.
 - **If `@blueshed/railroad` is in deps, use `list()` not `applyOpsToCollection`.** `doc.data` IS a railroad `Signal<T>`. → `reference.md` → *Railroad recipe*.
 - **Never edit framework SQL** (`001a-001f-*.sql`). They are the stored-function contract.
 - **Regenerate `003-tables.sql` with the CLI**: `bunx delta sql ./types.ts --out init_db/003-tables.sql`. Framework SQL is `001a–001f`, auth-jwt is `002`, your tables are `003`.
+- **`DeltaAuth` gates the Postgres backend only.** `createDocListener({ auth })` enforces `gate()` on every open/delta; the JSON-file and SQLite backends accept open/delta from **any connected socket** (`wireAuth` only adds login-style `call` actions — it does not gate doc traffic). Need per-user gating → Postgres backend, or wrap the handlers yourself.
 - **Never put tokens in WS URLs**: use `onUpgrade` (cookies / Authorization) or `call("authenticate", ...)`. → `reference.md` → *Authentication*.
 - **Await `authenticate` before `openDoc`** — an unauthenticated `open` races past the auth response and 401s.
 - **No bare `pool.query` when auth is enabled**: route through `docTypeFromDef({ auth })` so `withAppAuth` binds `app.user_id`. → `reference.md` → *RLS*.

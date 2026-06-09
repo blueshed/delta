@@ -32,7 +32,15 @@
 import type { DeltaOp } from "../core";
 
 export interface DomCollection<T> {
-  /** Stable id for a row value — usually `(v) => String(v.id)`. */
+  /**
+   * Stable id for a row value — usually `(v) => String(v.id)`. MUST return
+   * the same id that appears in op paths (the collection's map key): explicit
+   * `add /coll/<id>` ops key the node by the PATH id, while `/coll/-` appends
+   * and the reconnect root-replace reconcile key by THIS function. If the two
+   * disagree (e.g. paths keyed by uuid but `key` derives from other fields),
+   * replace/remove ops miss their nodes after a reconnect. Carry the id in
+   * the row value and return it here.
+   */
   key: (value: T) => string;
   /** Build the node for a new row. Called on `add` ops and on first sight of a row. */
   create: (value: T) => Node;

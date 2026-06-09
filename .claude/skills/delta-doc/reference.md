@@ -431,6 +431,8 @@ registerDocType(venueAt);
 
 The extension surface is `DeltaAuth<Identity>`. Delta itself reads no credentials — JWT is just the reference.
 
+**Scope: the gate protects the Postgres backend only.** `createDocListener(ws, pool, { auth })` runs `auth.gate()` before every open / delta / open_at (custom docs included). The JSON-file backend (`registerDoc`) and the SQLite backend (`registerDocs`) never consult `DeltaAuth` — any connected socket can open and write those docs. `wireAuth` only registers login-style `call` actions; it does not gate doc traffic. If those tiers need per-user gating, front them with network trust (or your own `ws.on` wrapper), or graduate to Postgres.
+
 ```ts
 // Use the reference JWT impl (requires auth-jwt.sql applied)
 import { jwtAuth } from "@blueshed/delta/auth-jwt";

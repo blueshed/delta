@@ -171,7 +171,15 @@ export function createWs(opts?: WsOptions): WsServer {
         log.debug(`open id=${clientId}`);
       },
       async message(ws: any, raw: any) {
-        const msg = JSON.parse(String(raw));
+        // Parse inside a guard: a non-JSON frame must not become an unhandled
+        // rejection (there's no id to respond to, so just drop it).
+        let msg: any;
+        try {
+          msg = JSON.parse(String(raw));
+        } catch {
+          log.error("ignoring malformed frame (invalid JSON)");
+          return;
+        }
         const { id, action } = msg;
 
         if (!action) {
@@ -268,15 +276,26 @@ export async function registerDoc<T>(
 
   log.info(`loaded from ${opts.file}`);
 
-  async function persist() {
-    await Bun.write(dataFile, JSON.stringify(doc, null, 2));
+  // Persist writes are serialized through a chain so two rapid deltas can't
+  // interleave Bun.write calls. A prior failure doesn't poison the chain (the
+  // catch resets it); callers decide whether to await or log-and-continue.
+  let persistChain: Promise<unknown> = Promise.resolve();
+  function persist(): Promise<void> {
+    const next = persistChain
+      .catch(() => { /* prior failure already surfaced to its caller */ })
+      .then(() => Bun.write(dataFile, JSON.stringify(doc, null, 2)))
+      .then(() => {});
+    persistChain = next;
+    return next;
   }
 
   function applyAndBroadcast(ops: DeltaOp[]) {
     applyOps(doc, ops);
     log.info(`delta [${ops.map((o) => `${o.op} ${o.path}`).join(", ")}]`);
     ws.publish(name, { doc: name, ops });
-    persist();
+    // The ack already went out — the doc is in-memory-first by design — so a
+    // disk failure here is logged rather than becoming an unhandled rejection.
+    persist().catch((err: any) => log.error(`persist failed: ${err?.message ?? err}`));
   }
 
   ws.on("open", (msg, client, respond) => {

@@ -11,7 +11,7 @@
 import { connectWs, openDoc, type Doc } from "../../src/client/client";
 import { applyOpsToCollection } from "../../src/client/dom-ops";
 
-interface Message { author: string; text: string; at: string }
+interface Message { id: string; author: string; text: string; at: string }
 interface ChatDoc { messages: Record<string, Message> }
 
 const ws = connectWs("/ws");
@@ -22,6 +22,11 @@ const form    = document.getElementById("composer") as HTMLFormElement;
 const authorI = document.getElementById("author") as HTMLInputElement;
 const textI   = document.getElementById("text")   as HTMLInputElement;
 
+// One long-lived id → node map shared by the initial paint and every
+// applyOpsToCollection call — a fresh map per call would re-append rows on
+// the reconnect reconcile and make replace/remove miss their nodes.
+const nodes = new Map<string, Node>();
+
 function renderMessage(m: Message): HTMLDivElement {
   const row = document.createElement("div");
   row.className = "msg";
@@ -31,26 +36,28 @@ function renderMessage(m: Message): HTMLDivElement {
   return row;
 }
 
-// 1. Initial paint — once the open response arrives, render every message.
+// 1. Initial paint — once the open response arrives, render every message,
+//    seeding the shared nodes map so later ops find their rows.
 await doc.ready;
-for (const [id, m] of Object.entries(doc.data.get()?.messages ?? {})) {
+for (const m of Object.values(doc.data.get()?.messages ?? {})) {
   const node = renderMessage(m);
-  node.dataset.id = id;
+  nodes.set(m.id, node);
   log.append(node);
 }
 log.scrollTop = log.scrollHeight;
 
-// 2. Live ops — patch keyed DOM nodes without rebuilding the list.
+// 2. Live ops — patch keyed DOM nodes without rebuilding the list. `key`
+//    returns the same id used in op paths (the doc's map key).
 doc.onOps((ops) =>
   applyOpsToCollection<Message>(log, "messages", ops, {
-    key: (m) => `${m.author}:${m.at}`,
+    key: (m) => m.id,
     create: renderMessage,
     update: (node, m) => {
       const el = node as HTMLElement;
       (el.firstElementChild as HTMLElement).textContent = m.author;
       (el.lastElementChild  as HTMLElement).textContent = m.text;
     },
-  }),
+  }, nodes),
 );
 
 form.addEventListener("submit", async (ev) => {
@@ -58,7 +65,7 @@ form.addEventListener("submit", async (ev) => {
   const id = crypto.randomUUID();
   await doc.send([{
     op: "add", path: `/messages/${id}`,
-    value: { author: authorI.value, text: textI.value, at: new Date().toISOString() },
+    value: { id, author: authorI.value, text: textI.value, at: new Date().toISOString() },
   }]);
   textI.value = "";
   textI.focus();

@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Follow-up fixes from a post-0.4.16 deep review of the project and its skills
+(+5 regression tests).
+
+### Fixed
+
+- **SQLite `/<coll>/-` append inserted a row with the literal id `"-"`**
+  (`src/server/sqlite.ts`). The backend now mints a server-side id (UUID — the
+  SQLite schema's ids are TEXT) and the broadcast op carries the real id,
+  matching the Postgres backend's `nextval` behaviour.
+- **SQLite backend never pruned dead subscribers.** A socket that dropped
+  without sending `close` pinned the doc cache (and per-write fan-out work)
+  forever. `registerDocs` now prunes closed sockets on every open/delta and
+  evicts a doc's cache when it loses its last subscriber — mirroring the
+  Postgres listener's `pruneDoc`.
+- **A malformed (non-JSON) WebSocket frame became an unhandled rejection**
+  (`src/server/server.ts`). The frame is now dropped with a logged error and
+  the socket keeps working.
+- **JSON-file backend `persist()` was fire-and-forget.** Disk writes are now
+  serialized through a chain (rapid deltas can't interleave `Bun.write`) and
+  a persistence failure is logged instead of becoming an unhandled rejection.
+- **Postgres listener: an ops-log gap (e.g. `delta_prune_ops` ran while the
+  listener was disconnected) silently skipped the pruned ops.** The drain loop
+  now detects the version gap and pushes each subscriber a fresh
+  identity-scoped snapshot as a root-replace op instead.
+- **The canonical recipe (`delta-doc` SKILL.md, `examples/shared-state/`,
+  README) misused `applyOpsToCollection`**: no long-lived `nodes` map (every
+  row duplicated on the reconnect reconcile; replace/remove missed their
+  nodes) and a `key` that didn't match the op-path id. The recipe now hoists
+  one map, seeds it during the initial paint, carries the id in the row value,
+  and keys by it. `dom-ops.ts` documents the key/path-id contract.
+
+### Documentation
+
+- `delta-doc` SKILL.md / reference.md now state explicitly that `DeltaAuth`
+  gates the **Postgres backend only** — the JSON-file and SQLite backends
+  accept open/delta from any connected socket.
+- SKILL.md documents the per-backend semantics of `/<coll>/-` append, adds the
+  missing `@blueshed/delta/logger` row to the exports table, and adds a
+  non-negotiable rule about the long-lived `nodes` map.
+- `/publish` notes the Docker-free CI-gate equivalent for remote (web)
+  sessions.
+- `delta install-skills` now credits the originating sibling package when a
+  bundled skill copy is byte-identical to the sibling's (was always
+  `@blueshed/delta`).
+
 ## [0.4.16] — 2026-06-03
 
 A correctness, security, and documentation hardening pass: 56 findings from a

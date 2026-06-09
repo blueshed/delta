@@ -252,6 +252,65 @@ describe("Finding #1: concurrent writes to the same field", () => {
 });
 
 // ===========================================================================
+// Ops-log gap (delta_prune_ops) — subscribers get a snapshot, not silence
+// ===========================================================================
+
+describe("ops-log gap: pruned history triggers a per-subscriber resnapshot", () => {
+  let worldId: string;
+
+  beforeEach(async () => {
+    clearRegistry();
+    await resetSites();
+    registerDocType(
+      docTypeFromDef(defineDoc("world:", { root: "worlds", include: ["sites"] }), pool),
+    );
+    await startListener({});
+    worldId = await seedWorld();
+  });
+
+  test("a version gap publishes a root-replace with the authoritative state", async () => {
+    const doc = `world:${worldId}`;
+    const sub = makeClient("sub");
+    await sendAndAwait(ws, sub, { action: "open", doc });
+    const before = sub.sent.length;
+
+    // Commit two writes and prune the FIRST one's ops row in a single
+    // transaction, so by the time the listener's NOTIFY handler fetches, the
+    // log starts past the version it last saw — the deterministic equivalent
+    // of delta_prune_ops having run while the listener was disconnected.
+    const c = await pool.connect();
+    try {
+      await c.query("BEGIN");
+      await c.query("SELECT delta_apply($1, $2::jsonb)", [doc, JSON.stringify([
+        { op: "add", path: "/sites/901", value: { name: "first", lat: 1, lng: 1 } },
+      ])]);
+      await c.query("SELECT delta_apply($1, $2::jsonb)", [doc, JSON.stringify([
+        { op: "add", path: "/sites/902", value: { name: "second", lat: 2, lng: 2 } },
+      ])]);
+      await c.query("DELETE FROM _delta_ops_log WHERE doc_name = $1 AND version = 1", [doc]);
+      await c.query("COMMIT");
+    } finally {
+      c.release();
+    }
+
+    // The subscriber must receive a whole-doc root-replace containing BOTH
+    // rows — publishing only the surviving v2 op would silently drop 901.
+    const snapshot = await waitFor(() =>
+      sub.sent
+        .slice(before)
+        .find((m: any) => m.ops?.[0]?.op === "replace" && m.ops?.[0]?.path === ""),
+    );
+    expect(snapshot.doc).toBe(doc);
+    expect(snapshot.ops[0].value.sites["901"].name).toBe("first");
+    expect(snapshot.ops[0].value.sites["902"].name).toBe("second");
+
+    // No bare tail op was published around the gap — the snapshot replaced it.
+    const bareOps = sub.sent.slice(before).filter((m: any) => m.ops && m.ops[0]?.path !== "");
+    expect(bareOps).toEqual([]);
+  });
+});
+
+// ===========================================================================
 // M3 — delta_apply rejects ops outside the doc's root/include collections
 // ===========================================================================
 

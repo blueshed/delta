@@ -38,13 +38,15 @@ import { connectWs, openDoc } from "@blueshed/delta/client";
 import { applyOpsToCollection } from "@blueshed/delta/dom-ops";
 
 const doc = openDoc("chat:room", connectWs("/ws"));
+const nodes = new Map(); // one long-lived id → node map, seeded by the initial paint
 
 await doc.ready;
-// ... initial paint from doc.data.get() ...
-doc.onOps((ops) => applyOpsToCollection(log, "messages", ops, { key, create, update }));
+// ... initial paint from doc.data.get(), nodes.set(m.id, node) per row ...
+doc.onOps((ops) => applyOpsToCollection(log, "messages", ops, { key: (m) => m.id, create, update }, nodes));
 
-// Send: one verb, one path.
-await doc.send([{ op: "add", path: `/messages/${crypto.randomUUID()}`, value: { author, text } }]);
+// Send: one verb, one path; the value carries the same id used in the path.
+const id = crypto.randomUUID();
+await doc.send([{ op: "add", path: `/messages/${id}`, value: { id, author, text } }]);
 ```
 
 Walk into [`examples/shared-state/`](examples/shared-state/) for the complete, runnable version.
