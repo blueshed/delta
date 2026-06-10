@@ -64,7 +64,7 @@ compose port). The local cluster is on **5432**, so override `DELTA_TEST_PG_URL`
 ```bash
 export DELTA_TEST_PG_URL="postgres://delta:delta@localhost:5432/delta_test"
 
-bun test tests/            # full suite (242 tests, ~7s) — the real gate here
+bun test tests/            # full suite (321 tests, ~11s) — the real gate here
 bun run check              # tsc --noEmit (no DB needed)
 ```
 

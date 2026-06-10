@@ -13,7 +13,7 @@
         "typescript": "^5.9.3",
       },
       "peerDependencies": {
-        "@blueshed/railroad": "^0.9.0",
+        "@blueshed/railroad": "^0.9.0 || ^0.10.0",
         "jose": "^6.0.0",
         "pg": "^8.20.0",
       },
