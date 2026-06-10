@@ -23,7 +23,7 @@
  * (see `@blueshed/delta/dom-ops` → `applyOpsToCollection`) instead of
  * rebuilding subtrees on every change.
  */
-import { signal, createLogger, key, inject } from "@blueshed/railroad";
+import { signal, batch, createLogger, key, inject } from "@blueshed/railroad";
 import { applyOps, type DeltaOp } from "../core";
 
 export type { DeltaOp } from "../core";
@@ -233,10 +233,14 @@ export function connectWs(
               // Mutate in place so captured child refs (e.g. a row object
               // bound into a drag-handler closure) stay valid across echoes.
               // `set(sameRef)` is a no-op under Object.is — `touch()` is the
-              // escape hatch that fires subscribers.
+              // escape hatch that fires subscribers. The two notifications
+              // are batched so an effect reading both `data` and
+              // `dataVersion` re-runs once per delta, not twice.
               applyOps(current, msg.ops);
-              entry.dataVersion.set(entry.dataVersion.peek() + 1);
-              entry.data.touch();
+              batch(() => {
+                entry.dataVersion.set(entry.dataVersion.peek() + 1);
+                entry.data.touch();
+              });
             }
           }
         }
@@ -314,8 +318,12 @@ export function openDoc<T>(name: string, client?: WsClient): Doc<T> {
     dataVersion,
     opsHandlers,
     onOpen: (state: any) => {
-      data.set(state as T);
-      dataVersion.set(dataVersion.peek() + 1);
+      // Batched for the same reason as the broadcast path: one settled pass
+      // for subscribers that read both signals.
+      batch(() => {
+        data.set(state as T);
+        dataVersion.set(dataVersion.peek() + 1);
+      });
       if (opened) {
         // RECONNECT: emit a synthetic whole-doc replace so onOps consumers can
         // reconcile against the authoritative post-reconnect snapshot. (No

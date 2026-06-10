@@ -49,11 +49,13 @@ document.getElementById("root")!.append(Page());
 
 ### tsx-railroad mode
 
-The sibling `railroad` skill (installed alongside this one in `@blueshed/railroad`'s `.claude/skills/`) covers the API surface and the five JSX gotchas that bite if you're not careful (`.get()` in children, list keying, SVG namespace, dispose scopes, realtime escape hatches). Read it before generating component code.
+The sibling `railroad` skill (installed alongside this one in `@blueshed/railroad`'s `.claude/skills/`) covers the API surface and the seven JSX gotchas that bite if you're not careful (`.get()` in children, list keying, SVG namespace, dispose scopes, realtime escape hatches, lowercase event handlers, `list()` vs plain `.map()`). Read it before generating component code.
 
-The mount pattern:
+The mount pattern — `mount()` brackets a dispose scope so effects, `when()`, and `list()` inside the page tear down with it (bare `.append(<Page />)` works but leaves `when()`/`list()` created at the top level un-disposable, and railroad warns):
 
 ```tsx
+import { mount } from "@blueshed/railroad";
+
 function Page() {
   return (
     <div>
@@ -63,7 +65,7 @@ function Page() {
   );
 }
 
-document.getElementById("root")!.append(<Page />);
+mount(document.getElementById("root")!, () => <Page />);
 ```
 
 For an interactive scaffold, prefer `routes(target, table)` so navigation, params, and dispose scoping work out of the box:

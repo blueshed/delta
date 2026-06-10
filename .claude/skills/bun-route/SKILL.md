@@ -1,6 +1,6 @@
 ---
 name: bun-route
-version: 0.9.0
+version: 0.10.0
 description: Scaffold a new Bun HTML route with bundled CSS and TypeScript/JavaScript. Use when the user wants to add a page/route to a Bun fullstack app.
 argument-hint: [route-path] [description]
 ---

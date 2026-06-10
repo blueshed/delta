@@ -14,7 +14,7 @@
  * No useState, no fetch, no subscription config. The doc IS the state.
  */
 import {
-  provide, list, when,
+  provide, list, when, mount,
   type ReadonlySignal,
 } from "@blueshed/railroad";
 import { connectWs, WS, openDoc, type Doc } from "@blueshed/delta/client";
@@ -127,4 +127,6 @@ function App(): Node {
 
 // `<App />` (not `App()`) so createElement pushes a parent dispose scope
 // for any effects/computeds inside the tree — see railroad SKILL §4.
-document.getElementById("root")!.append(<App />);
+// mount() brackets a root dispose scope (railroad ≥0.10) so the app's
+// effects/when()/list() are disposable — the canonical root for router-less pages.
+mount(document.getElementById("root")!, () => <App />);

@@ -5,7 +5,7 @@
     "": {
       "name": "@blueshed/delta",
       "devDependencies": {
-        "@blueshed/railroad": "0.9.0",
+        "@blueshed/railroad": "0.10.0",
         "@types/bun": "^1.3.14",
         "@types/pg": "^8.20.0",
         "jose": "^6.2.3",
@@ -25,7 +25,7 @@
     },
   },
   "packages": {
-    "@blueshed/railroad": ["@blueshed/railroad@0.9.0", "", {}, "sha512-H7aXIQ/CpEhIYcvA4XC0qC9MVZv6ON63jzbGsfHh2T0j2B7Znef/MkgTqa7ePAtbovEgYra2hivoGy135qZk2A=="],
+    "@blueshed/railroad": ["@blueshed/railroad@0.10.0", "", {}, "sha512-xgTYm//S05AGecCLgqMosMmWHaO94Pp6Z7KbYxuXGQMPGBMfs07DuNJd04OiqMzRWCNu/3xm8Zv8SFWW/MVwSw=="],
 
     "@types/bun": ["@types/bun@1.3.14", "", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
 

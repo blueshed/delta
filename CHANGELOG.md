@@ -38,6 +38,22 @@ Follow-up fixes from a post-0.4.16 deep review of the project and its skills
   one map, seeds it during the initial paint, carries the id in the row value,
   and keys by it. `dom-ops.ts` documents the key/path-id contract.
 
+### Changed
+
+- **Railroad 0.10.0.** Dev dependency bumped; peer range widened to
+  `^0.9.0 || ^0.10.0` (delta's imports — `signal`, `batch`, `createLogger`,
+  `key`, `inject` — are unchanged across both). Vendored `railroad` and
+  `bun-route` skills refreshed to 0.10.0 (glitch-free topological signal
+  scheduling, `mount()` root scope, first-class SVG namespace, router
+  query-string/trailing-slash edges).
+- **Client signal notifications are batched** (`src/client/client.ts`): the
+  paired `dataVersion` bump + `data.touch()` (and `data.set` + version bump on
+  open/reconnect) now run inside `batch()`, so an effect reading both signals
+  re-runs once per delta instead of twice. Works on railroad 0.9 too; under
+  0.10's topological flush the pass is also glitch-free.
+- `examples/kanban` mounts via `mount()` (railroad ≥0.10) instead of a bare
+  `.append(<App />)`, matching the updated skill's canonical root pattern.
+
 ### Documentation
 
 - `delta-doc` SKILL.md / reference.md now state explicitly that `DeltaAuth`
