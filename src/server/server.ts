@@ -22,6 +22,9 @@
  */
 import { createLogger } from "./logger";
 import { applyOps, type DeltaOp } from "../core";
+// Type-only circularity with ./auth (it imports `type WsServer` from here);
+// safe — auth.ts has no runtime import of this module.
+import { isAuthError, type DeltaAuth } from "./auth";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -36,6 +39,10 @@ export type ActionHandler = (
 export interface WsServer {
   path: string;
   on(action: string, handler: ActionHandler): void;
+  /** Register a handler fired when a socket disconnects (transport close —
+   *  killed tab, network drop, or explicit socket close). The hook ephemeral
+   *  features need for cleanup (e.g. presence). Returns an unsubscribe fn. */
+  onDisconnect(handler: (client: any) => void): () => void;
   publish(channel: string, data: any): void;
   sendTo(clientId: string, data: any): void;
   setServer(s: any): void;
@@ -44,6 +51,7 @@ export interface WsServer {
     idleTimeout: number;
     sendPings: boolean;
     publishToSelf: boolean;
+    maxPayloadLength: number;
     open(ws: any): void;
     message(ws: any, raw: any): void;
     close(ws: any): void;
@@ -60,6 +68,12 @@ export interface DocHandle<T> {
 export interface DocOptions<T> {
   file: string;
   empty: T;
+  /**
+   * Gate every open / delta / close on this doc through `auth.gate(client)`
+   * (401 on failure) — same contract the Postgres listener enforces. Only
+   * the gate runs here; `asSqlArg` (RLS) has no meaning on this backend.
+   */
+  auth?: DeltaAuth<any>;
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +122,13 @@ export interface WsOptions {
   path?: string;
   idleTimeout?: number;
   sendPings?: boolean;
+  /**
+   * Upper bound on a single incoming frame, in bytes (passed straight to
+   * Bun's websocket handler; Bun closes the socket on violation). Defaults to
+   * 1 MiB — a delta message is ops JSON, so anything near this is a bug or
+   * abuse. Raise it deliberately for docs with genuinely large row payloads.
+   */
+  maxPayloadLength?: number;
 }
 
 /** Create a shared WebSocket server with action routing and Bun pub/sub. */
@@ -115,6 +136,7 @@ export function createWs(opts?: WsOptions): WsServer {
   const log = createLogger("[ws]");
   const actions = new Map<string, ActionHandler[]>();
   const clients = new Map<string, any>();
+  const disconnectHandlers = new Set<(client: any) => void>();
   let serverRef: any;
 
   const path = opts?.path ?? "/ws";
@@ -131,6 +153,11 @@ export function createWs(opts?: WsOptions): WsServer {
     on(action: string, handler: ActionHandler) {
       if (!actions.has(action)) actions.set(action, []);
       actions.get(action)!.push(handler);
+    },
+
+    onDisconnect(handler: (client: any) => void) {
+      disconnectHandlers.add(handler);
+      return () => { disconnectHandlers.delete(handler); };
     },
 
     publish(channel: string, data: any) {
@@ -152,6 +179,7 @@ export function createWs(opts?: WsOptions): WsServer {
       idleTimeout: opts?.idleTimeout ?? 60,
       sendPings: opts?.sendPings ?? true,
       publishToSelf: true,
+      maxPayloadLength: opts?.maxPayloadLength ?? 1024 * 1024,
       open(ws: any) {
         if (!ws.data) ws.data = {};
         // The clientId arrives from the upgrade query string and is therefore
@@ -252,6 +280,10 @@ export function createWs(opts?: WsOptions): WsServer {
         // Only delete our own mapping — a collision-replaced socket may now
         // own this id.
         if (clientId && clients.get(clientId) === ws) clients.delete(clientId);
+        for (const handler of disconnectHandlers) {
+          try { handler(ws); }
+          catch (err: any) { log.error(`onDisconnect handler threw: ${err?.message ?? err}`); }
+        }
         log.debug(`close id=${clientId ?? "?"}`);
       },
     },
@@ -298,21 +330,36 @@ export async function registerDoc<T>(
     persist().catch((err: any) => log.error(`persist failed: ${err?.message ?? err}`));
   }
 
+  const auth = opts.auth;
+  /** True when the client passes the gate (or no auth configured); responds 401 otherwise. */
+  function gated(client: any, respond: (r: any) => void): boolean {
+    if (!auth) return true;
+    const identity = auth.gate(client);
+    if (isAuthError(identity)) {
+      respond({ error: { code: 401, message: identity.error } });
+      return false;
+    }
+    return true;
+  }
+
   ws.on("open", (msg, client, respond) => {
     if (msg.doc !== name) return;
+    if (!gated(client, respond)) return;
     trackSubscribe(client, name);
     respond({ result: doc });
     log.debug("opened");
   });
 
-  ws.on("delta", (msg, _client, respond) => {
+  ws.on("delta", (msg, client, respond) => {
     if (msg.doc !== name) return;
+    if (!gated(client, respond)) return;
     applyAndBroadcast(msg.ops);
     respond({ result: { ack: true } });
   });
 
   ws.on("close", (msg, client, respond) => {
     if (msg.doc !== name) return;
+    if (!gated(client, respond)) return;
     trackUnsubscribe(client, name);
     respond({ result: { ack: true } });
     log.debug("closed");
@@ -347,4 +394,133 @@ export function registerMethod(
     log.debug("called");
     respond({ result: await handler(msg.params, client) });
   });
+}
+
+// ---------------------------------------------------------------------------
+// Presence — an ephemeral peers doc
+// ---------------------------------------------------------------------------
+//
+// Presence is doc-shaped on purpose: clients use the ordinary client API —
+// `openDoc("presence:lobby")` yields `{ peers: { <clientId>: state }, me }`,
+// joins/leaves arrive as add/remove ops on `/peers/<id>`, and a client
+// updates its own entry (cursor, status, …) with a plain `doc.send`. No new
+// client surface, and `list()` / `applyOpsToCollection` render it like any
+// other collection.
+//
+// Unlike registerDoc, nothing persists: state lives in this process and an
+// entry vanishes the moment its socket closes (via `ws.onDisconnect`) or
+// sends `close`. NOTE: presence is per-process — `ws.publish` only reaches
+// sockets on this server. Multi-process deployments need sticky sessions per
+// presence room (cross-process presence would ride pg NOTIFY; not built).
+
+export interface PresenceOptions {
+  /**
+   * Derive the state a client shares with its peers (name, avatar, …).
+   * Return null/undefined to reject the open with 401 — point this at
+   * `client.data.identity` for gated presence. Defaults to `() => ({})`
+   * (anonymous presence; peers see only ids).
+   */
+  identity?: (client: any) => any;
+}
+
+export interface PresenceHandle {
+  /** Snapshot of the current peers (clientId → shared state). */
+  getPeers(): Record<string, any>;
+}
+
+/** RFC-6901 escape for a peer id used as a path segment. */
+function escapeToken(s: string): string {
+  return s.replace(/~/g, "~0").replace(/\//g, "~1");
+}
+
+/** Register an ephemeral presence doc with the WebSocket server. */
+export function registerPresence(
+  ws: Pick<WsServer, "on" | "publish" | "onDisconnect">,
+  name: string,
+  opts: PresenceOptions = {},
+): PresenceHandle {
+  const log = createLogger(`[${name}]`);
+  const identityFn = opts.identity ?? (() => ({}));
+  const peers = new Map<string, any>();   // peer id → shared state
+  const members = new Map<string, any>(); // peer id → owning socket
+
+  function leave(client: any): void {
+    const id = client.data?.presenceIds?.[name] as string | undefined;
+    if (!id) return;
+    delete client.data.presenceIds[name];
+    // Only the owning socket removes the entry — after a clientId collision
+    // remint, another live socket may own this id.
+    if (members.get(id) !== client) return;
+    members.delete(id);
+    peers.delete(id);
+    ws.publish(name, { doc: name, ops: [{ op: "remove", path: `/peers/${escapeToken(id)}` }] });
+    log.debug(`leave ${id}`);
+  }
+
+  ws.on("open", (msg, client, respond) => {
+    if (msg.doc !== name) return;
+    const state = identityFn(client);
+    if (state == null) {
+      respond({ error: { code: 401, message: "Authentication required" } });
+      return;
+    }
+    const id = String(client.data?.clientId ?? crypto.randomUUID());
+    const value = { ...state, id };
+    if (!client.data) client.data = {};
+    (client.data.presenceIds ??= {})[name] = id;
+
+    const isNew = !peers.has(id);
+    peers.set(id, value);
+    members.set(id, client);
+    trackSubscribe(client, name);
+
+    // `me` tells the client which /peers entry is its own (the only one it
+    // may write). Broadcast ops never touch it.
+    respond({ result: { peers: Object.fromEntries(peers), me: id } });
+    ws.publish(name, {
+      doc: name,
+      ops: [{ op: isNew ? "add" : "replace", path: `/peers/${escapeToken(id)}`, value }],
+    });
+    log.debug(`join ${id} (${peers.size} peer${peers.size === 1 ? "" : "s"})`);
+  });
+
+  ws.on("delta", (msg, client, respond) => {
+    if (msg.doc !== name) return;
+    const id = client.data?.presenceIds?.[name] as string | undefined;
+    if (!id) {
+      respond({ error: { code: 403, message: "presence: open the doc before writing" } });
+      return;
+    }
+    const own = `/peers/${escapeToken(id)}`;
+    const ops = (msg.ops ?? []) as DeltaOp[];
+    for (const op of ops) {
+      if (op.op !== "replace" || op.path !== own
+          || (op as any).value == null || typeof (op as any).value !== "object") {
+        respond({
+          error: { code: 403, message: `presence: only \`replace ${own}\` with an object value is allowed` },
+        });
+        return;
+      }
+    }
+    const broadcast: DeltaOp[] = ops.map((op) => {
+      const value = { ...(op as any).value, id }; // id is immutable
+      peers.set(id, value);
+      return { op: "replace", path: own, value };
+    });
+    respond({ result: { ack: true } });
+    if (broadcast.length) ws.publish(name, { doc: name, ops: broadcast });
+  });
+
+  ws.on("close", (msg, client, respond) => {
+    if (msg.doc !== name) return;
+    leave(client);
+    trackUnsubscribe(client, name);
+    respond({ result: { ack: true } });
+  });
+
+  ws.onDisconnect((client) => leave(client));
+
+  return {
+    getPeers: () => Object.fromEntries(peers),
+  };
 }

@@ -23,9 +23,13 @@ export type {
   ColumnShorthand,
   TableDef,
   Schema,
+  TypedSchema,
   ResolvedTable,
   DocDef,
   ValidationError,
+  InferColumn,
+  InferRow,
+  InferDoc,
 } from "../../schema";
 export { defineSchema, defineDoc } from "../../schema";
 

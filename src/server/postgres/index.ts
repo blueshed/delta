@@ -29,9 +29,13 @@ export type {
   ColumnDef,
   TableDef,
   Schema,
+  TypedSchema,
   ResolvedTable,
   DocDef,
   ValidationError,
+  InferColumn,
+  InferRow,
+  InferDoc,
 } from "./schema";
 
 export {
@@ -44,6 +48,8 @@ export {
 
 export { generateSql } from "./codegen";
 export type { GenerateSqlOptions } from "./codegen";
+
+export { migrateSchema } from "./migrate";
 
 export {
   applyFramework,

@@ -7,8 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Follow-up fixes from a post-0.4.16 deep review of the project and its skills
-(+5 regression tests).
+Follow-up fixes from a post-0.4.16 deep review of the project and its skills,
+plus the review's feature roadmap (+23 tests).
+
+### Added
+
+- **`doc.close()`** (`@blueshed/delta/client`). Per-doc lifecycle: sends the
+  wire `close`, stops broadcasts, drops `onOps` handlers, removes the doc from
+  the reconnect re-open set, and rejects later `send`s. Closes the SPA leak
+  where every doc a user ever visited stayed subscribed for the life of the
+  socket.
+- **`registerPresence(ws, name, { identity? })`** (`@blueshed/delta/server`).
+  Presence as an ephemeral doc: clients `openDoc(name)` → `{ peers, me }`,
+  joins/leaves broadcast as add/remove ops on `/peers/<id>` (socket disconnect
+  removes the peer via the new `ws.onDisconnect` hook), and a client updates
+  its own entry with an ordinary `replace /peers/<me>` delta (403 for anyone
+  else's; `id` immutable). Per-process; works with every backend.
+- **`migrateSchema(pool, schema)`** (`@blueshed/delta/postgres`). Additive,
+  idempotent ALTERs when `types.ts` evolves: new columns (NOT NULL backfilled
+  via type defaults), parent-FK and temporal retrofit, and a `current_` view
+  refresh (a `SELECT *` view snapshots its columns, so without the refresh
+  reads never see new columns). Counterpart of the SQLite `migrateSchema`.
+- **`InferDoc` / `InferRow`** (shared schema, re-exported from `/sqlite` and
+  `/postgres`). Compile-time derivation of client doc shapes from the
+  `defineSchema` literal — one source of truth for SQL and TypeScript.
+- **Auth gating below Postgres.** `registerDoc(ws, name, { auth })` (JSON-file)
+  and `registerDocs(..., { auth })` (SQLite) now enforce `auth.gate(client)`
+  (401) on open/delta/close — the same contract as `createDocListener`.
+  Postgres remains the only tier that additionally binds RLS.
+- **`ws.onDisconnect(handler)`** on `WsServer` — transport-close hook for
+  ephemeral features; and **`maxPayloadLength`** in `WsOptions` (default 1 MiB)
+  bounding incoming frames.
 
 ### Fixed
 

@@ -18,6 +18,7 @@
  */
 import type { WsServer } from "./server";
 import { trackSubscribe, trackUnsubscribe } from "./server";
+import { isAuthError, type DeltaAuth } from "./auth";
 import { applyOps as deltaApplyOps, type DeltaOp, splitPath } from "../core";
 import { createLogger } from "./logger";
 import {
@@ -36,9 +37,13 @@ export type {
   ColumnShorthand,
   TableDef,
   Schema,
+  TypedSchema,
   ResolvedTable,
   DocDef,
   ValidationError,
+  InferColumn,
+  InferRow,
+  InferDoc,
 } from "../schema";
 export const defineSchema = defineSchemaShared;
 export const defineDoc = defineDocShared;
@@ -143,14 +148,33 @@ function sqlDefault(value: unknown): string {
 
 const log = createLogger("[delta-sqlite]");
 
-/** Register all doc definitions with the WebSocket server. */
+/**
+ * Register all doc definitions with the WebSocket server.
+ *
+ * `opts.auth` gates every open / delta / close through `auth.gate(client)`
+ * (401 on failure) — the same contract the Postgres listener enforces. Only
+ * the gate applies here; `asSqlArg` (RLS) has no meaning on this backend.
+ */
 export function registerDocs(
   ws: WsServer,
   db: any,
   schema: Schema,
   docs: DocDef[],
   customDocs: CustomDocDef<any>[] = [],
+  opts?: { auth?: DeltaAuth<any> },
 ) {
+  const auth = opts?.auth;
+  /** True when the client passes the gate (or no auth configured); responds 401 otherwise.
+   *  Called AFTER prefix matching so unmatched docs still fall through to other backends. */
+  function gated(client: any, respond: (r: any) => void): boolean {
+    if (!auth) return true;
+    const identity = auth.gate(client);
+    if (isAuthError(identity)) {
+      respond({ error: { code: 401, message: identity.error } });
+      return false;
+    }
+    return true;
+  }
   // Build lookup: prefix → DocDef
   const docByPrefix = new Map<string, DocDef>();
   for (const doc of docs) {
@@ -422,6 +446,7 @@ export function registerDocs(
     // Custom doc path first (independent prefix space).
     const customMatch = findCustom(docName);
     if (customMatch) {
+      if (!gated(client, respond)) return;
       const { def, docId } = customMatch;
       let doc = cache.get(docName);
       if (!doc) {
@@ -444,6 +469,7 @@ export function registerDocs(
 
     const match = findDoc(docName);
     if (!match) return;
+    if (!gated(client, respond)) return;
 
     const { def, docId } = match;
     let doc = cache.get(docName);
@@ -465,7 +491,7 @@ export function registerDocs(
     log.info(`opened ${docName}`);
   });
 
-  ws.on("delta", (msg, _client, respond) => {
+  ws.on("delta", (msg, client, respond) => {
     const docName = msg.doc as string;
     pruneSubscribers();
 
@@ -476,6 +502,7 @@ export function registerDocs(
 
     const match = findDoc(docName);
     if (!match) return;
+    if (!gated(client, respond)) return;
 
     const { def } = match;
     const doc = cache.get(docName);
@@ -538,6 +565,7 @@ export function registerDocs(
     const isCustom = findCustom(docName) != null;
     const isStandard = findDoc(docName) != null;
     if (!isCustom && !isStandard) return;
+    if (!gated(client, respond)) return;
 
     trackUnsubscribe(client, docName);
     subscriptions.get(docName)?.delete(client);

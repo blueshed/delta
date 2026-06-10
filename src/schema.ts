@@ -110,7 +110,21 @@ function assertColumnName(value: string): void {
   }
 }
 
-export function defineSchema(defs: Record<string, TableDef>): Schema {
+/**
+ * A `Schema` that also carries its literal table defs at the TYPE level, so
+ * `InferDoc` / `InferRow` can derive client-side row shapes from the same
+ * definition that generates the SQL. `$defs` is a phantom — never set at
+ * runtime; it exists only for the compiler.
+ */
+export interface TypedSchema<
+  D extends Record<string, TableDef> = Record<string, TableDef>,
+> extends Schema {
+  readonly $defs?: D;
+}
+
+export function defineSchema<const D extends Record<string, TableDef>>(
+  defs: D,
+): TypedSchema<D> {
   const tables: Record<string, ResolvedTable> = {};
 
   // First pass: resolve columns and basic properties.
@@ -211,3 +225,66 @@ export interface ValidationError {
   path: string;
   message: string;
 }
+
+// ---------------------------------------------------------------------------
+// Type inference — derive client row/doc shapes from the schema definition.
+//
+//   const schema = defineSchema({
+//     items: { columns: { name: "text", count: "integer?" } },
+//   });
+//   type ItemsDoc = InferDoc<typeof schema, "items">;
+//   // → { items: Record<string, { id: number | string; name: string; count: number | null }> }
+//
+// One source of truth: the object you hand to defineSchema also types
+// `openDoc<ItemsDoc>(...)`. Purely compile-time — nothing here runs.
+// ---------------------------------------------------------------------------
+
+type ColumnTs<T extends ColumnType> =
+  T extends "text" | "timestamptz" ? string
+  : T extends "integer" | "real" ? number
+  : T extends "boolean" ? boolean
+  : unknown; // json
+
+/** TS type for one column def or shorthand ("text?" → `string | null`). */
+export type InferColumn<C extends ColumnDef | ColumnShorthand> =
+  C extends `${infer B extends ColumnType}?` ? ColumnTs<B> | null
+  : C extends ColumnType ? ColumnTs<C>
+  : C extends ColumnDef
+    ? C["nullable"] extends true ? ColumnTs<C["type"]> | null : ColumnTs<C["type"]>
+  : never;
+
+/** The parent-FK column a `parent` declaration adds to each row. */
+type ParentFk<T extends TableDef> =
+  T["parent"] extends string ? { [K in `${T["parent"]}_id`]: number | string }
+  : T["parent"] extends { fk: infer F extends string } ? { [K in F]: number | string }
+  : {};
+
+/** Row shape for one table def: `id` + parent FK + declared columns. */
+export type InferRow<T extends TableDef> =
+  { id: number | string }
+  & ParentFk<T>
+  & { [K in keyof T["columns"]]: InferColumn<T["columns"][K]> };
+
+type DefsOf<S> = S extends TypedSchema<infer D> ? D : never;
+
+/**
+ * Doc shape for a `defineDoc` lens over a `defineSchema` result.
+ *
+ *   InferDoc<typeof schema, "items">                                // list doc
+ *   InferDoc<typeof schema, "venues", "areas" | "sites", "single">  // scoped single
+ *
+ * `Mode` mirrors the runtime scope resolution: "list" (the default — `items:`
+ * opens every row as an id-keyed map) renders the root as `Record<string, Row>`;
+ * "single" (`venue:42`) renders it as one `Row`. Included collections are
+ * always id-keyed maps.
+ */
+export type InferDoc<
+  S extends TypedSchema<any>,
+  Root extends keyof DefsOf<S> & string,
+  Include extends keyof DefsOf<S> & string = never,
+  Mode extends "list" | "single" = "list",
+> =
+  (Mode extends "single"
+    ? { [K in Root]: InferRow<DefsOf<S>[K]> }
+    : { [K in Root]: Record<string, InferRow<DefsOf<S>[K]>> })
+  & { [K in Include]: Record<string, InferRow<DefsOf<S>[K]>> };

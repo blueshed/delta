@@ -295,3 +295,47 @@ describe("identifier validation", () => {
     ).not.toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// InferDoc / InferRow — compile-time row inference from the schema literal.
+// These assertions are enforced by `bun run check` (tsc): a drift between the
+// runtime schema vocabulary and the type-level inference fails the typecheck.
+// ---------------------------------------------------------------------------
+
+import type { InferDoc, InferRow, TableDef } from "../src/server/postgres";
+
+describe("InferDoc / InferRow (compile-time)", () => {
+  const s = defineSchema({
+    venues: { columns: { name: "text", capacity: "integer?", meta: "json?" } },
+    areas: { columns: { label: "text", open: "boolean" }, parent: "venues" },
+    slots: { columns: { at: "timestamptz" }, parent: { collection: "areas", fk: "area" } },
+  });
+
+  test("single-mode doc: root row + included id-keyed maps", () => {
+    type VenueDoc = InferDoc<typeof s, "venues", "areas", "single">;
+    const doc: VenueDoc = {
+      venues: { id: 1, name: "Hall", capacity: null, meta: { tags: ["a"] } },
+      areas: { "10": { id: 10, venues_id: 1, label: "Stage", open: true } },
+    };
+    expect(doc.venues.name).toBe("Hall");
+    expect(doc.areas["10"]!.open).toBe(true);
+  });
+
+  test("list-mode doc (the default): root is an id-keyed map", () => {
+    type VenuesDoc = InferDoc<typeof s, "venues">;
+    const doc: VenuesDoc = {
+      venues: { "1": { id: 1, name: "Hall", capacity: 3, meta: null } },
+    };
+    expect(doc.venues["1"]!.capacity).toBe(3);
+  });
+
+  test("explicit parent fk and full ColumnDef objects infer too", () => {
+    type Slot = InferRow<{ columns: { at: "timestamptz" }; parent: { collection: "areas"; fk: "area" } }>;
+    const slot: Slot = { id: 5, area: 10, at: "2026-06-10T00:00:00Z" };
+    expect(slot.area).toBe(10);
+
+    type WithDef = InferRow<{ columns: { score: { type: "real"; nullable: true } } } & TableDef>;
+    const row: WithDef = { id: 1, score: null };
+    expect(row.score).toBeNull();
+  });
+});

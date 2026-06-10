@@ -131,9 +131,9 @@ Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (fie
 | `@blueshed/delta/core` | anywhere | `applyOps`, `DeltaOp` |
 | `@blueshed/delta/client` | browser | `connectWs` (with `close()`), `openDoc`, `call`, `WS`, `DeltaError` |
 | `@blueshed/delta/dom-ops` | browser | `applyOpsToCollection` — keyed-DOM op routing |
-| `@blueshed/delta/server` | Bun | `createWs`, `registerDoc` (JSON-file backend), `registerMethod` |
-| `@blueshed/delta/sqlite` | Bun | `defineSchema`, `defineDoc`, `defineCustomDoc`, `registerDocs(..., customDocs?)`, snapshots |
-| `@blueshed/delta/postgres` | Bun + pg | `defineSchema`, `defineDoc`, `defineCustomDoc`, `generateSql`, `applyFramework`, `createDocListener`, `registerDocType`, `docTypeFromDef`, `withAppAuth` |
+| `@blueshed/delta/server` | Bun | `createWs`, `registerDoc` (JSON-file backend), `registerMethod`, `registerPresence` (ephemeral peers doc) |
+| `@blueshed/delta/sqlite` | Bun | `defineSchema`, `defineDoc`, `defineCustomDoc`, `registerDocs(..., customDocs?, { auth? })`, `migrateSchema`, snapshots, type `InferDoc` |
+| `@blueshed/delta/postgres` | Bun + pg | `defineSchema`, `defineDoc`, `defineCustomDoc`, `generateSql`, `applyFramework`, `migrateSchema`, `createDocListener`, `registerDocType`, `docTypeFromDef`, `withAppAuth`, type `InferDoc` |
 | `@blueshed/delta/auth` | Bun | `DeltaAuth` contract, `wireAuth`, `upgradeWithAuth` |
 | `@blueshed/delta/auth-jwt` | Bun + pg + jose | `jwtAuth({ pool, secret })`, `applyAuthJwtSchema(pool)` |
 | `@blueshed/delta/logger` | Bun | `createLogger`, `setLogLevel`, `loggedRequest` |
@@ -150,7 +150,9 @@ Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (fie
 - **If `@blueshed/railroad` is in deps, use `list()` not `applyOpsToCollection`.** `doc.data` IS a railroad `Signal<T>`. → `reference.md` → *Railroad recipe*.
 - **Never edit framework SQL** (`001a-001f-*.sql`). They are the stored-function contract.
 - **Regenerate `003-tables.sql` with the CLI**: `bunx delta sql ./types.ts --out init_db/003-tables.sql`. Framework SQL is `001a–001f`, auth-jwt is `002`, your tables are `003`.
-- **`DeltaAuth` gates the Postgres backend only.** `createDocListener({ auth })` enforces `gate()` on every open/delta; the JSON-file and SQLite backends accept open/delta from **any connected socket** (`wireAuth` only adds login-style `call` actions — it does not gate doc traffic). Need per-user gating → Postgres backend, or wrap the handlers yourself.
+- **Every backend gates with the same `auth` option** — `registerDoc(ws, name, { auth })` (JSON-file), `registerDocs(..., { auth })` (SQLite), `createDocListener(ws, pool, { auth })` (Postgres). All enforce `auth.gate(client)` (401) on open/delta/close; only Postgres additionally binds RLS via `asSqlArg`. `wireAuth` just adds login-style `call` actions — passing `auth` to the backend is what gates doc traffic; forget it and any connected socket can read/write.
+- **Close docs you navigate away from**: `await doc.close()` unsubscribes server-side, stops broadcasts, and prevents re-open on reconnect. An unclosed doc stays live for the life of the socket — in a routed SPA that's every doc the user ever visited. (`wsClient.close()` tears down the whole socket; `doc.close()` is the per-doc version.)
+- **Presence is a doc, not a side channel.** `registerPresence(ws, "presence:room")` server-side; clients just `openDoc("presence:room")` → `{ peers, me }`, joins/leaves arrive as ops on `/peers/<id>`, and a client updates its own entry with `doc.send([{ op: "replace", path: \`/peers/${me}\`, value }])`. Ephemeral (disconnect removes the peer), per-process. → `reference.md` → *Presence*.
 - **Never put tokens in WS URLs**: use `onUpgrade` (cookies / Authorization) or `call("authenticate", ...)`. → `reference.md` → *Authentication*.
 - **Await `authenticate` before `openDoc`** — an unauthenticated `open` races past the auth response and 401s.
 - **No bare `pool.query` when auth is enabled**: route through `docTypeFromDef({ auth })` so `withAppAuth` binds `app.user_id`. → `reference.md` → *RLS*.
@@ -169,9 +171,11 @@ Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (fie
 ## Where to look next — `reference.md` sections
 
 - *First-time bootstrap* — `applyFramework` / `bunx delta init` / `docker-entrypoint-initdb.d`
+- *Schema migrations* — `migrateSchema(pool, schema)`: additive ALTERs when `types.ts` gains columns (Postgres; SQLite has its own)
 - *Quick start (Postgres backend)* — server + client with `jwtAuth`, session restore
 - *Contracts* — `DocType`, `DocDef`, `DeltaAuth` interfaces
-- *Schema generation* — `defineSchema`, column shorthands, `validateOps`
+- *Schema generation* — `defineSchema`, column shorthands, `validateOps`, `InferDoc` (derive the client doc type from the schema)
+- *Presence* — `registerPresence`: who's-here as an ephemeral doc; cursors via `replace /peers/<me>`
 - *`scope` syntax* — the colon DSL, operators, footguns
 - *Doc patterns* — list, catalog (list-mode `include`), scoped-single, per-user isolation, custom DocType
 - *Custom read docs* — `defineCustomDoc` membership (`query`+`matches`) vs recompute (whole-doc, Postgres); root-replace primitive

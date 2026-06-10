@@ -67,6 +67,10 @@ Browser code does not change when you graduate.
 
 `defineCustomDoc(prefix, opts)` declares a read-only doc whose contents are a Bun-side derived view over one or more watched collections. Two modes: **membership** (`query` + `matches`) for a flat predicate view — bbox queries, tag filters, anything you'd express as `WHERE` in a live materialised view (SQLite and Postgres); and **recompute** (`recompute`) for a whole-doc view that's nested, joined, or identity-dependent — re-evaluated per subscriber and republished on each watched write (Postgres only). See [`examples/sites-bbox/`](examples/sites-bbox/) for the membership backends.
 
+## Presence — who's here, as a doc
+
+`registerPresence(ws, "presence:lobby")` server-side; clients just `openDoc("presence:lobby")` and get `{ peers, me }`. Joins and leaves arrive as ordinary ops on `/peers/<id>` (a dead tab removes itself on disconnect — no heartbeat code), and a client updates its own entry — cursor, status — with a plain `doc.send`. Ephemeral, per-process, works with every backend.
+
 ## CLI
 
 After install, the `delta` bin is invokable via `bunx delta`:

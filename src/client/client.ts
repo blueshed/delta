@@ -288,6 +288,16 @@ export interface Doc<T> {
    * unsubscribe function.
    */
   onOps(handler: OpsHandler): () => void;
+  /**
+   * Stop receiving this doc. Removes the local subscription (no broadcasts,
+   * no re-open on reconnect), drops all `onOps` handlers, sends the wire
+   * `close` so the server can release the channel (and, on SQLite, evict the
+   * doc cache when this was the last subscriber), and rejects any later
+   * `send`. `doc.data` keeps its last value for teardown reads. Idempotent.
+   * Call it when a view navigates away — an unclosed doc stays live (and
+   * re-subscribes on every reconnect) for the life of the socket.
+   */
+  close(): Promise<void>;
 }
 
 const docLog = createLogger("[doc]");
@@ -342,8 +352,10 @@ export function openDoc<T>(name: string, client?: WsClient): Doc<T> {
   };
 
   let wsc: WsClient | null = client ?? null;
+  let closed = false;
 
   function register(c: WsClient): void {
+    if (closed) return;
     wsc = c;
     c._docs.set(name, entry);
     // If the socket is already open when we register, kick off the initial
@@ -372,12 +384,29 @@ export function openDoc<T>(name: string, client?: WsClient): Doc<T> {
     dataVersion,
     ready,
     send(ops: DeltaOp[]) {
+      if (closed) return Promise.reject({ code: 0, message: "doc closed" });
       const c = wsc ?? (wsc = client ?? inject(WS));
       return c.send({ action: "delta", doc: name, ops });
     },
     onOps(handler) {
       opsHandlers.add(handler);
       return () => { opsHandlers.delete(handler); };
+    },
+    async close() {
+      if (closed) return;
+      closed = true;
+      opsHandlers.clear();
+      // Resolve `ready` so an awaiter of a never-opened doc isn't stranded.
+      readyResolve();
+      const c = wsc;
+      // Only delete our own entry — a later openDoc(name) on the same client
+      // owns the slot now.
+      if (c && c._docs.get(name) === entry) c._docs.delete(name);
+      if (c && c.connected.peek()) {
+        // Best-effort: the local teardown above is what matters; the socket
+        // may be down or the server may 401 a post-logout close.
+        try { await c.send({ action: "close", doc: name }); } catch { /* ignore */ }
+      }
     },
   };
 }

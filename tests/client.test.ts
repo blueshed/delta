@@ -271,3 +271,83 @@ describe("onOps reconciliation on reconnect", () => {
     client.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// doc.close() — per-doc lifecycle
+// ---------------------------------------------------------------------------
+
+describe("doc.close()", () => {
+  function startTrackingServer(initialState: any) {
+    const sockets = new Set<any>();
+    const actions: any[] = [];
+    server = Bun.serve({
+      port: 0,
+      fetch(req, s) {
+        if (s.upgrade(req)) return undefined as any;
+        return new Response("no ws", { status: 400 });
+      },
+      websocket: {
+        open(ws) { sockets.add(ws); },
+        close(ws) { sockets.delete(ws); },
+        message(ws, raw) {
+          const msg = JSON.parse(String(raw));
+          actions.push(msg);
+          if (msg.action === "open") {
+            ws.send(JSON.stringify({ id: msg.id, result: initialState }));
+          } else if (msg.action === "close") {
+            ws.send(JSON.stringify({ id: msg.id, result: { ack: true } }));
+          } else if (msg.action === "broadcast") {
+            // Test hook: fan a doc op out to every socket.
+            for (const s of sockets) s.send(JSON.stringify({ doc: msg.doc, ops: msg.ops }));
+            ws.send(JSON.stringify({ id: msg.id, result: { ack: true } }));
+          }
+        },
+      },
+    });
+    return { url: `ws://localhost:${server.port}/ws`, actions };
+  }
+
+  test("close sends the wire close, stops broadcasts, prevents re-open, rejects send", async () => {
+    const { url, actions } = startTrackingServer({ items: { "1": { id: 1, n: 0 } } });
+    const ws = connectWs(url);
+    const doc = openDoc<{ items: Record<string, any> }>("items:", ws);
+    await doc.ready;
+    expect(doc.data.peek()?.items["1"].n).toBe(0);
+
+    let opsSeen = 0;
+    doc.onOps(() => { opsSeen++; });
+
+    await doc.close();
+
+    // Wire close went out for the doc…
+    expect(actions.some((a) => a.action === "close" && a.doc === "items:")).toBe(true);
+    // …the local subscription is gone (nothing left to re-open on reconnect)…
+    expect((ws as any)._docs.size).toBe(0);
+
+    // …a later broadcast for the doc no longer applies or notifies…
+    const ops: DeltaOp[] = [{ op: "replace", path: "/items/1/n", value: 99 }];
+    await ws.send({ action: "broadcast", doc: "items:", ops });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(doc.data.peek()?.items["1"].n).toBe(0);
+    expect(opsSeen).toBe(0);
+
+    // …and send() fails fast instead of writing through a closed doc.
+    await expect(doc.send([{ op: "replace", path: "/items/1/n", value: 1 }]))
+      .rejects.toMatchObject({ message: "doc closed" });
+
+    // Idempotent.
+    await doc.close();
+    ws.close();
+  });
+
+  test("close() before the socket ever opened resolves and suppresses registration", async () => {
+    const { url } = startTrackingServer({ items: {} });
+    const ws = connectWs(url);
+    const doc = openDoc<{ items: Record<string, any> }>("items:", ws);
+    await doc.close();          // immediately — possibly before the WS is up
+    await doc.ready;            // must not hang
+    await new Promise((r) => setTimeout(r, 50));
+    expect((ws as any)._docs.size).toBe(0);
+    ws.close();
+  });
+});

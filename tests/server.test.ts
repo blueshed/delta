@@ -572,3 +572,151 @@ describe("persist serialization", () => {
     expect(onDisk).toEqual({ items: ["v0", "v1", "v2", "v3", "v4"] });
   });
 });
+
+// ---------------------------------------------------------------------------
+// registerPresence — ephemeral peers doc
+// ---------------------------------------------------------------------------
+
+import { registerPresence } from "../src/server/server";
+
+describe("registerPresence", () => {
+  /** Wire a createWs to a mock pub/sub server that fans publishes out to
+   *  every mock socket subscribed to the channel. */
+  function presenceRig(opts?: Parameters<typeof registerPresence>[2]) {
+    const ws = createWs();
+    const sockets: ReturnType<typeof mockSocket>[] = [];
+    ws.setServer({
+      publish(channel: string, raw: string) {
+        for (const s of sockets) if (s.subscriptions.has(channel)) s.send(raw);
+      },
+    });
+    const handle = registerPresence(ws, "presence:lobby", opts);
+    const join = (id: string, identity?: unknown) => {
+      const s = mockSocket(id);
+      if (identity !== undefined) (s.data as any).identity = identity;
+      sockets.push(s);
+      return s;
+    };
+    return { ws, handle, join };
+  }
+
+  async function open(ws: ReturnType<typeof createWs>, sock: any, id = 1) {
+    await ws.websocket.message(sock, JSON.stringify({ id, action: "open", doc: "presence:lobby" }));
+    // The join broadcast can land on the same socket right after the
+    // response — pick the response by its request id.
+    return sock.sent.find((m: any) => m.id === id);
+  }
+
+  test("open returns peers + me; later joins broadcast add ops", async () => {
+    const { ws, handle, join } = presenceRig();
+    const a = join("alice");
+    const res = await open(ws, a);
+    expect(res.result.me).toBe("alice");
+    expect(Object.keys(res.result.peers)).toEqual(["alice"]);
+
+    const b = join("bob");
+    await open(ws, b);
+    // Alice saw bob join as a plain add op on /peers/bob.
+    const addOp = a.sent.find((m: any) => m.ops?.[0]?.path === "/peers/bob");
+    expect(addOp.ops[0].op).toBe("add");
+    expect(addOp.ops[0].value.id).toBe("bob");
+    expect(Object.keys(handle.getPeers()).sort()).toEqual(["alice", "bob"]);
+  });
+
+  test("a peer may replace only its own /peers entry; id is immutable", async () => {
+    const { ws, join } = presenceRig();
+    const a = join("alice");
+    const b = join("bob");
+    await open(ws, a);
+    await open(ws, b);
+
+    await ws.websocket.message(a, JSON.stringify({
+      id: 2, action: "delta", doc: "presence:lobby",
+      ops: [{ op: "replace", path: "/peers/alice", value: { status: "away", id: "forged" } }],
+    }));
+    expect(a.sent.find((m: any) => m.id === 2).result).toEqual({ ack: true });
+    const update = b.sent.find((m: any) => m.ops?.[0]?.value?.status === "away");
+    expect(update.ops[0].path).toBe("/peers/alice");
+    expect(update.ops[0].value.id).toBe("alice"); // forge rejected
+
+    await ws.websocket.message(a, JSON.stringify({
+      id: 3, action: "delta", doc: "presence:lobby",
+      ops: [{ op: "replace", path: "/peers/bob", value: { status: "hijacked" } }],
+    }));
+    expect(a.sent.find((m: any) => m.id === 3).error.code).toBe(403);
+  });
+
+  test("disconnect (transport close) removes the peer and broadcasts the leave", async () => {
+    const { ws, handle, join } = presenceRig();
+    const a = join("alice");
+    const b = join("bob");
+    await open(ws, a);
+    await open(ws, b);
+
+    ws.websocket.close(b);
+    expect(Object.keys(handle.getPeers())).toEqual(["alice"]);
+    const removeOp = a.sent.find((m: any) => m.ops?.[0]?.op === "remove");
+    expect(removeOp.ops[0].path).toBe("/peers/bob");
+  });
+
+  test("wire close leaves the room without dropping the socket", async () => {
+    const { ws, handle, join } = presenceRig();
+    const a = join("alice");
+    await open(ws, a);
+    await ws.websocket.message(a, JSON.stringify({ id: 9, action: "close", doc: "presence:lobby" }));
+    expect(a.sent.find((m: any) => m.id === 9).result).toEqual({ ack: true });
+    expect(handle.getPeers()).toEqual({});
+  });
+
+  test("identity hook gates the room (401) and shapes the shared state", async () => {
+    const { ws, join } = presenceRig({
+      identity: (c: any) => c.data?.identity ?? null,
+    });
+    const anon = join("anon");
+    const res = await open(ws, anon);
+    expect(res.error.code).toBe(401);
+
+    const alice = join("alice", { name: "Alice" });
+    const ok = await open(ws, alice);
+    expect(ok.result.peers["alice"]).toEqual({ name: "Alice", id: "alice" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// registerDoc auth gating (JSON-file backend)
+// ---------------------------------------------------------------------------
+
+describe("registerDoc auth gating", () => {
+  const tmpFile = `/tmp/delta-auth-doc-${Date.now()}.json`;
+
+  afterAll(() => {
+    try { unlinkSync(tmpFile); } catch {}
+  });
+
+  const requireIdentity = {
+    gate: (c: any) => c.data?.identity ?? { error: "Authentication required" },
+  };
+
+  test("unauthenticated open/delta are rejected with 401; authenticated pass", async () => {
+    const ws = createWs();
+    await registerDoc(ws, "secret", {
+      file: tmpFile,
+      empty: { items: [] as string[] },
+      auth: requireIdentity,
+    });
+
+    const anon = mockSocket("anon");
+    await ws.websocket.message(anon, JSON.stringify({ id: 1, action: "open", doc: "secret" }));
+    expect(anon.sent[0].error.code).toBe(401);
+    await ws.websocket.message(anon, JSON.stringify({
+      id: 2, action: "delta", doc: "secret",
+      ops: [{ op: "add", path: "/items/-", value: "nope" }],
+    }));
+    expect(anon.sent[1].error.code).toBe(401);
+
+    const user = mockSocket("user");
+    (user.data as any).identity = { id: 7 };
+    await ws.websocket.message(user, JSON.stringify({ id: 3, action: "open", doc: "secret" }));
+    expect(user.sent[0].result).toEqual({ items: [] });
+  });
+});

@@ -1763,3 +1763,55 @@ describe("review fixes: temporal timestamps + op validation", () => {
     expect(doc.projects.name).toBe("Beta");
   });
 });
+
+// ---------------------------------------------------------------------------
+// registerDocs auth gating
+// ---------------------------------------------------------------------------
+
+describe("registerDocs auth gating", () => {
+  const requireIdentity = {
+    gate: (c: any) => c.data?.identity ?? { error: "Authentication required" },
+  };
+
+  function rig() {
+    const db = new Database(":memory:");
+    createTables(db, schema);
+    const ws = createWs();
+    registerDocs(ws, db, schema, [projectDoc], [], { auth: requireIdentity });
+    db.run(
+      "INSERT INTO projects (id, name, status, valid_from) VALUES ('p1', 'Alpha', 'active', '2020-01-01 00:00:00')",
+    );
+    return { db, ws };
+  }
+
+  test("unauthenticated open / delta / close are rejected with 401", async () => {
+    const { ws } = rig();
+    const anon = mockSocket("anon");
+    await ws.websocket.message(anon, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+    expect(anon.sent[0].error.code).toBe(401);
+    await ws.websocket.message(anon, JSON.stringify({
+      id: 2, action: "delta", doc: "project:p1",
+      ops: [{ op: "replace", path: "/projects/name", value: "nope" }],
+    }));
+    expect(anon.sent[1].error.code).toBe(401);
+    await ws.websocket.message(anon, JSON.stringify({ id: 3, action: "close", doc: "project:p1" }));
+    expect(anon.sent[2].error.code).toBe(401);
+  });
+
+  test("authenticated clients pass the gate", async () => {
+    const { ws } = rig();
+    const user = mockSocket("user");
+    (user.data as any).identity = { id: 42 };
+    await ws.websocket.message(user, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+    expect(user.sent[0].result.projects.name).toBe("Alpha");
+  });
+
+  test("unmatched doc names still fall through (no spurious 401)", async () => {
+    const { ws } = rig();
+    const anon = mockSocket("anon");
+    // No prefix match → this backend must stay silent so another handler
+    // (or the dispatcher's unknown-action error) can own the response.
+    await ws.websocket.message(anon, JSON.stringify({ id: 1, action: "open", doc: "elsewhere:1" }));
+    expect(anon.sent.find((m: any) => m.error?.code === 401)).toBeUndefined();
+  });
+});

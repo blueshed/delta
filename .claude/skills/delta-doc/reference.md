@@ -32,6 +32,16 @@ bunx delta sql ./types.ts --out init_db/003-tables.sql
 
 `init` copies `001a-001f-*.sql` (and optionally `002-users.sql` from auth-jwt) into your directory. `sql` runs the codegen. Everything is idempotent.
 
+**Evolving the schema later** — `generateSql` is CREATE-only: re-applying it updates the `_delta_collections` metadata but never ALTERs an existing table, so a column added to `types.ts` would otherwise be silently dropped by writes. `migrateSchema(pool, schema)` closes the gap with additive, idempotent ALTERs (new columns with NOT NULL backfill, parent-FK retrofit, temporal retrofit, `current_` view refresh — a `SELECT *` view snapshots its columns at creation, so the refresh is what makes new columns visible to reads). Boot order, each step idempotent:
+
+```ts
+await applyFramework(pool);                       // 001a–001f
+await applySql(pool, generateSql(schema, docs));  // new tables + metadata
+await migrateSchema(pool, schema);                // ALTER existing tables
+```
+
+Drops, renames, and type changes are out of scope — use a real migration tool. (`migrateSchema` warns on type drift but never alters a type. SQLite has its own `migrateSchema` in `@blueshed/delta/sqlite` with the same contract.)
+
 **`docker-entrypoint-initdb.d`** — the cleanest setup for a fresh volume: mount your `init_db/` into the Postgres image and let it apply the SQL on first start. No boot-time application code.
 
 ```yaml
@@ -200,6 +210,22 @@ const errors = validateOps(schema, itemsDoc, [
 ]);
 if (errors.length) throw new Error(errors.map(e => e.message).join("\n"));
 ```
+
+**Typed docs — `InferDoc`.** The schema literal already knows every row shape; don't hand-write the client interface a second time. `InferDoc<typeof schema, Root, Include?, Mode?>` derives it (purely compile-time):
+
+```ts
+import type { InferDoc } from "@blueshed/delta/postgres";   // or /sqlite
+
+type ItemsDoc = InferDoc<typeof schema, "items">;
+// → { items: Record<string, { id: number | string; name: string; value: number; meta: unknown | null }> }
+
+const doc = openDoc<ItemsDoc>("items:");
+
+// Scoped-single doc with includes: Mode "single" makes the root ONE row.
+type VenueDoc = InferDoc<typeof schema, "venues", "areas" | "sites", "single">;
+```
+
+Mode mirrors the runtime scope resolution: `"list"` (default — `items:`) renders the root as an id-keyed map, `"single"` (`venue:42`) as one row. Rows include `id`, the parent-FK column, and every declared column (`"text?"` → `string | null`).
 
 ## `scope` syntax
 
@@ -427,11 +453,58 @@ const venueAt: DocType<{ venueId: number; at: string }> = {
 registerDocType(venueAt);
 ```
 
+## Presence
+
+Presence ("who's here", cursors, typing indicators) is an **ephemeral doc**, not a new concept: `registerPresence(ws, name)` server-side, and on the client it's just `openDoc` — same signal, same ops, same renderers. Works with every backend (it lives in the WS layer; nothing persists).
+
+```ts
+// server — any backend; identity() gates the room and shapes what peers see
+import { registerPresence } from "@blueshed/delta/server";
+
+registerPresence(ws, "presence:lobby", {
+  identity: (client) => {
+    const u = client.data?.identity;          // set by your DeltaAuth actions
+    return u ? { name: u.name } : null;       // null → 401 on open
+  },
+});
+```
+
+```ts
+// client — plain openDoc; `me` is the one /peers entry you may write
+interface Peer { id: string; name?: string; status?: string }
+interface PresenceDoc { peers: Record<string, Peer>; me: string }
+
+const room = openDoc<PresenceDoc>("presence:lobby");
+await room.ready;
+const me = room.data.peek()!.me;
+
+// Update your own state (cursor, status, …) — ordinary delta, echoes to all:
+await room.send([{ op: "replace", path: `/peers/${me}`, value: { status: "away" } }]);
+
+// Render like any collection: list(room.data.map(d => Object.values(d?.peers ?? {})), p => p.id, …)
+```
+
+Semantics worth knowing:
+
+- **Join/leave are ops.** Opening adds `/peers/<clientId>` (broadcast `add`); a wire `close` or a **socket disconnect** removes it (broadcast `remove`) — dead tabs clean themselves up via the server's disconnect hook, no heartbeat code.
+- **A peer may only `replace` its own `/peers/<me>` entry** (403 otherwise), and `id` is immutable — the server re-stamps it, so identity can't be forged through the value.
+- **`me` is per-client** (set in the open response, never touched by ops). After a reconnect the doc re-opens automatically and `me` may change — re-read it from `doc.data` rather than caching it forever.
+- **Two tabs = two peers** (presence is per-socket). Dedupe by your own identity field in the UI if you want per-user presence.
+- **Per-process.** `ws.publish` reaches this server's sockets only — multi-process deployments need sticky sessions per room. Cross-process presence is deliberately not built.
+
 ## Authentication
 
 The extension surface is `DeltaAuth<Identity>`. Delta itself reads no credentials — JWT is just the reference.
 
-**Scope: the gate protects the Postgres backend only.** `createDocListener(ws, pool, { auth })` runs `auth.gate()` before every open / delta / open_at (custom docs included). The JSON-file backend (`registerDoc`) and the SQLite backend (`registerDocs`) never consult `DeltaAuth` — any connected socket can open and write those docs. `wireAuth` only registers login-style `call` actions; it does not gate doc traffic. If those tiers need per-user gating, front them with network trust (or your own `ws.on` wrapper), or graduate to Postgres.
+**Scope: every backend gates, with the same option.** Pass the auth module to the backend and it runs `auth.gate(client)` (401 on failure) before every open / delta / close:
+
+```ts
+await registerDoc(ws, "chat:room", { file, empty, auth });   // JSON-file
+registerDocs(ws, db, schema, docs, customDocs, { auth });    // SQLite
+await createDocListener(ws, pool, { auth });                 // Postgres (custom docs included)
+```
+
+Only Postgres goes further: with `auth.asSqlArg` set, queries also bind `app.user_id` for RLS — the JSON-file and SQLite tiers gate *access*, not *row visibility*. `wireAuth` just registers login-style `call` actions; **passing `auth` to the backend is what gates doc traffic** — omit it and any connected socket can read/write that backend's docs.
 
 ```ts
 // Use the reference JWT impl (requires auth-jwt.sql applied)
@@ -788,6 +861,14 @@ Two things to know when driving `@blueshed/delta/client` from a Bun test or scri
   ```
 
 - **`wsClient.close()` suppresses the reconnect loop.** `connectWs` returns a reconnecting socket; without `close()`, it tries to come back forever after the server stops, keeping the process alive. Always call `close()` (it's idempotent) before tearing a server down.
+
+- **`doc.close()` is the per-doc version** — and it matters in apps, not just tests. It unsubscribes server-side, stops broadcasts, drops `onOps` handlers, removes the doc from the reconnect re-open set, and rejects later `send`s (`doc.data` keeps its last value for teardown reads). In a routed SPA, close the doc when its view unmounts — otherwise every doc the user ever visited stays live (and re-subscribes on every reconnect) for the life of the socket:
+
+  ```ts
+  const doc = openDoc<BoardDoc>(`board:${id}`);
+  // … view teardown (route change, component dispose):
+  await doc.close();
+  ```
 
 ## Wire-level protocol
 
