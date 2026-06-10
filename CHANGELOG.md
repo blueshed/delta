@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Client silently went stale on a missed Postgres broadcast** (`src/client/client.ts`,
+  `src/server/postgres/listener.ts`, `src/server/postgres/registry.ts`). The client
+  applied broadcast ops blindly and bumped a purely local counter, so a dropped op —
+  notably across the open/subscribe race on Postgres — was invisible. The server now
+  stamps a per-doc monotonic version on op-bearing messages (`_v` on the open snapshot,
+  `v` on each broadcast) and the client validates the sequence: a duplicate (`v ≤ sv`)
+  is ignored, a contiguous op (`v === sv+1`) is applied and advances the baseline, and a
+  gap (`v > sv+1`) triggers a deduped re-open + resync — riding the existing reconnect
+  synthetic-root-replace so `onOps` / `applyOpsToCollection` reconcile automatically.
+  Versions are `Number()`-normalized on both ends (pg yields a top-level `BIGINT` as a
+  string but JSONB-embedded numbers as JS numbers, so a strict comparison would otherwise
+  fire spurious resyncs forever). Hardening from an adversarial pass: broadcasts arriving
+  before the first open response are dropped (the snapshot is authoritative); a `_v`-less
+  (re)open clears the baseline so a stale version can't survive; a non-numeric/`NaN` `v`
+  falls into the unversioned path instead of poisoning `serverVersion`. **Scope:** Postgres
+  standard docs. SQLite/JSON and PG custom docs are unversioned (no `v`) and the client
+  applies them as-is — back-compatible.
+
 ## [0.4.16] — 2026-06-03
 
 A correctness, security, and documentation hardening pass: 56 findings from a
