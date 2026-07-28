@@ -522,7 +522,14 @@ export function openDoc<T>(name: string, client?: WsClient): Doc<T> {
     // `provide(WS, ...)` has run. If WS still isn't provided by then, stay
     // parked — send() retries registration, so a late provide self-heals.
     queueMicrotask(() => {
-      if (closed) return;
+      // Guard on the SHARED entry's refcount, not this handle's `closed` flag —
+      // the entry may still be held by a co-handle that opened the same name,
+      // and one handle closing must not suppress registration for the others.
+      // Today every pending handle queues its own microtask, so a handle-local
+      // guard happens to be covered by the co-handle's; this states the
+      // invariant directly instead of relying on that. `registerEntry` is
+      // idempotent once `client` is set, so the duplicate calls are free.
+      if (cur().refs <= 0) return;
       const c = tryInject(WS);
       if (c) registerEntry(c, name, cur());
       else docLog.error(`openDoc("${name}"): no WS provided — will register on first send()`);
@@ -537,7 +544,9 @@ export function openDoc<T>(name: string, client?: WsClient): Doc<T> {
   const ensureClient = (): WsClient => {
     const e = cur();
     const c = e.client ?? client ?? inject(WS);
-    if (!closed) registerEntry(c, name, e);
+    // Same invariant as the deferred path: register while the entry is still
+    // held by someone, rather than while THIS handle happens to be open.
+    if (e.refs > 0) registerEntry(c, name, e);
     return c;
   };
 

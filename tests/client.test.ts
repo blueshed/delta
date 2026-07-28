@@ -4,7 +4,8 @@
  * touch the network.
  */
 import { describe, test, expect, afterEach } from "bun:test";
-import { connectWs, openDoc } from "../src/client/client";
+import { connectWs, openDoc, WS, type WsClient } from "../src/client/client";
+import { provide, clearProviders, signal } from "@blueshed/railroad";
 import type { DeltaOp } from "../src/core";
 
 // `connectWs` resolves URLs against `location` — shim it for Bun.
@@ -424,5 +425,85 @@ describe("version gap detection + resync", () => {
     expect(received).toEqual([]);
 
     client.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Deferred registration guards on the SHARED entry, not one handle
+// (TODO.md addendum A1)
+//
+// openDoc() called before provide(WS, ...) parks the entry and registers it in
+// a microtask. That microtask used to bail on the CREATING handle's `closed`
+// flag — a per-handle fact used to decide the fate of a shared entry. It is
+// now guarded on the entry's refcount.
+//
+// A1 predicted a live handle could be stranded by its co-handle closing. That
+// is NOT reproducible: every pending handle queues its own microtask, so the
+// co-handle's registers. These pin the invariant directly, so the guard stays
+// correct even if that incidental cover is refactored away.
+// ---------------------------------------------------------------------------
+
+describe("deferred registration refcount", () => {
+  function fakeClient() {
+    const sent: any[] = [];
+    const client = {
+      connected: signal(true),
+      send: async (msg: any) => {
+        sent.push(msg);
+        return msg.action === "open" ? { seeded: true } : { ack: true };
+      },
+      on: () => () => {},
+      close: () => {},
+      _docs: new Map(),
+    } as unknown as WsClient;
+    return { client, sent };
+  }
+
+  test("a co-handle closing does not strand the surviving handle", async () => {
+    clearProviders();
+    const { client, sent } = fakeClient();
+
+    const a = openDoc<any>("shared");       // parks the entry
+    const b = openDoc<any>("shared");       // shares it, refs = 2
+    a.close();                              // refs = 1 — b still holds it
+    provide(WS, client);
+    await Bun.sleep(20);
+
+    expect(client._docs.has("shared")).toBe(true);
+    expect(b.data.get()).toEqual({ seeded: true });
+    // Exactly one open on the wire — the shared entry registers once.
+    expect(sent.filter((m) => m.action === "open")).toHaveLength(1);
+  });
+
+  test("a fully released doc does not register", async () => {
+    clearProviders();
+    const { client, sent } = fakeClient();
+
+    const a = openDoc<any>("released");
+    const b = openDoc<any>("released");
+    a.close();
+    b.close();                              // refs = 0
+    provide(WS, client);
+    await Bun.sleep(20);
+
+    // Registering here would resurrect a doc nobody holds and re-subscribe the
+    // socket to a stream with no reader.
+    expect(client._docs.has("released")).toBe(false);
+    expect(sent.filter((m) => m.action === "open")).toHaveLength(0);
+  });
+
+  test("close() is idempotent and cannot drive refs negative", async () => {
+    clearProviders();
+    const { client } = fakeClient();
+
+    const a = openDoc<any>("idem");
+    const b = openDoc<any>("idem");
+    a.close(); a.close(); a.close();        // repeated close of ONE handle
+    provide(WS, client);
+    await Bun.sleep(20);
+
+    // b's reference survived the repeats, so the doc is still registered.
+    expect(client._docs.has("idem")).toBe(true);
+    expect(b.data.get()).toEqual({ seeded: true });
   });
 });

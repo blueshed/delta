@@ -11,7 +11,7 @@
  * undefined — delta itself has no opinion on authentication.
  */
 import type { WsServer } from "../server";
-import { trackSubscribe, trackUnsubscribe } from "../server";
+import { trackSubscribe, trackUnsubscribe, onClientDrop } from "../server";
 import { createLogger } from "../logger";
 import type { Pool } from "pg";
 import { resolveDoc } from "./registry";
@@ -393,6 +393,26 @@ export async function createDocListener<I = unknown>(
     if (state.subscribers.size === 0) tracked.delete(docName);
   }
 
+  // Transport-level teardown (socket drop / logout via dropClientSubscriptions):
+  // pruneDoc only runs when a doc drains, so a doc whose subscribers all
+  // vanished without further writes stayed tracked, and custom-doc caches
+  // (which pruneDoc never touches) lived until an explicit `close` action
+  // that a dropped socket never sends. Mirrors the sqlite backend's hook.
+  function releaseClient(client: any): void {
+    for (const [docName, state] of tracked) {
+      if (!state.subscribers.delete(client)) continue;
+      if (state.subscribers.size === 0) tracked.delete(docName);
+    }
+    for (const [docName, subs] of customSubs) {
+      if (!subs.delete(client)) continue;
+      if (subs.size === 0) {
+        customSubs.delete(docName);
+        customCache.delete(docName);
+        customCriteria.delete(docName);
+      }
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // withDoc — authenticate (if configured), validate doc name, resolve handler,
   // wrap errors. Each WS branch supplies only its own body.
@@ -482,6 +502,7 @@ export async function createDocListener<I = unknown>(
         if (!customSubs.has(docName)) customSubs.set(docName, new Set());
         customSubs.get(docName)!.add(client);
         trackSubscribe(client, docName);
+        onClientDrop(client, releaseClient);
 
         respond({ result: doc });
         log.info(`opened ${docName} (custom${def.recompute ? ", recompute" : ""})`);
@@ -533,6 +554,7 @@ export async function createDocListener<I = unknown>(
 
     state.subscribers.add(client);
     trackSubscribe(client, docName);
+    onClientDrop(client, releaseClient);
     respond({ result: result.result });
     log.info(`opened ${docName} v${state.version}`);
   }));

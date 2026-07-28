@@ -609,3 +609,184 @@ describe("clientId collision (#24)", () => {
     expect(a.sent.at(-1)).toEqual({ to: "a" });
   });
 });
+
+// Local temp-file helper for the blocks below (the older describes each
+// declare their own `tmpFile` const inside their scope).
+const persistTmpFiles: string[] = [];
+function tmpFile(tag: string): string {
+  const f = `/tmp/delta-server-test-${tag}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`;
+  persistTmpFiles.push(f);
+  return f;
+}
+afterAll(() => {
+  for (const f of persistTmpFiles) { try { unlinkSync(f); } catch {} }
+});
+
+// ---------------------------------------------------------------------------
+// Malformed frames (TODO.md #2)
+//
+// `JSON.parse` used to sit OUTSIDE the try in an async handler, so any
+// non-JSON frame rejected with nothing to catch it — an unhandled rejection
+// any client could fire at will, and a remote kill for a process running a
+// strict `unhandledRejection` handler.
+// ---------------------------------------------------------------------------
+
+describe("malformed frames", () => {
+  /** Run `fn`, failing if it produces an unhandled rejection. */
+  async function withRejectionWatch(fn: () => Promise<void>): Promise<unknown[]> {
+    const seen: unknown[] = [];
+    const onReject = (err: unknown) => seen.push(err);
+    process.on("unhandledRejection", onReject);
+    try {
+      await fn();
+      // Unhandled rejections surface on a later turn, so give them one.
+      await new Promise((r) => setTimeout(r, 50));
+    } finally {
+      process.off("unhandledRejection", onReject);
+    }
+    return seen;
+  }
+
+  test("a non-JSON frame does not produce an unhandled rejection", async () => {
+    const ws = createWs();
+    const sock = mockSocket();
+    const rejections = await withRejectionWatch(async () => {
+      await ws.websocket.message(sock, "not json at all");
+    });
+    expect(rejections).toEqual([]);
+    // Nothing to answer on: the id lives inside the frame we couldn't parse.
+    expect(sock.sent).toEqual([]);
+  });
+
+  test("the socket still serves valid frames afterwards", async () => {
+    const ws = createWs();
+    registerMethod(ws, "ping", () => "pong");
+    const sock = mockSocket();
+
+    await ws.websocket.message(sock, "}{ broken");
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "call", method: "ping" }));
+
+    expect(sock.sent.find((m: any) => m.id === 1)?.result).toBe("pong");
+  });
+
+  test("a valid frame whose handler throws still answers on its id", async () => {
+    // The parse move must not swallow the pre-existing error path.
+    const ws = createWs();
+    ws.on("boom", () => { throw new Error("kaboom"); });
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ id: 7, action: "boom" }));
+    expect(sock.sent.find((m: any) => m.id === 7)?.error?.message).toBe("kaboom");
+  });
+
+  test("non-JSON frames are not misrouted to _raw handlers", async () => {
+    // `_raw` is for well-formed frames that carry no `action`; a parse failure
+    // must not look like one.
+    const ws = createWs();
+    let rawCalls = 0;
+    ws.on("_raw", () => { rawCalls++; });
+    const sock = mockSocket();
+
+    await ws.websocket.message(sock, "still not json");
+    expect(rawCalls).toBe(0);
+
+    await ws.websocket.message(sock, JSON.stringify({ hello: "world" }));
+    expect(rawCalls).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// persist() serialization (TODO.md addendum A2)
+//
+// `applyAndBroadcast` fired persist() without await, queue or catch: two rapid
+// deltas raced whole-file Bun.writes and the file could settle on the OLDER
+// snapshot, and an fs failure after a successful ack became an unhandled
+// rejection.
+// ---------------------------------------------------------------------------
+
+describe("persist queue", () => {
+  test("writes never overlap (deterministic — instruments Bun.write)", async () => {
+    // Ordering assertions alone are timing-dependent and a poor way to prove a
+    // race is gone. Counting concurrent writers is exact: pre-fix, N unawaited
+    // deltas started N concurrent Bun.writes.
+    const file = tmpFile("persist-overlap");
+    const ws = createWs();
+    const handle = await registerDoc<{ n: number }>(ws, "po", { file, empty: { n: 0 } });
+
+    const realWrite = Bun.write;
+    let inFlight = 0;
+    let maxInFlight = 0;
+    (Bun as any).write = async (...args: any[]) => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      try { return await (realWrite as any)(...args); }
+      finally { inFlight--; }
+    };
+    try {
+      for (let i = 1; i <= 20; i++) {
+        handle.applyAndBroadcast([{ op: "replace", path: "/n", value: i }]);
+      }
+      await handle.persist();
+    } finally {
+      (Bun as any).write = realWrite;
+    }
+
+    expect(maxInFlight).toBe(1);
+    expect(JSON.parse(await Bun.file(file).text()).n).toBe(20);
+  });
+
+  test("rapid deltas leave the file on the LATEST state", async () => {
+    const file = tmpFile("persist-order");
+    const ws = createWs();
+    const handle = await registerDoc<{ n: number }>(ws, "p", { file, empty: { n: 0 } });
+
+    // Fire many without awaiting — the pre-fix race.
+    for (let i = 1; i <= 25; i++) {
+      handle.applyAndBroadcast([{ op: "replace", path: "/n", value: i }]);
+    }
+    await handle.persist();   // resolves only after the whole queue drains
+
+    expect(JSON.parse(await Bun.file(file).text()).n).toBe(25);
+    expect(handle.getDoc().n).toBe(25);
+  });
+
+  test("persist() resolves after its own write, in call order", async () => {
+    const file = tmpFile("persist-chain");
+    const ws = createWs();
+    const handle = await registerDoc<{ n: number }>(ws, "pc", { file, empty: { n: 0 } });
+
+    const order: number[] = [];
+    const writes = [1, 2, 3].map((i) => {
+      handle.applyAndBroadcast([{ op: "replace", path: "/n", value: i }]);
+      return handle.persist().then(() => order.push(i));
+    });
+    await Promise.all(writes);
+
+    expect(order).toEqual([1, 2, 3]);
+    expect(JSON.parse(await Bun.file(file).text()).n).toBe(3);
+  });
+
+  test("a failing write is logged, not thrown as an unhandled rejection", async () => {
+    // A directory path makes Bun.write fail. The delta is already acked and
+    // broadcast by then, so the failure must not escape applyAndBroadcast.
+    const ws = createWs();
+    const handle = await registerDoc<{ n: number }>(ws, "pf", {
+      file: "/tmp", empty: { n: 0 },
+    });
+
+    const seen: unknown[] = [];
+    const onReject = (e: unknown) => seen.push(e);
+    process.on("unhandledRejection", onReject);
+    try {
+      handle.applyAndBroadcast([{ op: "replace", path: "/n", value: 1 }]);
+      await new Promise((r) => setTimeout(r, 50));
+    } finally {
+      process.off("unhandledRejection", onReject);
+    }
+    expect(seen).toEqual([]);
+
+    // The chain survives the failure: a later persist() still runs rather than
+    // inheriting the rejected promise.
+    await handle.persist().catch(() => {});
+    expect(handle.getDoc().n).toBe(1);
+  });
+});

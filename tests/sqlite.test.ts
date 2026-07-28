@@ -6,7 +6,7 @@ import {
   migrateSchema, validateOps,
   type Schema, type DocDef,
 } from "../src/server/sqlite";
-import { createWs } from "../src/server/server";
+import { createWs, dropClientSubscriptions } from "../src/server/server";
 import { setLogLevel } from "../src/server/logger";
 
 setLogLevel("silent");
@@ -1804,5 +1804,137 @@ describe("review fixes: temporal timestamps + op validation", () => {
     expect(live.n).toBe(1);
     const doc = loadDocAt(db, schema, projectDoc, "p1", at);
     expect(doc.projects.name).toBe("Beta");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TODO.md fixes — #3 whole-row replace acked-but-dropped + #7 socket-drop cleanup
+// ---------------------------------------------------------------------------
+
+describe("todo fixes: whole-row replace (#3) + socket-drop cleanup (#7)", () => {
+  let db: InstanceType<typeof Database>;
+  let ws: ReturnType<typeof createWs>;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    createTables(db, schema);
+    ws = createWs();
+    registerDocs(ws, db, schema, [projectDoc]);
+    db.run("INSERT INTO projects (id, name, status) VALUES ('p1', 'Alpha', 'active')");
+    db.run("INSERT INTO tasks (id, project_id, title, done) VALUES ('t1', 'p1', 'Orig', 0)");
+  });
+
+  async function open(sock: any) {
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+  }
+
+  test("#3: whole-row replace /<coll>/<id> persists (was acked + silently dropped)", async () => {
+    const sock = mockSocket();
+    await open(sock);
+    await ws.websocket.message(sock, JSON.stringify({
+      id: 2, action: "delta", doc: "project:p1",
+      ops: [{ op: "replace", path: "/tasks/t1", value: { title: "CHANGED", done: true } }],
+    }));
+    expect(sock.sent[1].error).toBeUndefined();
+    expect(sock.sent[1].result?.ack).toBe(true);
+    const row = db.query("SELECT title, done, project_id FROM current_tasks WHERE id = 't1'").get() as any;
+    expect(row.title).toBe("CHANGED");
+    expect(row.done).toBe(1);
+    expect(row.project_id).toBe("p1"); // merge keeps the FK the value omitted
+  });
+
+  test("#3: whole-row replace is a partial MERGE — omitted fields keep their values (Postgres parity)", async () => {
+    const sock = mockSocket();
+    await open(sock);
+    await ws.websocket.message(sock, JSON.stringify({
+      id: 2, action: "delta", doc: "project:p1",
+      ops: [{ op: "replace", path: "/tasks/t1", value: { done: true } }],
+    }));
+    const row = db.query("SELECT title, done FROM current_tasks WHERE id = 't1'").get() as any;
+    expect(row.title).toBe("Orig"); // delta_apply does `v_row || value` — so do we
+    expect(row.done).toBe(1);
+  });
+
+  test("#3: whole-root replace /<root> merges into the root row (was a 500)", async () => {
+    const sock = mockSocket();
+    await open(sock);
+    await ws.websocket.message(sock, JSON.stringify({
+      id: 2, action: "delta", doc: "project:p1",
+      ops: [{ op: "replace", path: "/projects", value: { name: "Beta" } }],
+    }));
+    expect(sock.sent[1].error).toBeUndefined();
+    const row = db.query("SELECT name, status FROM current_projects WHERE id = 'p1'").get() as any;
+    expect(row.name).toBe("Beta");
+    expect(row.status).toBe("active");
+  });
+
+  test("#3: whole-row replace with a non-object value is rejected (400), not acked", async () => {
+    const sock = mockSocket();
+    await open(sock);
+    await ws.websocket.message(sock, JSON.stringify({
+      id: 2, action: "delta", doc: "project:p1",
+      ops: [{ op: "replace", path: "/tasks/t1", value: "nope" }],
+    }));
+    expect(sock.sent[1].result).toBeUndefined();
+    expect(sock.sent[1].error?.code).toBe(400);
+    expect(sock.sent[1].error?.message).toContain("must be an object");
+  });
+
+  test("#3: whole-row replace collapses with field ops on the same row (one new version)", async () => {
+    const sock = mockSocket();
+    await open(sock);
+    await ws.websocket.message(sock, JSON.stringify({
+      id: 2, action: "delta", doc: "project:p1",
+      ops: [
+        { op: "replace", path: "/tasks/t1", value: { title: "Merged" } },
+        { op: "replace", path: "/tasks/t1/done", value: true },
+      ],
+    }));
+    expect(sock.sent[1].result?.ack).toBe(true);
+    const row = db.query("SELECT title, done FROM current_tasks WHERE id = 't1'").get() as any;
+    expect(row.title).toBe("Merged");
+    expect(row.done).toBe(1);
+    const live = db.query("SELECT COUNT(*) AS n FROM current_tasks WHERE id = 't1'").get() as any;
+    expect(live.n).toBe(1);
+  });
+
+  test("#7: a dropped socket evicts the doc cache — re-open reads fresh SQL", async () => {
+    const sockA = mockSocket("a");
+    await open(sockA);
+    expect(sockA.sent[0].result.projects.name).toBe("Alpha");
+
+    // Out-of-band write, invisible to the cached doc.
+    db.run("UPDATE projects SET name = 'Fresh' WHERE id = 'p1' AND valid_to IS NULL");
+
+    // Transport-level close — no polite `close` ACTION is ever sent.
+    ws.websocket.close(sockA);
+
+    const sockB = mockSocket("b");
+    await open(sockB);
+    expect(sockB.sent[0].result.projects.name).toBe("Fresh"); // stale cache would say Alpha
+  });
+
+  test("#7: logout (dropClientSubscriptions) evicts the same way", async () => {
+    const sockA = mockSocket("a");
+    await open(sockA);
+    db.run("UPDATE projects SET name = 'Fresh' WHERE id = 'p1' AND valid_to IS NULL");
+    dropClientSubscriptions(sockA);
+    const sockB = mockSocket("b");
+    await open(sockB);
+    expect(sockB.sent[0].result.projects.name).toBe("Fresh");
+  });
+
+  test("#7: a surviving subscriber keeps the cache warm", async () => {
+    const sockA = mockSocket("a");
+    const sockB = mockSocket("b");
+    await open(sockA);
+    await open(sockB);
+    db.run("UPDATE projects SET name = 'Fresh' WHERE id = 'p1' AND valid_to IS NULL");
+    ws.websocket.close(sockA);
+    const sockC = mockSocket("c");
+    await open(sockC);
+    // B is still subscribed, so the doc stays cached — C reads the cache, which
+    // (correctly, for the cache-coherency model) hasn't seen the raw SQL write.
+    expect(sockC.sent[0].result.projects.name).toBe("Alpha");
   });
 });

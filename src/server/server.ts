@@ -93,11 +93,38 @@ export function trackUnsubscribe(client: any, channel: string): void {
  */
 export function dropClientSubscriptions(client: any): void {
   const channels = client.data?.channels as Set<string> | undefined;
-  if (!channels) return;
-  for (const ch of channels) {
-    try { client.unsubscribe(ch); } catch { /* socket may be closing */ }
+  if (channels) {
+    for (const ch of channels) {
+      try { client.unsubscribe(ch); } catch { /* socket may be closing */ }
+    }
+    channels.clear();
   }
-  channels.clear();
+  runClientDropHooks(client);
+}
+
+/**
+ * Register a callback to run when this socket's subscriptions are torn down —
+ * transport-level close (tab closed, network drop) or an identity drop via
+ * `dropClientSubscriptions` (logout / switch). Backends use it to release
+ * per-socket subscriber state: the polite `close` ACTION only arrives when a
+ * client sends one, and a dropped socket never does. Hooks live in a Set keyed
+ * by function identity, so re-registering the same closure on every open is a
+ * cheap no-op; the set clears after running (a re-open after logout
+ * re-registers).
+ */
+export function onClientDrop(client: any, fn: (client: any) => void): void {
+  if (!client.data) client.data = {};
+  (client.data.dropHooks ??= new Set<(c: any) => void>()).add(fn);
+}
+
+function runClientDropHooks(client: any): void {
+  const hooks = client.data?.dropHooks as Set<(c: any) => void> | undefined;
+  if (!hooks?.size) return;
+  const fns = [...hooks];
+  hooks.clear();
+  for (const fn of fns) {
+    try { fn(client); } catch { /* teardown must not throw into transport close */ }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -171,17 +198,25 @@ export function createWs(opts?: WsOptions): WsServer {
         log.debug(`open id=${clientId}`);
       },
       async message(ws: any, raw: any) {
-        const msg = JSON.parse(String(raw));
-        const { id, action } = msg;
-
-        if (!action) {
-          for (const handler of actions.get("_raw") ?? []) {
-            await handler(msg, ws, () => {});
-          }
-          return;
-        }
-
+        // Parse INSIDE the try: this is an async handler, so a non-JSON frame
+        // used to reject with nothing to catch it — an unhandled rejection any
+        // client could trigger at will, and a remote kill for any process that
+        // installs a strict `unhandledRejection` handler. There is no `id` to
+        // answer on when the parse itself fails, so that case only logs.
+        let msg: any;
+        let id: any;
+        let action: any;
         try {
+          msg = JSON.parse(String(raw));
+          ({ id, action } = msg);
+
+          if (!action) {
+            for (const handler of actions.get("_raw") ?? []) {
+              await handler(msg, ws, () => {});
+            }
+            return;
+          }
+
           // Private methods (leading `_`) are internal helpers: composable
           // within other handlers' bodies, never reachable from the wire.
           // Reject before any handler runs, so the gate can't be bypassed and
@@ -244,6 +279,7 @@ export function createWs(opts?: WsOptions): WsServer {
         // Only delete our own mapping — a collision-replaced socket may now
         // own this id.
         if (clientId && clients.get(clientId) === ws) clients.delete(clientId);
+        runClientDropHooks(ws);
         log.debug(`close id=${clientId ?? "?"}`);
       },
     },
@@ -309,15 +345,29 @@ export async function registerDoc<T>(
 
   log.info(`loaded from ${opts.file}`);
 
-  async function persist() {
-    await Bun.write(dataFile, JSON.stringify(doc, null, 2));
+  // Whole-file writes are serialized through a promise chain. Two rapid deltas
+  // previously raced `Bun.write`, so the file could settle on the OLDER
+  // snapshot when the writes completed out of order.
+  let persisting: Promise<void> = Promise.resolve();
+
+  function persist(): Promise<void> {
+    const done = persisting
+      .then(() => Bun.write(dataFile, JSON.stringify(doc, null, 2)))
+      .then(() => {});
+    // The chain must survive a failed write, so it continues from a swallowed
+    // copy — but the promise handed back still rejects, so an explicit
+    // `await handle.persist()` can observe the error.
+    persisting = done.catch(() => {});
+    return done;
   }
 
   function applyAndBroadcast(ops: DeltaOp[]) {
     applyOps(doc, ops);
     log.info(`delta [${ops.map((o) => `${o.op} ${o.path}`).join(", ")}]`);
     ws.publish(name, { doc: name, ops: normalizeForBroadcast(doc, ops) });
-    persist();
+    // Fire-and-forget by design (the delta is already acked and broadcast), so
+    // an fs failure is logged rather than left as an unhandled rejection.
+    persist().catch((err: any) => log.error(`persist failed: ${err.message}`));
   }
 
   ws.on("open", (msg, client, respond) => {

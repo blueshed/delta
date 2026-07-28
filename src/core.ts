@@ -44,6 +44,40 @@ function parsePath(path: string): (string | number)[] {
   });
 }
 
+/**
+ * Reference tokens that reach an object's prototype rather than its own data.
+ *
+ * Op paths and values are client-supplied on every backend — the JSON-file
+ * backend applies them with no schema validation at all and then echoes them
+ * verbatim to every subscriber, so one client could poison the server process
+ * AND every other connected browser. The guard lives here, in the one module
+ * all three backends and the browser client share, so none of them can forget
+ * it. (SQLite/Postgres also reject `/__proto__/…` incidentally, as an unknown
+ * collection — that is a side effect of their schema check, not a defence.)
+ */
+const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+function assertSafePath(segments: (string | number)[], path: string): void {
+  for (const seg of segments) {
+    if (typeof seg === "string" && UNSAFE_KEYS.has(seg)) {
+      throw new Error(`Unsafe path segment "${seg}" in "${path}"`);
+    }
+  }
+}
+
+/**
+ * `Object.assign` honours an own `__proto__` key by invoking the prototype
+ * setter, so a root replace whose value carried one re-pointed the document's
+ * prototype. Copy own keys explicitly and skip the dangerous ones. Nested
+ * values are assigned wholesale rather than merged, so they stay inert data.
+ */
+function safeAssign(target: any, source: Record<string, unknown>): void {
+  for (const k of Object.keys(source)) {
+    if (UNSAFE_KEYS.has(k)) continue;
+    target[k] = source[k];
+  }
+}
+
 function walk(
   obj: any,
   segments: (string | number)[],
@@ -61,6 +95,7 @@ function walk(
 export function applyOps(doc: any, ops: DeltaOp[]): void {
   for (const op of ops) {
     const segments = parsePath(op.path);
+    assertSafePath(segments, op.path);
     // Root op (empty path "" or "/"): replace/clear the WHOLE doc IN PLACE. The value
     // reference is fixed — the server's doc tracking and the client both hold `doc` by
     // reference and notify on mutation (the client bumps dataVersion after applyOps) — so
@@ -75,7 +110,7 @@ export function applyOps(doc: any, ops: DeltaOp[]): void {
         (doc as unknown[]).push(...(op.value as unknown[]));
       } else if (!Array.isArray(doc) && op.value && typeof op.value === "object") {
         for (const k of Object.keys(doc)) delete doc[k];
-        Object.assign(doc, op.value as Record<string, unknown>);
+        safeAssign(doc, op.value as Record<string, unknown>);
       } else {
         throw new Error("root replace requires a matching container (object↔object / array↔array)");
       }

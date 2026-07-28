@@ -108,3 +108,76 @@ describe("applyOps", () => {
     expect(doc.a[""]).toBe("updated");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Prototype pollution (TODO.md #1)
+//
+// Op paths AND values are client-supplied on every backend. The JSON-file
+// backend applies them with no schema validation and echoes them verbatim to
+// every subscriber, so one client could poison the server process and every
+// other connected browser. The guard lives in core so all three backends and
+// the browser client inherit it.
+// ---------------------------------------------------------------------------
+
+describe("prototype pollution", () => {
+  // Each case asserts BOTH that the op is refused and that nothing leaked —
+  // "it threw" alone would pass even if the write had already landed.
+  const vectors: [string, DeltaOp][] = [
+    ["__proto__ direct",      { op: "add",     path: "/__proto__/polluted",            value: "x" }],
+    ["__proto__ nested",      { op: "add",     path: "/items/1/__proto__/polluted",    value: "x" }],
+    ["constructor.prototype", { op: "add",     path: "/constructor/prototype/polluted", value: "x" }],
+    ["prototype segment",     { op: "replace", path: "/prototype/polluted",            value: "x" }],
+    ["remove via __proto__",  { op: "remove",  path: "/__proto__/polluted" }],
+  ];
+
+  for (const [label, op] of vectors) {
+    test(`rejects ${label}`, () => {
+      const doc: any = { items: { 1: {} } };
+      expect(() => applyOps(doc, [op])).toThrow(/Unsafe path segment/);
+      expect(({} as any).polluted).toBeUndefined();
+      expect(Object.prototype.hasOwnProperty.call(Object.prototype, "polluted")).toBe(false);
+    });
+  }
+
+  test("a root replace cannot re-point the document's prototype", () => {
+    // Distinct from the path vector: `Object.assign` honours an own
+    // `__proto__` key by invoking the prototype SETTER, so the value itself
+    // was a vector even with every path segment safe. JSON.parse is how a real
+    // op arrives, and it makes `__proto__` an own property.
+    const doc: any = { a: 1 };
+    const value = JSON.parse(String.raw`{"__proto__":{"polluted":"via-value"},"b":2}`);
+
+    applyOps(doc, [{ op: "replace", path: "", value }]);
+
+    expect(Object.getPrototypeOf(doc)).toBe(Object.prototype);
+    expect(doc.polluted).toBeUndefined();
+    expect(doc.b).toBe(2);          // the legitimate key still lands
+  });
+
+  test("ordinary paths that merely contain the words still work", () => {
+    // The guard matches whole reference tokens, not substrings — a field
+    // legitimately called `constructorName` must not be collateral damage.
+    const doc: any = { rows: { 1: { constructorName: "old", prototypeId: 1 } } };
+    applyOps(doc, [
+      { op: "replace", path: "/rows/1/constructorName", value: "new" },
+      { op: "replace", path: "/rows/1/prototypeId", value: 2 },
+    ]);
+    expect(doc.rows[1].constructorName).toBe("new");
+    expect(doc.rows[1].prototypeId).toBe(2);
+  });
+
+  test("a rejected op does not partially apply the batch", () => {
+    const doc: any = { a: 1 };
+    expect(() =>
+      applyOps(doc, [
+        { op: "replace", path: "/a", value: 2 },
+        { op: "add", path: "/__proto__/polluted", value: "x" },
+      ]),
+    ).toThrow(/Unsafe path segment/);
+    // Ops before the bad one DID apply — applyOps is documented as atomic only
+    // in the sense that callers roll back around it (sqlite wraps it in a
+    // transaction). Pinned so the boundary is explicit rather than assumed.
+    expect(doc.a).toBe(2);
+    expect(({} as any).polluted).toBeUndefined();
+  });
+});

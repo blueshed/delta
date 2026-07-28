@@ -17,7 +17,7 @@
  * the backend is a JSON file or SQLite.
  */
 import type { WsServer } from "./server";
-import { trackSubscribe, trackUnsubscribe } from "./server";
+import { trackSubscribe, trackUnsubscribe, onClientDrop } from "./server";
 import { applyOps as deltaApplyOps, type DeltaOp, splitPath } from "../core";
 import { createLogger } from "./logger";
 import {
@@ -196,6 +196,22 @@ export function registerDocs(
     return null;
   }
 
+  // Transport-level teardown (socket drop / logout via dropClientSubscriptions):
+  // a dropped socket never sends the polite `close` action, so without this
+  // every abandoned doc stayed cached forever and its dead socket sat in
+  // `subscriptions`, growing the fan-out set monotonically (TODO.md #7).
+  // Mirrors the `close`-action eviction below.
+  function releaseClient(client: any): void {
+    for (const [docName, subs] of subscriptions) {
+      if (!subs.delete(client)) continue;
+      if (subs.size === 0) {
+        subscriptions.delete(docName);
+        cache.delete(docName);
+        customCriteria.delete(docName);
+      }
+    }
+  }
+
   function resolveScope(def: DocDef, docId: string): Record<string, string> {
     const resolved: Record<string, string> = {};
     if (Object.keys(def.scope).length === 0) {
@@ -319,6 +335,19 @@ export function registerDocs(
         continue;
       }
 
+      // Whole-root replace: /<root> — merge the value's fields into the root
+      // row (Postgres parity: delta_apply merges over the current row). The
+      // path carries the row identity, so `id` and the temporal columns are
+      // ignored rather than trusted from the value.
+      if (collKey === def.root && parts.length === 1) {
+        if (op.op !== "replace") throw new Error(`Root supports replace only`);
+        for (const [field, value] of Object.entries((op as any).value as Record<string, unknown>)) {
+          if (field === "id" || field === "valid_from" || field === "valid_to") continue;
+          rootFieldUpdates.set(field, value);
+        }
+        continue;
+      }
+
       if (!table || !def.include.includes(collKey)) {
         throw new Error(`Unknown collection: ${collKey}`);
       }
@@ -345,6 +374,22 @@ export function registerDocs(
           assertRowInScope(doc, collKey, id);
           const cascadeOps = removeRow(db, schema, table, collKey, id, doc, def);
           broadcastOps.push(...cascadeOps);
+        } else if (op.op === "replace") {
+          // Whole-row replace: /<coll>/<id> — a partial merge over the current
+          // row (Postgres parity: delta_apply does `v_row || value`). Rides the
+          // field-batch writer below so it collapses with field-level ops on
+          // the same row and shares the temporal/non-temporal write path.
+          // validateOps accepted this shape all along, but it used to fall
+          // through here and ack as a silent no-op (TODO.md #3).
+          const key = `${collKey}/${id}`;
+          if (!rowFieldBatches.has(key)) {
+            rowFieldBatches.set(key, { table, id, fields: new Map() });
+          }
+          const fields = rowFieldBatches.get(key)!.fields;
+          for (const [field, value] of Object.entries((op as any).value as Record<string, unknown>)) {
+            if (field === "id" || field === "valid_from" || field === "valid_to") continue;
+            fields.set(field, value);
+          }
         }
       } else if (parts.length === 3 && op.op === "replace") {
         // Field update — batch per row
@@ -426,6 +471,7 @@ export function registerDocs(
       trackSubscribe(client, docName);
       if (!subscriptions.has(docName)) subscriptions.set(docName, new Set());
       subscriptions.get(docName)!.add(client);
+      onClientDrop(client, releaseClient);
 
       respond({ result: doc });
       log.info(`opened ${docName} (custom)`);
@@ -450,6 +496,7 @@ export function registerDocs(
     trackSubscribe(client, docName);
     if (!subscriptions.has(docName)) subscriptions.set(docName, new Set());
     subscriptions.get(docName)!.add(client);
+    onClientDrop(client, releaseClient);
 
     respond({ result: doc });
     log.info(`opened ${docName}`);
@@ -889,6 +936,35 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
     const isKnownKey = (k: string) =>
       k === "id" || k === fkCol || table.columns[k] !== undefined;
 
+    // One-segment paths: /<root> is a whole-root partial merge (replace only);
+    // /<coll> on an included collection has no meaning for a client op — reject
+    // it here so it 400s instead of reaching the executor's throw (500).
+    if (parts.length === 1) {
+      if (collKey !== def.root) {
+        errors.push({ path: op.path, message: `Whole-collection ops are not supported: ${op.op} ${op.path}` });
+        continue;
+      }
+      if (op.op !== "replace") {
+        errors.push({ path: op.path, message: "Root supports replace only" });
+        continue;
+      }
+      const value = (op as any).value as Record<string, unknown> | undefined;
+      if (value == null || typeof value !== "object" || Array.isArray(value)) {
+        errors.push({ path: op.path, message: "Replace value must be an object" });
+        continue;
+      }
+      for (const key of Object.keys(value)) {
+        if (!isKnownKey(key)) errors.push({ path: op.path, message: `Unknown field: ${key}` });
+      }
+      for (const [field, fieldValue] of Object.entries(value)) {
+        const colDef = table.columns[field];
+        if (!colDef) continue;
+        const typeErr = validateFieldType(colDef, field, fieldValue);
+        if (typeErr) errors.push({ path: `${op.path}/${field}`, message: typeErr });
+      }
+      continue;
+    }
+
     // Root collection is single-mode: /<root>/<field> is a FIELD replace
     // (not /<root>/<id> row), so validate parts[1] as a column name.
     if (collKey === def.root && parts.length === 2) {
@@ -910,8 +986,14 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
     // Whole-row add / replace on an included collection: /<coll>/<id> (or /<coll>/- for add).
     if ((op.op === "add" || op.op === "replace") && parts.length === 2) {
       const value = (op as any).value as Record<string, unknown> | undefined;
-      if (value == null || typeof value !== "object") {
-        if (op.op === "add") errors.push({ path: op.path, message: "Add value must be an object" });
+      if (value == null || typeof value !== "object" || Array.isArray(value)) {
+        // Rejecting a bad REPLACE matters as much as a bad add now that the
+        // executor implements whole-row replace — before, a non-object value
+        // was silently dropped along with the rest of the op.
+        errors.push({
+          path: op.path,
+          message: `${op.op === "add" ? "Add" : "Replace"} value must be an object`,
+        });
         continue;
       }
 
