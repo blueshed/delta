@@ -1,6 +1,6 @@
 import { describe, test, expect, afterAll } from "bun:test";
 import {
-  createWs, registerDoc, registerMethod,
+  createWs, registerDoc, registerMethod, normalizeForBroadcast,
   trackSubscribe, trackUnsubscribe, dropClientSubscriptions,
 } from "../src/server/server";
 import { setLogLevel } from "../src/server/logger";
@@ -143,6 +143,91 @@ describe("createWs", () => {
     const sock = mockSocket();
     await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "selective" }));
     expect(sock.sent[0].error.message).toContain("No handler matched");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// normalizeForBroadcast — field-level ops become whole-row replaces
+// ---------------------------------------------------------------------------
+
+describe("normalizeForBroadcast", () => {
+  const doc = {
+    cards: {
+      "5": { id: 5, title: "edited", done: true },
+      "9": { id: 9, title: "other" },
+    },
+    settings: { theme: "dark" },
+  };
+
+  test("depth>=3 field op becomes a whole-row replace read from doc state", () => {
+    const ops = normalizeForBroadcast(doc, [
+      { op: "replace", path: "/cards/5/title", value: "edited" },
+    ]);
+    expect(ops).toEqual([
+      { op: "replace", path: "/cards/5", value: doc.cards["5"] },
+    ]);
+  });
+
+  test("depth<=2 ops pass through untouched", () => {
+    const ops = [
+      { op: "replace", path: "/settings/theme", value: "light" },
+      { op: "add", path: "/cards/-", value: { id: 1 } },
+      { op: "remove", path: "/cards/9" },
+      { op: "replace", path: "", value: doc },
+    ] as const;
+    expect(normalizeForBroadcast(doc, [...ops])).toEqual([...ops]);
+  });
+
+  test("multiple field ops on one row collapse to a single replace", () => {
+    const ops = normalizeForBroadcast(doc, [
+      { op: "replace", path: "/cards/5/title", value: "edited" },
+      { op: "replace", path: "/cards/5/done", value: true },
+    ]);
+    expect(ops).toEqual([
+      { op: "replace", path: "/cards/5", value: doc.cards["5"] },
+    ]);
+  });
+
+  test("a field op on a row removed later in the same batch is dropped", () => {
+    const afterApply = { cards: { "9": { id: 9 } } }; // row 5 already gone
+    const ops = normalizeForBroadcast(afterApply, [
+      { op: "replace", path: "/cards/5/title", value: "x" },
+      { op: "remove", path: "/cards/5" },
+    ]);
+    expect(ops).toEqual([{ op: "remove", path: "/cards/5" }]);
+  });
+
+  test("escaped path segments survive the rewrite", () => {
+    const d = { "a/b": { "k~x": { v: 1 } } };
+    const ops = normalizeForBroadcast(d, [
+      { op: "replace", path: "/a~1b/k~0x/v", value: 1 },
+    ]);
+    expect(ops).toEqual([
+      { op: "replace", path: "/a~1b/k~0x", value: { v: 1 } },
+    ]);
+  });
+
+  test("registerDoc broadcasts the normalized ops on the wire", async () => {
+    const tmpFile = `/tmp/railroad-test-normalize-${Date.now()}.json`;
+    const ws = createWs();
+    const published: any[] = [];
+    ws.setServer({ publish: (_ch: string, data: string) => published.push(JSON.parse(data)) });
+    const handle = await registerDoc(ws, "board", {
+      file: tmpFile,
+      empty: { cards: { "5": { id: 5, title: "before" } } as Record<string, any> },
+    });
+
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({
+      id: 1, action: "delta", doc: "board",
+      ops: [{ op: "replace", path: "/cards/5/title", value: "after" }],
+    }));
+
+    expect(handle.getDoc().cards["5"]!.title).toBe("after");
+    expect(published[0].ops).toEqual([
+      { op: "replace", path: "/cards/5", value: { id: 5, title: "after" } },
+    ]);
+    try { unlinkSync(tmpFile); } catch {}
   });
 });
 

@@ -7,7 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`doc.close()` and scope-aware `openDoc`** (`src/client/client.ts`). The server
+  always had a `close` action; the client can now send it. `close()` releases a
+  handle; when the last handle for a name goes, the doc is unregistered
+  (broadcasts stop dispatching, reconnects stop re-opening it) and a
+  best-effort `close` tells the server to unsubscribe the socket. Opened
+  inside a railroad dispose scope (a component, a `routes()` handler,
+  `when()`/`list()`, or `mount()`), the handle closes automatically on scope
+  teardown, so per-route docs no longer accumulate subscriptions for the life
+  of the page. Repeated `openDoc(name)` calls on one client now share a single
+  entry — the same signals — with a refcount, instead of the second call
+  silently disconnecting the first handle's signals from broadcasts.
+- **railroad ↔ delta integration suite** (`tests/railroad-client.test.ts`): a
+  real `Bun.serve` delta server driven over a real WebSocket into railroad
+  `mount()`/`when()`/`list()` under happy-dom — pinning the seams neither
+  package's unit tests can see (field-level edit → keyed row DOM, one flush
+  per broadcast, dedupe/close, scope teardown, late `provide(WS)`).
+
+### Changed
+
+- **railroad peer/dev dependency: `^0.9.0` → `^0.10.0`.** The 0.x caret
+  excluded railroad 0.10 entirely, and the scope-aware close needs
+  `hasActiveDisposeScope`/`trackDispose` (exported since 0.10.0).
+
 ### Fixed
+
+- **Field-level ops left keyed railroad `list()` rows stale on the JSON-file
+  backend** (`src/server/server.ts`). SQLite/Postgres rewrite field writes to
+  whole-row replaces, but the file backend broadcast ops verbatim; the client
+  applies field ops by mutating the row object in place, so the row's identity
+  never changed and `list()`'s per-row signal (default `Object.is`) silently
+  swallowed the update. `registerDoc` broadcasts now pass through
+  `normalizeForBroadcast` (exported for custom DocTypes): depth ≥ 3 ops become
+  whole-row replaces of their depth-2 ancestor read from post-apply state,
+  collapsed per row, dropped when the row was removed later in the same batch.
+  All three backends are now wire-consistent.
+- **Broadcasts flushed subscribers twice** (`src/client/client.ts`). A
+  broadcast wrote `dataVersion` and touched `data` as two separate railroad
+  flushes (and `onOpen` wrote `data` then `dataVersion` the same way), so an
+  effect reading both ran twice with a half-updated window between. Both
+  pairs now run inside railroad's `batch()` — one settled flush per broadcast.
+- **A doc opened before `provide(WS, ...)` could send but never receive**
+  (`src/client/client.ts`). DI resolution ran in a single `queueMicrotask`;
+  when `provide` came later (async init), registration failed with only a
+  console error, and `doc.send()` lazily resolved the client *without*
+  registering — ops went out, broadcasts never came back, `ready` never
+  resolved. Registration now retries on first `send()` (and duplicate opens
+  park on one shared pending entry), so a late provide self-heals.
 
 - **A doc could write rows outside its own scope** (`src/sql/001b-delta-scope.sql`,
   `src/sql/001d-delta-write.sql`, `src/server/sqlite.ts`). Reads were always scoped —

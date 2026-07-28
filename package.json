@@ -30,7 +30,7 @@
   ],
   "scripts": {
     "check": "bunx tsc --noEmit",
-    "test": "bun test tests/core.test.ts tests/server.test.ts tests/sqlite.test.ts tests/auth.test.ts",
+    "test": "bun test tests/core.test.ts tests/server.test.ts tests/sqlite.test.ts tests/auth.test.ts tests/railroad-client.test.ts",
     "test:pg": "bun test tests/postgres.test.ts tests/auth-jwt.test.ts",
     "test:all": "bun test tests/",
     "db:up": "docker compose up -d --wait",
@@ -39,7 +39,7 @@
     "ci": "bun run db:up && bun run check && bun run test:all; code=$?; bun run db:down; exit $code"
   },
   "peerDependencies": {
-    "@blueshed/railroad": "^0.9.0",
+    "@blueshed/railroad": "^0.10.0",
     "pg": "^8.20.0",
     "jose": "^6.0.0"
   },
@@ -55,11 +55,12 @@
     }
   },
   "devDependencies": {
-    "@blueshed/railroad": "0.9.0",
+    "@blueshed/railroad": "^0.10.1",
+    "@happy-dom/global-registrator": "^20.11.1",
     "@types/bun": "^1.3.14",
     "@types/pg": "^8.20.0",
-    "jose": "^6.2.3",
-    "pg": "^8.21.0",
+    "jose": "^6.2.4",
+    "pg": "^8.22.0",
     "typescript": "^5.9.3"
   },
   "author": "Peter Bunyan <peter@blueshed.co.uk> (https://blueshed.co.uk)",

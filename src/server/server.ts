@@ -21,7 +21,7 @@
  *   ws.setServer(server);
  */
 import { createLogger } from "./logger";
-import { applyOps, type DeltaOp } from "../core";
+import { applyOps, splitPath, type DeltaOp } from "../core";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -254,6 +254,47 @@ export function createWs(opts?: WsOptions): WsServer {
 // Document registration
 // ---------------------------------------------------------------------------
 
+// JSON-Pointer re-escape (inverse of splitPath's unescape): ~ first, then /.
+const escapeSegment = (s: string) => s.replace(/~/g, "~0").replace(/\//g, "~1");
+
+/**
+ * Normalize a delta batch for broadcast: rewrite field-level ops (depth >= 3,
+ * e.g. `/cards/5/title`) into whole-row replaces of their depth-2 ancestor
+ * (`/cards/5`), with the row value read from the just-applied doc state.
+ *
+ * The SQLite and Postgres backends already broadcast whole-row ops; without
+ * this, the JSON-file backend was the one path emitting field-level ops on the
+ * wire — which keyed reactive consumers (railroad's `list()`) cannot see: the
+ * client applies them by mutating the row object in place, so the row's
+ * identity never changes and its DOM goes stale. Whole-row replaces give every
+ * consumer a fresh row reference.
+ *
+ * Depth <= 2 ops pass through untouched. Multiple field ops on one row
+ * collapse to a single replace (the doc already reflects the whole batch). A
+ * rewrite whose row no longer exists (removed later in the same batch) is
+ * dropped — the removal op itself broadcasts the disappearance.
+ *
+ * Exported for custom DocType authors who assemble their own broadcasts.
+ */
+export function normalizeForBroadcast(doc: unknown, ops: DeltaOp[]): DeltaOp[] {
+  const out: DeltaOp[] = [];
+  const rewritten = new Set<string>();
+  for (const op of ops) {
+    const segs = splitPath(op.path);
+    if (segs.length < 3) {
+      out.push(op);
+      continue;
+    }
+    const rowPath = `/${escapeSegment(segs[0]!)}/${escapeSegment(segs[1]!)}`;
+    if (rewritten.has(rowPath)) continue;
+    const row = (doc as any)?.[segs[0]!]?.[segs[1]!];
+    if (row === undefined) continue;
+    rewritten.add(rowPath);
+    out.push({ op: "replace", path: rowPath, value: row });
+  }
+  return out;
+}
+
 /** Register a persisted JSON document with the WebSocket server. */
 export async function registerDoc<T>(
   ws: Pick<WsServer, "on" | "publish">,
@@ -275,7 +316,7 @@ export async function registerDoc<T>(
   function applyAndBroadcast(ops: DeltaOp[]) {
     applyOps(doc, ops);
     log.info(`delta [${ops.map((o) => `${o.op} ${o.path}`).join(", ")}]`);
-    ws.publish(name, { doc: name, ops });
+    ws.publish(name, { doc: name, ops: normalizeForBroadcast(doc, ops) });
     persist();
   }
 

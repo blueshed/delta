@@ -629,6 +629,8 @@ function Chat() {
 
 Don't import `applyOpsToCollection` in railroad projects — `list(doc.data.map(...), keyFn, render)` covers the same case in one idiom. The railroad skill (installed alongside this one when `@blueshed/railroad` is in deps) has the JSX gotchas to avoid (no `.get()` in children, list keying, dispose scopes).
 
+`openDoc` is **scope-aware**: opened inside a railroad dispose scope (a component, a `routes()` handler, a `when()`/`list()` render, or `mount()`), the handle auto-`close()`s on scope teardown — so a per-route ``openDoc(`board:${id}`)`` releases its subscription when the route changes. Module-level opens have no scope and stay open for the life of the page. Repeated `openDoc(name)` calls on one client share a single entry (the *same* signals) with a refcount; `doc.close()` releases one handle, and the last release unregisters the doc and sends the server a best-effort `close` so the socket unsubscribes.
+
 Worked example: [`examples/kanban/`](../../../examples/kanban/) (boards → columns → cards, real-time sync via Postgres). The `serve.ts` + `client.tsx` files in that directory are the canonical railroad UX — a fullstack page using exactly the pattern above. The sibling `server.ts` + `run.ts` files are a headless three-client demo printing op transcripts to the terminal.
 
 ## The write loop — send, don't touch (no optimistic updates, no reloads)
@@ -636,7 +638,9 @@ Worked example: [`examples/kanban/`](../../../examples/kanban/) (boards → colu
 `doc.send(ops)` does **not** update your local view. It ships the ops to the server, which applies them and broadcasts the *same* ops to every connected client — **including the one that sent them**. That broadcast is what updates your UI. In the client (`client.ts`), an incoming op broadcast for an open doc:
 
 1. fires every `doc.onOps(handler)` first (DOM patchers run here), then
-2. applies the ops **in place** to `doc.data.peek()` and calls `data.touch()`, so subscribers (railroad `list()`, `effect`, …) re-run.
+2. applies the ops **in place** to `doc.data.peek()` and calls `data.touch()` — with `dataVersion` bumped in the same railroad `batch()`, so consumers see one settled flush per broadcast — and subscribers (railroad `list()`, `effect`, …) re-run.
+
+All three backends broadcast **row-level** ops: SQLite/Postgres rewrite field writes server-side, and the JSON-file backend normalizes at broadcast time (`/cards/5/title` goes out as a whole-row replace of `/cards/5`). A keyed railroad `list()` therefore always sees a fresh row reference when a row changes — its default `Object.is` equality just works. Only a *custom* stream that mutates row objects in place and `touch()`es needs railroad's `list(..., keyFn, render, { equals: () => false })` (railroad ≥ 0.10.1).
 
 The sender is just another subscriber receiving its own op back (the code calls these "echoes"). Two consequences trip up anyone arriving from REST/Firebase/optimistic-UI habits:
 

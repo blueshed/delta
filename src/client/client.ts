@@ -15,15 +15,21 @@
  *   const message = openDoc<Message>("message");
  *   effect(() => console.log(message.data.get()));
  *   message.send([{ op: "replace", path: "/message", value: "hello" }]);
+ *   message.close();   // release — automatic when opened inside a railroad scope
  *
  *   const status = await call<Status>("status");
  *
- * For large collections, prefer `doc.onOps(handler)` over `doc.data` — it
- * delivers the raw JSON-Patch ops so a renderer can mutate DOM atomically
- * (see `@blueshed/delta/dom-ops` → `applyOpsToCollection`) instead of
- * rebuilding subtrees on every change.
+ * Rendering collections: with railroad in the project, its keyed `list()`
+ * over `doc.data` is the idiom — per-row surgical updates come free (all
+ * backends broadcast row-level ops). `doc.onOps(handler)` +
+ * `applyOpsToCollection` (see `@blueshed/delta/dom-ops`) is the vanilla-DOM
+ * equivalent for projects without a keyed reactive list primitive; pick one
+ * per project.
  */
-import { signal, createLogger, key, inject } from "@blueshed/railroad";
+import {
+  signal, batch, createLogger, key, inject, tryInject,
+  hasActiveDisposeScope, trackDispose,
+} from "@blueshed/railroad";
 import { applyOps, type DeltaOp } from "../core";
 
 export type { DeltaOp } from "../core";
@@ -128,6 +134,17 @@ export interface OpenDocEntry {
   opsHandlers: Set<OpsHandler>;
   /** Called with the full doc state on open and every reconnect. */
   onOpen: (state: any) => void;
+  /** Live Doc handles sharing this entry — openDoc dedupes by name, close()
+   *  only unregisters when the last handle releases. */
+  refs: number;
+  /** Pending doc.ready resolvers; resolved and cleared on (each) open. */
+  readyResolvers: Array<() => void>;
+  /** The WsClient this entry is registered with, once known. */
+  client: WsClient | null;
+  /** Set when deferred registration found the name already registered under a
+   *  different entry (mixed explicit-client + DI opens) — handles follow the
+   *  chain to the canonical entry. */
+  mergedInto?: OpenDocEntry;
   /**
    * Last authoritative server doc version applied — seeded from `_v` on the
    * open snapshot and advanced by `v` on each broadcast. `undefined` means the
@@ -195,8 +212,12 @@ export function connectWs(
       // drag-handler closure) stay valid across echoes. `set(sameRef)` is a
       // no-op under Object.is — `touch()` is the escape hatch that fires subs.
       applyOps(current, ops);
-      entry.dataVersion.set(entry.dataVersion.peek() + 1);
-      entry.data.touch();
+      // One consistent flush per broadcast: an effect reading both data and
+      // dataVersion runs once, never in a half-updated window between the two.
+      batch(() => {
+        entry.dataVersion.set(entry.dataVersion.peek() + 1);
+        entry.data.touch();
+      });
     }
   }
 
@@ -341,35 +362,43 @@ export interface Doc<T> {
    * unsubscribe function.
    */
   onOps(handler: OpsHandler): () => void;
+  /**
+   * Release this handle. When the last handle for the doc name closes, the
+   * doc is unregistered (broadcasts stop dispatching, reconnects stop
+   * re-opening it) and a best-effort `close` action tells the server to
+   * unsubscribe the socket. Idempotent per handle.
+   *
+   * Called automatically on scope teardown when the doc was opened inside a
+   * railroad dispose scope (a component, a routes() handler, when()/list(),
+   * or mount()) — so per-route docs don't accumulate for the life of the
+   * page. Module-level opens have no scope and stay open.
+   */
+  close(): void;
 }
 
 const docLog = createLogger("[doc]");
 
-/**
- * Open a persisted doc as a reactive signal. Safe to call at module level —
- * if no `client` is passed, the WsClient is resolved lazily from DI
- * (`provide(WS, connectWs(...))`). For scripts or tests that want multiple
- * independent clients in one process, pass the `client` explicitly.
- */
-export function openDoc<T>(name: string, client?: WsClient): Doc<T> {
-  const data = signal<T | null>(null);
+// DI-based opens that run before `provide(WS, ...)` park their entries here,
+// keyed by doc name, so duplicate openDoc(name) calls share ONE entry (one
+// set of signals) even before the client exists. Entries move into the
+// client's _docs map on registration.
+const pendingDocs = new Map<string, OpenDocEntry>();
+
+// First open renders from the caller reading `doc.data`; subsequent opens
+// are reconnects, where onOps consumers (a DOM built from
+// applyOpsToCollection) need a reconciliation signal because state may have
+// drifted during the outage. `opened` lives on the entry so the broadcast
+// handler can drop ops that arrive before the first open lands.
+function createEntry(): OpenDocEntry {
+  const data = signal<any>(null);
   const dataVersion = signal(0);
-  const opsHandlers = new Set<OpsHandler>();
-
-  let readyResolve: () => void;
-  const ready = new Promise<void>((r) => {
-    readyResolve = r;
-  });
-
-  // First open renders from the caller reading `doc.data`; subsequent opens
-  // are reconnects, where onOps consumers (a DOM built from
-  // applyOpsToCollection) need a reconciliation signal because state may have
-  // drifted during the outage. `opened` lives on the entry so the broadcast
-  // handler can drop ops that arrive before the first open lands.
   const entry: OpenDocEntry = {
     data,
     dataVersion,
-    opsHandlers,
+    opsHandlers: new Set<OpsHandler>(),
+    refs: 1,
+    readyResolvers: [],
+    client: null,
     opened: false,
     onOpen: (state: any) => {
       // (Re)establish the authoritative version SOLELY from this snapshot: seed
@@ -382,14 +411,17 @@ export function openDoc<T>(name: string, client?: WsClient): Doc<T> {
       } else {
         entry.serverVersion = undefined;
       }
-      data.set(state as T);
-      dataVersion.set(dataVersion.peek() + 1);
+      // One flush: consumers of data + dataVersion see a single settled pass.
+      batch(() => {
+        data.set(state);
+        dataVersion.set(dataVersion.peek() + 1);
+      });
       if (entry.opened) {
         // RECONNECT: emit a synthetic whole-doc replace so onOps consumers can
         // reconcile against the authoritative post-reconnect snapshot. (No
         // emission on the FIRST open — initial render is the caller's job.)
         const reconcileOps: DeltaOp[] = [{ op: "replace", path: "", value: state }];
-        for (const handler of opsHandlers) {
+        for (const handler of entry.opsHandlers) {
           // Mirror the broadcast dispatch: one throwing handler must not break
           // the others.
           try { handler(reconcileOps); }
@@ -397,49 +429,150 @@ export function openDoc<T>(name: string, client?: WsClient): Doc<T> {
         }
       }
       entry.opened = true;
-      readyResolve();
+      const resolvers = entry.readyResolvers;
+      entry.readyResolvers = [];
+      for (const r of resolvers) r();
     },
   };
+  return entry;
+}
 
-  let wsc: WsClient | null = client ?? null;
-
-  function register(c: WsClient): void {
-    wsc = c;
-    c._docs.set(name, entry);
-    // If the socket is already open when we register, kick off the initial
-    // open now. Otherwise the `open`-event handler inside connectWs will
-    // fire the open for every tracked doc once the socket is up.
-    if (c.connected.peek()) {
-      c.send({ action: "open", doc: name })
-        .then(entry.onOpen)
-        .catch((err: any) => docLog.error(`openDoc("${name}"): ${err.message}`));
+/**
+ * Register `entry` as the canonical entry for `name` on client `c`. If the
+ * name is already registered under a DIFFERENT entry (mixed explicit-client +
+ * DI opens of the same doc), merge into it: fold refs, ops handlers, and
+ * ready resolvers, and leave a `mergedInto` pointer for handles to follow.
+ * Idempotent once `entry.client` is set.
+ */
+function registerEntry(c: WsClient, name: string, entry: OpenDocEntry): void {
+  if (entry.client) return;
+  if (pendingDocs.get(name) === entry) pendingDocs.delete(name);
+  const existing = c._docs.get(name);
+  if (existing && existing !== entry) {
+    existing.refs += entry.refs;
+    for (const h of entry.opsHandlers) existing.opsHandlers.add(h);
+    if (existing.opened) {
+      for (const r of entry.readyResolvers) r();
+    } else {
+      existing.readyResolvers.push(...entry.readyResolvers);
     }
+    entry.readyResolvers = [];
+    entry.mergedInto = existing;
+    entry.client = c;
+    return;
   }
+  entry.client = c;
+  c._docs.set(name, entry);
+  // If the socket is already open when we register, kick off the initial
+  // open now. Otherwise the `open`-event handler inside connectWs will
+  // fire the open for every tracked doc once the socket is up.
+  if (c.connected.peek()) {
+    c.send({ action: "open", doc: name })
+      .then(entry.onOpen)
+      .catch((err: any) => docLog.error(`openDoc("${name}"): ${err.message}`));
+  }
+}
 
-  if (client) {
-    register(client);
+/**
+ * Open a persisted doc as a reactive signal. Safe to call at module level —
+ * if no `client` is passed, the WsClient is resolved from DI
+ * (`provide(WS, connectWs(...))`), eagerly when already provided, else via a
+ * deferred registration that also self-heals on first `send()`. For scripts
+ * or tests that want multiple independent clients in one process, pass the
+ * `client` explicitly.
+ *
+ * Repeated openDoc(name) calls on the same client share one underlying entry
+ * — the same signals — with a refcount; `close()` releases a handle and
+ * unregisters the doc when the last one goes. Opened inside a railroad
+ * dispose scope, the handle closes automatically on scope teardown.
+ */
+export function openDoc<T>(name: string, client?: WsClient): Doc<T> {
+  let entry: OpenDocEntry;
+  let closed = false;
+
+  // Follow merges so every access sees the canonical entry.
+  const cur = (): OpenDocEntry => {
+    while (entry.mergedInto) entry = entry.mergedInto;
+    return entry;
+  };
+
+  // Resolve the client as early as possible: an explicit argument, or DI when
+  // provide(WS, ...) has already run — the common case, and the one where
+  // dedupe is exact. Only otherwise do we park in pendingDocs and defer.
+  const eager = client ?? tryInject(WS) ?? null;
+  if (eager) {
+    const existing = eager._docs.get(name);
+    if (existing) {
+      existing.refs++;
+      entry = existing;
+    } else {
+      entry = createEntry();
+      registerEntry(eager, name, entry);
+    }
   } else {
+    const pending = pendingDocs.get(name);
+    if (pending) {
+      pending.refs++;
+      entry = pending;
+    } else {
+      entry = createEntry();
+      pendingDocs.set(name, entry);
+    }
     // Defer DI resolution so openDoc can be called at module load before
-    // `provide(WS, ...)` has run.
+    // `provide(WS, ...)` has run. If WS still isn't provided by then, stay
+    // parked — send() retries registration, so a late provide self-heals.
     queueMicrotask(() => {
-      try { register(inject(WS)); }
-      catch (err: any) { docLog.error(`openDoc("${name}"): ${err.message}`); }
+      if (closed) return;
+      const c = tryInject(WS);
+      if (c) registerEntry(c, name, cur());
+      else docLog.error(`openDoc("${name}"): no WS provided — will register on first send()`);
     });
   }
 
-  return {
-    data,
-    dataVersion,
+  let readyResolve!: () => void;
+  const ready = new Promise<void>((r) => { readyResolve = r; });
+  if (entry.opened) readyResolve();
+  else entry.readyResolvers.push(readyResolve);
+
+  const ensureClient = (): WsClient => {
+    const e = cur();
+    const c = e.client ?? client ?? inject(WS);
+    if (!closed) registerEntry(c, name, e);
+    return c;
+  };
+
+  const doc: Doc<T> = {
+    get data() { return cur().data; },
+    get dataVersion() { return cur().dataVersion; },
     ready,
     send(ops: DeltaOp[]) {
-      const c = wsc ?? (wsc = client ?? inject(WS));
-      return c.send({ action: "delta", doc: name, ops });
+      return ensureClient().send({ action: "delta", doc: name, ops });
     },
     onOps(handler) {
-      opsHandlers.add(handler);
-      return () => { opsHandlers.delete(handler); };
+      cur().opsHandlers.add(handler);
+      return () => { cur().opsHandlers.delete(handler); };
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      const e = cur();
+      e.refs--;
+      if (e.refs > 0) return;
+      if (pendingDocs.get(name) === e) pendingDocs.delete(name);
+      if (e.client) {
+        e.client._docs.delete(name);
+        // Best-effort server unsubscribe — ignore transport failures.
+        e.client.send({ action: "close", doc: name }).catch(() => {});
+      }
     },
   };
+
+  // Opened inside a railroad dispose scope (a component, a routes() handler,
+  // a when()/list() render, or mount()): release with the scope, so per-route
+  // docs don't accumulate subscriptions for the life of the page.
+  if (hasActiveDisposeScope()) trackDispose(() => doc.close());
+
+  return doc;
 }
 
 /** Call a stateless RPC method. Accepts an explicit client for multi-client scripts. */
