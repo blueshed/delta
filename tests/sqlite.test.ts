@@ -594,15 +594,19 @@ describe("registerDocs", () => {
       const tws = createWs();
       registerDocs(tws, tdb, s, [userDoc, teamDoc]);
 
-      // Open user doc
+      // Drive this through `team:` — memberships hang off teams via parent_fk, so
+      // team:team1 is the doc that actually HOLDS m1. (user:u1 declares
+      // `include: ["memberships"]` too, but loadCollection only walks parent-FK
+      // chains, not cascadeOn refs, so its memberships map opens empty — and a doc
+      // may only write rows it can read. That refusal is pinned in
+      // tests/write-scope.test.ts.)
       const sock = mockSocket();
-      await tws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "user:u1" }));
+      await tws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "team:team1" }));
 
-      // Remove user — should cascade to memberships
       await tws.websocket.message(sock, JSON.stringify({
         id: 2,
         action: "delta",
-        doc: "user:u1",
+        doc: "team:team1",
         ops: [{ op: "remove", path: "/memberships/m1" }],
       }));
 
@@ -1020,6 +1024,112 @@ describe("registerDocs", () => {
       expect(ndb.query("SELECT * FROM entries WHERE id = 'e1'").all()).toHaveLength(0);
       // e2 still there
       expect(ndb.query("SELECT * FROM entries WHERE id = 'e2'").all()).toHaveLength(1);
+    });
+
+    // Regression: a non-temporal table has `id` as its WHOLE primary key, so
+    // the temporal close+reinsert collides on it. Replaces used to fail with
+    // `UNIQUE constraint failed`, making non-temporal rows unupdatable. These
+    // assert against SQL (not the in-memory cache) so a write that only landed
+    // in the cache can't pass.
+    describe("field replace", () => {
+      const s = defineSchema({
+        logs: { temporal: false, columns: { msg: "text", level: "integer" } },
+        entries: {
+          temporal: false,
+          parent: { collection: "logs", fk: "log_id" },
+          columns: { line: "text", seq: "integer" },
+        },
+      });
+      const doc = defineDoc("log:", { root: "logs", include: ["entries"] });
+
+      let ndb: any;
+      let nws: ReturnType<typeof createWs>;
+
+      beforeEach(() => {
+        ndb = new Database(":memory:");
+        createTables(ndb, s);
+        ndb.run("INSERT INTO logs (id, msg, level) VALUES ('l1', 'test', 1)");
+        ndb.run("INSERT INTO entries (id, log_id, line, seq) VALUES ('e1', 'l1', 'line1', 1)");
+        nws = createWs();
+        registerDocs(nws, ndb, s, [doc]);
+      });
+
+      async function open() {
+        const sock = mockSocket();
+        await nws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "log:l1" }));
+        return sock;
+      }
+
+      test("collection row field replace persists", async () => {
+        const sock = await open();
+        await nws.websocket.message(sock, JSON.stringify({
+          id: 2, action: "delta", doc: "log:l1",
+          ops: [{ op: "replace", path: "/entries/e1/line", value: "edited" }],
+        }));
+
+        expect(sock.sent[1].result).toEqual({ ack: true });
+        expect(ndb.query("SELECT line FROM entries WHERE id = 'e1'").get()).toEqual({ line: "edited" });
+        // Updated in place — not duplicated by an insert.
+        expect(ndb.query("SELECT * FROM entries WHERE id = 'e1'").all()).toHaveLength(1);
+      });
+
+      test("root field replace persists", async () => {
+        const sock = await open();
+        await nws.websocket.message(sock, JSON.stringify({
+          id: 2, action: "delta", doc: "log:l1",
+          ops: [{ op: "replace", path: "/logs/msg", value: "renamed" }],
+        }));
+
+        expect(sock.sent[1].result).toEqual({ ack: true });
+        expect(ndb.query("SELECT msg FROM logs WHERE id = 'l1'").get()).toEqual({ msg: "renamed" });
+        expect(ndb.query("SELECT * FROM logs WHERE id = 'l1'").all()).toHaveLength(1);
+      });
+
+      test("several fields in one delta are batched into one update", async () => {
+        const sock = await open();
+        await nws.websocket.message(sock, JSON.stringify({
+          id: 2, action: "delta", doc: "log:l1",
+          ops: [
+            { op: "replace", path: "/entries/e1/line", value: "both" },
+            { op: "replace", path: "/entries/e1/seq", value: 42 },
+            { op: "replace", path: "/logs/msg", value: "two" },
+            { op: "replace", path: "/logs/level", value: 9 },
+          ],
+        }));
+
+        expect(sock.sent[1].result).toEqual({ ack: true });
+        expect(ndb.query("SELECT line, seq FROM entries WHERE id = 'e1'").get())
+          .toEqual({ line: "both", seq: 42 });
+        expect(ndb.query("SELECT msg, level FROM logs WHERE id = 'l1'").get())
+          .toEqual({ msg: "two", level: 9 });
+      });
+
+      test("the parent FK survives an update", async () => {
+        // updateRow writes the FK column too; dropping it would violate its
+        // NOT NULL constraint or silently reparent the row.
+        const sock = await open();
+        await nws.websocket.message(sock, JSON.stringify({
+          id: 2, action: "delta", doc: "log:l1",
+          ops: [{ op: "replace", path: "/entries/e1/line", value: "keep fk" }],
+        }));
+        expect(ndb.query("SELECT log_id FROM entries WHERE id = 'e1'").get()).toEqual({ log_id: "l1" });
+      });
+
+      test("a cold reopen sees the update (it reached SQL, not just the cache)", async () => {
+        const sock = await open();
+        await nws.websocket.message(sock, JSON.stringify({
+          id: 2, action: "delta", doc: "log:l1",
+          ops: [{ op: "replace", path: "/entries/e1/line", value: "durable" }],
+        }));
+
+        // A fresh registerDocs over the same DB starts with an empty cache, so
+        // this open re-reads from SQL.
+        const fresh = createWs();
+        registerDocs(fresh, ndb, s, [doc]);
+        const sock2 = mockSocket();
+        await fresh.websocket.message(sock2, JSON.stringify({ id: 1, action: "open", doc: "log:l1" }));
+        expect(sock2.sent[0].result.entries.e1.line).toBe("durable");
+      });
     });
   });
 

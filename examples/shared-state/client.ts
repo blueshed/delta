@@ -11,7 +11,9 @@
 import { connectWs, openDoc, type Doc } from "../../src/client/client";
 import { applyOpsToCollection } from "../../src/client/dom-ops";
 
-interface Message { author: string; text: string; at: string }
+// `id` carries the same uuid the op path uses (`/messages/<id>`) — the DOM
+// renderer keys rows by it, so the per-op and whole-doc paths agree.
+interface Message { id: string; author: string; text: string; at: string }
 interface ChatDoc { messages: Record<string, Message> }
 
 const ws = connectWs("/ws");
@@ -31,34 +33,33 @@ function renderMessage(m: Message): HTMLDivElement {
   return row;
 }
 
-// 1. Initial paint — once the open response arrives, render every message.
-await doc.ready;
-for (const [id, m] of Object.entries(doc.data.get()?.messages ?? {})) {
-  const node = renderMessage(m);
-  node.dataset.id = id;
-  log.append(node);
-}
-log.scrollTop = log.scrollHeight;
-
-// 2. Live ops — patch keyed DOM nodes without rebuilding the list.
-doc.onOps((ops) =>
+// One render path for everything: the first paint, every live op, and the
+// synthetic whole-doc replace that `onOps` emits on reconnect. `nodes` (the
+// id → node map) is kept per (log, "messages") inside applyOpsToCollection,
+// so it persists across calls — that persistence is what lets `remove` find
+// its node and stops a reconnect re-appending the whole list.
+const render = (ops: Parameters<Parameters<typeof doc.onOps>[0]>[0]) =>
   applyOpsToCollection<Message>(log, "messages", ops, {
-    key: (m) => `${m.author}:${m.at}`,
+    key: (m) => m.id,
     create: renderMessage,
     update: (node, m) => {
       const el = node as HTMLElement;
       (el.firstElementChild as HTMLElement).textContent = m.author;
       (el.lastElementChild  as HTMLElement).textContent = m.text;
     },
-  }),
-);
+  });
+
+await doc.ready;
+render([{ op: "replace", path: "", value: doc.data.get() }]);   // initial paint
+log.scrollTop = log.scrollHeight;
+doc.onOps(render);                                             // live + reconnect
 
 form.addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const id = crypto.randomUUID();
   await doc.send([{
     op: "add", path: `/messages/${id}`,
-    value: { author: authorI.value, text: textI.value, at: new Date().toISOString() },
+    value: { id, author: authorI.value, text: textI.value, at: new Date().toISOString() },
   }]);
   textI.value = "";
   textI.focus();

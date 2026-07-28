@@ -42,10 +42,12 @@ ws.setServer(server);
 ### `client.ts`
 
 ```ts
-import { connectWs, openDoc, type Doc } from "@blueshed/delta/client";
+import { connectWs, openDoc, type Doc, type DeltaOp } from "@blueshed/delta/client";
 import { applyOpsToCollection } from "@blueshed/delta/dom-ops";
 
-interface Message { author: string; text: string; at: string }
+// `id` MUST match the uuid used in the op path below — `key` reads it, and the
+// per-op and whole-doc render paths have to agree on the id.
+interface Message { id: string; author: string; text: string; at: string }
 interface ChatDoc { messages: Record<string, Message> }
 
 const ws = connectWs("/ws");
@@ -61,34 +63,35 @@ function renderMessage(m: Message): HTMLDivElement {
   return row;
 }
 
-await doc.ready;
-for (const [id, m] of Object.entries(doc.data.get()?.messages ?? {})) {
-  const node = renderMessage(m);
-  node.dataset.id = id;
-  log.append(node);
-}
-
-doc.onOps((ops) =>
+// ONE render path — first paint, live ops, and the synthetic whole-doc replace
+// `onOps` emits on reconnect all go through it. Don't hand-build the initial
+// DOM separately: applyOpsToCollection keeps the id → node map that `remove`
+// and the reconnect reconcile depend on, and a hand-built list isn't in it.
+const render = (ops: DeltaOp[]) =>
   applyOpsToCollection<Message>(log, "messages", ops, {
-    key: (m) => `${m.author}:${m.at}`,
+    key: (m) => m.id,
     create: renderMessage,
     update: (node, m) => {
       const el = node as HTMLElement;
       (el.firstElementChild as HTMLElement).textContent = m.author;
       (el.lastElementChild  as HTMLElement).textContent = m.text;
     },
-  }),
-);
+  });
+
+await doc.ready;
+render([{ op: "replace", path: "", value: doc.data.get() }]);   // initial paint
+doc.onOps(render);                                             // live + reconnect
 
 // Sending: one op, one verb, one path. Note what's NOT here — no
 // `log.append(...)`, no local push. The op echoes back through `onOps`
 // above and renders itself. Touch the DOM here too and the message
 // appears twice. Send, then let the broadcast render.
 async function send(author: string, text: string) {
+  const id = crypto.randomUUID();
   await doc.send([{
     op: "add",
-    path: `/messages/${crypto.randomUUID()}`,
-    value: { author, text, at: new Date().toISOString() },
+    path: `/messages/${id}`,
+    value: { id, author, text, at: new Date().toISOString() },
   }]);
 }
 ```

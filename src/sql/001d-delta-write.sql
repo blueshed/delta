@@ -19,6 +19,7 @@ DECLARE
   v_child_row RECORD;
   v_ref       RECORD;
   v_ref_row   RECORD;
+  v_affected  BIGINT;
   v_ops       JSONB := '[]'::jsonb;
 BEGIN
   SELECT * INTO v_coll FROM _delta_collections
@@ -35,6 +36,13 @@ BEGIN
     EXECUTE format('DELETE FROM %I WHERE id = $1', v_coll.table_name)
       USING p_id;
   END IF;
+
+  -- Only claim a removal that actually happened. The row may already be closed,
+  -- or an RLS policy may have silently filtered the UPDATE/DELETE to zero rows —
+  -- in which case emitting the op would tell every subscriber to drop a row that
+  -- is still in the table, and cascading from it would compound the lie.
+  GET DIAGNOSTICS v_affected = ROW_COUNT;
+  IF v_affected = 0 THEN RETURN v_ops; END IF;
 
   v_ops := v_ops || jsonb_build_array(
     jsonb_build_object('op', 'remove', 'path', _delta_build_path(p_collection_key, p_id::text))
@@ -246,6 +254,19 @@ BEGIN
         v_new_row := v_new_row || jsonb_build_object(v_coll.parent_fk, v_doc_id);
       END IF;
 
+      -- A direct child's FK was just injected above, so it is in scope by
+      -- construction. A grandchild's arrives verbatim from the client — without
+      -- this check it grafts the new row onto ANOTHER doc's parent.
+      IF v_coll.parent_collection IS NOT NULL
+         AND v_coll.parent_collection IS DISTINCT FROM v_def.root_collection
+         AND NOT _delta_row_in_scope(
+               v_def, p_doc_name, v_coll.parent_collection,
+               (v_new_row->>v_coll.parent_fk)::BIGINT) THEN
+        RAISE EXCEPTION 'row not found: %/%',
+          v_coll.parent_collection, COALESCE(v_new_row->>v_coll.parent_fk, '')
+          USING ERRCODE = 'P0001';
+      END IF;
+
       -- Apply column defaults from metadata
       SELECT v_new_row || COALESCE(jsonb_object_agg(
         col_key,
@@ -292,6 +313,12 @@ BEGIN
     -- ---------------------------------------------------------------
     IF array_length(v_parts, 1) = 2 AND v_op->>'op' = 'remove' THEN
       v_id := v_parts[2]::BIGINT;
+      -- _delta_cascade_remove addresses rows by id alone, so without this gate a
+      -- client could name any id and delete a sibling doc's row.
+      IF NOT _delta_row_in_scope(v_def, p_doc_name, v_coll_key, v_id) THEN
+        RAISE EXCEPTION 'row not found: %/%', v_coll_key, v_id
+          USING ERRCODE = 'P0001';
+      END IF;
       v_broadcast_ops := v_broadcast_ops || _delta_cascade_remove(
         v_coll_key, v_id, v_def.include
       );
@@ -304,6 +331,14 @@ BEGIN
     -- ---------------------------------------------------------------
     IF (array_length(v_parts, 1) = 2 OR array_length(v_parts, 1) = 3) AND v_op->>'op' = 'replace' THEN
       v_id := v_parts[2]::BIGINT;
+
+      -- Same gate as remove: the row is addressed by bare id, so it must belong
+      -- to this doc. (The single-mode root branch above never reaches here — it
+      -- targets v_doc_id directly.)
+      IF NOT _delta_row_in_scope(v_def, p_doc_name, v_coll_key, v_id) THEN
+        RAISE EXCEPTION 'row not found: %/%', v_coll_key, v_id
+          USING ERRCODE = 'P0001';
+      END IF;
 
       -- 3-segment: wrap single field into partial row value
       IF array_length(v_parts, 1) = 3 THEN

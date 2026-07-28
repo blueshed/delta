@@ -5,6 +5,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A doc could write rows outside its own scope** (`src/sql/001b-delta-scope.sql`,
+  `src/sql/001d-delta-write.sql`, `src/server/sqlite.ts`). Reads were always scoped —
+  `_delta_load_collection` / `loadCollection` filter children down the parent-FK chain —
+  but writes addressed rows by **bare id**. `remove /<coll>/<id>` went straight to the
+  cascade, `replace /<coll>/<id>[/field]` read the row by id, and a **grandchild** `add`
+  trusted the parent FK in the payload (a direct child's FK is injected server-side, so
+  that path was always safe). A client holding `tenant:1` could therefore name a row id
+  belonging to `tenant:2` and delete it, overwrite it, or graft a new child onto it.
+  Both backends now gate every row-addressed write on the same predicate the reads use,
+  so the rule is simply **you may write what you may read**: Postgres via a new
+  `_delta_row_in_scope(def, doc_name, collection, id)` that walks the parent-FK chain to
+  the root (and short-circuits for list-mode includes, which are loaded in full);
+  SQLite via membership in the loaded doc, which by construction holds exactly the
+  in-scope rows. Refusals reuse the "row not found" wording so they stay
+  indistinguishable from a genuinely absent row rather than confirming an id exists.
+  **Behaviour change:** a doc whose read view omits a collection can no longer write it.
+  The known case is a doc reaching rows only through a `cascadeOn` reference — e.g. a
+  `user:` doc declaring `include: ["memberships"]` where `memberships` hangs off `teams`.
+  Such a doc already opened with an empty map for that collection; it can now no longer
+  write it either. Route those writes through the doc that owns the parent chain.
+- **`_delta_cascade_remove` announced removals it hadn't made** (`src/sql/001d-delta-write.sql`).
+  It emitted a `remove` op unconditionally, so when the UPDATE/DELETE affected zero rows —
+  an already-closed row, or one an RLS policy filtered out — every subscriber was told to
+  drop a row that was still in the table. It now checks `ROW_COUNT` and emits nothing (and
+  cascades no further) when nothing was removed.
+- **Non-temporal SQLite rows could not be updated at all** (`src/server/sqlite.ts`).
+  Both field-replace paths — collection rows and root fields — applied an update as
+  "close the old version, insert the new one". That is right for a temporal table, whose
+  composite `(id, valid_from)` key keeps both versions, but a non-temporal table has `id`
+  as its whole primary key, so the insert collided: every `replace` against one failed
+  with `UNIQUE constraint failed: <table>.id` and rolled the delta back with a 500. A new
+  `updateRow` issues a real in-place `UPDATE` for non-temporal tables (rather than the
+  Postgres backend's DELETE-then-INSERT, so the row is never briefly absent); the parent
+  FK column is included, so a child row can't be silently reparented or trip its NOT NULL
+  constraint. The temporal path is unchanged.
+- **`applyOpsToCollection` lost its node map between calls** (`src/client/dom-ops.ts`).
+  The `nodes` parameter defaulted to a fresh `new Map()` **per call**, so every 4-argument
+  caller — including the canonical recipe in `SKILL.md`, `README.md` and
+  `examples/shared-state/` — started each op batch with no record of which row owned which
+  node. `remove` found nothing to detach and became a silent no-op, and the synthetic
+  whole-doc replace emitted on reconnect matched nothing and re-created + re-appended the
+  entire collection, duplicating the list on **every** reconnect. The default map is now
+  held per `(parent, collection)`, so the short form is correct on its own; an explicitly
+  passed map still takes precedence. The canonical recipe is rewritten to render the first
+  paint through the same call (feeding it a synthetic root-replace) instead of hand-building
+  the initial DOM, and its `key` now returns the id the op paths actually use — the previous
+  `` `${author}:${at}` `` never matched the uuid in `/messages/<uuid>`.
+
 ## [0.5.0] — 2026-06-10
 
 ### Fixed

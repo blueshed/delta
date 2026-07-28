@@ -26,8 +26,14 @@
  * state signal updates. Keep `doc.data` for read-only consumers that don't
  * need op-level precision.
  *
- *   const nodes = new Map<string, Node>();
- *   doc.onOps((ops) => applyOpsToCollection(list, "todos", ops, renderer, nodes));
+ * Render the FIRST paint through this same function — feed it a synthetic
+ * whole-doc replace — so there is one code path and no hand-built DOM for the
+ * reconnect reconcile to diverge from:
+ *
+ *   const render = (ops) => applyOpsToCollection(list, "todos", ops, renderer);
+ *   await doc.ready;
+ *   render([{ op: "replace", path: "", value: doc.data.get() }]);   // initial paint
+ *   doc.onOps(render);                                             // live + reconnect
  */
 import type { DeltaOp } from "../core";
 
@@ -50,20 +56,50 @@ export interface DomCollection<T> {
 }
 
 /**
+ * Registry backing the DEFAULT `nodes` map, keyed by (parent, collection).
+ *
+ * The id → Node map has to survive between calls — it is the only record of
+ * which row owns which node. A per-call `new Map()` default silently broke
+ * every 4-argument caller: `remove` found nothing to detach, and the reconnect
+ * root-replace re-created and re-appended the entire collection, duplicating
+ * it on every reconnect. Anchoring the default here makes the short form
+ * correct on its own. A `WeakMap` so nodes die with their parent.
+ */
+const defaultNodeMaps = new WeakMap<Node, Map<string, Map<string, Node>>>();
+
+function defaultNodesFor(parent: Node, collection: string): Map<string, Node> {
+  let byCollection = defaultNodeMaps.get(parent);
+  if (!byCollection) {
+    byCollection = new Map();
+    defaultNodeMaps.set(parent, byCollection);
+  }
+  let nodes = byCollection.get(collection);
+  if (!nodes) {
+    nodes = new Map();
+    byCollection.set(collection, nodes);
+  }
+  return nodes;
+}
+
+/**
  * Apply delta ops to a keyed DOM collection under `parent`. Only handles
  * ops at `/<collection>/...` — other ops are skipped (callers typically
  * route ops for multiple collections by calling this once per collection).
  *
- * `nodes` is the id → Node map. Pass a long-lived `Map` so repeated calls
- * build on the same state. The map is mutated in place; the return value
- * is the same map for convenience.
+ * `nodes` is the id → Node map. It MUST persist across calls; omit it and one
+ * is kept per (parent, collection) for you. Pass your own only when you need
+ * to seed or inspect it. Either way the map is mutated in place and returned.
+ *
+ * Whatever you pass, `col.key(value)` must return the same id the ops use in
+ * `/<collection>/<id>` — the root-replace path keys by `col.key`, the per-row
+ * path keys by the path segment, and they have to agree.
  */
 export function applyOpsToCollection<T>(
   parent: Node,
   collection: string,
   ops: DeltaOp[],
   col: DomCollection<T>,
-  nodes: Map<string, Node> = new Map(),
+  nodes: Map<string, Node> = defaultNodesFor(parent, collection),
 ): Map<string, Node> {
   const prefix = `/${collection}/`;
   for (const op of ops) {

@@ -566,26 +566,33 @@ interface Todo { id: number; text: string; done: boolean; }
 
 const doc = openDoc<{ todos: Record<string, Todo> }>("todos:5");
 const list = document.getElementById("todo-list")!;
-const nodes = new Map<string, Node>();
 
 const renderer: DomCollection<Todo> = {
-  key: (t) => String(t.id),
+  key: (t) => String(t.id),          // MUST equal the id used in /todos/<id>
   create: (t) => { /* build li */ return li; },
   update: (node, t) => { /* patch in place */ },
   remove: (node) => { /* cleanup hook; DOM removal is automatic */ },
 };
 
-// Initial render from the full state (once).
-await doc.ready;
-for (const todo of Object.values(doc.data.get()?.todos ?? {})) {
-  const node = renderer.create(todo);
-  nodes.set(renderer.key(todo), node);
-  list.appendChild(node);
-}
+// ONE render path — initial paint, live ops, and the synthetic whole-doc
+// replace that arrives on reconnect all go through it.
+const render = (ops: DeltaOp[]) => applyOpsToCollection(list, "todos", ops, renderer);
 
-// Subsequent updates via ops — patches DOM surgically, never rebuilds.
-doc.onOps((ops) => applyOpsToCollection(list, "todos", ops, renderer, nodes));
+await doc.ready;
+render([{ op: "replace", path: "", value: doc.data.get() }]);
+doc.onOps(render);
 ```
+
+**Don't hand-build the initial DOM.** `applyOpsToCollection` keeps an id → node
+map — that map is how `remove` finds its node and how the reconnect reconcile
+knows which rows it already has. Nodes you appended yourself aren't in it, so
+`remove` becomes a no-op and the first reconnect re-appends the whole
+collection. Painting through the same call is what keeps the map and the DOM in
+agreement.
+
+The map is held per `(parent, collection)` for you. Pass your own as a 5th
+argument only when you need to seed or inspect it — it must then be long-lived
+and threaded through *every* call, including the initial paint.
 
 **When `doc.data` is still fine:** the whole doc fits in one card, no keyboard focus to preserve, < ~10 rows.
 

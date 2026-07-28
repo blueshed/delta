@@ -272,3 +272,102 @@ describe("applyOpsToCollection", () => {
     expect(parent.children.length).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The default `nodes` map must PERSIST across calls.
+//
+// It used to default to a fresh `new Map()` per call, which silently broke
+// every 4-argument caller — including the canonical recipe in SKILL.md,
+// README.md and examples/shared-state. With an empty map each time, `remove`
+// found no node to detach, and the reconnect root-replace missed every row and
+// re-created + re-appended the whole collection. A chat log duplicated itself
+// on every reconnect. These tests drive the 4-arg form the docs actually show.
+// ---------------------------------------------------------------------------
+
+describe("default node map persistence", () => {
+  const rows = (...ids: number[]) =>
+    Object.fromEntries(ids.map((id) => [String(id), { id, name: `r${id}` }]));
+  const rootReplace = (value: any): DeltaOp[] => [{ op: "replace", path: "", value }];
+
+  test("4-arg form: repeated reconnect reconciles do not duplicate nodes", () => {
+    const parent = new MockNode();
+    const col = makeCollection();
+    const snapshot = { todos: rows(1, 2, 3) };
+
+    // Initial paint through the same path the recipe now uses.
+    applyOpsToCollection<Row>(parent as unknown as Node, "todos", rootReplace(snapshot), col);
+    expect(parent.children.length).toBe(3);
+
+    // Two reconnects. Each emits a synthetic whole-doc replace.
+    applyOpsToCollection<Row>(parent as unknown as Node, "todos", rootReplace(snapshot), col);
+    applyOpsToCollection<Row>(parent as unknown as Node, "todos", rootReplace(snapshot), col);
+    expect(parent.children.length).toBe(3);
+  });
+
+  test("4-arg form: remove detaches the node added by an earlier call", () => {
+    const parent = new MockNode();
+    const removes: string[] = [];
+    const col = makeCollection([], removes);
+
+    applyOpsToCollection<Row>(parent as unknown as Node, "todos",
+      [{ op: "add", path: "/todos/-", value: { id: 7, name: "seven" } }], col);
+    expect(parent.children.length).toBe(1);
+
+    applyOpsToCollection<Row>(parent as unknown as Node, "todos",
+      [{ op: "remove", path: "/todos/7" }], col);
+    expect(parent.children.length).toBe(0);
+    expect(removes).toEqual(["7"]);
+  });
+
+  test("4-arg form: a reconnect after live ops keeps the true set", () => {
+    const parent = new MockNode();
+    const col = makeCollection();
+
+    applyOpsToCollection<Row>(parent as unknown as Node, "todos",
+      rootReplace({ todos: rows(1, 2) }), col);
+    applyOpsToCollection<Row>(parent as unknown as Node, "todos",
+      [{ op: "add", path: "/todos/3", value: { id: 3, name: "r3" } }], col);
+    expect(parent.children.length).toBe(3);
+
+    // Server dropped 1 while we were offline; reconnect snapshot is {2,3}.
+    applyOpsToCollection<Row>(parent as unknown as Node, "todos",
+      rootReplace({ todos: rows(2, 3) }), col);
+    expect(parent.children.length).toBe(2);
+    expect(parent.children.map((c) => c.payload.id).sort()).toEqual([2, 3]);
+  });
+
+  test("default maps are isolated per parent and per collection", () => {
+    const a = new MockNode();
+    const b = new MockNode();
+    const col = makeCollection();
+
+    applyOpsToCollection<Row>(a as unknown as Node, "todos", rootReplace({ todos: rows(1) }), col);
+    applyOpsToCollection<Row>(b as unknown as Node, "todos", rootReplace({ todos: rows(1) }), col);
+    // Same id, different parents — each keeps its own node.
+    expect(a.children.length).toBe(1);
+    expect(b.children.length).toBe(1);
+
+    // A second collection under the SAME parent must not clobber the first.
+    applyOpsToCollection<Row>(a as unknown as Node, "notes", rootReplace({ notes: rows(1) }), col);
+    expect(a.children.length).toBe(2);
+    applyOpsToCollection<Row>(a as unknown as Node, "notes", rootReplace({ notes: rows(1) }), col);
+    expect(a.children.length).toBe(2);
+  });
+
+  test("an explicitly passed map is used and returned (reference.md form)", () => {
+    const parent = new MockNode();
+    const col = makeCollection();
+    const mine = new Map<string, Node>();
+
+    const returned = applyOpsToCollection<Row>(
+      parent as unknown as Node, "todos", rootReplace({ todos: rows(1, 2) }), col, mine,
+    );
+    expect(returned).toBe(mine);
+    expect([...mine.keys()].sort()).toEqual(["1", "2"]);
+
+    // Threading the same map through every call is equally stable — this is the
+    // long-hand the manual documents, for callers that need to seed or inspect it.
+    applyOpsToCollection<Row>(parent as unknown as Node, "todos", rootReplace({ todos: rows(1, 2) }), col, mine);
+    expect(parent.children.length).toBe(2);
+  });
+});

@@ -209,6 +209,93 @@ END;
 $$ LANGUAGE plpgsql STABLE;
 
 -- ---------------------------------------------------------------------------
+-- _delta_row_in_scope: may this doc address this row?
+--
+-- Mirrors the READ filtering in _delta_load_collection / delta_open exactly,
+-- so the rule is simply "you may write what you may read".
+--
+-- Reads were always scoped, but writes addressed rows by bare id: a client
+-- holding `tenant:1` could name a row id belonging to `tenant:2` and remove or
+-- overwrite it. delta_apply now gates every row-addressed write through here.
+-- Returning FALSE for a row that exists but is invisible (including one hidden
+-- by RLS) is deliberate — it keeps "forbidden" and "absent" indistinguishable
+-- so the gate can't be used to probe for ids.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION _delta_row_in_scope(
+  p_def            _delta_docs,
+  p_doc_name       TEXT,
+  p_collection_key TEXT,
+  p_id             BIGINT
+) RETURNS BOOLEAN AS $$
+DECLARE
+  v_scope    JSONB;
+  v_is_list  BOOLEAN;
+  v_root_id  BIGINT;
+  v_coll     RECORD;
+  v_cur_coll TEXT;
+  v_cur_id   BIGINT;
+  v_view     TEXT;
+  v_exists   BOOLEAN;
+  v_depth    INT := 0;
+BEGIN
+  IF p_id IS NULL THEN RETURN FALSE; END IF;
+
+  v_scope   := _delta_resolve_scope(p_def, p_doc_name);
+  v_is_list := (v_scope->>'mode') = 'list';
+
+  IF v_is_list THEN
+    -- List mode: `include`d collections are loaded in FULL by
+    -- _delta_load_collection_all (no FK filter), so every row of them is
+    -- readable and therefore writable. Only the root is narrowed, by the
+    -- resolved WHERE.
+    IF p_collection_key IS DISTINCT FROM p_def.root_collection THEN
+      RETURN TRUE;
+    END IF;
+    SELECT * INTO v_coll FROM _delta_collections
+     WHERE collection_key = p_collection_key;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    v_view := _delta_source_view(v_coll.table_name, v_coll.temporal);
+    EXECUTE format(
+      'SELECT EXISTS(SELECT 1 FROM %I t WHERE t.id = $1 AND %s)',
+      v_view, COALESCE(v_scope->>'where', 'TRUE')
+    ) INTO v_exists USING p_id;
+    RETURN v_exists;
+  END IF;
+
+  -- Single mode: walk the parent-FK chain up to the root collection, the same
+  -- traversal _delta_load_collection makes on the way down.
+  v_root_id  := (v_scope->'values'->>'id')::BIGINT;
+  v_cur_coll := p_collection_key;
+  v_cur_id   := p_id;
+
+  LOOP
+    v_depth := v_depth + 1;
+    IF v_depth > 32 THEN RETURN FALSE; END IF;   -- malformed / cyclic parent chain
+
+    IF v_cur_coll = p_def.root_collection THEN
+      RETURN v_cur_id IS NOT DISTINCT FROM v_root_id;
+    END IF;
+
+    SELECT * INTO v_coll FROM _delta_collections
+     WHERE collection_key = v_cur_coll;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+
+    -- Unparented collection: _delta_load_collection loads it whole, so it is
+    -- shared by every doc of this type and every row of it is in scope.
+    IF v_coll.parent_collection IS NULL THEN RETURN TRUE; END IF;
+
+    v_view := _delta_source_view(v_coll.table_name, v_coll.temporal);
+    EXECUTE format('SELECT t.%I FROM %I t WHERE t.id = $1', v_coll.parent_fk, v_view)
+      INTO v_cur_id USING v_cur_id;
+    IF v_cur_id IS NULL THEN RETURN FALSE; END IF;   -- absent, or invisible to us
+
+    v_cur_coll := v_coll.parent_collection;
+  END LOOP;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+-- ---------------------------------------------------------------------------
 -- _delta_strip_temporal: remove valid_from/valid_to/override from a JSONB row
 -- ---------------------------------------------------------------------------
 

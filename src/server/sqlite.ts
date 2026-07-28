@@ -328,12 +328,21 @@ export function registerDocs(
         if (op.op === "add") {
           // Add row
           const row = (op as any).value as Record<string, unknown>;
+          // A DIRECT child's FK is forced to `rootId` by insertCollectionRow, but a
+          // grandchild's comes verbatim from the client. Unchecked, that grafts the
+          // new row onto another doc's parent — a cross-doc write. Require the named
+          // parent to be in THIS doc's scope.
+          assertParentInScope(doc, def, table, row);
           const ts = now();
           const fullRow = insertCollectionRow(db, schema, table, id, rootId, def, row, ts);
           doc[collKey][id] = fullRow;
           broadcastOps.push({ op: "add", path: `/${collKey}/${id}`, value: fullRow });
         } else if (op.op === "remove") {
-          // Remove row + cascades
+          // Remove row + cascades. `removeRow` addresses rows by id ALONE, so
+          // without this gate a client could name any id and delete a sibling
+          // doc's row (the field-replace path below has always made the
+          // equivalent check via `doc[collKey]?.[id]`).
+          assertRowInScope(doc, collKey, id);
           const cascadeOps = removeRow(db, schema, table, collKey, id, doc, def);
           broadcastOps.push(...cascadeOps);
         }
@@ -351,15 +360,21 @@ export function registerDocs(
       }
     }
 
-    // Apply batched root-field updates as a single close + reinsert.
+    // Apply batched root-field updates as a single close + reinsert (temporal)
+    // or one in-place UPDATE (non-temporal — `id` is the whole PK there, so a
+    // reinsert would collide).
     if (rootFieldUpdates.size > 0) {
       const rootTable = schema.tables[def.root]!;
       const ts = now();
       if (rootTable.temporal) closeRow(db, rootTable, rootId, ts);
       const updated = { ...doc[def.root] };
       for (const [field, value] of rootFieldUpdates) updated[field] = value;
-      if (rootTable.temporal) { updated.valid_from = ts; updated.valid_to = null; }
-      insertRootRow(db, rootTable, updated, ts);
+      if (rootTable.temporal) {
+        updated.valid_from = ts; updated.valid_to = null;
+        insertRootRow(db, rootTable, updated, ts);
+      } else {
+        updateRow(db, rootTable, rootId, updated);
+      }
       doc[def.root] = updated;
       broadcastOps.push({ op: "replace", path: `/${def.root}`, value: updated });
     }
@@ -378,7 +393,8 @@ export function registerDocs(
       for (const [field, value] of batch.fields) {
         updated[field] = value;
       }
-      reinsertRow(db, batch.table, batch.id, updated, ts);
+      if (batch.table.temporal) reinsertRow(db, batch.table, batch.id, updated, ts);
+      else updateRow(db, batch.table, batch.id, updated);
       doc[collKey][batch.id] = updated;
       broadcastOps.push({ op: "replace", path: `/${collKey}/${batch.id}`, value: updated });
     }
@@ -1073,6 +1089,66 @@ function reinsertRow(db: any, table: ResolvedTable, id: string, row: any, ts: st
 
   const placeholders = cols.map(() => "?").join(", ");
   db.run(`INSERT INTO ${table.name} (${cols.join(", ")}) VALUES (${placeholders})`, vals);
+}
+
+/**
+ * Overwrite a NON-temporal row in place.
+ *
+ * A temporal row is updated by closing the old version and inserting a new one
+ * — the composite `(id, valid_from)` key keeps both. A non-temporal table has
+ * `id` as its whole primary key, so that same insert collides: replaces against
+ * one used to fail with `UNIQUE constraint failed`, making non-temporal rows
+ * unupdatable. UPDATE rather than DELETE+INSERT (which is what the Postgres
+ * backend does) so the row is never briefly absent.
+ */
+function updateRow(db: any, table: ResolvedTable, id: string, row: any) {
+  const cols: string[] = [];
+  if (table.parent) cols.push(table.parent.fkColumn);
+  cols.push(...Object.keys(table.columns));
+  if (cols.length === 0) return;
+
+  const sets = cols.map((c) => `${c} = ?`).join(", ");
+  const vals = cols.map((c) => encodeValue(table, c, row[c]));
+  db.run(`UPDATE ${table.name} SET ${sets} WHERE id = ?`, [...vals, id]);
+}
+
+// ---------------------------------------------------------------------------
+// Write scoping
+// ---------------------------------------------------------------------------
+//
+// A loaded doc holds EXACTLY the rows its scope admits — that's what
+// `loadDocFromSql` builds. So "is this row in the doc?" IS the scope check,
+// and these two guards make every write path ask it. Reads were always scoped;
+// writes addressed rows by bare id, so a client holding `customer:alice` could
+// name a row of `customer:bob` and reach it. The error message deliberately
+// matches the "not there" case — a distinct "forbidden" would confirm the row
+// exists to someone probing ids.
+
+/** Throw unless `id` is a row this doc actually holds. */
+function assertRowInScope(doc: any, collKey: string, id: string): void {
+  if (doc[collKey]?.[id] == null) {
+    throw new Error(`Row not found: ${collKey}/${id}`);
+  }
+}
+
+/**
+ * Throw unless a new row's parent is in scope. Only meaningful for
+ * grandchildren-and-deeper: a direct child of the doc root has its FK assigned
+ * server-side, and an unparented collection is loaded in full (so every row of
+ * it is in scope by construction).
+ */
+function assertParentInScope(
+  doc: any,
+  def: DocDef,
+  table: ResolvedTable,
+  row: Record<string, unknown> | undefined,
+): void {
+  const parent = table.parent;
+  if (!parent || parent.collection === def.root) return;
+  const fk = row?.[parent.fkColumn];
+  if (fk == null || doc[parent.collection]?.[String(fk)] == null) {
+    throw new Error(`Row not found: ${parent.collection}/${fk ?? ""}`);
+  }
 }
 
 function removeRow(
