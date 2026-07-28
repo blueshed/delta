@@ -1,6 +1,6 @@
 ---
 name: railroad
-version: 0.10.1
+version: 0.11.0
 description: "Railroad — reactive UI for the Bun fullstack runtime. Signals, JSX, hash router, DI, logger. Use when writing JSX with signals, when()/list()/routes(), or any import from @blueshed/railroad. Pair with @blueshed/delta for WebSocket document sync."
 ---
 
@@ -19,7 +19,7 @@ Bun 1.3 already ships HTML imports, HMR, TSX bundling, `--compile`, and `Bun.Web
 - **DI / logger** — typed `provide`/`inject` with phantom-typed keys; leveled console output.
 - **Realtime escape hatches** — `.touch()`, `.mutate()`, `.patch()` for in-place document mutation under WebSocket / CRDT / `LISTEN/NOTIFY` patch streams.
 
-## The seven things that bite if you're not careful
+## The eight things that bite if you're not careful
 
 ### 1. Do NOT call `.get()` in JSX children
 
@@ -141,6 +141,8 @@ filter.patch({ color: "blue" });
 
 Railroad is HTML-flavoured JSX — it uses `class`, not `className`; `onclick`, not `onClick`. The runtime accepts PascalCase too (it lowercases anything starting with `on`), but mixing conventions makes diffs noisier and trains the next reader on the wrong style.
 
+The value must be a **function** — `onclick={handler}`, never `onclick={handler()}` (that calls it at render) and never a Signal (handlers are not reactive; pass a function that reads the signal). A non-function warns on the console and attaches nothing. `onclick={maybeHandler}` with null/undefined is fine — no handler, no warning.
+
 ```tsx
 // ✅ Lowercase HTML — matches `class`, `srcdoc`, `tabindex` etc.
 <button onclick={() => count.update(n => n + 1)}>+1</button>
@@ -167,6 +169,32 @@ const COLUMNS = [{ id: "todo" }, { id: "doing" }, { id: "done" }];
 ```
 
 Rule of thumb: any array derived from a signal (`doc.data.map(d => d.cards)`, `signal([...])`, etc.) must go through `list()`. Hard-coded arrays in module scope can use `.map()`.
+
+### 8. Async components resolve to a **thunk**
+
+Components may be `async`. They render a placeholder immediately (plus an optional `fallback` thunk prop) and fill in when the promise settles. The one rule: **resolve to a thunk, not a bare Node** — the `() =>` on the return line is the entire contract:
+
+```tsx
+// ✅ Async component — note the `() =>` on the return line
+async function Profile() {
+  const user = await fetchUser();
+  return () => <div>{user.name}</div>;
+}
+<Profile fallback={() => <p>loading…</p>} />
+
+// ❌ Bare-Node resolution — pointed console.error, nothing rendered
+async function Profile() {
+  const user = await fetchUser();
+  return <div>{user.name}</div>;   // fix: return () => <div>{user.name}</div>
+}
+```
+
+Why the thunk: effects created after an `await` have no owner scope — browser JS has no AsyncContext to carry "current scope" across suspension — so a bare-Node resolution's bindings could never be torn down. The thunk gives railroad a synchronous moment it controls: it runs under a fresh scope composed into the component's cleanup, so teardown is correct no matter when the promise settles (dispose before resolution simply drops the thunk — it never runs).
+
+- `fallback` is a thunk too (`fallback={() => <p>…</p>}`) — rendered immediately, swapped out on settlement; a rejection clears it (no stuck spinners) and logs the error.
+- Effects created **before** the first `await` are owned by the component scope as usual.
+- Async `routes()` handlers follow the same contract — resolve to `() => <Node>` so post-await bindings die on navigation. A bare `Promise<Node>` still renders (back-compat), but anything reactive it built after the `await` outlives the route.
+- The effect + signal + `when()` pattern is still right when you want streaming or multi-stage states rather than one fallback→content swap.
 
 ## Mental model
 

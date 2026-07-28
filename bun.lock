@@ -5,16 +5,16 @@
     "": {
       "name": "@blueshed/delta",
       "devDependencies": {
-        "@blueshed/railroad": "^0.10.0",
+        "@blueshed/railroad": "^0.11.0",
         "@happy-dom/global-registrator": "^20.11.1",
         "@types/bun": "^1.3.14",
         "@types/pg": "^8.20.0",
-        "jose": "^6.2.3",
-        "pg": "^8.21.0",
+        "jose": "^6.2.4",
+        "pg": "^8.22.0",
         "typescript": "^5.9.3",
       },
       "peerDependencies": {
-        "@blueshed/railroad": "^0.10.0",
+        "@blueshed/railroad": "^0.11.0",
         "jose": "^6.0.0",
         "pg": "^8.20.0",
       },
@@ -26,7 +26,7 @@
     },
   },
   "packages": {
-    "@blueshed/railroad": ["@blueshed/railroad@0.10.1", "", {}, "sha512-09pJlKFw2VBBvDJTNhsP0WgwPTyzD9VgNmrdJSlECj621/qzn3SdDg0Lbj4dpaUPY94hIGWk1INqttlc9+KB1A=="],
+    "@blueshed/railroad": ["@blueshed/railroad@0.11.0", "", {}, "sha512-Rw0cCB6rWZEGD5t0e40TRrBjEq0GYa1vmA1VHrxItF28TZc9Vx5hbOqZ77ZJM6ph/+PJZZQfrJgYrAblG3WsdA=="],
 
     "@happy-dom/global-registrator": ["@happy-dom/global-registrator@20.11.1", "", { "dependencies": { "@types/node": ">=20.0.0", "happy-dom": "^20.11.1" } }, "sha512-1C0wwHiyMlEdsbrJqff5ORE2PwaXBOam5rMqkZVOReAezd5nt6Tl/WGg28UAo75Ziuwchs0KaF8lvnn2oAtvJA=="],
 

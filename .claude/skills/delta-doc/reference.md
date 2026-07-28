@@ -631,6 +631,21 @@ Don't import `applyOpsToCollection` in railroad projects — `list(doc.data.map(
 
 `openDoc` is **scope-aware**: opened inside a railroad dispose scope (a component, a `routes()` handler, a `when()`/`list()` render, or `mount()`), the handle auto-`close()`s on scope teardown — so a per-route ``openDoc(`board:${id}`)`` releases its subscription when the route changes. Module-level opens have no scope and stay open for the life of the page. Repeated `openDoc(name)` calls on one client share a single entry (the *same* signals) with a refcount; `doc.close()` releases one handle, and the last release unregisters the doc and sends the server a best-effort `close` so the socket unsubscribes.
 
+**In an async component or async route handler, open inside the thunk** (railroad ≥ 0.11.0). There is no active dispose scope after an `await` — browser JS has no AsyncContext to carry one across suspension, which is exactly why railroad asks async components to resolve to `() => <Node>`. It runs that thunk under a scope it owns, so an `openDoc` *inside* the thunk is scope-aware as usual; one in the async body **after** the first `await` has no owner and never auto-closes:
+
+```tsx
+async function Board({ id }: { id: string }) {
+  const meta = await fetchMeta(id);
+  const bad = openDoc(`board:${meta.id}`);       // ❌ post-await: no scope, leaks
+  return () => {
+    const doc = openDoc(`board:${meta.id}`);     // ✅ inside the thunk: auto-closes
+    return <div>{doc.data.map(d => d.title)}</div>;
+  };
+}
+```
+
+Awaiting *before* any `openDoc` and opening synchronously in the thunk is the whole rule. If you must open post-await, keep the handle and `close()` it yourself.
+
 Worked example: [`examples/kanban/`](../../../examples/kanban/) (boards → columns → cards, real-time sync via Postgres). The `serve.ts` + `client.tsx` files in that directory are the canonical railroad UX — a fullstack page using exactly the pattern above. The sibling `server.ts` + `run.ts` files are a headless three-client demo printing op transcripts to the terminal.
 
 ## The write loop — send, don't touch (no optimistic updates, no reloads)

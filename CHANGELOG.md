@@ -28,12 +28,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **railroad peer/dev dependency: `^0.9.0` → `^0.10.0`.** The 0.x caret
-  excluded railroad 0.10 entirely, and the scope-aware close needs
-  `hasActiveDisposeScope`/`trackDispose` (exported since 0.10.0).
+- **railroad peer/dev dependency: `^0.9.0` → `^0.11.0`.** The scope-aware close
+  needs `hasActiveDisposeScope`/`trackDispose` (exported since 0.10.0), and a
+  0.x caret pins to one minor — `^0.9.0` excluded 0.10 entirely, as `^0.10.0`
+  would now exclude 0.11. Delta's own surface is unchanged across 0.10 → 0.11;
+  the full suite passes against 0.11.0 unmodified. Vendored `railroad` and
+  `bun-route` skills resynced to 0.11.0.
+- **Documented `openDoc` inside async components** (skill `reference.md`).
+  railroad 0.11.0 turns async components and async route handlers into a
+  supported shape (resolve to a thunk). There is no active dispose scope after
+  an `await` — verified, not assumed — so an `openDoc` in the async body past
+  the first `await` has no owner and never auto-closes, while one inside the
+  returned thunk behaves as usual. The rule is "open inside the thunk"; the
+  reference now says so with both shapes side by side.
 
 ### Fixed
 
+- **Prototype pollution via op paths and root-replace values** (`src/core.ts`).
+  `applyOps` walked a client-supplied JSON Pointer with no key filtering, so
+  `__proto__` / `constructor` / `prototype` were reachable reference tokens. The
+  JSON-file backend applies ops with no schema validation and then echoes them
+  verbatim to every subscriber, so one client could poison the server process
+  **and** every other connected browser. A second vector, found while testing:
+  a root replace whose *value* carried an own `__proto__` key re-pointed the
+  document's prototype, because `Object.assign` honours that key by invoking the
+  prototype setter. Both are closed in `core.ts`, so all three backends and the
+  browser client inherit the guard; whole reference tokens only, so a field
+  named `constructorName` is unaffected.
+- **A malformed WebSocket frame caused an unhandled rejection**
+  (`src/server/server.ts`). `JSON.parse` sat outside the `try` in an async
+  handler, so any non-JSON frame rejected with nothing to catch it — trivially
+  triggerable by any client, and a remote kill for a process running a strict
+  `unhandledRejection` handler. The parse moved inside; a frame that fails to
+  parse has no id to answer on, so it logs only.
+- **`import … from "@blueshed/delta"` threw `ERR_PACKAGE_PATH_NOT_EXPORTED`**
+  (`package.json`). `exports` had no `"."` key, and when `exports` is present
+  `main`/`types` are ignored — so the bare specifier, which is everyone's first
+  import, could not resolve while two fields claimed it could. Added `"."`;
+  `tests/package-exports.test.ts` now resolves the bare specifier and every
+  declared subpath for real, from a temp package symlinked to the repo.
+- **JSON-file `persist()` was fire-and-forget** (`src/server/server.ts`). Two
+  rapid deltas raced whole-file `Bun.write`s and the file could settle on the
+  *older* snapshot, and an fs failure after a successful ack surfaced as an
+  unhandled rejection. Writes are now serialized through a promise chain that
+  survives a failed write, while the returned promise still rejects so an
+  explicit `await handle.persist()` can observe it.
 - **Field-level ops left keyed railroad `list()` rows stale on the JSON-file
   backend** (`src/server/server.ts`). SQLite/Postgres rewrite field writes to
   whole-row replaces, but the file backend broadcast ops verbatim; the client
@@ -92,6 +131,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Postgres backend's DELETE-then-INSERT, so the row is never briefly absent); the parent
   FK column is included, so a child row can't be silently reparented or trip its NOT NULL
   constraint. The temporal path is unchanged.
+- **Whole-row `replace /<coll>/<id>` was acked and silently discarded (SQLite)**
+  (`src/server/sqlite.ts`). The two-segment branch handled `add` and `remove`
+  only, so a `replace` fell through, wrote no SQL, broadcast nothing — and the
+  handler still answered `{ack: true}`. Silent data loss with a positive
+  acknowledgement, and no echo to correct the UI. It is now a partial merge over
+  the current row, matching Postgres (`v_row || value`), collapsing with field
+  ops on the same row into one version. Whole-root `replace /<root>` merges too
+  (previously a 500), and `validateOps` rejects non-object replace values and
+  `/coll`-level ops with a 400 instead of letting them 500 or no-op.
+- **Abrupt disconnects never released `subscriptions` / `cache`**
+  (`src/server/server.ts`, `src/server/sqlite.ts`,
+  `src/server/postgres/listener.ts`). Both backends shrank their maps only from
+  the polite `close` action, so a crashed tab, a dropped network or a logout
+  left a dead socket in the fan-out set and the doc cached forever — and after a
+  logout the previous identity's scoped doc stayed resident, so a later re-open
+  could serve stale cached state. New `onClientDrop(client, fn)` registers
+  per-socket teardown hooks, run from both the transport-level `websocket.close`
+  and `dropClientSubscriptions`; each backend releases the socket and evicts its
+  caches at zero subscribers.
 - **`applyOpsToCollection` lost its node map between calls** (`src/client/dom-ops.ts`).
   The `nodes` parameter defaulted to a fresh `new Map()` **per call**, so every 4-argument
   caller — including the canonical recipe in `SKILL.md`, `README.md` and

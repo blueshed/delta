@@ -26,7 +26,7 @@ globalThis.WebSocket = NativeWebSocket;
 
 import {
   effect, mount, when, list,
-  provide, clearProviders, setLogLevel as railroadLogLevel,
+  provide, clearProviders, setLogLevel as railroadLogLevel, hasActiveDisposeScope,
 } from "@blueshed/railroad";
 import { connectWs, openDoc, WS, type Doc, type WsClient } from "../src/client/client";
 import { createWs, registerDoc, type DocHandle } from "../src/server/server";
@@ -202,5 +202,35 @@ describe("railroad ↔ delta", () => {
     await until(() => doc.data.peek()?.cards["7"]?.title === "late");
     doc.close();
     clearProviders();
+  });
+  // railroad 0.11.0 makes async components a supported shape (resolve to a
+  // thunk). There is no dispose scope after an `await` — browser JS has no
+  // AsyncContext to carry one across suspension — so an openDoc past the first
+  // await never auto-closes, while one inside the thunk does. The skill's
+  // reference documents that rule; this pins the mechanism it rests on.
+  test("no dispose scope survives an await; the thunk gets a fresh one", async () => {
+    const seen: Record<string, boolean> = {};
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+
+    let settle!: () => void;
+    const reached = new Promise<void>((r) => { settle = r; });
+
+    const dispose = mount(root, () => {
+      seen.sync = hasActiveDisposeScope();
+      void (async () => {
+        await Promise.resolve();
+        seen.afterAwait = hasActiveDisposeScope();
+        settle();
+      })();
+      return document.createElement("div");
+    });
+
+    await reached;
+    dispose();
+    root.remove();
+
+    expect(seen.sync).toBe(true);        // synchronous body IS owned
+    expect(seen.afterAwait).toBe(false); // post-await is NOT — hence the thunk rule
   });
 });

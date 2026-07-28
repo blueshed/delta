@@ -6,6 +6,8 @@ Three op verbs (`add` / `replace` / `remove`), one path grammar (`/coll/id/field
 
 It's smaller than the alternative you're reaching for. The whole system fits in one context window — your AI can read all of it before writing a line.
 
+Starting fresh? `bun create blueshed my-app` scaffolds a full app on this stack — delta + [`@blueshed/railroad`](https://www.npmjs.com/package/@blueshed/railroad) + invoket, agent wiring included.
+
 ## The recipe — one command, three files, two browser tabs
 
 ```sh

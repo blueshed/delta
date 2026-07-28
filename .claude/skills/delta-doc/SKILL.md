@@ -12,6 +12,8 @@ This file is the **router**. `reference.md` is the **manual**. Stay in the route
 
 ## The canonical recipe — copy verbatim, don't improvise
 
+**Greenfield (no project yet)?** Scaffold first — `bunx create-blueshed my-app` — it emits this exact stack pre-wired (delta + railroad + invoket + skills sync); then continue below. **Existing project?** The three files below.
+
 Three files, no database, no schema, no codegen, no fetch calls, no auth setup. Reproduce verbatim for any "give me shared state" request. Only deviate when the model is genuinely list-of-typed-records-shaped (→ SQLite) or cross-process / multi-tenant (→ Postgres). Full working version: `examples/shared-state/`.
 
 ### `server.ts`
