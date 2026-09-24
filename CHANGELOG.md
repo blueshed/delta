@@ -80,6 +80,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (or `"<=:end"`, `"like:prefix"`) was taken as a literal to match, so every open was a 404.
   `registerDocs` now throws, saying SQLite reads the doc name with `":docId"`. To move across:
   use `":docId"`, or a literal that does not start with a DSL prefix.
+- **`undo` / `redo` answer a conflict instead of failing, and the cursor moves on** (both
+  backends; see Fixed). A walk that meets a later write by someone else, or that the document
+  refuses, used to be an error (or, worse, wrote over the later write) and left the cursor where
+  it was; it now answers a result, `{ doc, ops: [], conflict: [paths], entry, version }`, and
+  records the entry as walked, so the next undo is the entry before it and that one is never
+  redone. `history` lists such a walk as an entry with no ops. To move across: test
+  `result.conflict` (not `error`) to tell the person their undo met someone else's change;
+  `null` still means nothing to walk, and an `error` now means the walk was not tried (401,
+  404, a 409 for `entry`, or the server's 5xx).
+- **`jwtAuth`: a socket is signed out when its token runs out** (see Fixed). It used to stay
+  signed in for the socket's life. At its next request after the token's `exp` it is answered
+  401 "Session expired: authenticate again" and its subscriptions are dropped. To move across:
+  sign in from `connectWs`'s `onConnect` with a token you refresh, and on that 401
+  re-authenticate and re-open your documents (the socket stays connected, so `onConnect` does
+  not run again by itself).
 
 ### Added
 
@@ -191,13 +206,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   acked, cached and broadcast, and gone on the next cold read. Postgres's `validateOps` too.
 - **SQLite: a json column's string value survives a cold read** (v0.5.0 review #4). Strings were stored
   raw and parsed on the way back, so `"123"` came back as `123` and `"true"` as `true` after a
-  restart or eviction. Every json value is now stored as JSON; a raw string an earlier release
-  stored still reads back as the string it was.
+  restart or eviction. Every json value is now stored as JSON. A string an earlier release
+  stored raw reads back as it did: as the string, unless it parses as JSON.
 - **`jwtAuth`: a session ends when its token does** (v0.5.0 review #10). `gate()` returned the identity
   for the socket's whole life, so a token that ran out after `authenticate` still let every
   `open` and `delta` in. The token's `exp` is kept with the identity, and once it has passed
   the gate signs the socket out ("Session expired: authenticate again", subscriptions dropped),
-  as `logout` does. With `onConnect`, the client signs in again on its next connect.
+  as `logout` does (see Breaking).
 - **SQLite: a document whose root row has a parent can change its root fields** (v0.5.0 review #5). The
   root's row writer left the parent key out, so on a temporal table the new version failed
   `NOT NULL constraint failed: <table>.<fk>`. The three row writers, which had drifted apart,
