@@ -120,18 +120,8 @@ Claude Code on the web runs in an ephemeral container with no Docker daemon, so 
 `ci` fail there. `.claude/hooks/session-start.sh` provisions that container when
 `CLAUDE_CODE_REMOTE=true`: it starts the bundled Postgres 16 cluster on **5432**, creates the
 `delta` role (superuser, as in compose) and the `delta_test` database, runs `bun install`, and
-exports `DELTA_TEST_PG_URL`. By hand, the same is:
-
-```bash
-pg_ctlcluster 16 main start          # pg_lsclusters → 16 main 5432 online
-su postgres -c "psql -v ON_ERROR_STOP=1 -c \"DO \\\$\\\$ BEGIN
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='delta') THEN
-    CREATE ROLE delta LOGIN SUPERUSER PASSWORD 'delta';
-  END IF; END \\\$\\\$;\""
-su postgres -c "psql -tAc \"SELECT 1 FROM pg_database WHERE datname='delta_test'\"" \
-  | grep -q 1 || su postgres -c "createdb -O delta delta_test"
-bun install
-```
+exports `DELTA_TEST_PG_URL`. By hand, the same is
+`CLAUDE_CODE_REMOTE=true .claude/hooks/session-start.sh`; it is idempotent.
 
 The gate there, in place of `bun run ci`:
 
