@@ -318,6 +318,41 @@ describe("registerDoc", () => {
     expect(sock.sent[0].error.message).toContain("No handler matched");
   });
 
+  test("a path without a leading slash is refused and leaves the document (F4)", async () => {
+    const file = `${tmpFile}.f4`;
+    await Bun.write(file, JSON.stringify({ messages: { a: { text: "hi" } }, title: "keep" }));
+    const ws = createWs();
+    const published: any[] = [];
+    ws.setServer({ publish: (_ch: string, raw: string) => published.push(JSON.parse(raw)) });
+    const handle = await registerDoc(ws, "chat:room", { file, empty: { messages: {}, title: "" } as any });
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "delta", doc: "chat:room", ops: [{ op: "remove", path: "messages" }] }));
+    expect(sock.sent[0].error.message).toContain('Invalid JSON Pointer "messages"');
+    expect(handle.getDoc()).toEqual({ messages: { a: { text: "hi" } }, title: "keep" });
+    expect(published).toEqual([]);
+    try { unlinkSync(file); } catch {}
+  });
+
+  test("a batch whose second op fails changes nothing, broadcasts nothing, persists nothing (D5)", async () => {
+    const file = `${tmpFile}.d5`;
+    await Bun.write(file, JSON.stringify({ messages: { m1: { text: "hi" } } }));
+    const ws = createWs();
+    const published: any[] = [];
+    ws.setServer({ publish: (_ch: string, raw: string) => published.push(JSON.parse(raw)) });
+    const handle = await registerDoc(ws, "chat:room", { file, empty: { messages: {} } as any });
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "delta", doc: "chat:room", ops: [
+      { op: "replace", path: "/messages/m1/text", value: "HALF" },
+      { op: "replace", path: "/messages/zz/text", value: "x" },
+    ] }));
+    expect(sock.sent[0].error.message).toContain("Path not found");
+    expect(handle.getDoc()).toEqual({ messages: { m1: { text: "hi" } } });
+    expect(published).toEqual([]);
+    await handle.persist();
+    expect(await Bun.file(file).json()).toEqual({ messages: { m1: { text: "hi" } } });
+    try { unlinkSync(file); } catch {}
+  });
+
   test("loads existing file on startup", async () => {
     await Bun.write(tmpFile, JSON.stringify({ items: ["existing"] }));
 

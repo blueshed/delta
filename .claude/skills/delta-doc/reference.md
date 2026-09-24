@@ -378,7 +378,7 @@ const dashboard = defineCustomDoc<{ userId: string }>("dashboard:", {
 - **No relevance gate.** Unlike membership's `matches`, recompute re-evaluates on *any* write to *any* watched collection, for *every* subscriber of *every* doc under the prefix — there's no per-doc filter. Cost ≈ (subscribers under the prefix) × (writes to any watched collection); it is **not** cached. Keep `watch` tight and `recompute` cheap.
 - The recomputed doc reaches each client as a single **root-replace** op — see below.
 
-**Root-replace — the client-side primitive recompute rides on.** `applyOps` treats an empty/root path (`""` or `"/"`) as "swap or clear the whole doc, in place":
+**Root-replace — the client-side primitive recompute rides on.** `applyOps` treats the empty path `""` as "swap or clear the whole doc, in place" (`"/"` is the member named `""`, per RFC 6901):
 
 ```ts
 applyOps(doc, [{ op: "replace", path: "", value: next }]);  // object↔object / array↔array

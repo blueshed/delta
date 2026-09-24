@@ -1,15 +1,24 @@
 /**
  * Delta — shared types and operations for JSON document patching.
  *
- * Used by both delta-server (apply + persist) and delta-client (apply + render).
+ * Used by every backend (apply + persist) and by the client (apply + render).
  * No dependencies — safe to import anywhere.
  *
- * Delta ops use JSON Pointer paths (`/`-separated, numeric for array index, `-` for append):
+ * Delta ops use RFC 6901 JSON Pointer paths:
  *   { op: "replace", path: "/field",    value: "new" }  — set a value at path
- *   { op: "add",     path: "/items/-",  value: item }   — append to array
+ *   { op: "add",     path: "/items/-",  value: item }   — append to an array
  *   { op: "remove",  path: "/items/0" }                  — delete by index
  *
- * Multiple ops applied via applyOps() are atomic in memory.
+ * The grammar, the same in `splitPath`, `applyOps` and the Postgres
+ * `_delta_split_path`:
+ *   - `""` is the whole document; every other path starts with `/`.
+ *   - A segment escapes `~` as `~0` and `/` as `~1`; any other `~` is an error.
+ *   - A segment is a member name, a string, unless its parent is an array:
+ *     `/items/007` keys `"007"` in an object, and is an error in an array,
+ *     where an index is `0` or `[1-9][0-9]*` and `-` (add only) appends.
+ *
+ * `applyOps` applies a batch whole or not at all: an op that throws undoes the
+ * ops before it, in place, and the error is rethrown.
  */
 
 // ---------------------------------------------------------------------------
@@ -22,27 +31,35 @@ export type DeltaOp =
   | { op: "remove"; path: string };
 
 // ---------------------------------------------------------------------------
-// Apply
+// Pointers
 // ---------------------------------------------------------------------------
 
+/** The unescaped segments of a JSON Pointer: `""` → `[]`, `"/a~1b/c"` → `["a/b", "c"]`. Throws on a malformed pointer. */
 export function splitPath(path: string): string[] {
-  // Root op: "" and "/" both address the whole document → no reference tokens.
-  if (path === "" || path === "/") return [];
-  // RFC-6901: a JSON Pointer is "/" + each reference token. Empty middle or
-  // trailing tokens are GENUINE keys ("/a//b" → ["a", "", "b"], "/a/" →
-  // ["a", ""]), so we must NOT drop them with `.filter(Boolean)`. We slice off
-  // the leading "" produced by the first "/" and unescape (~1→/, ~0→~).
-  return path
-    .split("/")
-    .slice(1)
-    .map((s) => s.replace(/~1/g, "/").replace(/~0/g, "~"));
+  if (path === "") return [];
+  if (typeof path !== "string" || !path.startsWith("/")) {
+    throw new Error(`Invalid JSON Pointer ${JSON.stringify(path)}: a path starts with "/" ("" is the whole document)`);
+  }
+  if (/~(?![01])/.test(path)) {
+    throw new Error(`Invalid JSON Pointer ${JSON.stringify(path)}: "~" is written "~0" and "/" is written "~1"`);
+  }
+  // Empty segments are genuine keys ("/a//b" → ["a", "", "b"]); ~1 before ~0.
+  return path.slice(1).split("/").map((s) => s.replace(/~1/g, "/").replace(/~0/g, "~"));
 }
 
-function parsePath(path: string): (string | number)[] {
-  return splitPath(path).map((unescaped) => {
-    return /^\d+$/.test(unescaped) ? Number(unescaped) : unescaped;
-  });
+/** One segment escaped for a pointer: `~` → `~0`, then `/` → `~1`. */
+export function escapeSegment(segment: string | number): string {
+  return String(segment).replace(/~/g, "~0").replace(/\//g, "~1");
 }
+
+/** A pointer from its segments, each escaped: `joinPath("messages", "a/b")` → `"/messages/a~1b"`. */
+export function joinPath(...segments: (string | number)[]): string {
+  return segments.map((s) => `/${escapeSegment(s)}`).join("");
+}
+
+// ---------------------------------------------------------------------------
+// Apply
+// ---------------------------------------------------------------------------
 
 /**
  * Reference tokens that reach an object's prototype rather than its own data.
@@ -51,19 +68,9 @@ function parsePath(path: string): (string | number)[] {
  * backend applies them with no schema validation at all and then echoes them
  * verbatim to every subscriber, so one client could poison the server process
  * AND every other connected browser. The guard lives here, in the one module
- * all three backends and the browser client share, so none of them can forget
- * it. (SQLite/Postgres also reject `/__proto__/…` incidentally, as an unknown
- * collection — that is a side effect of their schema check, not a defence.)
+ * every backend and the browser client share, so none of them can forget it.
  */
 const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
-
-function assertSafePath(segments: (string | number)[], path: string): void {
-  for (const seg of segments) {
-    if (typeof seg === "string" && UNSAFE_KEYS.has(seg)) {
-      throw new Error(`Unsafe path segment "${seg}" in "${path}"`);
-    }
-  }
-}
 
 /**
  * `Object.assign` honours an own `__proto__` key by invoking the prototype
@@ -78,62 +85,100 @@ function safeAssign(target: any, source: Record<string, unknown>): void {
   }
 }
 
-function walk(
-  obj: any,
-  segments: (string | number)[],
-): { parent: any; key: string | number } {
-  let current = obj;
-  for (let i = 0; i < segments.length - 1; i++) {
-    current = current[segments[i]!];
-    if (current == null)
-      throw new Error(`Path not found at segment ${segments[i]}`);
+/** Fill `doc` in place with `value`'s contents (object↔object, array↔array). */
+function fillRoot(doc: any, value: unknown): void {
+  if (Array.isArray(doc)) {
+    doc.length = 0;
+    doc.push(...(value as unknown[]));
+  } else {
+    for (const k of Object.keys(doc)) delete doc[k];
+    safeAssign(doc, value as Record<string, unknown>);
   }
-  return { parent: current, key: segments[segments.length - 1]! };
 }
 
-/** Apply delta ops to a document in place. */
+const INDEX = /^(0|[1-9][0-9]*)$/;
+
+/** The key `seg` names in `parent`: a string member, or an index where the parent is an array. */
+function keyIn(parent: any, seg: string, path: string): string | number {
+  if (!Array.isArray(parent)) return seg;
+  if (!INDEX.test(seg)) throw new Error(`Invalid array index "${seg}" in ${path}`);
+  return Number(seg);
+}
+
+function applyOne(doc: any, op: DeltaOp, undo: (() => void)[]): void {
+  const segments = splitPath(op.path);
+  for (const seg of segments) {
+    if (UNSAFE_KEYS.has(seg)) throw new Error(`Unsafe path segment "${seg}" in "${op.path}"`);
+  }
+
+  // Root op (""): replace/clear the WHOLE doc IN PLACE. The value reference is
+  // fixed — the server's doc tracking and the client both hold `doc` by
+  // reference and notify on mutation — so we mutate the container rather than
+  // reassign. Enables a whole-doc refresh for evaluator-backed docs (e.g. a
+  // recomputed custom read) without a fragile nested diff.
+  if (segments.length === 0) {
+    const value = op.op === "remove" ? (Array.isArray(doc) ? [] : {}) : op.value;
+    const matches = Array.isArray(doc)
+      ? Array.isArray(value)
+      : !!value && typeof value === "object" && !Array.isArray(value);
+    if (!matches) throw new Error("root replace requires a matching container (object↔object / array↔array)");
+    const before = Array.isArray(doc) ? [...doc] : { ...doc };
+    undo.push(() => fillRoot(doc, before));
+    fillRoot(doc, value);
+    return;
+  }
+
+  let parent = doc;
+  for (let i = 0; i < segments.length - 1; i++) {
+    parent = parent[keyIn(parent, segments[i]!, op.path)];
+    if (parent === null || typeof parent !== "object") {
+      throw new Error(`Path not found at segment ${segments[i]} in ${op.path}`);
+    }
+  }
+  const last = segments[segments.length - 1]!;
+
+  if (Array.isArray(parent)) {
+    const arr = parent;
+    if (op.op === "add" && last === "-") {
+      arr.push(op.value);
+      undo.push(() => void arr.pop());
+      return;
+    }
+    const i = keyIn(arr, last, op.path) as number;
+    if (op.op === "remove") {
+      if (i >= arr.length) return;                    // nothing there, as for a missing member
+      const [was] = arr.splice(i, 1);
+      undo.push(() => void arr.splice(i, 0, was));
+      return;
+    }
+    // `add` at an index OVERWRITES (assignment, not an RFC-6902 splice-insert):
+    // the framework keys collections by id-maps and appends with "/-". An index
+    // past the end would leave holes, so it is refused.
+    if (i > arr.length || (op.op === "replace" && i === arr.length)) {
+      throw new Error(`Path not found: index ${i} is past the end of ${op.path}`);
+    }
+    const had = i < arr.length;
+    const was = arr[i];
+    undo.push(() => { if (had) arr[i] = was; else arr.length = i; });
+    arr[i] = op.value;
+    return;
+  }
+
+  const obj = parent;
+  const had = Object.prototype.hasOwnProperty.call(obj, last);
+  const was = obj[last];
+  undo.push(() => { if (had) obj[last] = was; else delete obj[last]; });
+  if (op.op === "remove") delete obj[last];
+  else obj[last] = op.value;
+}
+
+/** Apply delta ops to a document in place: the whole batch, or (when an op throws) none of it. */
 export function applyOps(doc: any, ops: DeltaOp[]): void {
-  for (const op of ops) {
-    const segments = parsePath(op.path);
-    assertSafePath(segments, op.path);
-    // Root op (empty path "" or "/"): replace/clear the WHOLE doc IN PLACE. The value
-    // reference is fixed — the server's doc tracking and the client both hold `doc` by
-    // reference and notify on mutation (the client bumps dataVersion after applyOps) — so
-    // we mutate the container rather than reassign. Enables a whole-doc refresh for
-    // evaluator-backed docs (e.g. a recomputed custom read) without a fragile nested diff.
-    if (segments.length === 0) {
-      if (op.op === "remove") {
-        if (Array.isArray(doc)) doc.length = 0;
-        else for (const k of Object.keys(doc)) delete doc[k];
-      } else if (Array.isArray(doc) && Array.isArray(op.value)) {
-        doc.length = 0;
-        (doc as unknown[]).push(...(op.value as unknown[]));
-      } else if (!Array.isArray(doc) && op.value && typeof op.value === "object") {
-        for (const k of Object.keys(doc)) delete doc[k];
-        safeAssign(doc, op.value as Record<string, unknown>);
-      } else {
-        throw new Error("root replace requires a matching container (object↔object / array↔array)");
-      }
-      continue;
-    }
-    const { parent, key } = walk(doc, segments);
-    switch (op.op) {
-      case "replace":
-      case "add":
-        // NOTE: `add` to an array INDEX (e.g. "/items/1") is an OVERWRITE
-        // (plain assignment), NOT an RFC-6902 splice-insert. The framework
-        // keys collections by id-maps, so insert-by-index is rarely hit;
-        // changing this to splice could regress those callers. Array append
-        // uses "/-" (handled below); RFC-6902 index insertion is intentionally
-        // unsupported.
-        if (Array.isArray(parent) && key === "-") parent.push(op.value);
-        else parent[key] = op.value;
-        break;
-      case "remove":
-        if (Array.isArray(parent) && typeof key === "number")
-          parent.splice(key, 1);
-        else delete parent[key];
-        break;
-    }
+  const undo: (() => void)[] = [];
+  try {
+    for (const op of ops) applyOne(doc, op, undo);
+  } catch (err) {
+    for (let i = undo.length - 1; i >= 0; i--) undo[i]!();
+    throw err;
   }
 }

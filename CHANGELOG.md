@@ -19,15 +19,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   leaked). To move across: add `owns` (for a per-user name, `(user, name) => name ===
   \`todos:${user.id}\``), or `shared: true` where every signed-in user may see every row. A
   wrapper `DocType` that checked the name in `open` can go.
+- **Paths are strict RFC 6901 JSON Pointers, in `splitPath` and `applyOps`** (so on every
+  backend and in the client). A path that does not start with `/` is now an error; it used to
+  split to no segments, which is the root, so `remove "messages"` wiped the whole document and
+  was broadcast and persisted as such. `"/"` is now the member named `""`, not the root: use
+  `""` for a whole-document replace or remove. A `~` not followed by `0` or `1` is an error.
+- **A segment is a string unless its parent is an array.** `/items/007` keys `"007"`; it used to
+  become the number 7 (so `"007"` and `"7"` were one row, and two long numeric ids such as
+  snowflakes could collapse into one key). Under an array an index is `0` or `[1-9][0-9]*`, and
+  `replace`/`add` past the end is an error (it used to leave holes). Nothing to change unless
+  you relied on the coercion.
 
 ### Added
 
+- **`joinPath(...segments)` and `escapeSegment(segment)`** (`@blueshed/delta/core`): a pointer
+  built from ids, each segment escaped, the inverse of `splitPath`.
 - **`DocType.owns?(identity, docName)`** (Postgres). The listener asks it before `open`,
   `delta`, `open_at` and `history` when it has an `auth` module; false is a 404, as a missing
   document is, and the socket never subscribes. `docTypeFromDef` sets it from `owns`.
 
 ### Fixed
 
+- **A batch applies whole or not at all** (`applyOps`). An op that throws undoes the ops before
+  it, in place, so held references stay live. The JSON-file backend applied a failing batch's
+  first ops to its live document: the writer got an error, the server kept the change and
+  persisted it at the next write, and no one else heard of it.
+- **`validateOps` (SQLite and Postgres) reports a malformed pointer** as a 400 with the reason,
+  instead of throwing.
 - **Postgres: an RLS-hidden row no longer reaches another identity's socket** (see Breaking).
   `tests/postgres-rls.test.ts` runs as a `NOSUPERUSER` role, so the policy really filters, and
   pins both round-1 repros.

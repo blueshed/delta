@@ -128,13 +128,13 @@ type DeltaOp =
   | { op: "remove";  path: string };                 // delete by path
 ```
 
-Paths: `/collection` (list), `/collection/id` (row), `/collection/id/field` (field), `/collection/-` (append). Path segments follow RFC 6901 JSON Pointer escaping — `~1` decodes to `/` and `~0` to `~` — so ids or field names containing `/` or `~` round-trip cleanly through `applyOps` and every backend. An **empty/root path** (`""` or `"/"`) on `replace`/`remove` swaps or clears the **whole doc in place** (object↔object, array↔array) — the primitive behind recompute custom docs. → `reference.md` → *Custom read docs*.
+Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/field` (field), `/collection/-` (append to an array; on a collection of rows, a new row whose id the server mints). Every path starts with `/`; one that doesn't is an error, never the root. Escape `~` as `~0` and `/` as `~1` in a segment (`joinPath("messages", id)` from `@blueshed/delta/core` does it), so ids containing `/` or `~` round-trip through every backend. A segment is a string unless its parent is an array: `/items/007` is the key `"007"`. The **empty path `""`** on `replace`/`remove` swaps or clears the **whole doc in place** (object↔object, array↔array) — the primitive behind recompute custom docs; `"/"` is the member named `""`, not the root. A batch applies whole or not at all. → `reference.md` → *Custom read docs*.
 
 ## Exports
 
 | Subpath | Runs | Purpose |
 |---|---|---|
-| `@blueshed/delta/core` | anywhere | `applyOps`, `DeltaOp` |
+| `@blueshed/delta/core` | anywhere | `applyOps`, `DeltaOp`, `splitPath`, `joinPath`, `escapeSegment` |
 | `@blueshed/delta/client` | browser | `connectWs` (with `close()`), `openDoc`, `call`, `WS`, `DeltaError` |
 | `@blueshed/delta/dom-ops` | browser | `applyOpsToCollection` — keyed-DOM op routing |
 | `@blueshed/delta/server` | Bun | `createWs`, `registerDoc` (JSON-file backend), `registerMethod` |

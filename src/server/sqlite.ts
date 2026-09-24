@@ -1066,7 +1066,9 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
   const errors: ValidationError[] = [];
 
   for (const op of ops) {
-    const parts = splitPath(op.path);
+    let parts: string[];
+    try { parts = splitPath(op.path); }
+    catch (err: any) { errors.push({ path: String(op.path), message: err.message }); continue; }
     const collKey = parts[0];
     if (!collKey) {
       errors.push({ path: op.path, message: "Empty path" });

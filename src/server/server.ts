@@ -21,7 +21,7 @@
  *   ws.setServer(server);
  */
 import { createLogger } from "./logger";
-import { applyOps, splitPath, type DeltaOp } from "../core";
+import { applyOps, splitPath, joinPath, type DeltaOp } from "../core";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -290,9 +290,6 @@ export function createWs(opts?: WsOptions): WsServer {
 // Document registration
 // ---------------------------------------------------------------------------
 
-// JSON-Pointer re-escape (inverse of splitPath's unescape): ~ first, then /.
-const escapeSegment = (s: string) => s.replace(/~/g, "~0").replace(/\//g, "~1");
-
 /**
  * Normalize a delta batch for broadcast: rewrite field-level ops (depth >= 3,
  * e.g. `/cards/5/title`) into whole-row replaces of their depth-2 ancestor
@@ -321,7 +318,7 @@ export function normalizeForBroadcast(doc: unknown, ops: DeltaOp[]): DeltaOp[] {
       out.push(op);
       continue;
     }
-    const rowPath = `/${escapeSegment(segs[0]!)}/${escapeSegment(segs[1]!)}`;
+    const rowPath = joinPath(segs[0]!, segs[1]!);
     if (rewritten.has(rowPath)) continue;
     const row = (doc as any)?.[segs[0]!]?.[segs[1]!];
     if (row === undefined) continue;
