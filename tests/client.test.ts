@@ -645,3 +645,11 @@ describe("connectWs outside a browser", () => {
     expect(JSON.parse(out)).toEqual(["ws://app.example/ws", "wss://api.example/ws"]);
   });
 });
+
+// R8: the root barrel loads railroad's JSX and its global `JSX` namespace, which
+// clashes with React's in an app that only wants delta's socket. Pin the subpaths.
+test("delta's client imports railroad's subpaths, never the root barrel", async () => {
+  const src = await Bun.file(new URL("../src/client/client.ts", import.meta.url)).text();
+  expect(src).not.toMatch(/from "@blueshed\/railroad"/);
+  expect(src).toMatch(/from "@blueshed\/railroad\/signals"/);
+});
