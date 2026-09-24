@@ -247,6 +247,19 @@ describe("undo beside someone else (Postgres)", () => {
     expect((await walk(ws, c, "A", {}, "redo")).result).toBeNull();   // the conflicted undo is not redone
   });
 
+  test("an entry that touched a row twice is walked by its net change: made then changed, changed then removed", async () => {
+    const ws = await process();
+    const c = eta();
+    await write(ws, c, "A", [{ op: "add", path: "/items/100", value: { name: "a" } }, { op: "replace", path: "/items/100/name", value: "b" }]);
+    expect((await walk(ws, c, "A")).result).toMatchObject({ ops: [{ op: "remove", path: "/items/100" }] });
+    expect(await row(100)).toBeUndefined();
+
+    const id = idOf(await write(ws, c, "B", [{ op: "add", path: "/items/-", value: { name: "y" } }]));
+    await write(ws, c, "A", [{ op: "replace", path: `/items/${id}/name`, value: "y2" }, { op: "remove", path: `/items/${id}` }]);
+    expect((await walk(ws, c, "A")).result.conflict).toBeUndefined();
+    expect(await row(id)).toEqual({ name: "y", value: 0 });
+  });
+
   test("dry: true answers the plan and walks nothing; entry: id walks only that entry (F3)", async () => {
     const ws = await process();
     const c = eta();

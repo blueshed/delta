@@ -133,7 +133,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write by another cursor was lost, and that cursor's own undo brought back what had just been
   undone. A walk now sets back only the fields its entry changed, and only where each still
   holds what the entry left (a row it made is removed only if it is as it was left; a row it
-  removed is put back only if nobody has). A field someone has written since is a conflict:
+  removed is put back only if nobody has). Each row is walked once, from what it was before
+  the entry to what the entry left, so a batch that made a row and changed it (or removed one
+  and made it again, or changed one and removed it) walks back whole; walked op by op, such an
+  entry answered a conflict with itself. A field someone has written since is a conflict:
   the walk changes nothing and answers `{ doc, ops: [], conflict: [paths], entry, version }`,
   which a caller can tell from `null` (nothing to walk). On Postgres the rule is
   `_delta_walk_plan` and the walk `delta_walk(cursor, who, back, dry?, entry?)` (and

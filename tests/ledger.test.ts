@@ -250,6 +250,20 @@ describe("undo beside someone else", () => {
     expect((await read()).notes.text).toBeNull();
   });
 
+  test("an entry that touched a row twice is walked by its net change: made then changed, removed then made again", async () => {
+    const { write, read, undo } = two();
+    await read();
+    await write("A", [{ op: "add", path: "/items/x", value: { name: "a" } }, { op: "replace", path: "/items/x/name", value: "b" }]);
+    expect((await undo("A")).result).toMatchObject({ ops: [{ op: "remove", path: "/items/x" }] });
+    expect((await read()).items).toEqual({});
+
+    await write("B", [{ op: "add", path: "/items/y", value: { name: "y" } }]);
+    await write("A", [{ op: "remove", path: "/items/y" }, { op: "add", path: "/items/y", value: { name: "y2" } }]);
+    const back = await undo("A");
+    expect(back.result.conflict).toBeUndefined();
+    expect((await read()).items.y).toMatchObject({ name: "y" });
+  });
+
   test("the cursor's walk does not scan the ledger: undo stays quick behind a feed of facts (F10)", async () => {
     const { db, write, read, undo } = two();
     await read();

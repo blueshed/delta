@@ -73,11 +73,20 @@ function same(a: unknown, b: unknown): boolean {
  *   the entry left it.
  * - The entry removed a row (`add` walks it): put it back, if nobody has.
  *
- * Any guard that fails is a conflict, by path, and then nothing is walked.
+ * Each row is walked once, from what it was before the entry to what the entry
+ * left: every inverse op of a path carries the same "before" (an `add` or
+ * `replace` its value; a `remove` none, there was no row), so a row the entry
+ * touched twice (made and changed, changed and removed) is walked by its net
+ * change. Any guard that fails is a conflict, by path, and then nothing is walked.
  */
 export function planWalk(entry: { ops: DeltaOp[]; inverse: DeltaOp[] }, current: any): { ops: DeltaOp[]; conflict: string[] } {
   const left = new Map<string, any>();   // what the entry left at a path (undefined: it removed it)
   for (const op of entry.ops) left.set(op.path, op.op === "remove" ? undefined : op.value);
+  const before = new Map<string, any>(); // what a path held before the entry (undefined: nothing), in the inverse's order
+  for (const inv of entry.inverse) {
+    const was = inv.op === "remove" ? undefined : inv.value;
+    if (!before.has(inv.path) || was != null) before.set(inv.path, was);
+  }
   const now = (path: string) => {
     const [coll, id] = splitPath(path);
     return id === undefined ? current?.[coll!] : current?.[coll!]?.[id];
@@ -85,21 +94,21 @@ export function planWalk(entry: { ops: DeltaOp[]; inverse: DeltaOp[] }, current:
   const data = (row: any) => Object.keys(row ?? {}).filter((f) => !STORAGE.has(f));
   const ops: DeltaOp[] = [];
   const conflict: string[] = [];
-  for (const inv of entry.inverse) {
-    const here = now(inv.path);
-    const wrote = left.get(inv.path);
-    if (inv.op === "add") {
-      if (here != null) conflict.push(inv.path);
-      else ops.push(inv);
-    } else if (inv.op === "remove") {
-      if (here == null || data(wrote).some((f) => !same(here[f], wrote[f]))) conflict.push(inv.path);
-      else ops.push(inv);
-    } else {
-      const was = (inv.value ?? {}) as Record<string, unknown>;
-      const fields = [...new Set([...data(was), ...data(wrote)])].filter((f) => !same(was[f], wrote?.[f]));
+  for (const [path, was] of before) {
+    const here = now(path);
+    const wrote = left.get(path);
+    if (was == null && wrote == null) continue;       // made and removed by the entry: nothing to walk
+    if (was == null) {                                // it made the row
+      if (here == null || data(wrote).some((f) => !same(here[f], wrote[f]))) conflict.push(path);
+      else ops.push({ op: "remove", path });
+    } else if (wrote == null) {                       // it removed the row
+      if (here != null) conflict.push(path);
+      else ops.push({ op: "add", path, value: was });
+    } else {                                          // it changed the row's fields
+      const fields = [...new Set([...data(was), ...data(wrote)])].filter((f) => !same(was[f], wrote[f]));
       if (fields.length === 0) continue;
-      if (here == null || fields.some((f) => !same(here[f], wrote?.[f]))) conflict.push(inv.path);
-      else ops.push({ op: "replace", path: inv.path, value: Object.fromEntries(fields.map((f) => [f, was[f] ?? null])) });
+      if (here == null || fields.some((f) => !same(here[f], wrote[f]))) conflict.push(path);
+      else ops.push({ op: "replace", path, value: Object.fromEntries(fields.map((f) => [f, was[f] ?? null])) });
     }
   }
   return conflict.length ? { ops: [], conflict } : { ops, conflict };

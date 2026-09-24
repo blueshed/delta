@@ -147,14 +147,20 @@ $$;
 -- changed are set back, each guarded by what the entry left there: a row it
 -- changed gets back those fields if each still holds what it wrote; a row it
 -- made is removed if it is as it was left; a row it removed comes back if
--- nobody has put one there. A guard that fails is a conflict, by path, and
--- then nothing is walked. Returns { ops } or { ops: [], conflict: [paths] }.
+-- nobody has put one there. Each row is walked once, from what it was before
+-- the entry (every inverse op of a path carries it: an add or replace its
+-- value, a remove none) to what the entry left, so a row the entry touched
+-- twice is walked by its net change. A guard that fails is a conflict, by
+-- path, and then nothing is walked. Returns { ops } or { ops: [], conflict: [paths] }.
 CREATE OR REPLACE FUNCTION _delta_walk_plan(p_entry _delta_ledger)
 RETURNS JSONB AS $$
 DECLARE
   v_doc      JSONB := COALESCE(delta_open(p_entry.doc_name), '{}'::jsonb);
   v_left     JSONB := '{}'::jsonb;   -- path -> what the entry left there (JSON null: it removed it)
+  v_before   JSONB := '{}'::jsonb;   -- path -> what it held before the entry (JSON null: nothing)
+  v_paths    TEXT[] := '{}';         -- the paths, in the order the inverse first names them
   v_op       JSONB;
+  v_path     TEXT;
   v_parts    TEXT[];
   v_here     JSONB;
   v_wrote    JSONB;
@@ -168,31 +174,41 @@ BEGIN
       CASE WHEN v_op->>'op' = 'remove' THEN 'null'::jsonb ELSE v_op->'value' END);
   END LOOP;
   FOR v_op IN SELECT * FROM jsonb_array_elements(p_entry.inverse) LOOP
-    v_parts := _delta_split_path(v_op->>'path');
+    IF NOT v_before ? (v_op->>'path') THEN
+      v_paths := v_paths || (v_op->>'path');
+      v_before := v_before || jsonb_build_object(v_op->>'path', 'null'::jsonb);
+    END IF;
+    IF v_op->>'op' <> 'remove' AND COALESCE(v_op->'value', 'null'::jsonb) <> 'null'::jsonb THEN
+      v_before := v_before || jsonb_build_object(v_op->>'path', v_op->'value');
+    END IF;
+  END LOOP;
+  FOREACH v_path IN ARRAY v_paths LOOP
+    v_parts := _delta_split_path(v_path);
     v_here := CASE WHEN array_length(v_parts, 1) = 1 THEN v_doc->v_parts[1] ELSE v_doc->v_parts[1]->v_parts[2] END;
     IF v_here = 'null'::jsonb THEN v_here := NULL; END IF;
-    v_wrote := NULLIF(v_left->(v_op->>'path'), 'null'::jsonb);
-    IF v_op->>'op' = 'add' THEN
-      IF v_here IS NOT NULL THEN v_conflict := v_conflict || to_jsonb(v_op->>'path');
-      ELSE v_ops := v_ops || jsonb_build_array(v_op); END IF;
-    ELSIF v_op->>'op' = 'remove' THEN
+    v_wrote := NULLIF(v_left->v_path, 'null'::jsonb);
+    v_was := NULLIF(v_before->v_path, 'null'::jsonb);
+    CONTINUE WHEN v_was IS NULL AND v_wrote IS NULL;   -- made and removed by the entry
+    IF v_was IS NULL THEN                               -- it made the row
       IF v_here IS NULL OR EXISTS (
-        SELECT 1 FROM jsonb_each(COALESCE(v_wrote, '{}'::jsonb)) w
+        SELECT 1 FROM jsonb_each(v_wrote) w
          WHERE w.key NOT IN ('valid_from', 'valid_to') AND NOT _delta_same(v_here->w.key, w.value)
-      ) THEN v_conflict := v_conflict || to_jsonb(v_op->>'path');
-      ELSE v_ops := v_ops || jsonb_build_array(v_op); END IF;
-    ELSE
-      v_was := COALESCE(NULLIF(v_op->'value', 'null'::jsonb), '{}'::jsonb);
+      ) THEN v_conflict := v_conflict || to_jsonb(v_path);
+      ELSE v_ops := v_ops || jsonb_build_array(jsonb_build_object('op', 'remove', 'path', v_path)); END IF;
+    ELSIF v_wrote IS NULL THEN                          -- it removed the row
+      IF v_here IS NOT NULL THEN v_conflict := v_conflict || to_jsonb(v_path);
+      ELSE v_ops := v_ops || jsonb_build_array(jsonb_build_object('op', 'add', 'path', v_path, 'value', v_was)); END IF;
+    ELSE                                                -- it changed the row's fields
       SELECT array_agg(k ORDER BY k) INTO v_fields FROM (
         SELECT jsonb_object_keys(v_was) AS k
-        UNION SELECT jsonb_object_keys(COALESCE(v_wrote, '{}'::jsonb))
+        UNION SELECT jsonb_object_keys(v_wrote)
       ) keys
       WHERE k NOT IN ('valid_from', 'valid_to') AND NOT _delta_same(v_was->k, v_wrote->k);
       CONTINUE WHEN v_fields IS NULL;
       IF v_here IS NULL OR EXISTS (SELECT 1 FROM unnest(v_fields) f WHERE NOT _delta_same(v_here->f, v_wrote->f)) THEN
-        v_conflict := v_conflict || to_jsonb(v_op->>'path');
+        v_conflict := v_conflict || to_jsonb(v_path);
       ELSE
-        v_ops := v_ops || jsonb_build_array(jsonb_build_object('op', 'replace', 'path', v_op->>'path',
+        v_ops := v_ops || jsonb_build_array(jsonb_build_object('op', 'replace', 'path', v_path,
           'value', (SELECT jsonb_object_agg(f, COALESCE(v_was->f, 'null'::jsonb)) FROM unnest(v_fields) f)));
       END IF;
     END IF;
