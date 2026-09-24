@@ -210,6 +210,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ("make the row first, or declare the document implied: true"); it said `Not found`.
 - **`validateOps` (SQLite and Postgres) reports a malformed pointer** as a 400 with the reason,
   instead of throwing.
+- **Postgres: a write's echo is the row as stored, not as sent** (`001d`, `CREATE OR REPLACE`).
+  `delta_apply` told an added or changed row as the JSON it built, so a value its column cast
+  was told uncast: in a list document scoped by the name (`scope: { owner_id: ":id" }`) every
+  add was echoed, broadcast and recorded with `owner_id: "1"` where the table and the next
+  `open` say `1`, and a date sent to a `timestamptz` came back in another form. Each write now
+  reads its row back (`RETURNING`), so the echo, the ledger's entry and a later `open` agree,
+  and undo's guard no longer finds a conflict between an entry and the row it made.
 - **Postgres: an RLS-hidden row no longer reaches another identity's socket** (see Breaking).
   `tests/postgres-rls.test.ts` runs as a `NOSUPERUSER` role, so the policy really filters, and
   pins both round-1 repros.

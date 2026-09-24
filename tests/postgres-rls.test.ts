@@ -149,6 +149,19 @@ describe("RLS and the broadcast channel (NOSUPERUSER role)", () => {
     expect(JSON.stringify(bob.sent)).not.toContain("alice SECRET");
   });
 
+  test("an add's echo is the row as stored: the owner the scope fills in is the column's integer, so its undo is no conflict with itself", async () => {
+    await admin.query("TRUNCATE _delta_ledger RESTART IDENTITY");
+    registerDocType(docTypeFromDef(mine, app, { auth, owns: (who, name) => name === `rls-mine:${who.id}` }));
+    listener = await createDocListener(ws, app, { auth, ledger: true });
+    const alice = person(1);
+    await sendAndAwait(ws, alice, { action: "open", doc: "rls-mine:1" });
+    const w = await sendAndAwait(ws, alice, { action: "delta", doc: "rls-mine:1", ops: [{ op: "add", path: "/rls_items/-", value: { name: "a" } }] });
+    expect(w.result.ops[0].value).toEqual({ id: expect.any(Number), owner_id: 1, name: "a" });   // "1", from the doc name, was told as it was
+    const back = await sendAndAwait(ws, alice, { action: "undo" });
+    expect(back.result.conflict).toBeUndefined();
+    expect(back.result.ops).toHaveLength(1);
+  });
+
   test("shared: true is the author saying every signed-in identity hears every write", async () => {
     registerDocType(docTypeFromDef(everyone, app, { auth, shared: true }));
     listener = await createDocListener(ws, app, { auth });

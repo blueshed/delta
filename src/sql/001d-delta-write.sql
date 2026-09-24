@@ -214,17 +214,17 @@ BEGIN
         v_new_row := v_new_row || jsonb_build_object('valid_from', v_ts, 'valid_to', NULL);
 
         EXECUTE format(
-          'INSERT INTO %I SELECT * FROM jsonb_populate_record(null::%I, $1)',
+          'INSERT INTO %I AS t SELECT * FROM jsonb_populate_record(null::%I, $1) RETURNING to_jsonb(t)',
           v_coll.table_name, v_coll.table_name
-        ) USING v_new_row;
+        ) INTO v_new_row USING v_new_row;
 
         v_new_row := _delta_strip_temporal(v_new_row);
       ELSE
         EXECUTE format('DELETE FROM %I WHERE id = $1', v_coll.table_name) USING v_doc_id;
         EXECUTE format(
-          'INSERT INTO %I SELECT * FROM jsonb_populate_record(null::%I, $1)',
+          'INSERT INTO %I AS t SELECT * FROM jsonb_populate_record(null::%I, $1) RETURNING to_jsonb(t)',
           v_coll.table_name, v_coll.table_name
-        ) USING v_new_row;
+        ) INTO v_new_row USING v_new_row;
       END IF;
 
       v_broadcast_ops := v_broadcast_ops || jsonb_build_array(
@@ -304,10 +304,14 @@ BEGIN
         v_new_row := v_new_row || jsonb_build_object('valid_from', v_ts, 'valid_to', NULL);
       END IF;
 
+      -- Every write here tells the row as stored (RETURNING), not as sent: a
+      -- value its column casts (a scope's '1' into an integer, a date into a
+      -- timestamptz) is told as a later open reads it, so the broadcast, the
+      -- ledger's entry and undo's guard agree with the table.
       EXECUTE format(
-        'INSERT INTO %I SELECT * FROM jsonb_populate_record(null::%I, $1)',
+        'INSERT INTO %I AS t SELECT * FROM jsonb_populate_record(null::%I, $1) RETURNING to_jsonb(t)',
         v_coll.table_name, v_coll.table_name
-      ) USING v_new_row;
+      ) INTO v_new_row USING v_new_row;
 
       -- Strip temporal columns from broadcast
       IF v_coll.temporal THEN
@@ -386,18 +390,18 @@ BEGIN
         v_new_row := v_new_row || jsonb_build_object('valid_from', v_ts, 'valid_to', NULL);
 
         EXECUTE format(
-          'INSERT INTO %I SELECT * FROM jsonb_populate_record(null::%I, $1)',
+          'INSERT INTO %I AS t SELECT * FROM jsonb_populate_record(null::%I, $1) RETURNING to_jsonb(t)',
           v_coll.table_name, v_coll.table_name
-        ) USING v_new_row;
+        ) INTO v_new_row USING v_new_row;
       ELSE
         -- Non-temporal: UPDATE with merged row
         EXECUTE format(
           'DELETE FROM %I WHERE id = $1', v_coll.table_name
         ) USING v_id;
         EXECUTE format(
-          'INSERT INTO %I SELECT * FROM jsonb_populate_record(null::%I, $1)',
+          'INSERT INTO %I AS t SELECT * FROM jsonb_populate_record(null::%I, $1) RETURNING to_jsonb(t)',
           v_coll.table_name, v_coll.table_name
-        ) USING v_new_row;
+        ) INTO v_new_row USING v_new_row;
       END IF;
 
       -- Strip temporal from broadcast
