@@ -5,6 +5,117 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Delta in-process, for a server that renders documents itself: the ledger and undo on both
+database backends, document kinds whose truth is not a database, and one stream of changes.
+
+### Breaking
+
+Nothing breaking for existing users: every new behaviour is opt-in (`ledger: true`,
+`inverse: true`, `implied: true`, the new kinds and `createLocal`), and without it the answers
+and broadcasts are the same as in 0.5.1. Four changes to check when upgrading:
+
+- **SQLite: a document whose root is a row now hears that row whole** (a fix, below). If you
+  open a single-row document (`household:h1`, root `households`) while the same row is written
+  through a document that holds it in a map (`board:w1`, including `households`), the
+  broadcast is now `replace /households` with the row, and `replace /households` with `null`
+  when the row is removed. Before, it was `replace /households/h1`, which added a stray key to
+  the root, and a remove sent nothing. Code that renders such a document should allow the root
+  to be `null`.
+- **Postgres: `applyFramework` and `delta init` now install `001g-delta-ledger.sql`**, which
+  creates the table `_delta_ledger` and the `delta_apply_logged`, `delta_undo`, `delta_redo`
+  and `delta_history` functions. Nothing uses them until `createDocListener(ws, pool,
+  { ledger: true })`. If you vendor the SQL, run `bunx delta init <dir> --upgrade` to add it.
+- **railroad 0.12 as a peer: an `openDoc` inside an `effect()` body is now closed and
+  re-opened every time the effect runs again** (railroad 0.12 makes each effect run its own
+  scope). To move across: open the document in the component or at module level, and read
+  `doc.data` inside the effect. Nothing changes on railroad 0.11.
+- **SQLite: a write inside the caller's own transaction now works.** It becomes a savepoint
+  and rolls back alone. Before, the backend's bare `BEGIN` failed with "cannot start a
+  transaction within a transaction".
+
+### Added
+
+- **The ledger** (`src/server/ledger.ts` for SQLite; `src/sql/001g-delta-ledger.sql` for
+  Postgres). `registerDocs(ws, db, schema, docs, custom, { ledger: true })` and
+  `createDocListener(ws, pool, { ledger: true })` record every write in the same transaction:
+  its ops, its inverse, the document's version, `who` made it and the `cursor` undo walks. A
+  write then answers `{ ack, version, entry, ops, inverse }` and its broadcast carries `v`. On
+  Postgres the ledger lives in the database every process shares, so a write made in one
+  process can be undone from another. A lock per document keeps concurrent writers from
+  landing between the read an inverse is taken from and the write.
+- **`undo`, `redo` and `history` actions** over the ledger. Undo walks back what one cursor
+  wrote, newest first; redo walks it forward; a fresh write ends what could be redone. A write
+  sent with `undoable: false` (a fact, such as a price tick) is recorded but passed over, and
+  ends no redo. `history` answers a document's newest entries to whoever may open it; each
+  entry says whether the asker's cursor wrote it (`mine`), never who did. The cursor is named
+  by a caller in this process (`cursor` on the message); over a socket it is the connection's
+  `clientId`, and a `cursor` on the message is ignored.
+- **`who`**: the identity a write came from, as the auth module's `gate` gives it. Strings and
+  numbers are written as they are, anything else as JSON; pass `who: (identity) => string` to
+  choose.
+- **`createLocal()`** (`@blueshed/delta/local`): delta in the same process, with no socket.
+  A backend registers on `local.server` as it would on `createWs()`. `local.call(action, msg)`
+  runs `open`, `delta`, `close`, `call`, `undo`, `redo` and `history` and resolves with the
+  answer, for every backend. `local.as(identity)` gives a caller that writes as that identity
+  (one client per identity, carried as `client.data.identity`, where a `gate` and the ledger's
+  `who` read it). `local.onPublish(fn)` hears every broadcast on every channel.
+- **One stream of changes.** With a ledger, both database backends publish
+  `{ doc, ops, v }` and `open` answers with `_v`, so a copy kept from the stream knows where it
+  starts. The memory and source kinds do the same.
+- **Document kinds not stored in a database** (`@blueshed/delta/kinds`):
+  - `registerMemory(ws, { prefix, empty, writable? })`: live documents held in memory, gone on
+    restart, never on a ledger. Written by a caller in this process only, unless
+    `writable: "any"`. Returns `peek` and `forget`.
+  - `registerStatic(ws, { prefix, value })`: a value fixed for the release. Every write is
+    refused (403).
+  - `registerSource(ws, { prefix, read, every?, subscribe?, stale? })`: one reading from
+    outside, shared by every watcher. It is taken when the first watcher opens the document,
+    polled (`every`) or pushed (`subscribe`) while anyone watches, and stopped when the last
+    closes. The document is `{ reading, at, stale }`: `at` is when the reading was taken, and
+    `stale` turns true when no reading comes within `stale` ms. Every write is refused.
+- **Implied documents** (SQLite): `defineDoc(prefix, { ..., implied: true })` opens empty
+  when its root row does not exist yet, and its first write makes the row. An implied
+  document cannot also declare a `scope`.
+- **The inverse of a write, on request** (SQLite): a `delta` message with `inverse: true` is
+  answered with the ops applied and their inverse, read from the document as it was. A run of
+  cascaded removes comes back parent first. `inverseOf(before, applied)` is exported from
+  `@blueshed/delta/sqlite`.
+- **Postgres `DocType.apply` takes an optional fifth argument**, `by: { who, cursor,
+  undoable?, undoes? }`, and may return `inverse` and `entry`. `docTypeFromDef` uses it to
+  write through `delta_apply_logged`. A custom `DocType` that ignores it is not on the ledger.
+- Tests: `tests/local.test.ts`, `tests/ledger.test.ts`, `tests/kinds.test.ts`,
+  `tests/postgres-ledger.test.ts`, and `tests/postgres-fanout.test.ts` (the two SQLite fan-out
+  cases asked of Postgres; see Fixed).
+
+### Changed
+
+- **railroad `^0.11.0 || ^0.12.0`** as a peer (was `^0.11.0`). Delta's client passes its
+  tests on both. A test pins that an `openDoc` inside an `effect()` body is closed when the
+  effect runs again; the skill's reference says to open in the component or at module level.
+- **SQLite writes use `db.transaction()`** instead of a bare `BEGIN`, so they nest as a
+  savepoint inside a caller's transaction (see Breaking).
+- **The release procedure** is `.claude/commands/publish.md`, the same text in railroad, delta
+  and eta. This section is promoted by it at release.
+
+### Fixed
+
+- **SQLite fan-out onto a document whose root is the row** (`src/server/sqlite.ts`). A keyed
+  row `/<coll>/<id>` forwarded to a document whose root is that row is now
+  `replace /<coll>` whole, or `null` when the row is removed (see Breaking).
+- **SQLite fan-out of rows whose parent comes in the same write.** Fan-out judged each op
+  against the other document as it was before the write, so a course and its drinks added
+  together (as an undo of a dropped course does) reached the other document without the
+  drinks. Each op taken is now applied to the target at once.
+- The Postgres backend has neither bug: it has no cross-document fan-out for defined
+  documents. A write is published on the channel of the document it was written through; other
+  open documents over the same rows see it when they next open (or reconnect).
+  `tests/postgres-fanout.test.ts` pins this.
+- **The railroad client test failed `bun run test` with an unhandled error** (on railroad
+  0.11.0 as well): the socket's late close event reached happy-dom after it was unregistered.
+  The test now waits for the socket to close first.
+
 ## [0.5.1] — 2026-07-28
 
 ### Added
