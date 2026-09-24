@@ -118,6 +118,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **railroad 0.13 accepted** as a peer (`^0.11.0 || ^0.12.0 || ^0.13.0`), and the devDependency is
+  `^0.13.0`; the copies of railroad's skills kept here are 0.13.0's. Delta's client tests pass on it.
+
 - **`TODO.md` is replaced by `todo.jsonl`**, one open item per line in eta's format. What the
   v0.5.0 review found and round 2 fixed is recorded here; what is still open moved across.
 - **The delta-doc skill says what each backend does.** SKILL.md has a *Backends side by side*

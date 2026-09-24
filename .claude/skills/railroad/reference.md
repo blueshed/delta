@@ -47,6 +47,8 @@ example:
     "jsx": "react-jsx",
     "jsxImportSource": "@blueshed/railroad",
     "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "module": "esnext",
+    "target": "esnext",
     "moduleResolution": "bundler",
     "strict": true
   }
@@ -140,8 +142,17 @@ const coords = signal({ x: 1, y: 2 }, {
 batch(() => { count.set(10); count.set(20); });      // effect runs once
 ```
 
-`effect(fn)` returns its disposer; `fn` may return a cleanup, called before
-each re-run and on dispose.
+`effect(fn)` returns its disposer; `fn` may return a cleanup function, called
+once, before the next run or on dispose. Any other return value is ignored at
+run time (tsc still rejects an expression body that returns a value; use a
+block). `fn` must be synchronous: `effect(async () => …)` logs an error, because its
+Promise is not a cleanup and nothing after its first `await` is tracked.
+
+Writes made inside an effect body reach other listeners **after the body
+returns**, on its first run as on every later one. An effect that writes `a`
+and then reads a computed of `a` sees the old value and re-runs once the
+write settles; an effect that writes its own dependency (a clamp, a default)
+runs again after its current run, never inside it.
 
 **Each effect/computed run owns what it creates** (0.12+). Anything its body
 creates — computeds (including `.map()`), nested effects, `when()`/`list()`,
@@ -183,6 +194,12 @@ const dispose = mount(document.getElementById("root")!, () => <Greeting />);
 <div style={() => ({ width: `${w.get()}px` })} />           // style: CSS string or object
 ```
 
+A child that is a signal or a function renders its value as text, and
+`null`, `undefined`, `true` and `false` as nothing, exactly as a static child
+does. A component body runs once and **untracked**: a `.get()` in it (or in a
+`when()` branch, a `list()` row, a route handler) is a one-shot read that
+subscribes nothing, not even the effect that happens to be building it.
+
 ### Props
 
 Props follow the same rule as children: a Signal or a function is reactive,
@@ -192,12 +209,16 @@ element) and `on*` (attached as a listener; must be a function).
 | Prop | Static value | Reactive value (Signal or function) |
 |---|---|---|
 | `class` / `className` | set; `null`/`undefined`/`false` → no attribute | same, re-applied on change |
-| `style` | CSS string (`"color: red"`) or object (`{ color: "red" }`); `null`/`false`/`""` → no attribute | same; may switch between string and object; an object clears keys the next object omits |
-| `value` `checked` `disabled` `selected` `src` `srcdoc` | set as DOM property; `null`/`undefined` → `""` | same |
-| `innerHTML` | set; `null`/`undefined` → `""` | same |
+| `style` | CSS string (`"color: red"`) or object (`{ color: "red", "--accent": "blue" }`: camelCase keys and custom properties); `null`/`false`/`""` → no attribute | same; may switch between string and object; an object clears keys the next object omits |
+| `value` `checked` `disabled` `selected` `src` `srcdoc` | set as DOM property; `null`/`undefined` → `""`; a `<select>`'s `value` selects its option | same |
+| `innerHTML` | set; `null`/`undefined` → `""`; replaces any JSX children | same |
+| `htmlFor` | the `for` attribute | same |
 | anything else | `setAttribute(String(v))`; `false`/`null`/`undefined` → removed | same |
-| `ref` | called once with the element | — |
-| `on*` | `addEventListener` (lowercased); non-function warns, attaches nothing | not reactive |
+| `ref` | called once with the element, after its children are appended | — |
+| `on*` | `addEventListener` (lowercased; the DOM's events, so `onchange` on a text input fires on commit, `oninput` per keystroke); non-function warns, attaches nothing | not reactive |
+
+Props are applied after the element's children, which is what lets a
+`<select value>` find its `<option>`s.
 
 ### `when(condition, truthy, falsy?)`
 
@@ -207,8 +228,9 @@ element) and `on*` (attached as a listener; must be a function).
 
 `condition` is a signal or a function (wrapped in a computed). The branch is
 rebuilt only when truthiness flips (falsy ↔ truthy); a value change inside the
-same branch (`"a"` → `"b"`) does not re-render — components inside the branch
-read signals for that. The branch renders **synchronously** (0.12+): it is in
+same branch (`"a"` → `"b"`) does not re-render, so a value read with `.get()`
+in the branch stays the first one. Pass a signal into the branch instead:
+`when(user, () => <Profile name={user.map(u => u?.name ?? "")} />)`. The branch renders **synchronously** (0.12+): it is in
 the returned fragment, and so in the DOM as soon as `mount()` / the parent
 append returns. The branch lives between `<!--when-->` and `<!--/when-->`
 comments, and each branch gets its own dispose scope.
@@ -224,7 +246,9 @@ comments, and each branch gets its own dispose scope.
 ```
 
 The keyed form passes each row a `ReadonlySignal<T>` and a `ReadonlySignal<number>` index;
-rows are moved, not rebuilt, and each row lives between bracket comments.
+rows are moved, not rebuilt, and each row lives between bracket comments. A
+reorder moves only the rows outside the longest run already in order, so a
+row that didn't move keeps its focus, selection and scroll position.
 The index form (`list(items, (item, i) => …)`) passes raw values and rebuilds
 every row on every change — fine for static lists. Rows render
 **synchronously** (0.12+), like `when()`.
@@ -245,7 +269,9 @@ including inside `when()` and `list()`, with camelCase preserved.
 
 Hash-based client router. Handlers receive `(params, params$)` — the second is
 a reactive `ReadonlySignal` that updates when params change within the same
-pattern (`/users/1` → `/users/2` does not re-render).
+pattern (`/users/1` → `/users/2` does not re-render). The handler runs once per
+pattern, so `params` is the first match: `({ id }) => <h1>{id}</h1>` still
+shows `1` at `/users/2`. Read anything that changes through `params$`.
 
 ```tsx
 import { routes, navigate, route, when } from "@blueshed/railroad";
@@ -318,8 +344,8 @@ row's item signal, and an in-place patch re-delivers the **same row
 reference** — which the default `Object.is` swallows, leaving that row's DOM
 stale. Forcing the notify makes every row re-project; the row's own `.map()`
 computeds still bail on unchanged values, so actual DOM writes stay minimal.
-Streams that replace whole row objects (delta's SQLite/Postgres backends do
-this) can keep the default.
+Streams that replace whole row objects can keep the default; `@blueshed/delta`
+is one, since every backend broadcasts a changed row as a whole-row replace.
 
 ### Delta-doc — turnkey JSON-Patch sync, signal-backed
 
@@ -446,14 +472,16 @@ import { signal, computed, effect } from "@blueshed/railroad/signals";
 
 ## Sharp edges
 
-- **Propagation is glitch-free and topologically ordered** (0.10+). One write — or one `batch()` of writes — runs each affected computed/effect at most once per settled pass, upstream before downstream, so a diamond (`a → b`, `a → c`, an effect reads both) never observes half-updated state. Siblings at the same depth run in subscription order; an effect that *writes* signals re-queues their consumers in the same pass (a true cycle throws).
+- **Propagation is topologically ordered** (0.10+). One write — or one `batch()` of writes — runs each affected computed/effect at most once per settled pass, upstream before downstream, so a diamond (`a → b`, `a → c`, an effect reads both) never observes half-updated state. That holds while each computed reads the same signals every time. A computed that switches what it reads (`flag.get() ? b.get() : a.get() * 2`) can end up deeper than the effects reading it were ordered for; on a later write such an effect can run once on half-updated values and then again on the settled ones. Every write settles consistently, and within the same synchronous pass, so JSX bindings (text, attributes) never paint the half-updated value; only an effect with a side effect per run (a log, a request) sees the extra run. Siblings at the same depth run in subscription order; an effect that *writes* signals re-queues their consumers in the same pass (a true cycle throws).
 - **Effects own what they create** (0.12+). Anything an `effect()` or `computed()` body creates — computeds, nested effects, `when()`/`list()`, components, `trackDispose()` registrations such as delta's `openDoc()` — is disposed before the next run and when the effect is disposed. Keep long-lived state outside the effect body.
 - **`when()`/`list()` need a dispose scope.** Created outside a component, `routes()` handler, or `mount()`, their internal effects are unreachable — railroad warns on the console. Mount roots via `mount()` or `routes()`.
 - **Routes match in declaration order.** The first pattern that matches wins — declare `/users/new` before `/users/:id`.
 - **Route matching is segment-based only.** No query-string handling (`#/users/42?tab=1` matches `/users/:id` with `id === "42?tab=1"`), and a trailing slash is a real empty segment (`/users/42/` does not match `/users/:id`).
 - **SVG tags get their namespace at creation** (0.10+) — refs fire once and manual listeners survive. Only the four HTML/SVG-ambiguous tags (`a`, `script`, `style`, `title`) still go through adoption when appended inside `<svg>`: on that path a `ref` fires twice (use the last call) and hand-attached listeners don't carry over — use `on*` props. Adoption happens when a node is placed through JSX, `mount()`, `routes()`, or a `when()`/`list()` parent; a `when()`/`list()` fragment appended *by hand* into an `<svg>` (`svg.appendChild(when(…))`) does not adopt those four tags in its first render -- place it through one of those instead.
+- **One copy of railroad per page.** Signals, scopes and providers don't cross copies, so with two (a `file:`-linked checkout that brings its own `node_modules/@blueshed/railroad`) the UI stops updating. The second copy logs `A second copy of @blueshed/railroad has loaded (…)`; SKILL.md › Local development across repos has the fix.
+- **An event handler is not a dispose scope.** A `computed()`, `.map()` or `effect()` created in `onclick` lives until you dispose it; derive in the component body.
 - **`provide`/`inject` is a process-global singleton.** Great for client apps and app-wide services; on the server it is shared across all requests, so don't use it for per-request state.
 - **`.mutate()` uses `structuredClone`** — it only works on plain-data signals (no functions, class instances, or DOM nodes in the value).
-- **In-place row mutation + `.touch()` needs `list()`'s `equals` option.** A keyed `list()` pushes updates into each row's item signal; a patch stream that mutates row objects in place re-delivers the same reference, which the default `Object.is` swallows — the row's DOM goes silently stale. Pass `{ equals: () => false }` as the fourth argument for such streams. Same-reference projections have the same trap: `doc.map(d => d.settings)` returns the same ref after a `.touch()`, so the computed bails — project to fresh values (`Object.values(...)`, primitives) or pass `{ equals: () => false }` to `.map()`.
+- **In-place row mutation + `.touch()` needs `list()`'s `equals` option.** A keyed `list()` pushes updates into each row's item signal; a patch stream that mutates row objects in place re-delivers the same reference, which the default `Object.is` swallows — the row's DOM goes silently stale. Pass `{ equals: () => false }` as the fourth argument for such streams. (`@blueshed/delta` broadcasts whole rows, so its docs don't need it.) Same-reference projections have the same trap: `doc.map(d => d.settings)` returns the same ref after a `.touch()`, so the computed bails — project to fresh values (`Object.values(...)`, primitives) or pass `{ equals: () => false }` to `.map()`.
 - **Async components resolve to a thunk.** `async function Profile() { const u = await fetchUser(); return () => <div>{u.name}</div>; }` renders a placeholder (plus an optional `fallback={() => <p>loading…</p>}` prop) and fills in on resolution. The `() =>` on the return line is the whole contract: effects created after an `await` have no owner scope (browser JS has no AsyncContext), so the thunk gives railroad a synchronous moment to bracket them — teardown then works no matter when the promise settles. A bare-Node resolution gets a pointed console.error naming the fix. The same contract applies to async `routes()` handlers (`Promise<() => Node>`); a bare `Promise<Node>` still renders, but its post-await bindings outlive the route.
 - **The index-based `list()` form rebuilds every row on every change.** It disposes and re-renders each row per sync; that's its contract. Use the keyed form (`list(items, keyFn, render)`) for anything that updates — rows then patch in place through their item signals.
