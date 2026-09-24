@@ -75,6 +75,12 @@ describe("an add of a row that is already there (Postgres)", () => {
     expect((await pool.query("SELECT body FROM current_add_notes")).rows).toEqual([{ body: "back" }]);
   });
 
+  test("an add that leaves out a required field is a 400, not a row with \"\" in it (A11)", async () => {
+    const r = await delta("add-tags:", [{ op: "add", path: "/add_tags/-", value: {} }]);
+    expect(r.error).toEqual({ code: 400, message: "Required field missing: label (give it a value, or declare a default or make it nullable in the schema)" });
+    expect((await pool.query("SELECT count(*) AS n FROM add_tags")).rows[0].n).toBe("0");
+  });
+
   test("plain table: a 409, not a 500", async () => {
     await delta("add-tags:", [{ op: "add", path: "/add_tags/-", value: { label: "a" } }]);
     const id = (await pool.query("SELECT id FROM add_tags")).rows[0].id;

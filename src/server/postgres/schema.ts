@@ -10,12 +10,10 @@
 import type { Pool } from "pg";
 import { type DeltaOp, splitPath } from "../../core";
 import {
-  type ColumnDef,
   type Schema,
   type DocDef,
   type ValidationError,
 } from "../../schema";
-import { defaultForType } from "./sql";
 
 export type {
   ColumnType,
@@ -59,7 +57,7 @@ export async function pruneOpsLog(pool: Pool, keepInterval = "1 hour"): Promise<
 
 // ---------------------------------------------------------------------------
 // validateOps — pre-flight check that ops reference known collections and
-// fields, with required-field detection via the Postgres `defaultForType`.
+// fields, and that an add gives every required column (not nullable, no default).
 // ---------------------------------------------------------------------------
 
 export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): ValidationError[] {
@@ -99,9 +97,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
       if (op.op === "add") {
         for (const [col, colDef] of Object.entries(table.columns)) {
           if (!colDef.nullable && colDef.default === undefined && value[col] === undefined) {
-            if (defaultForType((colDef as ColumnDef).type) === null) {
-              errors.push({ path: op.path, message: `Required field missing: ${col}` });
-            }
+            errors.push({ path: op.path, message: `Required field missing: ${col} (give it a value, or declare a default or make it nullable in the schema)` });
           }
         }
       }

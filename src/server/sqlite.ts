@@ -534,9 +534,13 @@ export function registerDocs(
     const match = findDoc(docName);
     if (!match) return;
 
-    const doc = load(docName, match.def, match.docId);
+    let doc: any;
+    try { doc = load(docName, match.def, match.docId); }
+    catch (err: any) { return respond({ error: { code: 500, message: named(err).message } }); }
     if (!doc) {
-      respond({ error: { code: 404, message: "Not found" } });
+      // Say why: a SQLite document is one root row (there is no list mode).
+      const where = Object.entries(resolveScope(match.def, match.docId)).map(([k, v]) => `${k} = ${JSON.stringify(v)}`).join(" and ");
+      respond({ error: { code: 404, message: `Not found: no ${match.def.root} row where ${where}. A SQLite document is one root row and its children: make the row first, or declare the document implied: true` } });
       return;
     }
 
@@ -600,6 +604,7 @@ export function registerDocs(
       implied.delete(docName);
     } catch (err: any) {
       cache.set(docName, snapshot); // restore in-memory cache
+      named(err);
       log.error(`delta failed: ${err.message}`);
       // A refusal carries its wire code (`refuse`); anything else is the server's.
       return { error: { code: typeof err.code === "number" ? err.code : 500, message: err.message } };
@@ -1161,13 +1166,13 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
         if (!isKnownKey(key)) errors.push({ path: op.path, message: `Unknown field: ${key}` });
       }
 
-      // Required-field check applies to adds only.
+      // Required-field check applies to adds only: a column that is neither
+      // nullable nor has a default must be given (it used to be stored as "",
+      // 0 or false, acked and broadcast).
       if (op.op === "add") {
         for (const [col, colDef] of Object.entries(table.columns)) {
           if (!colDef.nullable && colDef.default === undefined && value[col] === undefined) {
-            if (defaultForType(colDef.type) === null) {
-              errors.push({ path: op.path, message: `Required field missing: ${col}` });
-            }
+            errors.push({ path: op.path, message: `Required field missing: ${col} (give it a value, or declare a default or make it nullable in the schema)` });
           }
         }
       }
@@ -1272,6 +1277,14 @@ function insertRootRow(db: any, table: ResolvedTable, row: any, ts: string) {
 /** An error the writer is answered with: `code` is its wire code. */
 function refuse(code: number, message: string): never {
   throw Object.assign(new Error(message), { code });
+}
+
+/** SQLite's own error, with the fix when the fix is a call the app left out. */
+function named(err: any): any {
+  if (typeof err?.message === "string" && /no such table/.test(err.message) && !/createTables/.test(err.message)) {
+    err.message += " -- call createTables(db, schema) before the first open";
+  }
+  return err;
 }
 
 function insertCollectionRow(

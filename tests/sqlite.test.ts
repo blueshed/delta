@@ -422,20 +422,30 @@ describe("registerDocs", () => {
       expect(rows[0].body).toBe("Nice");
     });
 
-    test("applies default values for missing fields", async () => {
+    test("a missing required field is a 400; a missing nullable one is null (A11)", async () => {
       seedProject("p1", "Alpha", "active");
 
       const sock = mockSocket();
       await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
 
+      // `done` is required (not nullable, no default): it used to be stored as false.
       await ws.websocket.message(sock, JSON.stringify({
         id: 2,
         action: "delta",
         doc: "project:p1",
         ops: [{ op: "add", path: "/tasks/t1", value: { title: "Minimal" } }],
       }));
+      expect(sock.sent[1].error.code).toBe(400);
+      expect(sock.sent[1].error.message).toContain("Required field missing: done (give it a value, or declare a default or make it nullable in the schema)");
+      expect(db.query("SELECT * FROM current_tasks WHERE id = 't1'").get()).toBeNull();
 
-      // done defaults to false (boolean default), priority defaults to null (nullable)
+      await ws.websocket.message(sock, JSON.stringify({
+        id: 3,
+        action: "delta",
+        doc: "project:p1",
+        ops: [{ op: "add", path: "/tasks/t1", value: { title: "Minimal", done: false } }],
+      }));
+      // priority is nullable, so it is null
       const row = db.query("SELECT * FROM current_tasks WHERE id = 't1'").get() as any;
       expect(row.done).toBe(0);
       expect(row.priority).toBeNull();
@@ -1518,8 +1528,10 @@ describe("validateOps", () => {
     const errors = validateOps(s, doc, [
       { op: "add", path: "/items/x", value: { data: { a: 1 } } },
     ]);
-    // name is required (non-nullable, no default) and missing, but text has a type default ("")
-    expect(errors).toHaveLength(0);
+    // name is required (non-nullable, no default) and missing: refused, not stored as ""
+    expect(errors.map((e) => e.message)).toEqual([
+      "Required field missing: name (give it a value, or declare a default or make it nullable in the schema)",
+    ]);
   });
 
   test("add with wrong field type", () => {
@@ -2014,5 +2026,35 @@ describe("an add of a row that is already there", () => {
     expect((await delta("project:p1", [{ op: "remove", path: "/tasks/t1" }])).result).toEqual({ ack: true });
     expect((await delta("project:p1", [{ op: "add", path: "/tasks/t1", value: { title: "back", done: false } }])).result).toEqual({ ack: true });
     expect(liveTasks("t1")).toEqual([{ title: "back", project_id: "p1" }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Errors that name their fix (dogfood A2, A3): the first thing an agent sees
+// when it follows the Postgres-shaped recipe on SQLite.
+// ---------------------------------------------------------------------------
+
+describe("errors that name their fix", () => {
+  test("a missing table says to call createTables", async () => {
+    const db = new Database(":memory:");
+    const ws = createWs();
+    registerDocs(ws, db, schema, [projectDoc]);   // no createTables
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+    expect(sock.sent[0].error.message).toContain("no such table");
+    expect(sock.sent[0].error.message).toContain("call createTables(db, schema) before the first open");
+  });
+
+  test("a missing root row says a SQLite document is one root row", async () => {
+    const db = new Database(":memory:");
+    createTables(db, schema);
+    const ws = createWs();
+    registerDocs(ws, db, schema, [projectDoc, defineDoc("projects:", { root: "projects", include: [] })]);
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "projects:" }));   // a Postgres-style list doc
+    expect(sock.sent[0].error).toEqual({
+      code: 404,
+      message: 'Not found: no projects row where id = "". A SQLite document is one root row and its children: make the row first, or declare the document implied: true',
+    });
   });
 });

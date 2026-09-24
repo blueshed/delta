@@ -119,6 +119,7 @@ DECLARE
   v_row           JSONB;
   v_new_row       JSONB;
   v_exists        BOOLEAN;
+  v_missing       TEXT;
   v_ts            TIMESTAMPTZ := NOW();
   v_version       BIGINT;
   v_broadcast_ops JSONB := '[]'::jsonb;
@@ -278,26 +279,24 @@ BEGIN
           USING ERRCODE = 'P0001';
       END IF;
 
-      -- Apply column defaults from metadata
-      SELECT v_new_row || COALESCE(jsonb_object_agg(
-        col_key,
-        CASE col_def->>'type'
-          WHEN 'text'        THEN to_jsonb(COALESCE(col_def->>'default', ''))
-          WHEN 'integer'     THEN COALESCE(col_def->'default', '0'::jsonb)
-          WHEN 'real'        THEN COALESCE(col_def->'default', '0'::jsonb)
-          WHEN 'boolean'     THEN COALESCE(col_def->'default', 'false'::jsonb)
-          WHEN 'json'        THEN COALESCE(col_def->'default', 'null'::jsonb)
-          -- A required timestamptz has no sensible empty default; emit its
-          -- declared default or NULL (→ a clear NOT NULL violation) rather than
-          -- '' (which fails with an opaque "invalid input syntax" cast error).
-          WHEN 'timestamptz' THEN COALESCE(col_def->'default', 'null'::jsonb)
-          ELSE to_jsonb(''::text)
-        END
-      ), '{}'::jsonb)
-      INTO v_new_row
-      FROM jsonb_each(v_coll.columns_def) AS x(col_key, col_def)
-      WHERE NOT v_new_row ? col_key
-        AND NOT COALESCE((col_def->>'nullable')::boolean, false);
+      -- A required column (not nullable, no declared default) the value leaves
+      -- out is the writer's mistake: refuse it (SQLSTATE 23502, 400 on the
+      -- wire) rather than store '' / 0 / false for it.
+      SELECT string_agg(col_key, ', ' ORDER BY col_key) INTO v_missing
+        FROM jsonb_each(v_coll.columns_def) AS x(col_key, col_def)
+       WHERE NOT v_new_row ? col_key
+         AND NOT COALESCE((col_def->>'nullable')::boolean, false)
+         AND NOT col_def ? 'default';
+      IF v_missing IS NOT NULL THEN
+        RAISE EXCEPTION 'Required field missing: % (give it a value, or declare a default or make it nullable in the schema)', v_missing
+          USING ERRCODE = '23502';
+      END IF;
+
+      -- Declared column defaults, for what the value leaves out
+      SELECT v_new_row || COALESCE(jsonb_object_agg(col_key, col_def->'default'), '{}'::jsonb)
+        INTO v_new_row
+        FROM jsonb_each(v_coll.columns_def) AS x(col_key, col_def)
+       WHERE NOT v_new_row ? col_key AND col_def ? 'default';
 
       IF v_coll.temporal THEN
         v_new_row := v_new_row || jsonb_build_object('valid_from', v_ts, 'valid_to', NULL);

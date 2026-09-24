@@ -160,13 +160,19 @@ describe("validateOps", () => {
   });
 
   test("add missing required json field → error", () => {
-    // `meta` is json (defaultForType → null), non-nullable, no default → required.
-    // `name` (text → "") and `value` (integer → 0) have type defaults so aren't required.
+    // `meta` is json, non-nullable, no default → required.
     const errs = validateOps(schema, def, [
       { op: "add", path: "/items/-", value: { name: "a", value: 1 } },
     ]);
     expect(errs.length).toBeGreaterThan(0);
     expect(errs[0]!.message).toMatch(/Required field missing: meta/);
+  });
+
+  test("add missing a required text or integer field → error, not \"\" or 0 (A11)", () => {
+    const errs = validateOps(schema, def, [
+      { op: "add", path: "/items/-", value: { meta: {} } },
+    ]);
+    expect(errs.map((e) => e.message.split(" (")[0])).toEqual(["Required field missing: name", "Required field missing: value"]);
   });
 
   test("add with non-object value is an error", () => {

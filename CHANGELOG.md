@@ -43,6 +43,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fail with `invalid input syntax for type bigint`. The listener answers both as **400**
   (they were 500). The changes are `CREATE OR REPLACE`, so re-applying is safe: `applyFramework`
   does it; a vendored copy needs `bunx @blueshed/delta init <dir> --upgrade`.
+- **SQLite and Postgres: an `add` that leaves out a required column is a 400**, "Required field
+  missing: text (give it a value, or declare a default or make it nullable in the schema)". A
+  required column is one that is neither nullable nor has a declared default. It used to be
+  stored as `""`, `0` or `false` for its type, acked and broadcast, though the docs said
+  `validateOps` refused it. On Postgres (`001d`, `CREATE OR REPLACE`) the check is in
+  `delta_apply` (SQLSTATE `23502`), and a nullable column with a declared default now gets the
+  default, as on SQLite. To move across: send the field, or give the column a `default` or
+  make it nullable (`"text?"`).
 - **SQLite and Postgres: an `add` of a row that is already there is a 409**, "Row already exists:
   /coll/id -- replace it, or add to /coll/- for a new id", from any document. On a temporal
   table it used to insert a second live version of the row (the key is `(id, valid_from)`), so
@@ -108,6 +116,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   custom-doc fan-out). An id containing `/` or `~` was stored right but broadcast raw
   (`/messages/a/b`), so a peer's `applyOps` threw and its view silently diverged.
   `applyOpsToCollection` now reads paths with `splitPath`, so it finds such a row by its own id.
+- **SQLite errors name their fix.** A missing table says "call createTables(db, schema) before
+  the first open" (it said `no such table: current_lists`), and a document with no root row
+  says which row it looked for and that a SQLite document is one root row and its children
+  ("make the row first, or declare the document implied: true"); it said `Not found`.
 - **`validateOps` (SQLite and Postgres) reports a malformed pointer** as a 400 with the reason,
   instead of throwing.
 - **Postgres: an RLS-hidden row no longer reaches another identity's socket** (see Breaking).

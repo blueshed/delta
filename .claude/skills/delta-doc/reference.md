@@ -206,6 +206,9 @@ const schema = defineSchema({
 
 // Shorthand types: "text" | "integer" | "real" | "boolean" | "json" | "timestamptz"
 // Append "?" for nullable: "text?", "integer?"
+// A column that is neither nullable nor has a default is REQUIRED: an add that
+// leaves it out is a 400 "Required field missing" (SQLite and Postgres). Give it
+// a default ({ type: "boolean", default: false }) or make it nullable.
 
 const itemsDoc = defineDoc("items:", { root: "items", include: [] });
 
