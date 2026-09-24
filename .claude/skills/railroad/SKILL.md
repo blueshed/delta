@@ -13,7 +13,7 @@ Source files (each has a JSDoc header — read for full API): `signals.ts` · `j
 Bun 1.3 already ships HTML imports, HMR, TSX bundling, `--compile`, and `Bun.WebView`. Railroad adds:
 
 - **Signals** — push-based reactive primitives (Vue/Solid/Preact family; not TC39). Glitch-free: propagation is topologically ordered, so diamonds settle in one consistent pass.
-- **JSX runtime** — components run once, return real DOM nodes, signals bind to text and attributes automatically; supports automatic `style` signal property clearance when updated signals omit style keys.
+- **JSX runtime** — components run once, return real DOM nodes, signals and functions bind to text and attributes automatically; `style` takes a CSS string or an object (static or reactive), and a reactive object style clears keys the next value omits.
 - **`when()` / `list()` / `mount()`** — reactive conditionals, keyed lists, and a root scope helper, all with auto-disposal.
 - **Hash router** — `routes(target, table, options)`, `route()` for sub-navigation, reactive `params$` so `/users/1` → `/users/2` updates without remounting; supports `options.onError` boundary callback.
 - **DI / logger** — typed `provide`/`inject` with phantom-typed keys; leveled console output.
@@ -33,8 +33,9 @@ Bun 1.3 already ships HTML imports, HMR, TSX bundling, `--compile`, and `Bun.Web
 // ✅ Function child — auto-tracks reads
 <span>{() => count.get() > 5 ? "High" : "Low"}</span>
 
-// ✅ .map() for derived attrs / list content
+// ✅ .map() or a function for derived attrs / list content
 <input disabled={count.map(n => n > 10)} />
+<div class={() => count.get() > 10 ? "hot" : "cold"} />
 {list(todos, t => t.id, (todo$) => <li>{todo$.map(t => t.text)}</li>)}
 ```
 
@@ -105,7 +106,7 @@ const c = signal(0);
 effect(() => console.log(c.get()));
 ```
 
-Dispose scopes are pushed by `createElement(Component)`, a `routes()` handler, `when()`, `list()`, and `mount()` — for the effects/computeds created **inside** them. `route()` (singular) is **not** a scope provider: it returns a `ReadonlySignal` and does not dispose children for you.
+Dispose scopes are pushed by `createElement(Component)`, a `routes()` handler, `when()`, `list()`, and `mount()` — for the effects/computeds created **inside** them. Every `effect()`/`computed()` run is a scope too: whatever its body creates is disposed before the next run, so building computeds or UI inside an effect doesn't pile up. `route()` (singular) is **not** a scope provider: it returns a `ReadonlySignal` and does not dispose children for you.
 
 Two consequences worth internalising:
 
@@ -198,7 +199,7 @@ Why the thunk: effects created after an `await` have no owner scope — browser 
 
 ## Mental model
 
-Components run **once**. They return real DOM nodes. No virtual DOM, no reconciler, no diffing. Reactivity comes from signals — bare signals as children become reactive text nodes; signals as props become reactive attributes; function children auto-track signal reads.
+Components run **once**. They return real DOM nodes. No virtual DOM, no reconciler, no diffing. Reactivity comes from signals — bare signals as children become reactive text nodes; signals as props become reactive attributes; function children and function props (other than `ref`/`on*`) auto-track signal reads. `when()` and `list()` render their initial content synchronously, so it is in the DOM when `mount()` returns.
 
 Effects and computeds auto-dispose when their parent scope (component, route, `when`, `list`, `mount`) tears down.
 
