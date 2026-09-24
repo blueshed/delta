@@ -137,7 +137,7 @@ describe("Finding #2: custom docs and auth.gate()", () => {
     clearRegistry();
     await resetSites();
     registerDocType(
-      docTypeFromDef(defineDoc("world:", { root: "worlds", include: ["sites"] }), pool, { auth: requireIdentity }),
+      docTypeFromDef(defineDoc("world:", { root: "worlds", include: ["sites"] }), pool, { auth: requireIdentity, shared: true }),
     );
     await startListener({ auth: requireIdentity, custom: [sitesInBbox] });
     await seedWorld();

@@ -7,6 +7,238 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **Postgres: with `auth`, `docTypeFromDef` needs to know who owns a document.** Pass
+  `owns: (identity, docName) => boolean` (who may open it, write through it and hear it), or
+  `shared: true` (every identity that passes the gate may); without either it throws at
+  registration. A document's name is the channel its writes are broadcast on, and the listener
+  reads the change log with no identity, so RLS filtered what `open` read but not what the
+  channel carried: one identity's socket received rows another identity wrote, rows RLS hid
+  from it (a list doc every user opened, and a per-user name opened by the wrong user, both
+  leaked). To move across: add `owns` (for a per-user name, `(user, name) => name ===
+  \`todos:${user.id}\``), or `shared: true` where every signed-in user may see every row. A
+  wrapper `DocType` that checked the name in `open` can go.
+- **`install-skills` copies skills only from `@blueshed/*` packages and the packages your
+  `package.json` names in `"claudeSkills"`.** It copied every skill found anywhere in
+  `node_modules`, first found wins, so any dependency of a dependency could put instructions in
+  front of an agent (and with `--user`, in front of it in every project). A package it skips is
+  named on stderr. To move across: list the third-party packages whose skills you want in
+  `"claudeSkills"`.
+- **Paths are strict RFC 6901 JSON Pointers, in `splitPath` and `applyOps`** (so on every
+  backend and in the client). A path that does not start with `/` is now an error; it used to
+  split to no segments, which is the root, so `remove "messages"` wiped the whole document and
+  was broadcast and persisted as such. `"/"` is now the member named `""`, not the root: use
+  `""` for a whole-document replace or remove. A `~` not followed by `0` or `1` is an error.
+- **A segment is a string unless its parent is an array.** `/items/007` keys `"007"`; it used to
+  become the number 7 (so `"007"` and `"7"` were one row, and two long numeric ids such as
+  snowflakes could collapse into one key). Under an array an index is `0` or `[1-9][0-9]*`, and
+  `replace`/`add` past the end is an error (it used to leave holes). Nothing to change unless
+  you relied on the coercion.
+- **Postgres framework SQL (`001a`, `001d`): `_delta_split_path` follows the same grammar.** It
+  used to strip every leading `/` (`//items` was `/items`), take a slashless path, and unescape
+  nothing. It now raises SQLSTATE `22023` on a malformed path, and `_delta_build_path` escapes
+  its segments. A row id that is not a number (`add /items/<uuid>`) raises `22P02` with
+  "Postgres mints row ids -- add to /items/- and read the id from the echo", where it used to
+  fail with `invalid input syntax for type bigint`. The listener answers both as **400**
+  (they were 500). The changes are `CREATE OR REPLACE`, so re-applying is safe: `applyFramework`
+  does it; a vendored copy needs `bunx @blueshed/delta init <dir> --upgrade`.
+- **SQLite and Postgres: an `add` that leaves out a required column is a 400**, "Required field
+  missing: text (give it a value, or declare a default or make it nullable in the schema)". A
+  required column is one that is neither nullable nor has a declared default. It used to be
+  stored as `""`, `0` or `false` for its type, acked and broadcast, though the docs said
+  `validateOps` refused it. On Postgres (`001d`, `CREATE OR REPLACE`) the check is in
+  `delta_apply` (SQLSTATE `23502`), and a nullable column with a declared default now gets the
+  default, as on SQLite. To move across: send the field, or give the column a `default` or
+  make it nullable (`"text?"`).
+- **SQLite and Postgres: an `add` of a row that is already there is a 409**, "Row already exists:
+  /coll/id -- replace it, or add to /coll/- for a new id", from any document. On a temporal
+  table it used to insert a second live version of the row (the key is `(id, valid_from)`), so
+  a cold read or time travel found two; on a plain table it failed its key as a 500. A removed
+  row can still be added back under its id, as undo does. To move across: `replace` a row that
+  exists. (Postgres: `001d`, `CREATE OR REPLACE`.) The JSON-file backend keeps RFC 6902's
+  meaning, where `add` over a member replaces it.
+- **One error-code table on every backend**: 400 for a malformed op (a bad path, an unknown or
+  missing field), 404 for a row or path that is not there, 409 for an add of a row that is, as
+  well as 401 and 403 as before. The JSON file answered `-1` for every failed op, SQLite 500
+  for a missing row, Postgres 500 for nearly everything. `applyOps` errors now carry their
+  `code`, `createWs` answers with it, and the Postgres framework raises SQLSTATE `22023` /
+  `P0002` for a client's mistake and a missing row (`001d`, `CREATE OR REPLACE`), which the
+  listener answers as 400 / 404. `tests/error-codes.test.ts` asks each backend the same.
+  `createWs`'s own answers follow the table too: a name no backend owns is 404 (`No handler
+  matched`, as Postgres's `No handler for`), an unknown action 400, a private method 403, and
+  a handler that throws 500. They were all `-1`. `createLocal` answers `No handler matched`
+  with 404. To move across: code that tested for `-1` (or for 500 on a missing row) should
+  test the code it means.
+- **Postgres: an op that names a field the collection does not have is a 400** ("Unknown field:
+  nope (not a column of items)"), as on SQLite. `delta_apply` merged it into the row it
+  broadcast and acked it, and `jsonb_populate_record` dropped it on the way to the table: the
+  subscribers were told a value that was never stored (`001a` adds `_delta_assert_fields`,
+  `001d` calls it; `CREATE OR REPLACE`). To move across: send only the table's columns (and
+  `id`, the parent key); keep client-only state out of the row.
+- **SQLite: a Postgres scope binding is refused at registration.** `scope: { user_id: ":id" }`
+  (or `"<=:end"`, `"like:prefix"`) was taken as a literal to match, so every open was a 404.
+  `registerDocs` now throws, saying SQLite reads the doc name with `":docId"`. To move across:
+  use `":docId"`, or a literal that does not start with a DSL prefix.
+- **`undo` / `redo` answer a conflict instead of failing, and the cursor moves on** (both
+  backends; see Fixed). A walk that meets a later write by someone else, or that the document
+  refuses, used to be an error (or, worse, wrote over the later write) and left the cursor where
+  it was; it now answers a result, `{ doc, ops: [], conflict: [paths], entry, version }`, and
+  records the entry as walked, so the next undo is the entry before it and that one is never
+  redone. `history` lists such a walk as an entry with no ops. To move across: test
+  `result.conflict` (not `error`) to tell the person their undo met someone else's change;
+  `null` still means nothing to walk, and an `error` now means the walk was not tried (401,
+  404, a 409 for `entry`, or the server's 5xx).
+- **`jwtAuth`: a socket is signed out when its token runs out** (see Fixed). It used to stay
+  signed in for the socket's life. At its next request after the token's `exp` it is answered
+  401 "Session expired: authenticate again" and its subscriptions are dropped. To move across:
+  sign in from `connectWs`'s `onConnect` with a token you refresh, and on that 401
+  re-authenticate and re-open your documents (the socket stays connected, so `onConnect` does
+  not run again by itself).
+
+### Added
+
+- **`undo` / `redo` take `dry: true` and `entry: id`** (both backends). `dry` answers what the
+  walk would do (`{ doc, entry, ops, conflict? }`) and walks nothing, so a caller can ask
+  whoever owns the document before it walks; `entry` walks only if that is the cursor's next
+  entry, and answers 409 if it is not.
+- **`connectWs(url, { onConnect })`**: a hook run on every connect, the first and each
+  reconnect, before `connected` turns true and before any document opens or re-opens. Its
+  client sends at once; everything else waits for it. Sign in there
+  (`onConnect: (ws) => call("authenticate", { token }, ws)`) and a reconnect's re-opens go out
+  signed in. The `ConnectOptions` type is exported.
+- **`joinPath(...segments)` and `escapeSegment(segment)`** (`@blueshed/delta/core`): a pointer
+  built from ids, each segment escaped, the inverse of `splitPath`.
+- **`DocType.owns?(identity, docName)`** (Postgres). The listener asks it before `open`,
+  `delta`, `open_at` and `history` when it has an `auth` module, and before an `undo` or `redo`
+  writes to its entry's document (asked under the cursor's lock, so the entry asked about is
+  the one walked); false is a 404, as a missing document is, and the socket never subscribes.
+  `docTypeFromDef` sets it from `owns`. An identity taken off a document can no longer walk
+  its own entries there: its `delta` was refused, its `undo` still wrote.
+
+### Changed
+
+- **`TODO.md` is replaced by `todo.jsonl`**, one open item per line in eta's format. What the
+  v0.5.0 review found and round 2 fixed is recorded here; what is still open moved across.
+- **The delta-doc skill says what each backend does.** SKILL.md has a *Backends side by side*
+  table (what a document is, creating a row, ids and their type, `add` of an existing id,
+  whole-row replace, schema, the root row, scope, auth, versions, undo, fan-out, processes,
+  shutdown, `@types/pg`) and the id rule, and it no longer says the browser code never
+  changes without saying what does. reference.md has a SQLite quick start, `destroy()` and
+  `@types/pg` in the Postgres one, `onConnect` in the sign-in flow, `bunx @blueshed/delta`
+  (the unscoped `delta` on npm is someone else's), and says `examples/` and `tests/setup.ts`
+  are in the repository, not the package. The canonical recipe creates rows with
+  `add /messages/-` and wires its form; the railroad recipe keys rows by id and wires its input.
+  A *Local development across repos* section gives the packed-tarball recipe (a `file:` link
+  loads two railroads and the page goes inert).
+- **`await doc.send(ops)` resolves once the write's own echo is applied**, on every backend. The
+  JSON file and SQLite broadcast before they answer, so this was already so; Postgres answers
+  first and broadcasts through `NOTIFY`, so there the send now waits for the version its ack
+  names (at most 5 s, for a backend that acks a version it never broadcasts). Code that
+  awaited a send and then read `doc.data` now behaves the same after it graduates to Postgres.
+- **`@blueshed/delta/logger` is railroad's logger again**, copied from railroad 0.12.0 as it is,
+  with a test that fails when the two differ. Delta's copy was a stale fork: with an unknown
+  `LOG_LEVEL` (`verbose`) it printed nothing, errors included, and it wrote colour codes into
+  pipes and files. It is a copy, not an import, so railroad stays an optional peer that only
+  the client needs; a test pins that nothing under `src/server` imports railroad.
+- **The client imports railroad's subpaths** (`/signals`, `/shared`, `/logger`), not the root
+  barrel, whose global `JSX` namespace broke type-checking in a React or Preact app.
+
+### Fixed
+
+- **Undo no longer clobbers what someone else wrote since** (both backends). A walk
+  wrote the recorded inverse as it was, the whole row as it stood before the write, so a later
+  write by another cursor was lost, and that cursor's own undo brought back what had just been
+  undone. A walk now sets back only the fields its entry changed, and only where each still
+  holds what the entry left (a row it made is removed only if it is as it was left; a row it
+  removed is put back only if nobody has). Each row is walked once, from what it was before
+  the entry to what the entry left, so a batch that made a row and changed it (or removed one
+  and made it again, or changed one and removed it) walks back whole; walked op by op, such an
+  entry answered a conflict with itself. A field someone has written since is a conflict:
+  the walk changes nothing and answers `{ doc, ops: [], conflict: [paths], entry, version }`,
+  which a caller can tell from `null` (nothing to walk). On Postgres the rule is
+  `_delta_walk_plan` and the walk `delta_walk(cursor, who, back, dry?, entry?)` (and
+  `delta_walk_as`), in `001g`, all `CREATE OR REPLACE`; `delta_undo` / `delta_redo` call it.
+  The walk takes the document's lock before it plans, so no writer lands between the plan and
+  the write.
+- **A walk that cannot apply no longer sticks the cursor** (both backends). Its failure rolled
+  back and recorded nothing, so every undo met the same entry and nothing before it could be
+  undone. A conflict, a walk the document refuses (4xx) and a walk that changes nothing are
+  recorded as walked (an entry with no ops, not walkable, never redone), and the next undo goes
+  on to the entry before.
+- **SQLite: undo stays quick behind a feed of facts.** The cursor's query had no index on
+  `undoes` and scanned the ledger to join its tips (102 ms per undo at 400,000 rows of ticks);
+  with the index and the tips joined first it is 0.05 ms.
+- **A reconnect no longer freezes a signed-in client's documents** (with `onConnect`, above).
+  `connectWs` re-opened every document on the new socket before anything could sign it in, so
+  with in-band `authenticate` each re-open was a 401, logged and dropped, and `doc.data` stayed
+  as it was before the drop while `connected` said true. Re-authenticating from an `open`
+  listener lost the race too. To move across: move the `authenticate` call into `onConnect`.
+- **A request made while the socket is not ready no longer hangs when a connect fails.** Every
+  drop swapped in a new "ready" gate, even when the last one had never opened, so a `send` or
+  `call` made before the first connect, during an outage with a failed retry, or while
+  `onConnect` ran and the socket dropped, waited on a gate nothing would open: it never
+  settled, though `connected` turned true. A drop now makes a new gate only once the last one
+  has opened.
+- **`connectWs` works outside a browser, and keeps an absolute URL's scheme.** It read
+  `location` unconditionally (a Bun script threw `location is not defined`) and replaced the
+  scheme with the page's (`wss://api…` became `ws://` from an http page). An absolute
+  `ws:`/`wss:` URL is used as it is, `http:`/`https:` become `ws:`/`wss:`, and a relative one
+  outside a page is an error that says to pass an absolute URL.
+- **`add /<coll>/-` makes a new row on every backend.** On a collection of rows (an object, not
+  an array) the server mints the id: a uuid on the JSON file and SQLite, as the sequence does
+  on Postgres. The echo names the row (`/<coll>/<id>`) and the row carries it (`value.id`). The
+  JSON file and SQLite used to store it under the key `"-"`, so a second add collided. On an
+  array, `/-` still appends. This is the one create-row op that works unchanged from the JSON
+  file to Postgres.
+- **The path names the row, whatever the value's `id` says** (SQLite, Postgres `001d`). An
+  `add /coll/x` whose value carried `id: "y"` stored the row as `y` while broadcasting `/coll/x`.
+- **A batch applies whole or not at all** (`applyOps`). An op that throws undoes the ops before
+  it, in place, so held references stay live. The JSON-file backend applied a failing batch's
+  first ops to its live document: the writer got an error, the server kept the change and
+  persisted it at the next write, and no one else heard of it.
+- **Paths built from ids are escaped** (SQLite broadcasts, fan-out and cascades; the Postgres
+  custom-doc fan-out). An id containing `/` or `~` was stored right but broadcast raw
+  (`/messages/a/b`), so a peer's `applyOps` threw and its view silently diverged.
+  `applyOpsToCollection` now reads paths with `splitPath`, so it finds such a row by its own id.
+- **SQLite: a field named after an `Object.prototype` member (`toString`, `valueOf`) is an
+  unknown field (400).** Column lookups took inherited members for columns, so the op was
+  acked, cached and broadcast, and gone on the next cold read. Postgres's `validateOps` too.
+- **SQLite: a json column's string value survives a cold read** (v0.5.0 review #4). Strings were stored
+  raw and parsed on the way back, so `"123"` came back as `123` and `"true"` as `true` after a
+  restart or eviction. Every json value is now stored as JSON. A string an earlier release
+  stored raw reads back as it did: as the string, unless it parses as JSON.
+- **`jwtAuth`: a session ends when its token does** (v0.5.0 review #10). `gate()` returned the identity
+  for the socket's whole life, so a token that ran out after `authenticate` still let every
+  `open` and `delta` in. The token's `exp` is kept with the identity, and once it has passed
+  the gate signs the socket out ("Session expired: authenticate again", subscriptions dropped),
+  as `logout` does (see Breaking).
+- **SQLite: a document whose root row has a parent can change its root fields** (v0.5.0 review #5). The
+  root's row writer left the parent key out, so on a temporal table the new version failed
+  `NOT NULL constraint failed: <table>.<fk>`. The three row writers, which had drifted apart,
+  are one.
+- **SQLite: a document evicted while someone has it open keeps working** (v0.5.0 review #6). `evict()`
+  dropped the cached copy but kept its subscribers, so a write through it answered 404 "Doc
+  not loaded", and fan-out onto it lost removes and grandchildren for good. A write, an undo
+  and a redo now read back every open document `evict()` dropped before they apply. A write to a document nobody
+  has open still answers 404, now "open <doc> before writing to it".
+- **SQLite errors name their fix.** A missing table says "call createTables(db, schema) before
+  the first open" (it said `no such table: current_lists`), and a document with no root row
+  says which row it looked for and that a SQLite document is one root row and its children
+  ("make the row first, or declare the document implied: true"); it said `Not found`.
+- **`validateOps` (SQLite and Postgres) reports a malformed pointer** as a 400 with the reason,
+  instead of throwing.
+- **Postgres: a write's echo is the row as stored, not as sent** (`001d`, `CREATE OR REPLACE`).
+  `delta_apply` told an added or changed row as the JSON it built, so a value its column cast
+  was told uncast: in a list document scoped by the name (`scope: { owner_id: ":id" }`) every
+  add was echoed, broadcast and recorded with `owner_id: "1"` where the table and the next
+  `open` say `1`, and a date sent to a `timestamptz` came back in another form. Each write now
+  reads its row back (`RETURNING`), so the echo, the ledger's entry and a later `open` agree,
+  and undo's guard no longer finds a conflict between an entry and the row it made.
+- **Postgres: an RLS-hidden row no longer reaches another identity's socket** (see Breaking).
+  `tests/postgres-rls.test.ts` runs as a `NOSUPERUSER` role, so the policy really filters, and
+  pins both round-1 repros.
+
 ## [0.6.0] - 2026-09-24
 
 Delta in-process, for a server that renders documents itself: the ledger and undo on both

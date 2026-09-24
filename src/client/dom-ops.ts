@@ -35,7 +35,7 @@
  *   render([{ op: "replace", path: "", value: doc.data.get() }]);   // initial paint
  *   doc.onOps(render);                                             // live + reconnect
  */
-import type { DeltaOp } from "../core";
+import { splitPath, type DeltaOp } from "../core";
 
 export interface DomCollection<T> {
   /** Stable id for a row value — usually `(v) => String(v.id)`. */
@@ -101,7 +101,6 @@ export function applyOpsToCollection<T>(
   col: DomCollection<T>,
   nodes: Map<string, Node> = defaultNodesFor(parent, collection),
 ): Map<string, Node> {
-  const prefix = `/${collection}/`;
   for (const op of ops) {
     // Whole-doc root replace (path "") — emitted on reconnect so onOps
     // consumers can RECONCILE against the authoritative snapshot. Treat
@@ -144,11 +143,12 @@ export function applyOpsToCollection<T>(
       }
       continue;
     }
-    if (op.path === `/${collection}` || !op.path.startsWith(prefix)) continue;
-    const rest = op.path.slice(prefix.length);
-    const slash = rest.indexOf("/");
-    const idPart = slash === -1 ? rest : rest.slice(0, slash);
-    const fieldPath = slash === -1 ? "" : rest.slice(slash + 1);
+    // The same pointer grammar as applyOps: segments unescaped, so a row id
+    // containing "/" or "~" is found by its own id.
+    const segments = op.path === "" ? [] : splitPath(op.path);
+    if (segments[0] !== collection || segments.length < 2) continue;
+    const idPart = segments[1]!;
+    const isField = segments.length > 2;
 
     if (idPart === "-" && op.op === "add") {
       // Append — id is assigned server-side; take it from the op value.
@@ -185,7 +185,7 @@ export function applyOpsToCollection<T>(
           parent.appendChild(fresh);
           break;
         }
-        if (fieldPath === "") {
+        if (!isField) {
           // Whole-row replace.
           if (col.update) col.update(node, value);
           else {

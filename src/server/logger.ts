@@ -1,17 +1,18 @@
 /**
- * Logger — colored, timestamped, level-gated console output.
+ * @blueshed/delta/logger — railroad's logger, kept in step with it.
  *
- * Usage:
- *   import { createLogger, setLogLevel, loggedRequest } from "@blueshed/railroad";
+ * Colored and timestamped on a terminal, plain when piped or with `NO_COLOR`,
+ * level-gated; an unknown `LOG_LEVEL` falls back to "info". The code below is
+ * `@blueshed/railroad/logger.ts` (0.12.0) as it is, copied rather than
+ * imported so a server that doesn't use delta's client needs no railroad;
+ * `tests/server.test.ts` fails when the two differ. Re-sync it when railroad's
+ * changes.
+ *
+ *   import { createLogger, setLogLevel, loggedRequest } from "@blueshed/delta/logger";
  *
  *   const log = createLogger("[server]");
  *   log.info("listening on :3000");   // 12:34:56.789 INFO  [server] listening on :3000
- *   log.debug("tick");                // only shown when level is "debug"
- *   log.warn("slow query");           // yellow
- *   log.error("connection failed");   // red, always shown
- *
  *   setLogLevel("debug");             // show everything
- *
  *   const handler = loggedRequest("[api]", myHandler);  // wrap a route with access logging
  */
 
@@ -19,11 +20,25 @@ export type LogLevel = "silent" | "error" | "warn" | "info" | "debug";
 
 const LEVELS: Record<LogLevel, number> = { silent: -1, error: 0, warn: 1, info: 2, debug: 3 };
 
-let current: LogLevel =
-  (globalThis.Bun?.env?.LOG_LEVEL as LogLevel) ?? "info";
+// A typo'd LOG_LEVEL would otherwise make LEVELS[current] undefined and silence
+// every log (including errors), so coerce unknown values back to "info".
+function normalizeLevel(level: string | undefined | null): LogLevel {
+  return level != null && level in LEVELS ? (level as LogLevel) : "info";
+}
+
+// Read env without depending on Bun's ambient global type. This file ships as
+// .ts, so a consumer's tsc type-checks it directly — referencing `globalThis.Bun`
+// would force every consumer to install @types/bun (TS7017 otherwise). The cast
+// keeps it portable across Bun, Node, and the browser.
+const env: Record<string, string | undefined> =
+  (globalThis as { Bun?: { env?: Record<string, string | undefined> } }).Bun?.env ??
+  (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ??
+  {};
+
+let current: LogLevel = normalizeLevel(env.LOG_LEVEL);
 
 export function setLogLevel(level: LogLevel) {
-  current = level;
+  current = normalizeLevel(level);
 }
 
 export function getLogLevel(): LogLevel {
@@ -36,10 +51,22 @@ function shouldLog(level: LogLevel): boolean {
 
 // === Colors ===
 
-const gray = (s: string) => `\x1b[90m${s}\x1b[0m`;
-const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
-const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
-const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
+// Emit ANSI colors only to an interactive terminal. Respects NO_COLOR
+// (https://no-color.org) and stays plain when piped, redirected to a file, or
+// running in a browser — contexts where raw escape codes corrupt the output.
+const colorEnabled: boolean = (() => {
+  if (env.NO_COLOR != null && env.NO_COLOR !== "") return false;
+  const stdout = (globalThis as { process?: { stdout?: { isTTY?: boolean } } })
+    .process?.stdout;
+  return stdout?.isTTY === true;
+})();
+
+const wrap = (code: string) => (s: string) =>
+  colorEnabled ? `\x1b[${code}m${s}\x1b[0m` : s;
+const gray = wrap("90");
+const yellow = wrap("33");
+const red = wrap("31");
+const dim = wrap("2");
 
 const color: Record<string, (s: string) => string> = {
   error: red,

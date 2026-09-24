@@ -7,8 +7,10 @@
  * Auth is pluggable via `opts.auth`. When provided, every doc message passes
  * through `auth.gate(client)` and the resulting identity is threaded into
  * `type.open / apply / openAt` so backends can scope queries (e.g. with
- * `withAppAuth` + RLS). When auth is omitted, no gate runs and identity is
- * undefined — delta itself has no opinion on authentication.
+ * `withAppAuth` + RLS), and a type's `owns(identity, docName)` decides whether
+ * that identity may have the document at all (404 when not). When auth is
+ * omitted, no gate runs and identity is undefined — delta itself has no
+ * opinion on authentication.
  */
 import type { WsServer } from "../server";
 import { trackSubscribe, trackUnsubscribe, onClientDrop } from "../server";
@@ -18,7 +20,7 @@ import { resolveDoc } from "./registry";
 import type { DocType } from "./registry";
 import type { DeltaAuth } from "../auth";
 import { isAuthError } from "../auth";
-import { type DeltaOp, splitPath } from "../../core";
+import { type DeltaOp, splitPath, joinPath } from "../../core";
 import { socketCursor } from "../ledger";
 
 const log = createLogger("[doc]");
@@ -65,6 +67,20 @@ export function defineCustomDoc<C>(
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * The wire code for an error the database raised -- the same table as the
+ * other backends. The framework raises SQLSTATE 22023 for a malformed path or
+ * op, 22P02 for a row id it could not mint and 23502 for an add that leaves
+ * out a required field (a client's mistake, 400); P0002 for a row that is not
+ * there (404); 23505 for an add of a row that is, and 40001 for an undo of an
+ * entry that is not the cursor's next (409). Anything else is the server's (500).
+ */
+const CODE_OF_SQLSTATE: Record<string, number> = { "22023": 400, "22P02": 400, "23502": 400, P0002: 404, "23505": 409, "40001": 409 };
+function wireCode(err: unknown): number {
+  const state = (err as { code?: unknown } | null)?.code;
+  return (typeof state === "string" && CODE_OF_SQLSTATE[state]) || 500;
 }
 
 // ---------------------------------------------------------------------------
@@ -392,13 +408,13 @@ export async function createDocListener<I = unknown>(
           if (!wasIn && shouldBeIn) {
             cached[coll] ??= {};
             cached[coll]![id] = row;
-            emitted.push({ op: "add", path: `/${coll}/${id}`, value: row });
+            emitted.push({ op: "add", path: joinPath(coll, id), value: row });
           } else if (wasIn && shouldBeIn) {
             cached[coll]![id] = row;
-            emitted.push({ op: "replace", path: `/${coll}/${id}`, value: row });
+            emitted.push({ op: "replace", path: joinPath(coll, id), value: row });
           } else if (wasIn && !shouldBeIn) {
             delete cached[coll]![id];
-            emitted.push({ op: "remove", path: `/${coll}/${id}` });
+            emitted.push({ op: "remove", path: joinPath(coll, id) });
           }
 
           if (emitted.length) ws.publish(docName, { doc: docName, ops: emitted });
@@ -453,7 +469,8 @@ export async function createDocListener<I = unknown>(
     identity: I | undefined;
   };
 
-  function withDoc(label: string, fn: (dc: DocCtx) => Promise<void> | void) {
+  // `owned: false` for close alone: letting go of a document never needs the owner's say.
+  function withDoc(label: string, fn: (dc: DocCtx) => Promise<void> | void, { owned = true } = {}) {
     return async (msg: any, client: any, respond: (r: any) => void) => {
       let identity: I | undefined;
       if (auth) {
@@ -472,11 +489,16 @@ export async function createDocListener<I = unknown>(
         return respond({ error: { code: 404, message: `No handler for ${docName}` } });
       }
       try {
+        // The document's name is its channel: one this identity does not own is
+        // not there for it (404, as a missing one), so it never subscribes.
+        if (owned && auth && found.type.owns && !(await found.type.owns(identity as I, docName))) {
+          return respond({ error: { code: 404, message: "Not found" } });
+        }
         await fn({ docName, type: found.type, ctx: found.ctx, msg, client, respond, identity });
       } catch (err) {
         const m = errMsg(err);
         log.error(`${label} failed: ${m}`);
-        respond({ error: { code: 500, message: m } });
+        respond({ error: { code: wireCode(err), message: m } });
       }
     };
   }
@@ -593,7 +615,12 @@ export async function createDocListener<I = unknown>(
   }));
 
   if (ledger) {
-    /** Undo or redo: the cursor's next entry, walked in the database (001g) and recorded as walking it. */
+    /**
+     * Undo or redo: the cursor's next entry, walked in the database (001g
+     * `delta_walk`) by its guarded plan and recorded as walking it; a conflict
+     * changes nothing, answers `conflict`, and moves the cursor on. `dry: true`
+     * answers the plan; `entry: id` walks only that entry.
+     */
     const walk = (way: "undo" | "redo") => async (msg: any, client: any, respond: (r: any) => void) => {
       let identity: I | undefined;
       if (auth) {
@@ -601,18 +628,37 @@ export async function createDocListener<I = unknown>(
         if (isAuthError(gated)) return respond({ error: { code: 401, message: gated.error } });
         identity = gated as I;
       }
+      const db = await pool.connect();
       try {
         const writer = writerOf(identity, client);
         const cursor = cursorOf(msg, client, writer);
+        await db.query("BEGIN");
+        // A walk writes to its entry's document, so it asks owns as delta does:
+        // under the cursor's lock (delta_walk takes it again), so the entry
+        // asked about is the one walked.
+        if (auth && cursor !== null) {
+          await db.query("SELECT pg_advisory_xact_lock(hashtext('delta-cursor:' || $1::text))", [cursor]);
+          const tip = (await db.query("SELECT doc_name FROM _delta_ledger_tip($1, $2)", [cursor, way === "undo"])).rows[0]?.doc_name;
+          const found = tip ? resolveDoc(tip) : null;
+          if (found?.type.owns && !(await found.type.owns(identity as I, tip))) {
+            await db.query("ROLLBACK");
+            return respond({ error: { code: 404, message: "Not found" } });
+          }
+        }
+        const args = [cursor, whoOf(writer), way === "undo", msg.dry === true, msg.entry ?? null];
         const { rows } =
           auth?.asSqlArg && identity !== undefined
-            ? await pool.query(`SELECT delta_${way}_as($1, $2, $3) AS result`, [String(auth.asSqlArg(identity)), cursor, whoOf(writer)])
-            : await pool.query(`SELECT delta_${way}($1, $2) AS result`, [cursor, whoOf(writer)]);
+            ? await db.query("SELECT delta_walk_as($1, $2, $3, $4, $5, $6) AS result", [String(auth.asSqlArg(identity)), ...args])
+            : await db.query("SELECT delta_walk($1, $2, $3, $4, $5) AS result", args);
+        await db.query("COMMIT");
         const result = rows[0]?.result ?? null;
-        respond({ result: result && { ...result, version: Number(result.version), entry: result.entry == null ? undefined : Number(result.entry) } });
+        respond({ result: result && { ...result, ...(result.version != null ? { version: Number(result.version) } : {}), entry: result.entry == null ? undefined : Number(result.entry) } });
       } catch (err) {
+        try { await db.query("ROLLBACK"); } catch { /* the connection may be gone */ }
         log.error(`${way} failed: ${errMsg(err)}`);
-        respond({ error: { code: 500, message: errMsg(err) } });
+        respond({ error: { code: wireCode(err), message: errMsg(err) } });
+      } finally {
+        db.release();
       }
     };
     ws.on("undo", walk("undo"));
@@ -646,7 +692,7 @@ export async function createDocListener<I = unknown>(
     }
     respond({ result: { ack: true } });
     log.debug(`closed ${docName}`);
-  }));
+  }, { owned: false }));
 
   return {
     evict(docName: string) {

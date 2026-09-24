@@ -6,7 +6,7 @@
  * schema with optional scope filters.
  *
  * Usage:
- *   import { defineSchema, defineDoc, createTables, registerDocs } from "@blueshed/railroad/delta-sqlite";
+ *   import { defineSchema, defineDoc, createTables, registerDocs } from "@blueshed/delta/sqlite";
  *
  *   const schema = defineSchema({ ... });
  *   const itineraryDoc = defineDoc("itinerary:", { root: "itineraries", include: [...] });
@@ -18,9 +18,9 @@
  */
 import type { WsServer } from "./server";
 import { trackSubscribe, trackUnsubscribe, onClientDrop } from "./server";
-import { applyOps as deltaApplyOps, type DeltaOp, splitPath } from "../core";
+import { applyOps as deltaApplyOps, type DeltaOp, splitPath, joinPath } from "../core";
 import { createLogger } from "./logger";
-import { createLedger, socketCursor } from "./ledger";
+import { createLedger, planWalk, socketCursor } from "./ledger";
 import {
   type ColumnDef,
   type Schema,
@@ -180,6 +180,16 @@ export function registerDocs(
   // Build lookup: prefix → DocDef
   const docByPrefix = new Map<string, DocDef>();
   for (const doc of docs) {
+    // A Postgres scope binding would be taken here as a literal to match, and
+    // the document would open as 404 for every name: say so at registration.
+    for (const [col, binding] of Object.entries(doc.scope)) {
+      if (binding !== ":docId" && /^(:|=:|<=:|>=:|like:|at:)/.test(binding)) {
+        throw new Error(
+          `registerDocs("${doc.prefix}"): scope { ${col}: "${binding}" } is the Postgres scope DSL; ` +
+          `SQLite reads the doc name with ":docId" only (scope: { ${col}: ":docId" })`,
+        );
+      }
+    }
     docByPrefix.set(doc.prefix, doc);
   }
 
@@ -219,7 +229,7 @@ export function registerDocs(
     if (db.query(`SELECT 1 FROM ${viewName} WHERE id = ?`).get(root.id)) return;
     const ts = now();
     if (rootTable.temporal) { root.valid_from = ts; root.valid_to = null; }
-    insertRootRow(db, rootTable, root, ts);
+    insertRow(db, rootTable, root, ts);
   }
 
   // Parsed criteria per open custom doc name (shared across clients of the same name).
@@ -249,7 +259,7 @@ export function registerDocs(
   // Transport-level teardown (socket drop / logout via dropClientSubscriptions):
   // a dropped socket never sends the polite `close` action, so without this
   // every abandoned doc stayed cached forever and its dead socket sat in
-  // `subscriptions`, growing the fan-out set monotonically (TODO.md #7).
+  // `subscriptions`, growing the fan-out set monotonically (v0.5.0 review #7).
   // Mirrors the `close`-action eviction below.
   function releaseClient(client: any): void {
     for (const [docName, subs] of subscriptions) {
@@ -404,7 +414,9 @@ export function registerDocs(
       }
 
       if (parts.length === 2) {
-        const id = parts[1]!;
+        // `add /<coll>/-` is a new row the server names: a uuid, carried by the
+        // broadcast path and the row, as Postgres does with its sequence.
+        const id = op.op === "add" && parts[1] === "-" ? crypto.randomUUID() : parts[1]!;
         if (op.op === "add") {
           // Add row
           const row = (op as any).value as Record<string, unknown>;
@@ -416,7 +428,7 @@ export function registerDocs(
           const ts = now();
           const fullRow = insertCollectionRow(db, schema, table, id, rootId, def, row, ts);
           doc[collKey][id] = fullRow;
-          broadcastOps.push({ op: "add", path: `/${collKey}/${id}`, value: fullRow });
+          broadcastOps.push({ op: "add", path: joinPath(collKey, id), value: fullRow });
         } else if (op.op === "remove") {
           // Remove row + cascades. `removeRow` addresses rows by id ALONE, so
           // without this gate a client could name any id and delete a sibling
@@ -431,7 +443,7 @@ export function registerDocs(
           // field-batch writer below so it collapses with field-level ops on
           // the same row and shares the temporal/non-temporal write path.
           // validateOps accepted this shape all along, but it used to fall
-          // through here and ack as a silent no-op (TODO.md #3).
+          // through here and ack as a silent no-op (v0.5.0 review #3).
           const key = `${collKey}/${id}`;
           if (!rowFieldBatches.has(key)) {
             rowFieldBatches.set(key, { table, id, fields: new Map() });
@@ -467,19 +479,19 @@ export function registerDocs(
       for (const [field, value] of rootFieldUpdates) updated[field] = value;
       if (rootTable.temporal) {
         updated.valid_from = ts; updated.valid_to = null;
-        insertRootRow(db, rootTable, updated, ts);
+        insertRow(db, rootTable, updated, ts);
       } else {
         updateRow(db, rootTable, rootId, updated);
       }
       doc[def.root] = updated;
-      broadcastOps.push({ op: "replace", path: `/${def.root}`, value: updated });
+      broadcastOps.push({ op: "replace", path: joinPath(def.root), value: updated });
     }
 
     // Apply batched field updates
     for (const [, batch] of rowFieldBatches) {
       const collKey = batch.table.docKey;
       const current = doc[collKey]?.[batch.id];
-      if (!current) throw new Error(`Row not found: ${collKey}/${batch.id}`);
+      if (!current) refuse(404, `Row not found: ${collKey}/${batch.id}`);
 
       const ts = now();
       if (batch.table.temporal) closeRow(db, batch.table, batch.id, ts);
@@ -489,10 +501,10 @@ export function registerDocs(
       for (const [field, value] of batch.fields) {
         updated[field] = value;
       }
-      if (batch.table.temporal) reinsertRow(db, batch.table, batch.id, updated, ts);
+      if (batch.table.temporal) insertRow(db, batch.table, updated, ts);
       else updateRow(db, batch.table, batch.id, updated);
       doc[collKey][batch.id] = updated;
-      broadcastOps.push({ op: "replace", path: `/${collKey}/${batch.id}`, value: updated });
+      broadcastOps.push({ op: "replace", path: joinPath(collKey, batch.id), value: updated });
     }
 
     return broadcastOps;
@@ -508,16 +520,7 @@ export function registerDocs(
     // Custom doc path first (independent prefix space).
     const customMatch = findCustom(docName);
     if (customMatch) {
-      const { def, docId } = customMatch;
-      let doc = cache.get(docName);
-      if (!doc) {
-        const criteria = def.parse(docId);
-        const rowsByColl = def.query(db, criteria);
-        doc = {};
-        for (const coll of def.watch) doc[coll] = toMap(rowsByColl[coll] ?? []);
-        cache.set(docName, doc);
-        customCriteria.set(docName, criteria);
-      }
+      const doc = loadCustom(docName, customMatch.def, customMatch.docId);
 
       trackSubscribe(client, docName);
       if (!subscriptions.has(docName)) subscriptions.set(docName, new Set());
@@ -532,9 +535,13 @@ export function registerDocs(
     const match = findDoc(docName);
     if (!match) return;
 
-    const doc = load(docName, match.def, match.docId);
+    let doc: any;
+    try { doc = load(docName, match.def, match.docId); }
+    catch (err: any) { return respond({ error: { code: 500, message: named(err).message } }); }
     if (!doc) {
-      respond({ error: { code: 404, message: "Not found" } });
+      // Say why: a SQLite document is one root row (there is no list mode).
+      const where = Object.entries(resolveScope(match.def, match.docId)).map(([k, v]) => `${k} = ${JSON.stringify(v)}`).join(" and ");
+      respond({ error: { code: 404, message: `Not found: no ${match.def.root} row where ${where}. A SQLite document is one root row and its children: make the row first, or declare the document implied: true` } });
       return;
     }
 
@@ -548,6 +555,20 @@ export function registerDocs(
     respond({ result: ledger ? { ...doc, _v: ledger.version(docName) } : doc });
     log.info(`opened ${docName}`);
   });
+
+  /** A custom document from the cache, or queried into it. */
+  function loadCustom(docName: string, def: CustomDocDef<any>, docId: string): any {
+    let doc = cache.get(docName);
+    if (!doc) {
+      const criteria = def.parse(docId);
+      const rowsByColl = def.query(db, criteria);
+      doc = {};
+      for (const coll of def.watch) doc[coll] = toMap(rowsByColl[coll] ?? []);
+      cache.set(docName, doc);
+      customCriteria.set(docName, criteria);
+    }
+    return doc;
+  }
 
   /** A document from the cache, or loaded into it: an implied one opens empty, and its first write makes its row. */
   function load(docName: string, def: DocDef, docId: string): any | null {
@@ -571,6 +592,21 @@ export function registerDocs(
    * and then told: to the document's subscribers, to the other open documents
    * that share its rows, and to the custom documents that watch them.
    */
+  /**
+   * Read back every doc someone has open that `evict()` dropped, before a
+   * write: fan-out checks a target's scope against its copy, and one with no
+   * copy used to lose its removes and grandchildren for good (v0.5.0 review #6).
+   */
+  function reloadEvicted(): void {
+    for (const [name, subs] of subscriptions) {
+      if (!subs.size || cache.has(name)) continue;
+      const custom = findCustom(name);
+      const match = custom ? null : findDoc(name);
+      if (custom) loadCustom(name, custom.def, custom.docId);
+      else if (match) load(name, match.def, match.docId);
+    }
+  }
+
   function write(docName: string, def: DocDef, doc: any, ops: DeltaOp[], by: { who: string | null; cursor: string | null; undoes?: number; undoable?: boolean }): Written | Failed {
     // Pre-flight validation — reject unknown collections/fields and bad types
     // up front instead of silently acking an op that diverges cache/broadcast
@@ -598,8 +634,10 @@ export function registerDocs(
       implied.delete(docName);
     } catch (err: any) {
       cache.set(docName, snapshot); // restore in-memory cache
+      named(err);
       log.error(`delta failed: ${err.message}`);
-      return { error: { code: 500, message: err.message } };
+      // A refusal carries its wire code (`refuse`); anything else is the server's.
+      return { error: { code: typeof err.code === "number" ? err.code : 500, message: err.message } };
     }
 
     // Committed. Fan-out is a post-commit side effect: a failure here must not
@@ -631,9 +669,10 @@ export function registerDocs(
     const match = findDoc(docName);
     if (!match) return;
 
+    reloadEvicted();
     const doc = cache.get(docName);
     if (!doc) {
-      respond({ error: { code: 404, message: "Doc not loaded" } });
+      respond({ error: { code: 404, message: `Doc not loaded: open ${docName} before writing to it` } });
       return;
     }
 
@@ -646,17 +685,40 @@ export function registerDocs(
   });
 
   if (ledger) {
-    /** Undo or redo: the cursor's next entry, walked through the same write path, recorded as walking it. */
+    /**
+     * Undo or redo: the cursor's next entry, walked through the same write path
+     * and recorded as walking it -- only the fields it changed, guarded by what
+     * it left (`planWalk`). A walk that meets a later write by someone else, or
+     * that no longer applies, changes nothing and answers `conflict`; it is
+     * recorded all the same, so the next walk goes on to the entry before it.
+     * `dry: true` answers what the walk would do and walks nothing; `entry: id`
+     * walks only if that is the cursor's next entry (409 otherwise).
+     */
     const walk = (way: "undo" | "redo") => (msg: any, client: any, respond: (r: any) => void) => {
       const cursor = cursorOf(msg, client);
       const entry = cursor === null ? undefined : way === "undo" ? ledger.nextUndo(cursor) : ledger.nextRedo(cursor);
       if (!entry) return respond({ result: null });
+      if (msg.entry != null && msg.entry !== entry.id) {
+        return respond({ error: { code: 409, message: `The cursor's next entry to ${way} is ${entry.id}, not ${msg.entry}` } });
+      }
+      reloadEvicted();   // a walk is a write: its fan-out needs every open doc's copy, as delta's does
       const match = findDoc(entry.doc);
       const doc = match && load(entry.doc, match.def, match.docId);
       if (!match || !doc) return respond({ error: { code: 404, message: `Not found: ${entry.doc}` } });
-      const out = write(entry.doc, match.def, doc, entry.inverse, { who: whoOf(client), cursor, undoes: entry.id });
-      if (!subscriptions.has(entry.doc)) cache.delete(entry.doc); // loaded for this walk only
-      respond("error" in out ? out : { result: { doc: entry.doc, ...out } });
+      try {
+        const plan = planWalk(entry, doc);
+        if (msg.dry) return respond({ result: { doc: entry.doc, entry: entry.id, ops: plan.ops, ...(plan.conflict.length ? { conflict: plan.conflict } : {}) } });
+        const by = { who: whoOf(client), cursor };
+        const out = plan.conflict.length || !plan.ops.length ? null : write(entry.doc, match.def, doc, plan.ops, { ...by, undoes: entry.id });
+        if (out && !("error" in out) && out.entry !== undefined) return respond({ result: { doc: entry.doc, ...out } });
+        if (out && "error" in out && out.error.code >= 500) return respond(out);
+        // A conflict, a walk the document refuses, or one that changes nothing: walked all the same.
+        const skipped = ledger.skip({ doc: entry.doc, ...by, undoes: entry.id });
+        const conflict = plan.conflict.length ? plan.conflict : out && "error" in out ? plan.ops.map((o) => o.path) : undefined;
+        respond({ result: { doc: entry.doc, ops: [], inverse: [], version: skipped.version, entry: skipped.entry, ...(conflict ? { conflict } : {}) } });
+      } finally {
+        if (!subscriptions.has(entry.doc)) cache.delete(entry.doc); // loaded for this walk only
+      }
     };
     ws.on("undo", walk("undo"));
     ws.on("redo", walk("redo"));
@@ -752,7 +814,7 @@ export function registerDocs(
         // key to the root object; it is the root, replaced whole -- or, the row gone, null.
         if (collKey === def.root && parts.length === 2) {
           if (id !== docId) continue;
-          take({ op: "replace", path: `/${collKey}`, value: op.op === "remove" ? null : (op as any).value });
+          take({ op: "replace", path: joinPath(collKey), value: op.op === "remove" ? null : (op as any).value });
           continue;
         }
 
@@ -772,7 +834,7 @@ export function registerDocs(
             if (row && String(row.id) === docId) take(op);
           } else if (row && rowInScope(collKey, row, def, docId, cached)) {
             // Target treats it as an included map — rewrite to a keyed op.
-            take({ op: "replace", path: `/${collKey}/${row.id}`, value: row });
+            take({ op: "replace", path: joinPath(collKey, row.id), value: row });
           }
           continue;
         }
@@ -835,13 +897,13 @@ export function registerDocs(
 
           if (!wasIn && shouldBeIn) {
             cached[coll][id] = row;
-            emitted.push({ op: "add", path: `/${coll}/${id}`, value: row });
+            emitted.push({ op: "add", path: joinPath(coll, id), value: row });
           } else if (wasIn && shouldBeIn) {
             cached[coll][id] = row;
-            emitted.push({ op: "replace", path: `/${coll}/${id}`, value: row });
+            emitted.push({ op: "replace", path: joinPath(coll, id), value: row });
           } else if (wasIn && !shouldBeIn) {
             delete cached[coll][id];
-            emitted.push({ op: "remove", path: `/${coll}/${id}` });
+            emitted.push({ op: "remove", path: joinPath(coll, id) });
           }
           // else: neither in nor becoming in — ignore.
 
@@ -852,7 +914,11 @@ export function registerDocs(
   }
 
   return {
-    /** Evict a doc from cache. */
+    /**
+     * Drop a doc's cached copy; the next open, write or fan-out that needs it
+     * reads it again from the tables (`reloadEvicted`). Its subscribers stay
+     * subscribed, and re-open to see what changed.
+     */
     evict(docName: string) {
       cache.delete(docName);
       implied.delete(docName);
@@ -1066,7 +1132,9 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
   const errors: ValidationError[] = [];
 
   for (const op of ops) {
-    const parts = splitPath(op.path);
+    let parts: string[];
+    try { parts = splitPath(op.path); }
+    catch (err: any) { errors.push({ path: String(op.path), message: err.message }); continue; }
     const collKey = parts[0];
     if (!collKey) {
       errors.push({ path: op.path, message: "Empty path" });
@@ -1086,8 +1154,9 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
     }
 
     const fkCol = table.parent?.fkColumn;
-    const isKnownKey = (k: string) =>
-      k === "id" || k === fkCol || table.columns[k] !== undefined;
+    // Own columns only: `table.columns.toString` is Object.prototype's, not a column.
+    const columnOf = (k: string): ColumnDef | undefined => (Object.hasOwn(table.columns, k) ? table.columns[k] : undefined);
+    const isKnownKey = (k: string) => k === "id" || k === fkCol || columnOf(k) !== undefined;
 
     // One-segment paths: /<root> is a whole-root partial merge (replace only);
     // /<coll> on an included collection has no meaning for a client op — reject
@@ -1110,7 +1179,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
         if (!isKnownKey(key)) errors.push({ path: op.path, message: `Unknown field: ${key}` });
       }
       for (const [field, fieldValue] of Object.entries(value)) {
-        const colDef = table.columns[field];
+        const colDef = columnOf(field);
         if (!colDef) continue;
         const typeErr = validateFieldType(colDef, field, fieldValue);
         if (typeErr) errors.push({ path: `${op.path}/${field}`, message: typeErr });
@@ -1126,7 +1195,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
         continue;
       }
       const field = parts[1]!;
-      const colDef = table.columns[field];
+      const colDef = columnOf(field);
       if (!colDef) {
         errors.push({ path: op.path, message: `Unknown field: ${field}` });
         continue;
@@ -1156,20 +1225,20 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
         if (!isKnownKey(key)) errors.push({ path: op.path, message: `Unknown field: ${key}` });
       }
 
-      // Required-field check applies to adds only.
+      // Required-field check applies to adds only: a column that is neither
+      // nullable nor has a default must be given (it used to be stored as "",
+      // 0 or false, acked and broadcast).
       if (op.op === "add") {
         for (const [col, colDef] of Object.entries(table.columns)) {
           if (!colDef.nullable && colDef.default === undefined && value[col] === undefined) {
-            if (defaultForType(colDef.type) === null) {
-              errors.push({ path: op.path, message: `Required field missing: ${col}` });
-            }
+            errors.push({ path: op.path, message: `Required field missing: ${col} (give it a value, or declare a default or make it nullable in the schema)` });
           }
         }
       }
 
       // Type-check the fields that map to declared columns.
       for (const [field, fieldValue] of Object.entries(value)) {
-        const colDef = table.columns[field];
+        const colDef = columnOf(field);
         if (!colDef) continue; // id / FK — not schema-typed
         const typeErr = validateFieldType(colDef, field, fieldValue);
         if (typeErr) errors.push({ path: `${op.path}/${field}`, message: typeErr });
@@ -1179,7 +1248,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
     // Field-level replace: /<coll>/<id>/field
     if (op.op === "replace" && parts.length === 3) {
       const field = parts[2]!;
-      const colDef = table.columns[field];
+      const colDef = columnOf(field);
       if (!colDef) {
         errors.push({ path: op.path, message: `Unknown field: ${field}` });
         continue;
@@ -1256,12 +1325,32 @@ function closeRow(db: any, table: ResolvedTable, id: string, ts: string = now())
   return ts;
 }
 
-function insertRootRow(db: any, table: ResolvedTable, row: any, ts: string) {
-  const cols = ["id", ...Object.keys(table.columns)];
+/**
+ * Insert one version of a row -- a new row, a root row, or the next version of
+ * a temporal one: its id, its parent key, its columns, and on a temporal
+ * table `valid_from = ts`. The one row writer: the three it replaces had
+ * drifted, and the root's had lost the parent key (v0.5.0 review #5).
+ */
+function insertRow(db: any, table: ResolvedTable, row: any, ts: string) {
+  const cols = ["id"];
+  if (table.parent) cols.push(table.parent.fkColumn);
+  cols.push(...Object.keys(table.columns));
   if (table.temporal) cols.push("valid_from");
-  const vals = cols.map((c) => c === "valid_from" ? ts : encodeValue(table, c, row[c]));
-  const placeholders = cols.map(() => "?").join(", ");
-  db.run(`INSERT INTO ${table.name} (${cols.join(", ")}) VALUES (${placeholders})`, vals);
+  const vals = cols.map((c) => (c === "valid_from" ? ts : encodeValue(table, c, row[c])));
+  db.run(`INSERT INTO ${table.name} (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`, vals);
+}
+
+/** An error the writer is answered with: `code` is its wire code. */
+function refuse(code: number, message: string): never {
+  throw Object.assign(new Error(message), { code });
+}
+
+/** SQLite's own error, with the fix when the fix is a call the app left out. */
+function named(err: any): any {
+  if (typeof err?.message === "string" && /no such table/.test(err.message) && !/createTables/.test(err.message)) {
+    err.message += " -- call createTables(db, schema) before the first open";
+  }
+  return err;
 }
 
 function insertCollectionRow(
@@ -1274,7 +1363,15 @@ function insertCollectionRow(
   row: Record<string, unknown>,
   ts: string,
 ): any {
+  // An add names a new row. On a temporal table the key is (id, valid_from),
+  // so an add of a live id would insert a second live version of it (and on a
+  // plain table fail UNIQUE as a 500): refuse it, in any document's scope.
+  const live = table.temporal ? `current_${table.name}` : table.name;
+  if (db.query(`SELECT 1 FROM ${live} WHERE id = ?`).get(id)) {
+    refuse(409, `Row already exists: ${joinPath(table.docKey, id)} -- replace it, or add to ${joinPath(table.docKey, "-")} for a new id`);
+  }
   const fullRow: any = { id, ...row };
+  fullRow.id = id;   // the path names the row, whatever the value says
   if (table.temporal) { fullRow.valid_from = ts; fullRow.valid_to = null; }
 
   // Resolve FK column
@@ -1293,37 +1390,11 @@ function insertCollectionRow(
     }
   }
 
-  const cols = ["id"];
-  if (table.parent) cols.push(table.parent.fkColumn);
-  cols.push(...Object.keys(table.columns));
-  if (table.temporal) cols.push("valid_from");
-
-  const vals = cols.map((c) => {
-    if (c === "valid_from") return ts;
-    return encodeValue(table, c, fullRow[c]);
-  });
-
-  const placeholders = cols.map(() => "?").join(", ");
-  db.run(`INSERT INTO ${table.name} (${cols.join(", ")}) VALUES (${placeholders})`, vals);
+  insertRow(db, table, fullRow, ts);
 
   // Decode for in-memory representation
   decodeRow(table, fullRow);
   return fullRow;
-}
-
-function reinsertRow(db: any, table: ResolvedTable, id: string, row: any, ts: string) {
-  const cols = ["id"];
-  if (table.parent) cols.push(table.parent.fkColumn);
-  cols.push(...Object.keys(table.columns));
-  if (table.temporal) cols.push("valid_from");
-
-  const vals = cols.map((c) => {
-    if (c === "valid_from") return ts;
-    return encodeValue(table, c, row[c]);
-  });
-
-  const placeholders = cols.map(() => "?").join(", ");
-  db.run(`INSERT INTO ${table.name} (${cols.join(", ")}) VALUES (${placeholders})`, vals);
 }
 
 /**
@@ -1361,9 +1432,7 @@ function updateRow(db: any, table: ResolvedTable, id: string, row: any) {
 
 /** Throw unless `id` is a row this doc actually holds. */
 function assertRowInScope(doc: any, collKey: string, id: string): void {
-  if (doc[collKey]?.[id] == null) {
-    throw new Error(`Row not found: ${collKey}/${id}`);
-  }
+  if (doc[collKey]?.[id] == null) refuse(404, `Row not found: ${collKey}/${id}`);
 }
 
 /**
@@ -1382,7 +1451,7 @@ function assertParentInScope(
   if (!parent || parent.collection === def.root) return;
   const fk = row?.[parent.fkColumn];
   if (fk == null || doc[parent.collection]?.[String(fk)] == null) {
-    throw new Error(`Row not found: ${parent.collection}/${fk ?? ""}`);
+    refuse(404, `Row not found: ${parent.collection}/${fk ?? ""}`);
   }
 }
 
@@ -1403,7 +1472,7 @@ function removeRow(
     db.run(`DELETE FROM ${table.name} WHERE id = ?`, [id]);
   }
   delete doc[collKey][id];
-  ops.push({ op: "remove", path: `/${collKey}/${id}` });
+  ops.push({ op: "remove", path: joinPath(collKey, id) });
 
   // Cascade via parent relationship (children)
   for (const childKey of table.children) {
@@ -1442,7 +1511,9 @@ function encodeValue(table: ResolvedTable, col: string, value: unknown): any {
   const def = table.columns[col];
   if (!def) return value ?? null;
 
-  if (def.type === "json" && value != null && typeof value !== "string") {
+  // Every json value is stored as JSON, strings included: a string stored raw
+  // came back from a cold read parsed ("123" as 123, "true" as true).
+  if (def.type === "json" && value != null) {
     return JSON.stringify(value);
   }
   if (def.type === "boolean") {
@@ -1454,7 +1525,7 @@ function encodeValue(table: ResolvedTable, col: string, value: unknown): any {
 function decodeRow(table: ResolvedTable, row: any) {
   for (const [col, def] of Object.entries(table.columns)) {
     if (def.type === "json" && typeof row[col] === "string") {
-      try { row[col] = JSON.parse(row[col]); } catch {}
+      try { row[col] = JSON.parse(row[col]); } catch { /* a string an earlier release stored raw: keep it */ }
     }
     if (def.type === "boolean" && row[col] != null) {
       row[col] = !!row[col];

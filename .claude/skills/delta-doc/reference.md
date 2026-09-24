@@ -26,13 +26,13 @@ await applySql(pool, generateSql(schema, docs));   // your tables
 **CLI** (docker-entrypoint-initdb.d or a migration tool owns the DB):
 
 ```bash
-bunx delta init init_db --with-auth
-bunx delta sql ./types.ts --out init_db/003-tables.sql
+bunx @blueshed/delta init init_db --with-auth
+bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql
 ```
 
 `init` copies `001a-001g-*.sql` (and optionally `002-users.sql` from auth-jwt) into your directory. `sql` runs the codegen. Everything is idempotent.
 
-**Vendor-first.** The framework SQL is copied into your `init_db/`, not read from `node_modules` at runtime — shadcn/ui for database schemas. The files are explicit, tracked in git and yours to read; `bunx delta init <dir> --upgrade` replaces them with `.bak` backups and tells you what changed (run it after upgrading delta: 0.6.0 added `001g-delta-ledger.sql`); your own `setup.ts` or `docker-entrypoint-initdb.d` walks `init_db/` in alphabetical order, with no hidden imports. Only the SQL is vendored; the TypeScript is imported as usual. `applyFramework(pool)` applies the same files programmatically.
+**Vendor-first.** The framework SQL is copied into your `init_db/`, not read from `node_modules` at runtime — shadcn/ui for database schemas. The files are explicit, tracked in git and yours to read; `bunx @blueshed/delta init <dir> --upgrade` replaces them with `.bak` backups and tells you what changed (run it after upgrading delta: 0.6.0 added `001g-delta-ledger.sql`); your own `setup.ts` or `docker-entrypoint-initdb.d` walks `init_db/` in alphabetical order, with no hidden imports. Only the SQL is vendored; the TypeScript is imported as usual. `applyFramework(pool)` applies the same files programmatically.
 
 **`docker-entrypoint-initdb.d`** — the cleanest setup for a fresh volume: mount your `init_db/` into the Postgres image and let it apply the SQL on first start. No boot-time application code.
 
@@ -55,6 +55,54 @@ volumes:
 
 Postgres applies `.sql` files in the mounted dir alphabetically on the first boot against an empty data volume. Subsequent boots skip. Re-run `docker compose down -v` to start fresh.
 
+## Quick start (SQLite backend)
+
+For list-of-typed-records data in one process: a schema, validation (400s for unknown fields,
+wrong types and missing required ones), temporal history and the ledger, with no database server.
+
+```ts
+// server.ts
+import { Database } from "bun:sqlite";
+import index from "./index.html";
+import { createWs } from "@blueshed/delta/server";
+import { defineSchema, defineDoc, createTables, registerDocs } from "@blueshed/delta/sqlite";
+
+export const schema = defineSchema({
+  lists: { columns: { title: "text?" } },
+  todos: {
+    parent: "lists",                               // → the key column lists_id
+    columns: { text: "text", done: { type: "boolean", default: false } },
+  },
+});
+export const listDoc = defineDoc("list:", { root: "lists", include: ["todos"], implied: true });
+
+const db = new Database("app.db");
+createTables(db, schema);                          // before the first open: CREATE TABLE IF NOT EXISTS
+const ws = createWs();
+registerDocs(ws, db, schema, [listDoc]);           // , customDocs?, { ledger: true } for undo
+
+const server = Bun.serve({ routes: { "/": index, [ws.path]: ws.upgrade }, websocket: ws.websocket });
+ws.setServer(server);
+```
+
+```ts
+// client — the same client as every backend
+const doc = openDoc<{ lists: List; todos: Record<string, Todo> }>("list:groceries");
+// open → { lists: { id: "groceries", title: null }, todos: {} }
+await doc.send([{ op: "add", path: "/todos/-", value: { text: "milk" } }]);   // echo: add /todos/<uuid>
+```
+
+What is different from Postgres (the full list is SKILL.md → *Backends side by side*):
+
+- **A SQLite document is one root row and its children.** `defineDoc("list:", { root: "lists", … })` opened as `list:groceries` is the `lists` row `groceries`, its `todos`, and their children. There is **no list mode**: `defineDoc("todos:", { root: "todos" })` opened as `todos:` looks for the row `id = ""` and answers 404, saying so. Put the rows under a root row.
+- **The root row** must exist before the document opens — seed it with SQL, or declare the document `implied: true` and its first write makes it (*Implied documents*, below).
+- **`createTables(db, schema)` before the first open.** A missing table's error says so. `migrateSchema(db, schema)` adds columns a later schema declares.
+- **Ids are strings.** `add /todos/-` mints a uuid; a client-chosen id (`/todos/<id>`) works too. `add` of an id that exists is a 409.
+- **Scope** reads the doc name with `":docId"` only (see *`scope` syntax*); a Postgres binding such as `":id"` throws at `registerDocs`.
+- **No auth.** `registerDocs` has no gate: every socket may open every document of a prefix. Keep per-user data out of a shared SQLite backend, or put it behind Postgres.
+- **One process per file**: the backend caches documents in memory, and a second process would not hear the first's writes.
+- **Fan-out**: a write reaches every open document that holds the row (*Fan-out*, below).
+
 ## Quick start (Postgres backend)
 
 ```ts
@@ -74,36 +122,51 @@ const ws = createWs();
 const auth = jwtAuth({ pool, secret: process.env.JWT_SECRET! });
 wireAuth(ws, auth);
 
+// With auth, say who owns each document: its name is the channel its writes go out on.
 registerDocType(
-  docTypeFromDef(defineDoc("items:", { root: "items", include: [] }), pool, { auth })
+  docTypeFromDef(defineDoc("items:", { root: "items", include: [], scope: { owner_id: ":id" } }), pool, {
+    auth,
+    owns: (user, docName) => docName === `items:${user.id}`,   // anyone else: 404
+  })
 );
 
-await createDocListener(ws, pool, { auth });
+const listener = await createDocListener(ws, pool, { auth });
 
 const server = Bun.serve({
   routes: { [ws.path]: ws.upgrade },
   websocket: ws.websocket,
 });
 ws.setServer(server);   // REQUIRED — without it ws.publish() is a no-op and broadcasts never reach clients
+
+// Shutdown (a test's afterAll, a script's end): the listener holds a pool
+// client for LISTEN, so pool.end() waits on it until it is destroyed.
+await listener.destroy();
+await pool.end();
 ```
+
+`bun add pg` and, to type-check, `bun add -d @types/pg` — delta ships TypeScript source, so `skipLibCheck` does not cover its `pg` imports. Ids on Postgres are BIGINTs from `seq_<table>`: create rows with `add /<coll>/-` (a client-chosen id that is not a number is a 400 that says so), and expect ids back as numbers.
 
 ```tsx
 // client.tsx
 import { provide, effect } from "@blueshed/railroad";
 import { connectWs, WS, openDoc, call, DeltaError } from "@blueshed/delta/client";
 
-provide(WS, connectWs("/ws"));
+// Sign in on EVERY connect -- the first and each reconnect -- before any doc
+// opens or re-opens. `onConnect` runs first and everything else waits for it.
+// (An `await call("authenticate")` made once is not enough: a reconnect
+// re-opens every doc on a new, unauthenticated socket, they 401 and stop.)
+let signedIn!: (user: User) => void;
+const me = new Promise<User>((resolve) => (signedIn = resolve));
+provide(WS, connectWs("/ws", {
+  onConnect: async (ws) => signedIn(await call<User>("authenticate", { token: localStorage.token }, ws)),
+}));
 
-// Await authenticate BEFORE openDoc — an open sent on an unauthenticated
-// connection races ahead of auth and is rejected with 401.
-await call("authenticate", { token: localStorage.token });
-
-const items = openDoc<{ items: Record<string, Item> }>("items:");
+const items = openDoc<{ items: Record<string, Item> }>(`items:${(await me).id}`);
 effect(() => console.log(items.data.get()));
 
 try {
   await items.send([
-    { op: "add", path: "/items/-", value: { name: "hello", value: 1 } },
+    { op: "add", path: "/items/-", value: { name: "hello", value: 1 } },   // the id comes back in the echo
   ]);
 } catch (err) {
   if (DeltaError.isDeltaError(err)) console.warn(`${err.code}: ${err.message}`);
@@ -114,29 +177,26 @@ try {
 await call("logout");
 ```
 
-**Session restore** — the client above assumes `localStorage.token` is set. For the full restore-on-load flow (present everywhere a real app ships), wrap bootstrap in a check:
+**Session restore** — the client above assumes `localStorage.token` is set. For the full restore-on-load flow (present everywhere a real app ships), read the token in the hook, so every connect signs in with the one stored now:
 
 ```ts
-async function bootstrap() {
-  const token = localStorage.getItem("token");
-  if (!token) return showLogin();
-  try {
-    const user = await call<User>("authenticate", { token });
-    showApp(user);
-  } catch {
-    localStorage.removeItem("token");  // stale or revoked
-    showLogin();
-  }
-}
+provide(WS, connectWs("/ws", {
+  onConnect: async (ws) => {
+    const token = localStorage.getItem("token");
+    if (!token) return showLogin();
+    try { showApp(await call<User>("authenticate", { token }, ws)); }   // on every connect: showApp must be idempotent
+    catch { localStorage.removeItem("token"); showLogin(); }           // stale or revoked
+  },
+}));
 
 async function login(email: string, password: string) {
   const user = await call<User & { token: string }>("login", { email, password });
-  localStorage.setItem("token", user.token);
+  localStorage.setItem("token", user.token);   // the next reconnect signs in with it
   showApp(user);
 }
 ```
 
-Token never goes in the WS URL — it's always in-band via `call("authenticate", ...)`.
+Token never goes in the WS URL — it's always in-band via `call("authenticate", ...)`. Cookie / `Authorization` auth at upgrade (`onUpgrade`) needs no hook: every new socket arrives signed in.
 
 ## Contracts
 
@@ -151,6 +211,8 @@ interface DocType<C = any, I = unknown> {
     Promise<{ version: number; ops?: any[]; inverse?: any[]; entry?: number | null }>;
   openAt?(ctx: C, docName: string, at: string, identity?: I):
     Promise<any | null>;
+  // With auth: may this identity open, write through and hear docName? False → 404.
+  owns?(identity: I, docName: string): boolean | Promise<boolean>;
 }
 
 // Writer — given to apply() when the listener keeps a ledger (`ledger: true`).
@@ -163,7 +225,7 @@ interface DocDef {
   prefix: string;
   root: string;                      // main collection key
   include: string[];                 // additional collections in the lens
-  scope: Record<string, string>;     // filter map: "<coll>.<col>" → "id" | literal
+  scope: Record<string, string>;     // root column → ":id" / the DSL (Postgres), ":docId" (SQLite), or a literal
   implied?: boolean;                 // SQLite: opens empty until its first write makes the root row
 }
 
@@ -199,6 +261,9 @@ const schema = defineSchema({
 
 // Shorthand types: "text" | "integer" | "real" | "boolean" | "json" | "timestamptz"
 // Append "?" for nullable: "text?", "integer?"
+// A column that is neither nullable nor has a default is REQUIRED: an add that
+// leaves it out is a 400 "Required field missing" (SQLite and Postgres). Give it
+// a default ({ type: "boolean", default: false }) or make it nullable.
 
 const itemsDoc = defineDoc("items:", { root: "items", include: [] });
 
@@ -239,7 +304,7 @@ So on SQLite a Postgres-style `scope: { user_id: ":id" }` does **not** read from
 
 ## Doc patterns
 
-**List doc** — prefix matches the whole name; opens every row:
+**List doc** (Postgres only; SQLite has no list mode) — prefix matches the whole name; opens every row:
 
 ```ts
 defineDoc("items:", { root: "items", include: [] });
@@ -281,7 +346,7 @@ defineDoc("venue:", {
 
 **Per-user list isolation** — each user sees only their own rows. The most common multi-tenant shape.
 
-Two parts: (1) scope the generic doc by a user-id carried in the doc name, (2) wrap `docTypeFromDef` with an identity check that the doc-name id matches the authenticated identity. The wrap also injects the owner id on `add` so the user can't forge other users' rows.
+Two parts: (1) scope the generic doc by a user-id carried in the doc name, (2) tell `docTypeFromDef` who owns each name. A document's name is the channel its writes are broadcast on — whoever has it open hears every write made through it, **whatever RLS lets them read** — so the name, not RLS, is what keeps one user's rows off another user's socket. `owns` is that check: the listener asks it before `open`, `delta`, `open_at` and `history`, and before an `undo` or `redo` writes to the entry's document, and answers 404 when it says no. With `auth`, `docTypeFromDef` throws unless it is given `owns` or `shared: true`.
 
 ```ts
 // types.ts
@@ -302,50 +367,25 @@ export const docs = [
 ```
 
 ```ts
-// server.ts — register a scoped-per-user DocType
-import { defineDoc, docTypeFromDef, registerDocType, type DocType } from "@blueshed/delta/postgres";
+// server.ts
+import { docTypeFromDef, registerDocType } from "@blueshed/delta/postgres";
 import type { User } from "@blueshed/delta/auth-jwt";
-import type { DeltaOp } from "@blueshed/delta/core";
 
-const generic = docTypeFromDef(
-  defineDoc("todos:", { root: "todos", include: [], scope: { owner_id: ":id" } }),
-  pool,
-  { auth },
-);
-
-const myTodos: DocType<{ userId: number }, User> = {
-  prefix: "todos:",
-  parse(name) {
-    const m = name.match(/^todos:(\d+)$/);
-    return m ? { userId: Number(m[1]) } : null;
-  },
-  async open(ctx, name, msg, identity) {
-    if (!identity || Number(identity.id) !== ctx.userId) return null; // 404, not 403
-    return generic.open({}, name, msg, identity);
-  },
-  async apply(ctx, name, ops, identity) {
-    if (!identity || Number(identity.id) !== ctx.userId) {
-      throw Object.assign(new Error("Forbidden"), { code: 403 });
-    }
-    // Inject owner_id on adds so the user can't forge rows for someone else.
-    const safeOps: DeltaOp[] = ops.map((op) =>
-      op.op === "add" && op.path === "/todos/-"
-        ? { ...op, value: { ...(op.value as object), owner_id: ctx.userId } }
-        : op,
-    );
-    return generic.apply({}, name, safeOps, identity);
-  },
-};
-registerDocType(myTodos);
+registerDocType(docTypeFromDef<User>(docs[0], pool, {
+  auth,
+  owns: (user, docName) => docName === `todos:${user.id}`,
+}));
 ```
 
 ```tsx
-// client — each user opens their own stream, channel isolation is automatic
+// client — each user opens their own name; another user's is a 404
 const me = (await call<User>("authenticate", { token })).id;
 const myTodos = openDoc<{ todos: Record<string, Todo> }>(`todos:${me}`);
 ```
 
-*Why inject `owner_id` AND have RLS `WITH CHECK`?* Two layers, each catches different failures cheaply. The policy is the authoritative guarantee — even a buggy server can't leak across users because the database refuses. The injection is an ergonomic wrapper: clients don't need to send `owner_id`, and a forged payload fails locally with a clear `Forbidden` rather than a round-trip to Postgres with a cryptic RLS error. Defence in depth, plus cleaner error surface.
+An `add /todos/-` on this list-mode doc takes `owner_id` from the scope (the doc name), not from the value, so a user cannot forge a row for someone else. RLS (`WITH CHECK`, below) is the second layer: even a buggy server cannot write across users, because the database refuses.
+
+**`shared: true`** says every identity that passes the gate may open every document of the prefix and hear every write to it — a team board, a public room. Never put `shared` on a table whose rows RLS hides from some of its readers: they would see those rows arrive on the channel. A custom `DocType` gets the same check by defining `owns`; one that leaves it out is trusted to refuse in its own `open`.
 
 ### Custom read docs — `defineCustomDoc`
 
@@ -397,7 +437,7 @@ const dashboard = defineCustomDoc<{ userId: string }>("dashboard:", {
 - **No relevance gate.** Unlike membership's `matches`, recompute re-evaluates on *any* write to *any* watched collection, for *every* subscriber of *every* doc under the prefix — there's no per-doc filter. Cost ≈ (subscribers under the prefix) × (writes to any watched collection); it is **not** cached. Keep `watch` tight and `recompute` cheap.
 - The recomputed doc reaches each client as a single **root-replace** op — see below.
 
-**Root-replace — the client-side primitive recompute rides on.** `applyOps` treats an empty/root path (`""` or `"/"`) as "swap or clear the whole doc, in place":
+**Root-replace — the client-side primitive recompute rides on.** `applyOps` treats the empty path `""` as "swap or clear the whole doc, in place" (`"/"` is the member named `""`, per RFC 6901):
 
 ```ts
 applyOps(doc, [{ op: "replace", path: "", value: next }]);  // object↔object / array↔array
@@ -488,7 +528,7 @@ const sessionAuth: DeltaAuth<{ id: number }> = {
 ```ts
 wireAuth(ws, auth);                            // auth.actions → WS "call" handlers
 ws.upgrade = upgradeWithAuth(ws, auth);        // auth.onUpgrade → HTTP handshake
-docTypeFromDef(def, pool, { auth });           // queries → withAppAuth (RLS session)
+docTypeFromDef(def, pool, { auth, owns });     // queries → *_as (RLS session); owns → who may have the doc
 createDocListener(ws, pool, { auth });         // gate every open / delta
 ```
 
@@ -509,6 +549,8 @@ localStorage.removeItem("token");
 ```
 
 The same teardown happens on an identity switch (a fresh `authenticate` after a `logout`): the old subscriptions are gone, so you must re-`openDoc` the docs the new user should see — their streams won't silently carry over from the previous identity.
+
+**A token that runs out.** `jwtAuth` keeps the token's `exp` with the identity. At the socket's first request after it, the gate answers 401 `Session expired: authenticate again` and drops the socket's subscriptions, as `logout` does. The socket stays connected, so `onConnect` does not run again: on that 401, `authenticate` with a fresh token and re-open the documents. Until that request the socket still hears the documents it has open (nothing checks the clock between requests).
 
 ## RLS with `app.user_id`
 
@@ -559,11 +601,13 @@ const appPool   = new Pool({ connectionString: process.env.PG_APP_URL });    // 
 const auth = jwtAuth({ pool: adminPool, secret: process.env.JWT_SECRET! });
 
 // Doc queries use the app pool so RLS policies bind.
-registerDocType(docTypeFromDef(def, appPool, { auth }));
+registerDocType(docTypeFromDef(def, appPool, { auth, owns }));
 await createDocListener(ws, appPool, { auth });
 ```
 
 Under this setup `withAppAuth(appPool, ...)` sets `app.user_id` as the `app` role, and the policy `USING (owner_id = current_setting('app.user_id')::bigint)` filters without the role bypassing it.
+
+**RLS filters reads, not the channel.** A write is broadcast on the channel named after the document it went through, to every socket that opened that name. The listener reads the change log with no identity, so a policy never sees the broadcast. One name that several identities open, on a table whose rows RLS hides from some of them, hands each of them every row written through it. So: one name per owner, and `owns` to check it (*Per-user list isolation*, above). `tests/postgres-rls.test.ts` pins this under a `NOSUPERUSER` role.
 
 **Error surfaces leak names, not values.** `_delta_resolve_scope`'s fail-fast raises (unknown doc prefix, unknown root collection, invalid scope key) include the offending identifier in the error message, and `createDocListener` propagates those messages back to the client as `{error: {code: 500, message: ...}}`. That's deliberate — it's what makes delta easy to debug from a Claude session reading the error. The side-effect is a tenant with direct WS access can enumerate registered doc prefixes / collection columns by probing bad inputs. Two rules to stay clean: (1) don't encode tenant-sensitive identifiers in doc-name prefixes (`tenant-42:` bad; `boards:42` fine — the id is already per-identity-gated); (2) if your WS server is public-facing and column names are sensitive, scrub the `500` branch in `createDocListener` before sending to the wire.
 
@@ -642,22 +686,35 @@ If the project has railroad in deps, the canonical client recipe changes — dro
 import { provide, list, when } from "@blueshed/railroad";
 import { connectWs, WS, openDoc } from "@blueshed/delta/client";
 
-interface Message { author: string; text: string; at: string }
+interface Message { id: string; author: string; text: string; at: string }
 interface ChatDoc { messages: Record<string, Message> }
 
 provide(WS, connectWs("/ws"));
 const doc = openDoc<ChatDoc>("chat:room");
 
+const say = (text: string) =>
+  doc.send([{ op: "add", path: "/messages/-", value: { author: "me", text, at: new Date().toISOString() } }]);
+
+function onSubmit(e: SubmitEvent) {
+  e.preventDefault();
+  const input = (e.currentTarget as HTMLFormElement).elements.namedItem("text") as HTMLInputElement;
+  if (input.value) say(input.value);   // send only: the echo renders it
+  input.value = "";
+}
+
 function Chat() {
   const messages = doc.data.map((d) => d ? Object.values(d.messages) : []);
   return when(doc.data, () => (
-    <div id="log">
-      {list(messages, (m) => m.at + m.author, (m$) => (
-        <div class="msg">
-          <span class="author">{m$.map((m) => m.author)}</span>
-          <span class="text">{m$.map((m) => m.text)}</span>
-        </div>
-      ))}
+    <div>
+      <div id="log">
+        {list(messages, (m) => String(m.id), (m$) => (
+          <div class="msg">
+            <span class="author">{m$.map((m) => m.author)}</span>
+            <span class="text">{m$.map((m) => m.text)}</span>
+          </div>
+        ))}
+      </div>
+      <form onsubmit={onSubmit}><input name="text" autocomplete="off" /> <button>Send</button></form>
     </div>
   ), () => <div>connecting…</div>);
 }
@@ -682,7 +739,7 @@ async function Board({ id }: { id: string }) {
 
 Awaiting *before* any `openDoc` and opening synchronously in the thunk is the whole rule. If you must open post-await, keep the handle and `close()` it yourself.
 
-Worked example: [`examples/kanban/`](../../../examples/kanban/) (boards → columns → cards, real-time sync via Postgres). The `serve.ts` + `client.tsx` files in that directory are the canonical railroad UX — a fullstack page using exactly the pattern above. The sibling `server.ts` + `run.ts` files are a headless three-client demo printing op transcripts to the terminal.
+Worked example: `examples/kanban/` in the repository (github.com/blueshed/delta; not in the npm package) — boards → columns → cards, real-time sync via Postgres. The `serve.ts` + `client.tsx` files in that directory are the canonical railroad UX — a fullstack page using exactly the pattern above. The sibling `server.ts` + `run.ts` files are a headless three-client demo printing op transcripts to the terminal.
 
 ## The write loop — send, don't touch (no optimistic updates, no reloads)
 
@@ -693,17 +750,17 @@ Worked example: [`examples/kanban/`](../../../examples/kanban/) (boards → colu
 
 All three backends broadcast **row-level** ops: SQLite/Postgres rewrite field writes server-side, and the JSON-file backend normalizes at broadcast time (`/cards/5/title` goes out as a whole-row replace of `/cards/5`). A keyed railroad `list()` therefore always sees a fresh row reference when a row changes — its default `Object.is` equality just works. Only a *custom* stream that mutates row objects in place and `touch()`es needs railroad's `list(..., keyFn, render, { equals: () => false })` (railroad ≥ 0.10.1).
 
-The sender is just another subscriber receiving its own op back (the code calls these "echoes"). Two consequences trip up anyone arriving from REST/Firebase/optimistic-UI habits:
+The sender is just another subscriber receiving its own op back (the code calls these "echoes"). **`await doc.send(ops)` resolves once that echo has been applied to `doc.data`**, on every backend: the JSON file and SQLite broadcast before they answer, and Postgres answers first, so the client waits for the version its ack names. Two consequences trip up anyone arriving from REST/Firebase/optimistic-UI habits:
 
 **Don't optimistically update.** Do not mutate the DOM or push into your local collection right after `send`. The echo already does it — doing it yourself double-applies: an `add` shows the row twice, a `replace` counter you also bump locally lands at +2, a chat line appears once optimistically and again on echo. The send path and the render path are the same path; keep all rendering on the render path.
 
 ```ts
 // WRONG — double-applies when the op echoes back
 log.append(renderMessage(m));                                  // optimistic
-await doc.send([{ op: "add", path: `/messages/${id}`, value: m }]);
+await doc.send([{ op: "add", path: "/messages/-", value: m }]);
 
 // RIGHT — send only; onOps / doc.data render it when it echoes back
-await doc.send([{ op: "add", path: `/messages/${id}`, value: m }]);
+await doc.send([{ op: "add", path: "/messages/-", value: m }]);
 ```
 
 **A brute-force reload is never necessary — not after a write, not ever.** The framework issues exactly two full reads, both automatic, and a developer-issued one is always either redundant or actively harmful (it rebuilds the DOM and throws away the op-level precision the protocol gave you):
@@ -752,7 +809,7 @@ local.onPublish((channel, change) => redraw(channel, change));   // { doc, ops, 
 
 **Savepoints (SQLite).** The SQLite backend writes with `db.transaction()`, so a write made inside your own transaction becomes a savepoint: it rolls back alone when it fails, and with yours when you roll back. Three things stay outside your transaction: the backend's cache, its broadcasts, and the version numbers it has handed out.
 
-So a rollback after delta has written means **subscribers have already heard a change that did not happen**, and the backend's cache still holds it. Evicting is not enough: a subscriber still attached to an evicted document gets 404 "Doc not loaded" on its next `delta` (TODO #6), and with a ledger the version is taken again from what is left in the ledger, so the rolled-back version number is reused — a browser already at that `v` drops the real change as one it has. What to do:
+So a rollback after delta has written means **subscribers have already heard a change that did not happen**, and the backend's cache still holds it. Evicting is not enough: `evict(docName)` makes the backend read the document again from the tables the next time it needs it, but its subscribers still hold what they heard, and with a ledger the version is taken again from what is left in the ledger, so the rolled-back version number is reused — a browser already at that `v` drops the real change as one it has. What to do:
 
 - **Close every document the rolled-back write touched, and have every subscriber re-open it.** A re-open reads the tables and resets the subscriber's version from the snapshot's `_v`. In-process that is `close` then `open`; a browser re-opens every document when its socket reconnects, so dropping its connection does it. This is what eta's story harness does between cases.
 - Better still, keep writes that may roll back away from documents anyone is watching.
@@ -783,12 +840,16 @@ await createDocListener(ws, pool, { auth, ledger: true, who: (identity) => Strin
 **The actions.**
 
 ```ts
-{ action: "undo",    cursor? }            // → { doc, ops, inverse, version, entry } | null when there is nothing to undo
-{ action: "redo",    cursor? }            // → the same, or null
+{ action: "undo",    cursor?, dry?, entry? }  // → { doc, ops, inverse, version, entry } | { doc, ops: [], conflict, … } | null when there is nothing to undo
+{ action: "redo",    cursor?, dry?, entry? }  // → the same
 { action: "history", doc, cursor?, limit? }  // → [{ id, doc, version, ops, inverse, at, undoable, mine }], newest first, limit 50
 ```
 
-Undo walks back what the cursor wrote, newest first, across documents; redo walks it forward; a fresh write by the cursor ends what could be redone. Each walk is itself a write through the same path — validated, recorded (linked to the entry it walked), broadcast — so every subscriber sees an undo as an ordinary change. A removed row comes back under its own id, a cascaded remove comes back parent first, and an undo reaches a document nobody has open (SQLite loads it for the walk and leaves it closed). `history` goes to whoever may open the document (Postgres checks `open` first); each entry says `mine` — whether the asker's cursor wrote it — never who did, never a cursor. On Postgres with `auth`, `undo` and `redo` pass the gate first (401 without an identity) and use the `_as` forms so RLS applies.
+Undo walks back what the cursor wrote, newest first, across documents; redo walks it forward; a fresh write by the cursor ends what could be redone. Each walk is itself a write through the same path — validated, recorded (linked to the entry it walked), broadcast — so every subscriber sees an undo as an ordinary change.
+
+**A walk sets back only what its entry changed, and only where the document still holds what the entry left.** A field someone else has written since is a **conflict**: the walk changes nothing and answers `conflict: [paths]` (a row it made and someone has edited is not removed; a row it removed and someone has put back is not added). Each row is walked once, by the entry's net change: a row one batch made and then changed is removed, one it removed and made again gets its fields back. The walk is recorded all the same — an entry with no ops that is never redone — so the next undo goes on to the entry before it; a walk the document refuses (the row's parent is gone) is recorded the same way. `null` still means nothing to walk.
+
+**Asking first.** `dry: true` answers what the walk would do — `{ doc, entry, ops, conflict? }` — and walks nothing, so a caller can ask whoever owns the document (a deadline, a permission) before it walks. `entry: <id>` then walks only if that is still the cursor's next entry, and answers 409 if it is not. A removed row comes back under its own id, a cascaded remove comes back parent first, and an undo reaches a document nobody has open (SQLite loads it for the walk and leaves it closed). `history` goes to whoever may open the document (Postgres checks `open` first); each entry says `mine` — whether the asker's cursor wrote it — never who did, never a cursor. On Postgres with `auth`, `undo` and `redo` pass the gate first (401 without an identity) and use the `_as` forms so RLS applies.
 
 **The inverse without a ledger (SQLite).** A `delta` message with `inverse: true` is answered `{ ack: true, ops, inverse }`: the ops as applied and what would take them back, read from the document as it was. For a writer that keeps its own history. `inverseOf(before, applied)` is exported from `@blueshed/delta/sqlite`: an add is removed, a remove added back, a replace replaced by its old self, in reverse order, except that a run of removes comes back parent first; temporal storage columns are left out. On Postgres the inverse comes with the ledger.
 
@@ -852,9 +913,10 @@ Apply `src/sql/001a-001g-*.sql` alphabetically to every database — idempotent.
 | `delta_open_at_as(user_id, doc_name, timestamptz)` | 1-RTT variant of `delta_open_at` |
 | `delta_apply_as(user_id, doc_name, ops jsonb)` | 1-RTT variant of `delta_apply` |
 | `delta_apply_logged(doc_name, ops, who, cursor, undoable?, undoes?)` | `delta_apply` with its ledger entry (`_delta_ledger`) in one transaction; returns `{ version, ops, inverse, entry }` (001g) |
-| `delta_undo(cursor, who?)` / `delta_redo(cursor, who?)` | walks the cursor's next entry through `delta_apply_logged`; returns its result with `doc`, or NULL |
+| `delta_walk(cursor, who, back, dry?, entry?)` | the cursor's next entry (`back`: to undo, else to redo), walked by its guarded plan (`_delta_walk_plan`) through `delta_apply_logged`; returns its result with `doc`, `{ doc, ops: [], conflict }` on a conflict, the plan with `dry`, or NULL |
+| `delta_undo(cursor, who?)` / `delta_redo(cursor, who?)` | `delta_walk` back / forward |
 | `delta_history(doc_name, cursor, limit?)` | the newest entries, each with `mine`, never who or a cursor |
-| `delta_apply_logged_as` / `delta_undo_as` / `delta_redo_as` | the same, with `app.user_id` set first for RLS |
+| `delta_apply_logged_as` / `delta_walk_as` / `delta_undo_as` / `delta_redo_as` | the same, with `app.user_id` set first for RLS |
 
 The `*_as` variants collapse the four identity-scoping round-trips (`BEGIN` → `set_config` → call → `COMMIT`) into one `SELECT`. The implicit transaction around the SELECT scopes `set_config(..., true)` to that statement, and RLS policies read it back exactly the same way. `docTypeFromDef({ auth })` uses them automatically — there's no opt-in. For arbitrary queries under an identity (escape hatch), `withAppAuth(pool, sqlArg, fn)` still exists and pays the extra RTTs.
 
@@ -891,37 +953,41 @@ Collections register themselves via `_delta_collections` (`columns_def`, `parent
 Runtime — talk to a running server:
 
 ```bash
-bunx delta open  <docName>             # one-shot open + print + exit
-bunx delta watch <docName>             # stream broadcast ops live
-bunx delta delta <docName> <opsJSON>   # apply ops
-bunx delta call  <method>  [paramsJSON]  # invoke RPC
+bunx @blueshed/delta open  <docName>             # one-shot open + print + exit
+bunx @blueshed/delta watch <docName>             # stream broadcast ops live (never exits)
+bunx @blueshed/delta delta <docName> <opsJSON>   # apply ops
+bunx @blueshed/delta call  <method>  [paramsJSON]  # invoke RPC
 ```
+
+Always the scoped name: `bunx delta` without a local install runs an unrelated npm package called `delta`.
 
 URL resolution: `--url` → `DELTA_WS_URL` → `.delta` file in cwd → `ws://localhost:${PORT:-3100}/ws`.
 
 Build-time — Postgres only:
 
 ```bash
-bunx delta init init_db --with-auth                      # vendor framework SQL
-bunx delta sql ./types.ts --out init_db/003-tables.sql   # codegen tables from schema
+bunx @blueshed/delta init init_db --with-auth                      # vendor framework SQL
+bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql   # codegen tables from schema
 ```
 
 `init` copies `001a-001g-*.sql` (and optionally `002-users.sql` from auth-jwt) into the target directory; `--upgrade` replaces existing files with `.bak` backups. `sql` runs the codegen. Both are idempotent.
 
-Vendor Claude Code skills — copies `.claude/skills/*` from this package and from any sibling package in `node_modules` that ships skills (e.g. `@blueshed/railroad` ships `railroad` and `bun-route`) into the consumer's `.claude/skills/` so Claude Code's project-skill autodiscovery picks them up:
+Vendor Claude Code skills — copies `.claude/skills/*` from this package and from the `@blueshed/*` packages in `node_modules` (e.g. `@blueshed/railroad` ships `railroad` and `bun-route`) into the consumer's `.claude/skills/` so Claude Code's project-skill autodiscovery picks them up. A skill is instructions an agent follows, so another package's skills are copied only when your `package.json` names it: `"claudeSkills": ["@acme/widgets"]`. Any other package that ships skills is skipped, with a line that says so:
 
 ```bash
-bunx delta install-skills              # → ./.claude/skills/
-bunx delta install-skills --user       # → ~/.claude/skills/
-bunx delta install-skills --dry-run    # preview, touch nothing
+bunx @blueshed/delta install-skills              # → ./.claude/skills/
+bunx @blueshed/delta install-skills --user       # → ~/.claude/skills/
+bunx @blueshed/delta install-skills --dry-run    # preview, touch nothing
 ```
 
 Re-runs are idempotent: byte-identical destinations skip; locally edited copies are overwritten with a `.bak` backup. Re-run after upgrading `@blueshed/delta` (or any sibling that ships a skill) to pull in the latest skill text.
 
 ## Testing
 
+**In your app**, test through `createLocal()` (below) or a real `Bun.serve` on port 0 with `connectWs("ws://localhost:<port>/ws")`. The helpers below are this repository's own `tests/setup.ts`; they are not in the npm package, so copy what you need.
+
 ```ts
-// tests/setup.ts exports:
+// delta's tests/setup.ts (repository only):
 newPool()                      // → Pool from DELTA_TEST_PG_URL (defaults to localhost:5433)
 applyFramework(pool)           // runs 001*-delta-*.sql in order
 applyAuthJwt(pool)             // runs auth-jwt.sql (users + login/register)
@@ -963,7 +1029,22 @@ Two things to know when driving `@blueshed/delta/client` from a Bun test or scri
   const bobDoc   = openDoc<Board>("board:1", bob);
   ```
 
+- **Pass an absolute URL** (`connectWs("ws://localhost:3000/ws")`): outside a browser there is no page to resolve `"/ws"` against, and `connectWs` says so. No `location` shim is needed. An absolute `wss://` stays `wss://`.
 - **`wsClient.close()` suppresses the reconnect loop.** `connectWs` returns a reconnecting socket; without `close()`, it tries to come back forever after the server stops, keeping the process alive. Always call `close()` (it's idempotent) before tearing a server down.
+
+## Local development across repos
+
+To run an app against a checkout of delta (or railroad), install a **packed tarball**, not a
+`file:` or `bun link` dependency. A linked checkout brings its own
+`node_modules/@blueshed/railroad`, so the page loads two railroads, delta's `doc.data` is a
+signal the app's railroad does not know, and the page sits on "connecting…" with no error.
+
+```sh
+cd ../delta && bun pm pack && cd ../app && bun add ../delta/blueshed-delta-<version>.tgz
+```
+
+After an edit, pack again and `bun add` the tarball again: a plain `bun install` keeps the old
+tarball's contents. railroad's skill has the same recipe under *Local development across repos*.
 
 ## Wire-level protocol
 
@@ -986,6 +1067,17 @@ Server-initiated broadcasts (no id):
 | Op broadcast | `{ doc, ops: DeltaOp[], v? }` — `v` is the version after the change, where the backend versions |
 
 Every message is JSON. Clients use `doc.send(ops)` internally; the protocol is only relevant when writing a custom action handler.
+
+**Error codes** — `{ id, error: { code, message } }`, and `DeltaError.code` on the client, mean the same on every backend:
+
+| code | means | e.g. |
+|---|---|---|
+| 400 | the op is malformed | a path without a leading `/`, an unknown field, a required field left out, a non-numeric id on Postgres |
+| 401 | not signed in | an `auth` gate said no |
+| 403 | the document is read-only | custom, static and source docs; memory docs over a socket |
+| 404 | not there | the document, a row, a path; a document the identity does not `own` |
+| 409 | already there | `add` of a row id that exists |
+| 500 | the server's own failure | the message says what |
 
 ## Why delta
 

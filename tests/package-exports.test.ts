@@ -5,7 +5,7 @@
  * key. When `exports` is present, `main` is IGNORED, so the bare specifier
  * `import ... from "@blueshed/delta"` threw ERR_PACKAGE_PATH_NOT_EXPORTED and
  * those two fields actively misled — while being the first import anyone
- * writes (TODO.md #11).
+ * writes (v0.5.0 review #11).
  *
  * Asserting the JSON alone would be circular, so each subpath is resolved for
  * real: a temp package with a symlink to this repo, importing through the
@@ -49,6 +49,19 @@ describe("package exports", () => {
     const { code, stderr } = await importFrom("@blueshed/delta", "applyOps");
     expect(stderr).not.toContain("ERR_PACKAGE_PATH_NOT_EXPORTED");
     expect(code).toBe(0);
+  });
+
+  test("railroad is an optional peer: only the client imports it", async () => {
+    // A server that doesn't use delta's client needs no railroad, so nothing
+    // under src/server or src/core may import it (the logger is a copy).
+    expect(pkg.peerDependencies["@blueshed/railroad"]).toBeDefined();
+    expect(pkg.peerDependenciesMeta?.["@blueshed/railroad"]?.optional).toBe(true);
+    const glob = new Bun.Glob("src/{server,sql}/**/*.ts");
+    const root = new URL("..", import.meta.url).pathname;
+    for await (const f of glob.scan(root)) {
+      expect([f, (await Bun.file(root + f).text()).includes('from "@blueshed/railroad')]).toEqual([f, false]);
+    }
+    expect((await Bun.file(root + "src/core.ts").text()).includes("@blueshed/railroad")).toBe(false);
   });
 
   test('"." is declared and agrees with main/types', () => {

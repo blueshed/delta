@@ -129,29 +129,148 @@ RETURNS _delta_ledger AS $$
   )
   SELECT l.* FROM _delta_ledger l JOIN tips t ON t.id = l.id
   WHERE CASE WHEN p_back THEN t.depth % 2 = 0
-        ELSE t.depth % 2 = 1
+        ELSE t.depth % 2 = 1 AND l.undoable   -- a walk recorded as changing nothing is never redone
           AND l.id > COALESCE((SELECT MAX(id) FROM _delta_ledger WHERE cursor = p_cursor AND undoes IS NULL AND undoable), 0)
         END
   ORDER BY l.id DESC
   LIMIT 1;
 $$ LANGUAGE sql STABLE;
 
--- delta_undo / delta_redo: the cursor's next entry, walked through
--- delta_apply_logged and recorded as walking it. NULL when there is none.
--- Returns the write's result with the document it landed on.
-CREATE OR REPLACE FUNCTION _delta_walk(p_cursor TEXT, p_who TEXT, p_back BOOLEAN)
+-- JSON values the same, with JSON null and a missing value the same.
+CREATE OR REPLACE FUNCTION _delta_same(a JSONB, b JSONB)
+RETURNS BOOLEAN LANGUAGE sql IMMUTABLE AS $$
+  SELECT COALESCE(a, 'null'::jsonb) = COALESCE(b, 'null'::jsonb);
+$$;
+
+-- _delta_walk_plan: what walking an entry does to the document as it is now
+-- -- the rule of planWalk in src/server/ledger.ts. Only the fields the entry
+-- changed are set back, each guarded by what the entry left there: a row it
+-- changed gets back those fields if each still holds what it wrote; a row it
+-- made is removed if it is as it was left; a row it removed comes back if
+-- nobody has put one there. Each row is walked once, from what it was before
+-- the entry (every inverse op of a path carries it: an add or replace its
+-- value, a remove none) to what the entry left, so a row the entry touched
+-- twice is walked by its net change. A guard that fails is a conflict, by
+-- path, and then nothing is walked. Returns { ops } or { ops: [], conflict: [paths] }.
+CREATE OR REPLACE FUNCTION _delta_walk_plan(p_entry _delta_ledger)
 RETURNS JSONB AS $$
-DECLARE v_entry _delta_ledger;
+DECLARE
+  v_doc      JSONB := COALESCE(delta_open(p_entry.doc_name), '{}'::jsonb);
+  v_left     JSONB := '{}'::jsonb;   -- path -> what the entry left there (JSON null: it removed it)
+  v_before   JSONB := '{}'::jsonb;   -- path -> what it held before the entry (JSON null: nothing)
+  v_paths    TEXT[] := '{}';         -- the paths, in the order the inverse first names them
+  v_op       JSONB;
+  v_path     TEXT;
+  v_parts    TEXT[];
+  v_here     JSONB;
+  v_wrote    JSONB;
+  v_was      JSONB;
+  v_fields   TEXT[];
+  v_ops      JSONB := '[]'::jsonb;
+  v_conflict JSONB := '[]'::jsonb;
+BEGIN
+  FOR v_op IN SELECT * FROM jsonb_array_elements(p_entry.ops) LOOP
+    v_left := v_left || jsonb_build_object(v_op->>'path',
+      CASE WHEN v_op->>'op' = 'remove' THEN 'null'::jsonb ELSE v_op->'value' END);
+  END LOOP;
+  FOR v_op IN SELECT * FROM jsonb_array_elements(p_entry.inverse) LOOP
+    IF NOT v_before ? (v_op->>'path') THEN
+      v_paths := v_paths || (v_op->>'path');
+      v_before := v_before || jsonb_build_object(v_op->>'path', 'null'::jsonb);
+    END IF;
+    IF v_op->>'op' <> 'remove' AND COALESCE(v_op->'value', 'null'::jsonb) <> 'null'::jsonb THEN
+      v_before := v_before || jsonb_build_object(v_op->>'path', v_op->'value');
+    END IF;
+  END LOOP;
+  FOREACH v_path IN ARRAY v_paths LOOP
+    v_parts := _delta_split_path(v_path);
+    v_here := CASE WHEN array_length(v_parts, 1) = 1 THEN v_doc->v_parts[1] ELSE v_doc->v_parts[1]->v_parts[2] END;
+    IF v_here = 'null'::jsonb THEN v_here := NULL; END IF;
+    v_wrote := NULLIF(v_left->v_path, 'null'::jsonb);
+    v_was := NULLIF(v_before->v_path, 'null'::jsonb);
+    CONTINUE WHEN v_was IS NULL AND v_wrote IS NULL;   -- made and removed by the entry
+    IF v_was IS NULL THEN                               -- it made the row
+      IF v_here IS NULL OR EXISTS (
+        SELECT 1 FROM jsonb_each(v_wrote) w
+         WHERE w.key NOT IN ('valid_from', 'valid_to') AND NOT _delta_same(v_here->w.key, w.value)
+      ) THEN v_conflict := v_conflict || to_jsonb(v_path);
+      ELSE v_ops := v_ops || jsonb_build_array(jsonb_build_object('op', 'remove', 'path', v_path)); END IF;
+    ELSIF v_wrote IS NULL THEN                          -- it removed the row
+      IF v_here IS NOT NULL THEN v_conflict := v_conflict || to_jsonb(v_path);
+      ELSE v_ops := v_ops || jsonb_build_array(jsonb_build_object('op', 'add', 'path', v_path, 'value', v_was)); END IF;
+    ELSE                                                -- it changed the row's fields
+      SELECT array_agg(k ORDER BY k) INTO v_fields FROM (
+        SELECT jsonb_object_keys(v_was) AS k
+        UNION SELECT jsonb_object_keys(v_wrote)
+      ) keys
+      WHERE k NOT IN ('valid_from', 'valid_to') AND NOT _delta_same(v_was->k, v_wrote->k);
+      CONTINUE WHEN v_fields IS NULL;
+      IF v_here IS NULL OR EXISTS (SELECT 1 FROM unnest(v_fields) f WHERE NOT _delta_same(v_here->f, v_wrote->f)) THEN
+        v_conflict := v_conflict || to_jsonb(v_path);
+      ELSE
+        v_ops := v_ops || jsonb_build_array(jsonb_build_object('op', 'replace', 'path', v_path,
+          'value', (SELECT jsonb_object_agg(f, COALESCE(v_was->f, 'null'::jsonb)) FROM unnest(v_fields) f)));
+      END IF;
+    END IF;
+  END LOOP;
+  IF jsonb_array_length(v_conflict) > 0 THEN
+    RETURN jsonb_build_object('ops', '[]'::jsonb, 'conflict', v_conflict);
+  END IF;
+  RETURN jsonb_build_object('ops', v_ops);
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+-- delta_walk: the cursor's next entry (p_back: the next to undo, else to
+-- redo), walked through delta_apply_logged -- by its plan, above -- and
+-- recorded as walking it. NULL when there is none.
+--   p_dry    answer the plan ({ doc, entry, ops, conflict? }) and walk nothing
+--   p_entry  walk only if this is the cursor's next entry (SQLSTATE 40001 → 409)
+-- A conflict, a walk the document refuses, or one that changes nothing is
+-- recorded all the same (no ops, not undoable: never redone), so the cursor
+-- moves on to the entry before it instead of meeting it again for ever.
+CREATE OR REPLACE FUNCTION delta_walk(
+  p_cursor TEXT, p_who TEXT, p_back BOOLEAN, p_dry BOOLEAN DEFAULT FALSE, p_entry BIGINT DEFAULT NULL
+) RETURNS JSONB AS $$
+DECLARE
+  v_entry   _delta_ledger;
+  v_plan    JSONB;
+  v_version BIGINT;
+  v_skip    BIGINT;
 BEGIN
   IF p_cursor IS NULL THEN RETURN NULL; END IF;
   -- one walker per cursor at a time: two undos pressed at once take two entries, not one twice
   PERFORM pg_advisory_xact_lock(hashtext('delta-cursor:' || p_cursor));
   v_entry := _delta_ledger_tip(p_cursor, p_back);
   IF v_entry.id IS NULL THEN RETURN NULL; END IF;
-  RETURN delta_apply_logged(v_entry.doc_name, v_entry.inverse, p_who, p_cursor, TRUE, v_entry.id)
-    || jsonb_build_object('doc', v_entry.doc_name);
+  IF p_entry IS NOT NULL AND p_entry <> v_entry.id THEN
+    RAISE EXCEPTION 'The cursor''s next entry to % is %, not %',
+      CASE WHEN p_back THEN 'undo' ELSE 'redo' END, v_entry.id, p_entry USING ERRCODE = '40001';
+  END IF;
+  -- the document's lock (delta_apply_logged takes it again): no writer lands between plan and walk
+  PERFORM pg_advisory_xact_lock(hashtext('delta:' || v_entry.doc_name));
+  v_plan := _delta_walk_plan(v_entry);
+  IF p_dry THEN RETURN v_plan || jsonb_build_object('doc', v_entry.doc_name, 'entry', v_entry.id); END IF;
+  IF NOT v_plan ? 'conflict' AND jsonb_array_length(v_plan->'ops') > 0 THEN
+    BEGIN
+      RETURN delta_apply_logged(v_entry.doc_name, v_plan->'ops', p_who, p_cursor, TRUE, v_entry.id)
+        || jsonb_build_object('doc', v_entry.doc_name);
+    EXCEPTION WHEN SQLSTATE '22023' OR SQLSTATE '22P02' OR SQLSTATE '23502' OR SQLSTATE '23505' OR SQLSTATE 'P0002' THEN
+      v_plan := jsonb_build_object('ops', '[]'::jsonb,
+        'conflict', (SELECT jsonb_agg(o->>'path') FROM jsonb_array_elements(v_plan->'ops') o));
+    END;
+  END IF;
+  SELECT COALESCE((SELECT version FROM _delta_versions WHERE doc_name = v_entry.doc_name), 0) INTO v_version;
+  INSERT INTO _delta_ledger (doc_name, version, ops, inverse, who, cursor, undoes, undoable)
+    VALUES (v_entry.doc_name, v_version, '[]'::jsonb, '[]'::jsonb, p_who, p_cursor, v_entry.id, FALSE)
+    RETURNING id INTO v_skip;
+  RETURN jsonb_build_object('doc', v_entry.doc_name, 'ops', '[]'::jsonb, 'inverse', '[]'::jsonb, 'version', v_version, 'entry', v_skip)
+    || CASE WHEN v_plan ? 'conflict' THEN jsonb_build_object('conflict', v_plan->'conflict') ELSE '{}'::jsonb END;
 END;
 $$ LANGUAGE plpgsql;
+
+-- delta_undo / delta_redo: delta_walk for the cursor's next entry back or forward.
+CREATE OR REPLACE FUNCTION _delta_walk(p_cursor TEXT, p_who TEXT, p_back BOOLEAN)
+RETURNS JSONB AS $$ SELECT delta_walk(p_cursor, p_who, p_back); $$ LANGUAGE sql;
 
 CREATE OR REPLACE FUNCTION delta_undo(p_cursor TEXT, p_who TEXT DEFAULT NULL)
 RETURNS JSONB AS $$ SELECT _delta_walk(p_cursor, p_who, TRUE); $$ LANGUAGE sql;
@@ -199,5 +318,14 @@ RETURNS JSONB LANGUAGE plpgsql AS $$
 BEGIN
   PERFORM set_config('app.user_id', p_user_id, true);
   RETURN _delta_walk(p_cursor, p_who, FALSE);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION delta_walk_as(
+  p_user_id TEXT, p_cursor TEXT, p_who TEXT, p_back BOOLEAN, p_dry BOOLEAN DEFAULT FALSE, p_entry BIGINT DEFAULT NULL
+) RETURNS JSONB LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM set_config('app.user_id', p_user_id, true);
+  RETURN delta_walk(p_cursor, p_who, p_back, p_dry, p_entry);
 END;
 $$;

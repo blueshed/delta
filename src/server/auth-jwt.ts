@@ -28,7 +28,7 @@
  * have no jose dependency, so the `delta init` CLI can load them without
  * forcing consumers to install jose just to copy SQL files.
  */
-import { SignJWT, jwtVerify } from "jose";
+import { SignJWT, jwtVerify, decodeJwt } from "jose";
 import type { Pool } from "pg";
 import { createLogger } from "./logger";
 import type { DeltaAuth } from "./auth";
@@ -71,15 +71,20 @@ export interface JwtAuthOpts {
 
 /** Set the socket's identity, tearing down a prior *different* identity's
  *  live subscriptions so an identity switch on one socket can't keep
- *  receiving the previous user's scoped docs. */
-function switchIdentity(client: any, user: User): void {
+ *  receiving the previous user's scoped docs. `expires` is when the token it
+ *  came from runs out (ms since the epoch); `gate` refuses it after that. */
+function switchIdentity(client: any, user: User, expires: number | undefined): void {
   const prev = client.data?.identity as User | undefined;
   if (prev && String(prev.id) !== String(user.id)) {
     dropClientSubscriptions(client);
   }
   if (!client.data) client.data = {};
   client.data.identity = user;
+  client.data.identityExpires = expires;
 }
+
+/** When a token's `exp` says it runs out, in ms since the epoch. */
+const expiresOf = (exp: unknown): number | undefined => (typeof exp === "number" ? exp * 1000 : undefined);
 
 export function jwtAuth(opts: JwtAuthOpts): DeltaAuth<User> {
   const secret =
@@ -102,18 +107,19 @@ export function jwtAuth(opts: JwtAuthOpts): DeltaAuth<User> {
       .sign(secret);
   }
 
-  async function verifyToken(token: string): Promise<User | null> {
+  async function verifyToken(token: string): Promise<{ user: User; expires: number | undefined } | null> {
     try {
       // Pin the algorithm allowlist — without it, jose accepts any alg the
       // token header claims, opening an alg-confusion vector.
       const { payload } = await jwtVerify(token, secret, { algorithms: [JWT_ALG] });
       const id = payload.sub;
       if (id === undefined) return null;
-      return {
+      const user: User = {
         id: /^\d+$/.test(String(id)) ? Number(id) : String(id),
         name: payload.name as string | undefined,
         email: payload.email as string | undefined,
       };
+      return { user, expires: expiresOf(payload.exp) };
     } catch {
       return null;
     }
@@ -127,8 +133,8 @@ export function jwtAuth(opts: JwtAuthOpts): DeltaAuth<User> {
         const { rows } = await opts.pool.query(loginSql, [email, password]);
         const user = rows[0]?.result as User | null;
         if (!user) return { error: "Invalid credentials" };
-        switchIdentity(client, user);
         const token = await signToken(user);
+        switchIdentity(client, user, expiresOf(decodeJwt(token).exp));
         log.info(`login user=${user.id}`);
         return { result: { ...user, token } };
       },
@@ -141,8 +147,8 @@ export function jwtAuth(opts: JwtAuthOpts): DeltaAuth<User> {
         try {
           const { rows } = await opts.pool.query(registerSql, [name, email, password]);
           const user = rows[0]?.result as User;
-          switchIdentity(client, user);
           const token = await signToken(user);
+          switchIdentity(client, user, expiresOf(decodeJwt(token).exp));
           log.info(`register user=${user.id}`);
           return { result: { ...user, token } };
         } catch (err: any) {
@@ -154,14 +160,15 @@ export function jwtAuth(opts: JwtAuthOpts): DeltaAuth<User> {
       async authenticate(params, client) {
         const { token } = params ?? {};
         if (!token) return { error: "token required" };
-        let user = await verifyToken(token);
-        if (!user) return { error: "Invalid token" };
+        const verified = await verifyToken(token);
+        if (!verified) return { error: "Invalid token" };
+        let user = verified.user;
         if (opts.verifyUser) {
           const checked = await opts.verifyUser(user, opts.pool);
           if (!checked) return { error: "Invalid token" };
           user = checked;
         }
-        switchIdentity(client, user);
+        switchIdentity(client, user, verified.expires);
         log.info(`authenticate user=${user.id}`);
         return { result: user };
       },
@@ -179,7 +186,17 @@ export function jwtAuth(opts: JwtAuthOpts): DeltaAuth<User> {
 
     gate(client) {
       const identity = client.data?.identity as User | undefined;
-      return identity ?? { error: "Authentication required" };
+      if (!identity) return { error: "Authentication required" };
+      // A session lasts as long as its token: once it runs out the socket is
+      // signed out (and its documents let go), as a logout would do.
+      const expires = client.data.identityExpires as number | undefined;
+      if (expires !== undefined && Date.now() >= expires) {
+        delete client.data.identity;
+        delete client.data.identityExpires;
+        dropClientSubscriptions(client);
+        return { error: "Session expired: authenticate again" };
+      }
+      return identity;
     },
 
     asSqlArg(identity) {

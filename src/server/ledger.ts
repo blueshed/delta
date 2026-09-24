@@ -19,8 +19,14 @@
  * entry at the end of a chain — the tip, nothing has walked it yet — is the one
  * that counts. A fresh write ends what could be redone. A write recorded as not
  * undoable (a fact: a price tick) starts no chain and ends no redo.
+ *
+ * A walk sets back only what its entry changed, and only where the document
+ * still holds what the entry left (`planWalk`): a field someone else has
+ * written since is a conflict, and a walk with a conflict changes nothing. It
+ * is still recorded (`skip`: no ops, not walkable), so the cursor moves on to
+ * the entry before it instead of meeting the same conflict for ever.
  */
-import type { DeltaOp } from "../core";
+import { splitPath, type DeltaOp } from "../core";
 
 export type LedgerEntry = {
   id: number;
@@ -42,7 +48,71 @@ export type Ledger = {
   nextUndo(cursor: string): LedgerEntry | undefined;
   /** The undo this cursor would walk forward again, unless a fresh write has come since. */
   nextRedo(cursor: string): LedgerEntry | undefined;
+  /** Records that `undoes` was walked and changed nothing (a conflict): the cursor moves past it, and it is never redone. */
+  skip(entry: { doc: string; who: string | null; cursor: string | null; undoes: number }): { version: number; entry: number };
 };
+
+/** Storage columns of a temporal row: not data, never a conflict. */
+const STORAGE = new Set(["valid_from", "valid_to"]);
+
+/** Deep equality of JSON values, with null and a missing value the same. */
+function same(a: unknown, b: unknown): boolean {
+  if (a === b || (a == null && b == null)) return true;
+  if (a === null || b === null || typeof a !== "object" || typeof b !== "object" || Array.isArray(a) !== Array.isArray(b)) return false;
+  const ka = Object.keys(a as object);
+  return ka.length === Object.keys(b as object).length && ka.every((k) => same((a as any)[k], (b as any)[k]));
+}
+
+/**
+ * What walking `entry` does to the document as it is now (`current`): only the
+ * fields the entry changed, each guarded by what the entry left there.
+ *
+ * - The entry changed a row's fields (`replace`): set back those fields, if
+ *   each still holds what the entry wrote.
+ * - The entry made a row (`remove` walks it): take the row away, if it is as
+ *   the entry left it.
+ * - The entry removed a row (`add` walks it): put it back, if nobody has.
+ *
+ * Each row is walked once, from what it was before the entry to what the entry
+ * left: every inverse op of a path carries the same "before" (an `add` or
+ * `replace` its value; a `remove` none, there was no row), so a row the entry
+ * touched twice (made and changed, changed and removed) is walked by its net
+ * change. Any guard that fails is a conflict, by path, and then nothing is walked.
+ */
+export function planWalk(entry: { ops: DeltaOp[]; inverse: DeltaOp[] }, current: any): { ops: DeltaOp[]; conflict: string[] } {
+  const left = new Map<string, any>();   // what the entry left at a path (undefined: it removed it)
+  for (const op of entry.ops) left.set(op.path, op.op === "remove" ? undefined : op.value);
+  const before = new Map<string, any>(); // what a path held before the entry (undefined: nothing), in the inverse's order
+  for (const inv of entry.inverse) {
+    const was = inv.op === "remove" ? undefined : inv.value;
+    if (!before.has(inv.path) || was != null) before.set(inv.path, was);
+  }
+  const now = (path: string) => {
+    const [coll, id] = splitPath(path);
+    return id === undefined ? current?.[coll!] : current?.[coll!]?.[id];
+  };
+  const data = (row: any) => Object.keys(row ?? {}).filter((f) => !STORAGE.has(f));
+  const ops: DeltaOp[] = [];
+  const conflict: string[] = [];
+  for (const [path, was] of before) {
+    const here = now(path);
+    const wrote = left.get(path);
+    if (was == null && wrote == null) continue;       // made and removed by the entry: nothing to walk
+    if (was == null) {                                // it made the row
+      if (here == null || data(wrote).some((f) => !same(here[f], wrote[f]))) conflict.push(path);
+      else ops.push({ op: "remove", path });
+    } else if (wrote == null) {                       // it removed the row
+      if (here != null) conflict.push(path);
+      else ops.push({ op: "add", path, value: was });
+    } else {                                          // it changed the row's fields
+      const fields = [...new Set([...data(was), ...data(wrote)])].filter((f) => !same(was[f], wrote[f]));
+      if (fields.length === 0) continue;
+      if (here == null || fields.some((f) => !same(here[f], wrote[f]))) conflict.push(path);
+      else ops.push({ op: "replace", path, value: Object.fromEntries(fields.map((f) => [f, was[f] ?? null])) });
+    }
+  }
+  return conflict.length ? { ops: [], conflict } : { ops, conflict };
+}
 
 type Row = { id: number; doc: string; version: number; ops: string; inverse: string; at: number; undoable: number; cursor?: string | null };
 
@@ -72,6 +142,8 @@ export function createLedger(db: any): Ledger {
   )`);
   db.run("CREATE INDEX IF NOT EXISTS idx_delta_ledger_doc ON delta_ledger (doc, version)");
   db.run("CREATE INDEX IF NOT EXISTS idx_delta_ledger_cursor ON delta_ledger (cursor)");
+  // The walk up a cursor's chains follows `undoes`: without this, each step scanned the table.
+  db.run("CREATE INDEX IF NOT EXISTS idx_delta_ledger_undoes ON delta_ledger (undoes)");
 
   const columns = "l.id, l.doc, l.version, l.ops, l.inverse, l.at, l.undoable";
   const tips = `
@@ -81,19 +153,21 @@ export function createLedger(db: any): Ledger {
       SELECT l.id, c.depth + 1 FROM delta_ledger l JOIN chain c ON l.undoes = c.id
     ),
     tips AS (
-      SELECT c.id, c.depth FROM chain c WHERE c.id NOT IN (SELECT undoes FROM delta_ledger WHERE undoes IS NOT NULL)
+      SELECT c.id, c.depth FROM chain c WHERE NOT EXISTS (SELECT 1 FROM delta_ledger w WHERE w.undoes = c.id)
     )`;
   const versionStmt = db.query("SELECT MAX(version) AS version FROM delta_ledger WHERE doc = ?");
   const insertStmt = db.query(
     "INSERT INTO delta_ledger (doc, version, ops, inverse, who, cursor, at, undoes, undoable) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
   );
   const historyStmt = db.query(`SELECT ${columns}, l.cursor FROM delta_ledger l WHERE l.doc = ? ORDER BY l.version DESC LIMIT ?`);
+  // CROSS JOIN keeps SQLite's join order: the cursor's tips first, then each row
+  // by its key. Joined the other way it scanned every row of the ledger.
   const undoStmt = db.query(`${tips}
-    SELECT ${columns} FROM delta_ledger l JOIN tips t ON t.id = l.id
+    SELECT ${columns} FROM tips t CROSS JOIN delta_ledger l ON l.id = t.id
     WHERE t.depth % 2 = 0 ORDER BY l.id DESC LIMIT 1`);
   const redoStmt = db.query(`${tips}
-    SELECT ${columns} FROM delta_ledger l JOIN tips t ON t.id = l.id
-    WHERE t.depth % 2 = 1
+    SELECT ${columns} FROM tips t CROSS JOIN delta_ledger l ON l.id = t.id
+    WHERE t.depth % 2 = 1 AND l.undoable = 1
       AND l.id > COALESCE((SELECT MAX(id) FROM delta_ledger WHERE cursor = ?1 AND undoes IS NULL AND undoable = 1), 0)
     ORDER BY l.id DESC LIMIT 1`);
 
@@ -117,6 +191,11 @@ export function createLedger(db: any): Ledger {
     nextRedo(cursor) {
       const row = redoStmt.get(cursor) as Row | null;
       return row ? toEntry(row) : undefined;
+    },
+    skip({ doc, who, cursor, undoes }) {
+      const v = version(doc);
+      const result = insertStmt.run(doc, v, "[]", "[]", who, cursor, Date.now(), undoes, 0);
+      return { version: v, entry: Number(result.lastInsertRowid) };
     },
   };
 }

@@ -318,6 +318,41 @@ describe("registerDoc", () => {
     expect(sock.sent[0].error.message).toContain("No handler matched");
   });
 
+  test("a path without a leading slash is refused and leaves the document (F4)", async () => {
+    const file = `${tmpFile}.f4`;
+    await Bun.write(file, JSON.stringify({ messages: { a: { text: "hi" } }, title: "keep" }));
+    const ws = createWs();
+    const published: any[] = [];
+    ws.setServer({ publish: (_ch: string, raw: string) => published.push(JSON.parse(raw)) });
+    const handle = await registerDoc(ws, "chat:room", { file, empty: { messages: {}, title: "" } as any });
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "delta", doc: "chat:room", ops: [{ op: "remove", path: "messages" }] }));
+    expect(sock.sent[0].error.message).toContain('Invalid JSON Pointer "messages"');
+    expect(handle.getDoc()).toEqual({ messages: { a: { text: "hi" } }, title: "keep" });
+    expect(published).toEqual([]);
+    try { unlinkSync(file); } catch {}
+  });
+
+  test("a batch whose second op fails changes nothing, broadcasts nothing, persists nothing (D5)", async () => {
+    const file = `${tmpFile}.d5`;
+    await Bun.write(file, JSON.stringify({ messages: { m1: { text: "hi" } } }));
+    const ws = createWs();
+    const published: any[] = [];
+    ws.setServer({ publish: (_ch: string, raw: string) => published.push(JSON.parse(raw)) });
+    const handle = await registerDoc(ws, "chat:room", { file, empty: { messages: {} } as any });
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "delta", doc: "chat:room", ops: [
+      { op: "replace", path: "/messages/m1/text", value: "HALF" },
+      { op: "replace", path: "/messages/zz/text", value: "x" },
+    ] }));
+    expect(sock.sent[0].error.message).toContain("Path not found");
+    expect(handle.getDoc()).toEqual({ messages: { m1: { text: "hi" } } });
+    expect(published).toEqual([]);
+    await handle.persist();
+    expect(await Bun.file(file).json()).toEqual({ messages: { m1: { text: "hi" } } });
+    try { unlinkSync(file); } catch {}
+  });
+
   test("loads existing file on startup", async () => {
     await Bun.write(tmpFile, JSON.stringify({ items: ["existing"] }));
 
@@ -623,7 +658,7 @@ afterAll(() => {
 });
 
 // ---------------------------------------------------------------------------
-// Malformed frames (TODO.md #2)
+// Malformed frames (v0.5.0 review #2)
 //
 // `JSON.parse` used to sit OUTSIDE the try in an async handler, so any
 // non-JSON frame rejected with nothing to catch it — an unhandled rejection
@@ -695,7 +730,7 @@ describe("malformed frames", () => {
 });
 
 // ---------------------------------------------------------------------------
-// persist() serialization (TODO.md addendum A2)
+// persist() serialization (v0.5.0 review A2)
 //
 // `applyAndBroadcast` fired persist() without await, queue or catch: two rapid
 // deltas raced whole-file Bun.writes and the file could settle on the OLDER
@@ -788,5 +823,32 @@ describe("persist queue", () => {
     // inheriting the rejected promise.
     await handle.persist().catch(() => {});
     expect(handle.getDoc().n).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F6: delta's logger was a stale fork of railroad's. With LOG_LEVEL=verbose
+// (a typo) it printed nothing at all, errors included, and it wrote ANSI
+// colour codes into pipes. It is railroad's logger now.
+// ---------------------------------------------------------------------------
+
+describe("the logger", () => {
+  test("is railroad's logger, line for line (re-sync it when railroad's changes)", async () => {
+    const code = (src: string) => src.slice(src.indexOf("export type LogLevel"));
+    const ours = await Bun.file(new URL("../src/server/logger.ts", import.meta.url)).text();
+    const railroads = await Bun.file(new URL("../node_modules/@blueshed/railroad/logger.ts", import.meta.url)).text();
+    expect(code(ours)).toBe(code(railroads));
+  });
+
+  test("an unknown LOG_LEVEL still shows errors, and a pipe gets no colour codes", async () => {
+    const LOGGER = new URL("../src/server/logger.ts", import.meta.url).pathname;
+    const proc = Bun.spawn(["bun", "-e", `const m = await import(${JSON.stringify(LOGGER)}); m.createLogger("[t]").error("ERROR-VISIBLE"); console.log("level=" + m.getLogLevel());`], {
+      stdout: "pipe", stderr: "pipe", env: { ...process.env, LOG_LEVEL: "verbose" },
+    });
+    const out = (await new Response(proc.stdout).text()) + (await new Response(proc.stderr).text());
+    await proc.exited;
+    expect(out).toContain("ERROR-VISIBLE");
+    expect(out).toContain("level=info");
+    expect(out).not.toContain("\x1b[");
   });
 });

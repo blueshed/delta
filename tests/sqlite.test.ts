@@ -7,6 +7,7 @@ import {
   type Schema, type DocDef,
 } from "../src/server/sqlite";
 import { createWs, dropClientSubscriptions } from "../src/server/server";
+import { applyOps } from "../src/core";
 import { setLogLevel } from "../src/server/logger";
 
 setLogLevel("silent");
@@ -421,20 +422,30 @@ describe("registerDocs", () => {
       expect(rows[0].body).toBe("Nice");
     });
 
-    test("applies default values for missing fields", async () => {
+    test("a missing required field is a 400; a missing nullable one is null (A11)", async () => {
       seedProject("p1", "Alpha", "active");
 
       const sock = mockSocket();
       await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
 
+      // `done` is required (not nullable, no default): it used to be stored as false.
       await ws.websocket.message(sock, JSON.stringify({
         id: 2,
         action: "delta",
         doc: "project:p1",
         ops: [{ op: "add", path: "/tasks/t1", value: { title: "Minimal" } }],
       }));
+      expect(sock.sent[1].error.code).toBe(400);
+      expect(sock.sent[1].error.message).toContain("Required field missing: done (give it a value, or declare a default or make it nullable in the schema)");
+      expect(db.query("SELECT * FROM current_tasks WHERE id = 't1'").get()).toBeNull();
 
-      // done defaults to false (boolean default), priority defaults to null (nullable)
+      await ws.websocket.message(sock, JSON.stringify({
+        id: 3,
+        action: "delta",
+        doc: "project:p1",
+        ops: [{ op: "add", path: "/tasks/t1", value: { title: "Minimal", done: false } }],
+      }));
+      // priority is nullable, so it is null
       const row = db.query("SELECT * FROM current_tasks WHERE id = 't1'").get() as any;
       expect(row.done).toBe(0);
       expect(row.priority).toBeNull();
@@ -1517,8 +1528,10 @@ describe("validateOps", () => {
     const errors = validateOps(s, doc, [
       { op: "add", path: "/items/x", value: { data: { a: 1 } } },
     ]);
-    // name is required (non-nullable, no default) and missing, but text has a type default ("")
-    expect(errors).toHaveLength(0);
+    // name is required (non-nullable, no default) and missing: refused, not stored as ""
+    expect(errors.map((e) => e.message)).toEqual([
+      "Required field missing: name (give it a value, or declare a default or make it nullable in the schema)",
+    ]);
   });
 
   test("add with wrong field type", () => {
@@ -1669,6 +1682,37 @@ describe("SQLite path escaping TDD", () => {
     const remaining = db.query("SELECT * FROM current_tasks WHERE id = 't/2'").all();
     expect(remaining).toHaveLength(0);
   });
+
+  test("broadcast paths are escaped again, so a peer lands on the same row (D7)", async () => {
+    seedProject("p1", "Alpha", "active");
+    const published: any[] = [];
+    ws.setServer({ publish: (_ch: string, raw: string) => published.push(JSON.parse(raw)) });
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+    const peer = structuredClone(sock.sent[0].result);
+
+    const send = (id: number, ops: any[]) => ws.websocket.message(sock, JSON.stringify({ id, action: "delta", doc: "project:p1", ops }));
+    await send(2, [{ op: "add", path: "/tasks/a~1b~0c", value: { title: "odd id", done: false } }]);
+    await send(3, [{ op: "replace", path: "/tasks/a~1b~0c/done", value: true }]);
+    expect(published.map((m) => m.ops[0].path)).toEqual(["/tasks/a~1b~0c", "/tasks/a~1b~0c"]);
+    for (const m of published) applyOps(peer, m.ops);
+    expect(Object.keys(peer.tasks)).toEqual(["a/b~c"]);
+    expect(peer.tasks["a/b~c"].done).toBe(true);
+
+    await send(4, [{ op: "remove", path: "/tasks/a~1b~0c" }]);
+    expect(published[2].ops[0].path).toBe("/tasks/a~1b~0c");
+    applyOps(peer, published[2].ops);
+    expect(peer.tasks).toEqual({});
+  });
+
+  test("a path without a leading slash is a 400, not a write", async () => {
+    seedProject("p1", "Alpha", "active");
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+    await ws.websocket.message(sock, JSON.stringify({ id: 2, action: "delta", doc: "project:p1", ops: [{ op: "remove", path: "tasks" }] }));
+    expect(sock.sent[1].error.code).toBe(400);
+    expect(sock.sent[1].error.message).toContain('Invalid JSON Pointer "tasks"');
+  });
 });
 
 describe("migrateSchema type mismatch warning TDD", () => {
@@ -1808,7 +1852,7 @@ describe("review fixes: temporal timestamps + op validation", () => {
 });
 
 // ---------------------------------------------------------------------------
-// TODO.md fixes — #3 whole-row replace acked-but-dropped + #7 socket-drop cleanup
+// v0.5.0 review fixes — #3 whole-row replace acked-but-dropped + #7 socket-drop cleanup
 // ---------------------------------------------------------------------------
 
 describe("todo fixes: whole-row replace (#3) + socket-drop cleanup (#7)", () => {
@@ -1936,5 +1980,191 @@ describe("todo fixes: whole-row replace (#3) + socket-drop cleanup (#7)", () => 
     // B is still subscribed, so the doc stays cached — C reads the cache, which
     // (correctly, for the cache-coherency model) hasn't seen the raw SQL write.
     expect(sockC.sent[0].result.projects.name).toBe("Alpha");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D6: an add names a new row. On a temporal table the key is (id, valid_from),
+// so an add of a live id used to insert a second live version of it.
+// ---------------------------------------------------------------------------
+
+describe("an add of a row that is already there", () => {
+  let db: InstanceType<typeof Database>;
+  let ws: ReturnType<typeof createWs>;
+  const PAST = "2020-01-01 00:00:00";
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    createTables(db, schema);
+    ws = createWs();
+    registerDocs(ws, db, schema, [projectDoc]);
+    for (const p of ["p1", "p2"]) db.run("INSERT INTO projects (id, name, status, valid_from) VALUES (?, 'P', 'active', ?)", [p, PAST]);
+    db.run("INSERT INTO tasks (id, project_id, title, done, valid_from) VALUES ('t1', 'p1', 'first', 0, ?)", [PAST]);
+  });
+
+  const delta = async (doc: string, ops: any[]) => {
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc }));
+    await ws.websocket.message(sock, JSON.stringify({ id: 2, action: "delta", doc, ops }));
+    return sock.sent[1];
+  };
+  const liveTasks = (id: string) => db.query("SELECT title, project_id FROM tasks WHERE id = ? AND valid_to IS NULL").all(id);
+
+  test("is a 409 that names the fix, and leaves one live row", async () => {
+    const r = await delta("project:p1", [{ op: "add", path: "/tasks/t1", value: { title: "again", done: false } }]);
+    expect(r.error).toEqual({ code: 409, message: "Row already exists: /tasks/t1 -- replace it, or add to /tasks/- for a new id" });
+    expect(liveTasks("t1")).toEqual([{ title: "first", project_id: "p1" }]);
+  });
+
+  test("is a 409 from another document too, so no second live copy lands in its scope", async () => {
+    const r = await delta("project:p2", [{ op: "add", path: "/tasks/t1", value: { title: "stolen", done: false } }]);
+    expect(r.error.code).toBe(409);
+    expect(liveTasks("t1")).toEqual([{ title: "first", project_id: "p1" }]);
+  });
+
+  test("a removed row can be added back under its own id", async () => {
+    expect((await delta("project:p1", [{ op: "remove", path: "/tasks/t1" }])).result).toEqual({ ack: true });
+    expect((await delta("project:p1", [{ op: "add", path: "/tasks/t1", value: { title: "back", done: false } }])).result).toEqual({ ack: true });
+    expect(liveTasks("t1")).toEqual([{ title: "back", project_id: "p1" }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Errors that name their fix (dogfood A2, A3): the first thing an agent sees
+// when it follows the Postgres-shaped recipe on SQLite.
+// ---------------------------------------------------------------------------
+
+describe("errors that name their fix", () => {
+  test("a missing table says to call createTables", async () => {
+    const db = new Database(":memory:");
+    const ws = createWs();
+    registerDocs(ws, db, schema, [projectDoc]);   // no createTables
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+    expect(sock.sent[0].error.message).toContain("no such table");
+    expect(sock.sent[0].error.message).toContain("call createTables(db, schema) before the first open");
+  });
+
+  test("a Postgres scope binding is refused at registration, naming :docId (D9)", () => {
+    const db = new Database(":memory:");
+    createTables(db, schema);
+    const pgStyle = defineDoc("mine:", { root: "projects", include: [], scope: { status: ":id" } });
+    expect(() => registerDocs(createWs(), db, schema, [pgStyle])).toThrow(
+      'registerDocs("mine:"): scope { status: ":id" } is the Postgres scope DSL; SQLite reads the doc name with ":docId" only (scope: { status: ":docId" })',
+    );
+    const literal = defineDoc("active:", { root: "projects", include: [], scope: { status: "active" } });
+    expect(() => registerDocs(createWs(), db, schema, [literal])).not.toThrow();
+  });
+
+  test("a missing root row says a SQLite document is one root row", async () => {
+    const db = new Database(":memory:");
+    createTables(db, schema);
+    const ws = createWs();
+    registerDocs(ws, db, schema, [projectDoc, defineDoc("projects:", { root: "projects", include: [] })]);
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "projects:" }));   // a Postgres-style list doc
+    expect(sock.sent[0].error).toEqual({
+      code: 404,
+      message: 'Not found: no projects row where id = "". A SQLite document is one root row and its children: make the row first, or declare the document implied: true',
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v0.5.0 review #4: a json column's string value survives a cold read. It was stored
+// raw, so "123" came back as 123 and "true" as true.
+// ---------------------------------------------------------------------------
+
+describe("json columns keep their types across a cold read", () => {
+  test("strings that look like JSON stay strings", async () => {
+    const db = new Database(":memory:");
+    createTables(db, schema);
+    db.run("INSERT INTO projects (id, name, status, valid_from) VALUES ('p1', 'P', 'active', '2020-01-01 00:00:00')");
+    const write = createWs();
+    registerDocs(write, db, schema, [projectDoc]);
+    const sock = mockSocket();
+    await write.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+    const values = ["123", "true", "[1,2]", "hello", 7, { a: "1" }];
+    for (const [i, meta] of values.entries()) {
+      await write.websocket.message(sock, JSON.stringify({ id: 2 + i, action: "delta", doc: "project:p1", ops: [{ op: "replace", path: "/projects/meta", value: meta }] }));
+      const cold = createWs();                                  // a fresh backend: nothing cached
+      registerDocs(cold, db, schema, [projectDoc]);
+      const reader = mockSocket();
+      await cold.websocket.message(reader, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+      expect(reader.sent[0].result.projects.meta).toEqual(meta);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v0.5.0 review #5: a document whose root row has a parent. The root writer left the
+// parent key out, so a root-field replace on a temporal root failed NOT NULL.
+// ---------------------------------------------------------------------------
+
+describe("a root row that has a parent", () => {
+  test("a root-field replace keeps the parent key", async () => {
+    const db = new Database(":memory:");
+    createTables(db, schema);
+    db.run("INSERT INTO projects (id, name, status, valid_from) VALUES ('p1', 'P', 'active', '2020-01-01 00:00:00')");
+    db.run("INSERT INTO tasks (id, project_id, title, done, valid_from) VALUES ('t1', 'p1', 'T', 0, '2020-01-01 00:00:00')");
+    const ws = createWs();
+    registerDocs(ws, db, schema, [defineDoc("task:", { root: "tasks", include: [] })]);
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "task:t1" }));
+    await ws.websocket.message(sock, JSON.stringify({ id: 2, action: "delta", doc: "task:t1", ops: [{ op: "replace", path: "/tasks/title", value: "renamed" }] }));
+    expect(sock.sent[1].result).toEqual({ ack: true });
+    expect(db.query("SELECT project_id, title FROM current_tasks WHERE id = 't1'").all()).toEqual([{ project_id: "p1", title: "renamed" }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v0.5.0 review #6: evict() dropped a doc's copy but kept its subscribers, so a write
+// through it answered 404 "Doc not loaded" and fan-out onto it lost removes.
+// ---------------------------------------------------------------------------
+
+describe("a doc evicted while someone has it open", () => {
+  test("still takes writes, and still hears the removes fanned out to it", async () => {
+    const db = new Database(":memory:");
+    createTables(db, schema);
+    db.run("INSERT INTO projects (id, name, status, valid_from) VALUES ('p1', 'P', 'active', '2020-01-01 00:00:00')");
+    db.run("INSERT INTO tasks (id, project_id, title, done, valid_from) VALUES ('t1', 'p1', 'T', 0, '2020-01-01 00:00:00')");
+    const ws = createWs();
+    const tasksOnly = defineDoc("tasks-of:", { root: "projects", include: ["tasks"] });
+    const handle = registerDocs(ws, db, schema, [projectDoc, tasksOnly]);
+    const published: any[] = [];
+    ws.setServer({ publish: (ch: string, raw: string) => published.push({ ch, ...JSON.parse(raw) }) });
+    const a = mockSocket("a");
+    const b = mockSocket("b");
+    await ws.websocket.message(a, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+    await ws.websocket.message(b, JSON.stringify({ id: 1, action: "open", doc: "tasks-of:p1" }));
+    handle.evict("tasks-of:p1");
+
+    await ws.websocket.message(a, JSON.stringify({ id: 2, action: "delta", doc: "project:p1", ops: [{ op: "remove", path: "/tasks/t1" }] }));
+    expect(published.filter((m) => m.ch === "tasks-of:p1").map((m) => m.ops)).toEqual([[{ op: "remove", path: "/tasks/t1" }]]);
+
+    handle.evict("tasks-of:p1");
+    await ws.websocket.message(b, JSON.stringify({ id: 2, action: "delta", doc: "tasks-of:p1", ops: [{ op: "replace", path: "/projects/name", value: "renamed" }] }));
+    expect(b.sent[1].result).toEqual({ ack: true });
+  });
+
+  test("hears the remove an undo fans out to it (the walk is a write too)", async () => {
+    const db = new Database(":memory:");
+    createTables(db, schema);
+    db.run("INSERT INTO projects (id, name, status, valid_from) VALUES ('p1', 'P', 'active', '2020-01-01 00:00:00')");
+    const ws = createWs();
+    const tasksOnly = defineDoc("tasks-of:", { root: "projects", include: ["tasks"] });
+    const handle = registerDocs(ws, db, schema, [projectDoc, tasksOnly], [], { ledger: true });
+    const published: any[] = [];
+    ws.setServer({ publish: (ch: string, raw: string) => published.push({ ch, ...JSON.parse(raw) }) });
+    const a = mockSocket("a");
+    const b = mockSocket("b");
+    await ws.websocket.message(a, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+    await ws.websocket.message(b, JSON.stringify({ id: 1, action: "open", doc: "tasks-of:p1" }));
+    await ws.websocket.message(a, JSON.stringify({ id: 2, action: "delta", doc: "project:p1", ops: [{ op: "add", path: "/tasks/t1", value: { title: "T", done: false } }] }));
+    handle.evict("tasks-of:p1");
+
+    await ws.websocket.message(a, JSON.stringify({ id: 3, action: "undo" }));
+    expect(a.sent.at(-1).result.ops).toEqual([{ op: "remove", path: "/tasks/t1" }]);
+    expect(published.filter((m) => m.ch === "tasks-of:p1").at(-1)?.ops).toEqual([{ op: "remove", path: "/tasks/t1" }]);
   });
 });

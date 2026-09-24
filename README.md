@@ -7,7 +7,9 @@ one WebSocket carries opens, writes and changes to the browser.
 It exists because shared, live state should be one small idea rather than a stack of fetch
 calls, caches and sockets. The whole package is small enough to read in one sitting (and to
 fit in an AI's context), there is one way to do each thing, and the browser code stays the same
-wherever the truth is kept.
+wherever the truth is kept: the same client and the same three verbs, with rows created by
+`add /<coll>/-` on every backend. (What each backend enforces differs; the skill's
+*Backends side by side* table says how.)
 
 Delta runs on [Bun](https://bun.sh). It ships TypeScript source (the exports are `.ts` files),
 the SQLite backend uses `bun:sqlite` and the server uses `Bun.serve`. The browser code needs a
@@ -32,7 +34,7 @@ setLogLevel("warn");
 // A shopping list: a row per list, its items in a map.
 const schema = defineSchema({
   lists: { columns: { title: "text?" }, temporal: false },
-  items: { parent: "lists", columns: { text: "text", done: "boolean" }, temporal: false },
+  items: { parent: "lists", columns: { text: "text", done: { type: "boolean", default: false } }, temporal: false },
 });
 const list = defineDoc("list:", { root: "lists", include: ["items"], implied: true });
 
@@ -143,7 +145,7 @@ Starting a new app? `bun create blueshed my-app` sets up delta and railroad toge
 | You use | Also add |
 |---|---|
 | `@blueshed/delta/client` (the browser) | `@blueshed/railroad` |
-| `@blueshed/delta/postgres` | `pg` |
+| `@blueshed/delta/postgres` | `pg` (and `@types/pg` to type-check: delta ships TypeScript source) |
 | `@blueshed/delta/auth-jwt` | `jose` and `pg` |
 
 The core, the JSON-file and SQLite backends, `local`, `kinds`, `dom-ops` and `logger` need
@@ -153,7 +155,7 @@ nothing else.
 
 - The `delta-doc` skill is the manual: [`SKILL.md`](.claude/skills/delta-doc/SKILL.md) routes,
   [`reference.md`](.claude/skills/delta-doc/reference.md) has the API, patterns, auth, row-level
-  security, the ledger, the kinds and the wire protocol. `bunx delta install-skills` copies it
+  security, the ledger, the kinds and the wire protocol. `bunx @blueshed/delta install-skills` copies it
   into your project for Claude Code.
 - [`examples/`](examples/): `shared-state` (JSON file), `sites-bbox` (custom views on SQLite
   and Postgres), `kanban` (Postgres with railroad), `todos-vs-rls` (row-level security).

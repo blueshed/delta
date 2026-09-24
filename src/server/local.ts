@@ -77,7 +77,7 @@ export function createLocal(): Local {
       await handler({ action, ...msg }, from, (response) => (answer ??= response));
       if (answer) return answer;
     }
-    return { error: { code: -1, message: `No handler matched: ${action}` } };
+    return { error: { code: 404, message: `No handler matched: ${action}` } };
   }
 
   function onPublish(fn: (channel: string, data: any) => void) {

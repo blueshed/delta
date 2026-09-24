@@ -163,3 +163,115 @@ describe("the cursor, over a socket", () => {
     expect(send(alice, "undo", {}).result).toMatchObject({ ops: [{ op: "remove", path: "/messages/m1" }] });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Undo beside someone else (eta F2a, F2b, F3, F10). A walk sets back only what
+// its entry changed, guarded by what the entry left; a conflict changes nothing
+// and is recorded as walked, so the cursor moves on.
+// ---------------------------------------------------------------------------
+
+describe("undo beside someone else", () => {
+  const note = defineDoc("note:", { root: "notes", include: ["items"], implied: true });
+  const notes = defineSchema({
+    notes: { columns: { text: "text?", title: "text?" }, temporal: false },
+    items: { parent: "notes", columns: { name: "text" }, temporal: false },
+  });
+  function two() {
+    const db = new Database(":memory:");
+    createTables(db, notes);
+    const local = createLocal();
+    registerDocs(local.server, db, notes, [note], [], { ledger: true });
+    const doc = "note:1";
+    const write = (cursor: string, ops: any[]) => local.call("delta", { doc, ops, cursor });
+    const read = async () => (await local.call("open", { doc })).result;
+    const undo = (cursor: string, more = {}) => local.call("undo", { cursor, ...more });
+    return { db, local, doc, write, read, undo };
+  }
+
+  test("an undo leaves a later write by someone else, and answers the conflict (F2a)", async () => {
+    const { write, read, undo } = two();
+    await read();
+    await write("A", [{ op: "replace", path: "/notes/text", value: "A's" }]);
+    await write("B", [{ op: "replace", path: "/notes/text", value: "B's" }]);
+    const answer = await undo("A");
+    expect(answer.result).toMatchObject({ doc: "note:1", ops: [], conflict: ["/notes"] });
+    expect((await read()).notes.text).toBe("B's");
+    await undo("B");
+    expect((await read()).notes.text).toBe("A's");   // B's own undo takes back B's write only
+  });
+
+  test("an undo sets back only the fields its write changed, so another field written since stays", async () => {
+    const { write, read, undo } = two();
+    await read();
+    await write("A", [{ op: "replace", path: "/notes/text", value: "A's" }]);
+    await write("B", [{ op: "replace", path: "/notes/title", value: "B's title" }]);
+    const answer = await undo("A");
+    expect(answer.result.conflict).toBeUndefined();
+    expect(answer.result.ops).toEqual([{ op: "replace", path: "/notes", value: expect.objectContaining({ text: null }) }]);
+    expect(await read()).toMatchObject({ notes: { text: null, title: "B's title" } });
+  });
+
+  test("an undo that no longer applies does not stick: the next undo walks the write before it (F2b)", async () => {
+    const { write, read, undo } = two();
+    await read();
+    await write("A", [{ op: "replace", path: "/notes/text", value: "A2" }]);
+    await write("A", [{ op: "add", path: "/items/x", value: { name: "x" } }]);
+    await write("B", [{ op: "remove", path: "/items/x" }]);
+    expect((await undo("A")).result).toMatchObject({ ops: [], conflict: ["/items/x"] });
+    expect((await undo("A")).result.conflict).toBeUndefined();
+    expect((await read()).notes.text).toBeNull();
+    expect((await undo("A")).result).toBeNull();                  // nothing left: null, not a conflict
+  });
+
+  test("a conflict is never redone: redo walks forward the last undo that did something", async () => {
+    const { write, read, undo, local } = two();
+    await read();
+    await write("A", [{ op: "replace", path: "/notes/text", value: "A1" }]);
+    await write("A", [{ op: "replace", path: "/notes/title", value: "A's title" }]);
+    await write("B", [{ op: "replace", path: "/notes/title", value: "B's title" }]);
+    expect((await undo("A")).result.conflict).toEqual(["/notes"]);  // the title: B has written it since
+    expect((await undo("A")).result.conflict).toBeUndefined();       // the text: set back
+    expect((await read()).notes).toMatchObject({ text: null, title: "B's title" });
+    await local.call("redo", { cursor: "A" });
+    expect((await read()).notes.text).toBe("A1");
+    expect((await local.call("redo", { cursor: "A" })).result).toBeNull();
+  });
+
+  test("dry: true says what an undo would do and walks nothing; entry: id walks only that entry (F3)", async () => {
+    const { write, read, undo } = two();
+    await read();
+    const w = await write("A", [{ op: "replace", path: "/notes/text", value: "A's" }]);
+    const dry = await undo("A", { dry: true });
+    expect(dry.result).toEqual({ doc: "note:1", entry: w.result.entry, ops: [{ op: "replace", path: "/notes", value: { text: null } }] });
+    expect((await read()).notes.text).toBe("A's");
+    expect((await undo("A", { entry: w.result.entry + 1 })).error?.code).toBe(409);
+    expect((await read()).notes.text).toBe("A's");
+    expect((await undo("A", { entry: w.result.entry })).result.ops).toHaveLength(1);
+    expect((await read()).notes.text).toBeNull();
+  });
+
+  test("an entry that touched a row twice is walked by its net change: made then changed, removed then made again", async () => {
+    const { write, read, undo } = two();
+    await read();
+    await write("A", [{ op: "add", path: "/items/x", value: { name: "a" } }, { op: "replace", path: "/items/x/name", value: "b" }]);
+    expect((await undo("A")).result).toMatchObject({ ops: [{ op: "remove", path: "/items/x" }] });
+    expect((await read()).items).toEqual({});
+
+    await write("B", [{ op: "add", path: "/items/y", value: { name: "y" } }]);
+    await write("A", [{ op: "remove", path: "/items/y" }, { op: "add", path: "/items/y", value: { name: "y2" } }]);
+    const back = await undo("A");
+    expect(back.result.conflict).toBeUndefined();
+    expect((await read()).items.y).toMatchObject({ name: "y" });
+  });
+
+  test("the cursor's walk does not scan the ledger: undo stays quick behind a feed of facts (F10)", async () => {
+    const { db, write, read, undo } = two();
+    await read();
+    await write("A", [{ op: "replace", path: "/notes/text", value: "A's" }]);
+    const insert = db.prepare("INSERT INTO delta_ledger (doc, version, ops, inverse, who, cursor, at, undoes, undoable) VALUES ('tick:m', ?, '[]', '[]', NULL, '', 0, NULL, 0)");
+    db.transaction(() => { for (let v = 1; v <= 50_000; v++) insert.run(v); })();
+    const t = performance.now();
+    for (let i = 0; i < 20; i++) await undo("A", { dry: true });
+    expect((performance.now() - t) / 20).toBeLessThan(2);   // was ~3 ms at 50k rows, 102 ms at 400k
+  });
+});

@@ -118,6 +118,8 @@ DECLARE
   v_field         TEXT;
   v_row           JSONB;
   v_new_row       JSONB;
+  v_exists        BOOLEAN;
+  v_missing       TEXT;
   v_ts            TIMESTAMPTZ := NOW();
   v_version       BIGINT;
   v_broadcast_ops JSONB := '[]'::jsonb;
@@ -149,7 +151,7 @@ BEGIN
     SELECT * INTO v_coll FROM _delta_collections
      WHERE collection_key = v_coll_key;
     IF NOT FOUND THEN
-      RAISE EXCEPTION 'unknown collection: %', v_coll_key;
+      RAISE EXCEPTION 'unknown collection: %', v_coll_key USING ERRCODE = '22023';
     END IF;
 
     -- Scope guard: an op may only target the doc's root or an included
@@ -162,7 +164,7 @@ BEGIN
       RAISE EXCEPTION
         'op collection "%" is not part of doc "%" (root: %, include: %)',
         v_coll_key, v_def.prefix, v_def.root_collection, v_def.include
-        USING ERRCODE = 'P0001';
+        USING ERRCODE = '22023';
     END IF;
 
     v_view := _delta_source_view(v_coll.table_name, v_coll.temporal);
@@ -181,6 +183,7 @@ BEGIN
       IF array_length(v_parts, 1) = 2 THEN
         v_op := jsonb_set(v_op, '{value}', jsonb_build_object(v_parts[2], v_op->'value'));
       END IF;
+      PERFORM _delta_assert_fields(v_coll_key, v_coll.columns_def, v_coll.parent_fk, v_op->'value');
 
       -- Read + lock
       IF v_coll.temporal THEN
@@ -196,7 +199,7 @@ BEGIN
       END IF;
 
       IF v_row IS NULL THEN
-        RAISE EXCEPTION 'root row not found: %', v_def.root_collection;
+        RAISE EXCEPTION 'root row not found: %', v_def.root_collection USING ERRCODE = 'P0002';
       END IF;
 
       -- Merge partial value
@@ -211,17 +214,17 @@ BEGIN
         v_new_row := v_new_row || jsonb_build_object('valid_from', v_ts, 'valid_to', NULL);
 
         EXECUTE format(
-          'INSERT INTO %I SELECT * FROM jsonb_populate_record(null::%I, $1)',
+          'INSERT INTO %I AS t SELECT * FROM jsonb_populate_record(null::%I, $1) RETURNING to_jsonb(t)',
           v_coll.table_name, v_coll.table_name
-        ) USING v_new_row;
+        ) INTO v_new_row USING v_new_row;
 
         v_new_row := _delta_strip_temporal(v_new_row);
       ELSE
         EXECUTE format('DELETE FROM %I WHERE id = $1', v_coll.table_name) USING v_doc_id;
         EXECUTE format(
-          'INSERT INTO %I SELECT * FROM jsonb_populate_record(null::%I, $1)',
+          'INSERT INTO %I AS t SELECT * FROM jsonb_populate_record(null::%I, $1) RETURNING to_jsonb(t)',
           v_coll.table_name, v_coll.table_name
-        ) USING v_new_row;
+        ) INTO v_new_row USING v_new_row;
       END IF;
 
       v_broadcast_ops := v_broadcast_ops || jsonb_build_array(
@@ -234,14 +237,25 @@ BEGIN
     -- Add row:  add /<collection>/<id>
     -- ---------------------------------------------------------------
     IF array_length(v_parts, 1) = 2 AND v_op->>'op' = 'add' THEN
+      PERFORM _delta_assert_fields(v_coll_key, v_coll.columns_def, v_coll.parent_fk, v_op->'value');
       v_id_text := v_parts[2];
       -- Auto-generate ID from sequence if path ends with '-'
       IF v_id_text = '-' THEN
         EXECUTE format('SELECT nextval(%L)', 'seq_' || v_coll.table_name) INTO v_id;
       ELSE
-        v_id := v_id_text::BIGINT;
+        v_id := _delta_row_id(v_coll_key, v_id_text);
+        -- An add names a new row. A temporal key is (id, valid_from), so an add
+        -- of a live id would insert a second live version of it: refuse it
+        -- (SQLSTATE 23505, 409 on the wire), as a plain table's key does.
+        EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I WHERE id = $1)', v_view) INTO v_exists USING v_id;
+        IF v_exists THEN
+          RAISE EXCEPTION 'row already exists: % -- replace it, or add to % for a new id',
+            _delta_build_path(v_coll_key, v_id::text), _delta_build_path(v_coll_key, '-')
+            USING ERRCODE = '23505';
+        END IF;
       END IF;
-      v_new_row := jsonb_build_object('id', v_id) || (v_op->'value');
+      -- The path names the row, whatever the value says.
+      v_new_row := (v_op->'value') || jsonb_build_object('id', v_id);
 
       -- Set FK: for list-mode root adds, apply scope equality values;
       -- for child collections in single-mode, set FK to root id. In list-mode
@@ -264,38 +278,40 @@ BEGIN
                (v_new_row->>v_coll.parent_fk)::BIGINT) THEN
         RAISE EXCEPTION 'row not found: %/%',
           v_coll.parent_collection, COALESCE(v_new_row->>v_coll.parent_fk, '')
-          USING ERRCODE = 'P0001';
+          USING ERRCODE = 'P0002';
       END IF;
 
-      -- Apply column defaults from metadata
-      SELECT v_new_row || COALESCE(jsonb_object_agg(
-        col_key,
-        CASE col_def->>'type'
-          WHEN 'text'        THEN to_jsonb(COALESCE(col_def->>'default', ''))
-          WHEN 'integer'     THEN COALESCE(col_def->'default', '0'::jsonb)
-          WHEN 'real'        THEN COALESCE(col_def->'default', '0'::jsonb)
-          WHEN 'boolean'     THEN COALESCE(col_def->'default', 'false'::jsonb)
-          WHEN 'json'        THEN COALESCE(col_def->'default', 'null'::jsonb)
-          -- A required timestamptz has no sensible empty default; emit its
-          -- declared default or NULL (→ a clear NOT NULL violation) rather than
-          -- '' (which fails with an opaque "invalid input syntax" cast error).
-          WHEN 'timestamptz' THEN COALESCE(col_def->'default', 'null'::jsonb)
-          ELSE to_jsonb(''::text)
-        END
-      ), '{}'::jsonb)
-      INTO v_new_row
-      FROM jsonb_each(v_coll.columns_def) AS x(col_key, col_def)
-      WHERE NOT v_new_row ? col_key
-        AND NOT COALESCE((col_def->>'nullable')::boolean, false);
+      -- A required column (not nullable, no declared default) the value leaves
+      -- out is the writer's mistake: refuse it (SQLSTATE 23502, 400 on the
+      -- wire) rather than store '' / 0 / false for it.
+      SELECT string_agg(col_key, ', ' ORDER BY col_key) INTO v_missing
+        FROM jsonb_each(v_coll.columns_def) AS x(col_key, col_def)
+       WHERE NOT v_new_row ? col_key
+         AND NOT COALESCE((col_def->>'nullable')::boolean, false)
+         AND NOT col_def ? 'default';
+      IF v_missing IS NOT NULL THEN
+        RAISE EXCEPTION 'Required field missing: % (give it a value, or declare a default or make it nullable in the schema)', v_missing
+          USING ERRCODE = '23502';
+      END IF;
+
+      -- Declared column defaults, for what the value leaves out
+      SELECT v_new_row || COALESCE(jsonb_object_agg(col_key, col_def->'default'), '{}'::jsonb)
+        INTO v_new_row
+        FROM jsonb_each(v_coll.columns_def) AS x(col_key, col_def)
+       WHERE NOT v_new_row ? col_key AND col_def ? 'default';
 
       IF v_coll.temporal THEN
         v_new_row := v_new_row || jsonb_build_object('valid_from', v_ts, 'valid_to', NULL);
       END IF;
 
+      -- Every write here tells the row as stored (RETURNING), not as sent: a
+      -- value its column casts (a scope's '1' into an integer, a date into a
+      -- timestamptz) is told as a later open reads it, so the broadcast, the
+      -- ledger's entry and undo's guard agree with the table.
       EXECUTE format(
-        'INSERT INTO %I SELECT * FROM jsonb_populate_record(null::%I, $1)',
+        'INSERT INTO %I AS t SELECT * FROM jsonb_populate_record(null::%I, $1) RETURNING to_jsonb(t)',
         v_coll.table_name, v_coll.table_name
-      ) USING v_new_row;
+      ) INTO v_new_row USING v_new_row;
 
       -- Strip temporal columns from broadcast
       IF v_coll.temporal THEN
@@ -312,12 +328,12 @@ BEGIN
     -- Remove row:  remove /<collection>/<id>  (+ cascades)
     -- ---------------------------------------------------------------
     IF array_length(v_parts, 1) = 2 AND v_op->>'op' = 'remove' THEN
-      v_id := v_parts[2]::BIGINT;
+      v_id := _delta_row_id(v_coll_key, v_parts[2]);
       -- _delta_cascade_remove addresses rows by id alone, so without this gate a
       -- client could name any id and delete a sibling doc's row.
       IF NOT _delta_row_in_scope(v_def, p_doc_name, v_coll_key, v_id) THEN
         RAISE EXCEPTION 'row not found: %/%', v_coll_key, v_id
-          USING ERRCODE = 'P0001';
+          USING ERRCODE = 'P0002';
       END IF;
       v_broadcast_ops := v_broadcast_ops || _delta_cascade_remove(
         v_coll_key, v_id, v_def.include
@@ -330,20 +346,21 @@ BEGIN
     -- Field replace: replace /<collection>/<id>/field (single field shorthand)
     -- ---------------------------------------------------------------
     IF (array_length(v_parts, 1) = 2 OR array_length(v_parts, 1) = 3) AND v_op->>'op' = 'replace' THEN
-      v_id := v_parts[2]::BIGINT;
+      v_id := _delta_row_id(v_coll_key, v_parts[2]);
 
       -- Same gate as remove: the row is addressed by bare id, so it must belong
       -- to this doc. (The single-mode root branch above never reaches here — it
       -- targets v_doc_id directly.)
       IF NOT _delta_row_in_scope(v_def, p_doc_name, v_coll_key, v_id) THEN
         RAISE EXCEPTION 'row not found: %/%', v_coll_key, v_id
-          USING ERRCODE = 'P0001';
+          USING ERRCODE = 'P0002';
       END IF;
 
       -- 3-segment: wrap single field into partial row value
       IF array_length(v_parts, 1) = 3 THEN
         v_op := jsonb_set(v_op, '{value}', jsonb_build_object(v_parts[3], v_op->'value'));
       END IF;
+      PERFORM _delta_assert_fields(v_coll_key, v_coll.columns_def, v_coll.parent_fk, v_op->'value');
 
       IF v_coll.temporal THEN
         EXECUTE format(
@@ -358,7 +375,7 @@ BEGIN
       END IF;
 
       IF v_row IS NULL THEN
-        RAISE EXCEPTION 'row not found: %/%', v_coll_key, v_id;
+        RAISE EXCEPTION 'row not found: %/%', v_coll_key, v_id USING ERRCODE = 'P0002';
       END IF;
 
       -- Merge partial value into current row
@@ -373,18 +390,18 @@ BEGIN
         v_new_row := v_new_row || jsonb_build_object('valid_from', v_ts, 'valid_to', NULL);
 
         EXECUTE format(
-          'INSERT INTO %I SELECT * FROM jsonb_populate_record(null::%I, $1)',
+          'INSERT INTO %I AS t SELECT * FROM jsonb_populate_record(null::%I, $1) RETURNING to_jsonb(t)',
           v_coll.table_name, v_coll.table_name
-        ) USING v_new_row;
+        ) INTO v_new_row USING v_new_row;
       ELSE
         -- Non-temporal: UPDATE with merged row
         EXECUTE format(
           'DELETE FROM %I WHERE id = $1', v_coll.table_name
         ) USING v_id;
         EXECUTE format(
-          'INSERT INTO %I SELECT * FROM jsonb_populate_record(null::%I, $1)',
+          'INSERT INTO %I AS t SELECT * FROM jsonb_populate_record(null::%I, $1) RETURNING to_jsonb(t)',
           v_coll.table_name, v_coll.table_name
-        ) USING v_new_row;
+        ) INTO v_new_row USING v_new_row;
       END IF;
 
       -- Strip temporal from broadcast
@@ -406,7 +423,7 @@ BEGIN
       CONTINUE;
     END IF;
 
-    RAISE EXCEPTION 'invalid op: % %', v_op->>'op', v_op->>'path';
+    RAISE EXCEPTION 'invalid op: % %', v_op->>'op', v_op->>'path' USING ERRCODE = '22023';
   END LOOP;
 
   v_version := _delta_bump_and_notify(p_doc_name, v_broadcast_ops);

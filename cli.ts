@@ -436,8 +436,11 @@ function cmdInit(dir: string | undefined, values: Record<string, unknown>) {
 // Vendor Claude Code skills into the consumer's .claude/skills/ directory.
 // Discovers skills from:
 //   - this package itself  (delta-doc)
-//   - any sibling package in node_modules with `.claude/skills/<name>/SKILL.md`
+//   - @blueshed/* packages in node_modules with `.claude/skills/<name>/SKILL.md`
 //     (e.g. @blueshed/railroad ships `railroad` and `bun-route`)
+//   - any other package the consumer names in its package.json `claudeSkills`
+// A skill is instructions an agent follows, so a package that merely sits in
+// node_modules (a dependency of a dependency) does not get to ship one.
 //
 // Skills aren't versioned like SQL — we always overwrite, but back up the
 // existing file as `.bak` so a consumer who edited their copy doesn't lose
@@ -478,9 +481,20 @@ function findNodeModulesDir(start: string): string | null {
   }
 }
 
+/** The packages outside @blueshed/* whose skills the consumer asked for: package.json `claudeSkills`. */
+function allowedSkillPackages(): Set<string> {
+  try {
+    const pkg = JSON.parse(readFileSync(resolve(process.cwd(), "package.json"), "utf8"));
+    return new Set(Array.isArray(pkg.claudeSkills) ? pkg.claudeSkills.filter((n: unknown) => typeof n === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
 function discoverSkillSources(): SkillSource[] {
   const sources: SkillSource[] = [];
   const seenNames = new Set<string>();
+  const allowed = allowedSkillPackages();
 
   // Our own skill — always present, ships in this package.
   const ownRoot = resolve(import.meta.dir, ".claude/skills");
@@ -520,6 +534,12 @@ function discoverSkillSources(): SkillSource[] {
         // Skip ourselves (we already added via ownRoot above).
         if (name === "@blueshed/delta") continue;
         const skillsRoot = join(dir, ".claude/skills");
+        if (!name.startsWith("@blueshed/") && !allowed.has(name)) {
+          if (listSkillsIn(skillsRoot, name).length) {
+            process.stderr.write(`  skipped ${name}: not @blueshed/*, and not in package.json "claudeSkills"\n`);
+          }
+          continue;
+        }
         for (const s of listSkillsIn(skillsRoot, name)) {
           if (!seenNames.has(s.name)) { sources.push(s); seenNames.add(s.name); }
         }

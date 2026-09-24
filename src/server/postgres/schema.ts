@@ -10,12 +10,10 @@
 import type { Pool } from "pg";
 import { type DeltaOp, splitPath } from "../../core";
 import {
-  type ColumnDef,
   type Schema,
   type DocDef,
   type ValidationError,
 } from "../../schema";
-import { defaultForType } from "./sql";
 
 export type {
   ColumnType,
@@ -59,13 +57,15 @@ export async function pruneOpsLog(pool: Pool, keepInterval = "1 hour"): Promise<
 
 // ---------------------------------------------------------------------------
 // validateOps — pre-flight check that ops reference known collections and
-// fields, with required-field detection via the Postgres `defaultForType`.
+// fields, and that an add gives every required column (not nullable, no default).
 // ---------------------------------------------------------------------------
 
 export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): ValidationError[] {
   const errors: ValidationError[] = [];
   for (const op of ops) {
-    const parts = splitPath(op.path);
+    let parts: string[];
+    try { parts = splitPath(op.path); }
+    catch (err: any) { errors.push({ path: String(op.path), message: err.message }); continue; }
     const collKey = parts[0];
     if (!collKey) { errors.push({ path: op.path, message: "Empty path" }); continue; }
     if (collKey !== def.root && !def.include.includes(collKey)) {
@@ -87,7 +87,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
       const fkColumn = table.parent?.fkColumn;
       for (const key of Object.keys(value)) {
         if (
-          !table.columns[key] &&
+          !Object.hasOwn(table.columns, key) &&
           key !== "id" &&
           (fkColumn === undefined || key !== fkColumn)
         ) {
@@ -97,16 +97,14 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
       if (op.op === "add") {
         for (const [col, colDef] of Object.entries(table.columns)) {
           if (!colDef.nullable && colDef.default === undefined && value[col] === undefined) {
-            if (defaultForType((colDef as ColumnDef).type) === null) {
-              errors.push({ path: op.path, message: `Required field missing: ${col}` });
-            }
+            errors.push({ path: op.path, message: `Required field missing: ${col} (give it a value, or declare a default or make it nullable in the schema)` });
           }
         }
       }
     }
     if (op.op === "replace" && parts.length === 3) {
       const field = parts[2]!;
-      if (!table.columns[field]) {
+      if (!Object.hasOwn(table.columns, field)) {
         errors.push({ path: op.path, message: `Unknown field: ${field}` }); continue;
       }
     }

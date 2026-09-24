@@ -8,7 +8,7 @@
  *                        starting with `_` are private and never wire-callable)
  *
  * Usage:
- *   import { createWs, registerDoc, registerMethod } from "@blueshed/railroad/delta-server";
+ *   import { createWs, registerDoc, registerMethod } from "@blueshed/delta/server";
  *
  *   const ws = createWs();
  *   await registerDoc<Message>(ws, "message", { file: "./message.json", empty: { message: "" } });
@@ -21,7 +21,7 @@
  *   ws.setServer(server);
  */
 import { createLogger } from "./logger";
-import { applyOps, splitPath, type DeltaOp } from "../core";
+import { applyOps, splitPath, joinPath, type DeltaOp } from "../core";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -230,7 +230,7 @@ export function createWs(opts?: WsOptions): WsServer {
               ws.send(
                 JSON.stringify({
                   id,
-                  error: { code: -1, message: `Private method: ${msg.method}` },
+                  error: { code: 403, message: `Private method: ${msg.method}` },
                 }),
               );
             return;
@@ -242,7 +242,7 @@ export function createWs(opts?: WsOptions): WsServer {
               ws.send(
                 JSON.stringify({
                   id,
-                  error: { code: -1, message: `Unknown action: ${action}` },
+                  error: { code: 400, message: `Unknown action: ${action}` },
                 }),
               );
             return;
@@ -262,15 +262,18 @@ export function createWs(opts?: WsOptions): WsServer {
             ws.send(
               JSON.stringify({
                 id,
-                error: { code: -1, message: `No handler matched: ${action}` },
+                // No backend owns this name (or method): not there, as on Postgres.
+                error: { code: 404, message: `No handler matched: ${action}` },
               }),
             );
           }
         } catch (err: any) {
           log.error(`error: ${err.message}`);
+          // An error that carries its wire code (applyOps: 400 / 404) is
+          // answered with it; anything else is the server's own (500).
           if (id)
             ws.send(
-              JSON.stringify({ id, error: { code: -1, message: err.message } }),
+              JSON.stringify({ id, error: { code: typeof err?.code === "number" ? err.code : 500, message: err.message } }),
             );
         }
       },
@@ -289,9 +292,6 @@ export function createWs(opts?: WsOptions): WsServer {
 // ---------------------------------------------------------------------------
 // Document registration
 // ---------------------------------------------------------------------------
-
-// JSON-Pointer re-escape (inverse of splitPath's unescape): ~ first, then /.
-const escapeSegment = (s: string) => s.replace(/~/g, "~0").replace(/\//g, "~1");
 
 /**
  * Normalize a delta batch for broadcast: rewrite field-level ops (depth >= 3,
@@ -321,7 +321,7 @@ export function normalizeForBroadcast(doc: unknown, ops: DeltaOp[]): DeltaOp[] {
       out.push(op);
       continue;
     }
-    const rowPath = `/${escapeSegment(segs[0]!)}/${escapeSegment(segs[1]!)}`;
+    const rowPath = joinPath(segs[0]!, segs[1]!);
     if (rewritten.has(rowPath)) continue;
     const row = (doc as any)?.[segs[0]!]?.[segs[1]!];
     if (row === undefined) continue;
@@ -329,6 +329,26 @@ export function normalizeForBroadcast(doc: unknown, ops: DeltaOp[]): DeltaOp[] {
     out.push({ op: "replace", path: rowPath, value: row });
   }
   return out;
+}
+
+/**
+ * `add .../-` onto a map of rows (an object, not an array) is "a new row, the
+ * server names it": mint a uuid, put it in the path and in the value's `id`,
+ * so the op as applied -- and as broadcast -- names the row, as the SQL
+ * backends' echoes do. On an array, `/-` appends, as RFC 6902 says.
+ */
+function mintIds(doc: unknown, ops: DeltaOp[]): DeltaOp[] {
+  return ops.map((op) => {
+    if (op.op !== "add" || !op.path.endsWith("/-")) return op;
+    const segs = splitPath(op.path);
+    let parent: any = doc;
+    for (const seg of segs.slice(0, -1)) parent = parent?.[seg];
+    if (parent === null || typeof parent !== "object" || Array.isArray(parent)) return op;
+    const id = crypto.randomUUID();
+    const v = op.value;
+    const value = v !== null && typeof v === "object" && !Array.isArray(v) ? { ...v, id } : v;
+    return { op: "add", path: joinPath(...segs.slice(0, -1), id), value };
+  });
 }
 
 /** Register a persisted JSON document with the WebSocket server. */
@@ -361,7 +381,8 @@ export async function registerDoc<T>(
     return done;
   }
 
-  function applyAndBroadcast(ops: DeltaOp[]) {
+  function applyAndBroadcast(sent: DeltaOp[]) {
+    const ops = mintIds(doc, sent);
     applyOps(doc, ops);
     log.info(`delta [${ops.map((o) => `${o.op} ${o.path}`).join(", ")}]`);
     ws.publish(name, { doc: name, ops: normalizeForBroadcast(doc, ops) });
