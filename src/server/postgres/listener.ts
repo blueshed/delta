@@ -19,6 +19,7 @@ import type { DocType } from "./registry";
 import type { DeltaAuth } from "../auth";
 import { isAuthError } from "../auth";
 import { type DeltaOp, splitPath } from "../../core";
+import { socketCursor } from "../ledger";
 
 const log = createLogger("[doc]");
 
@@ -101,9 +102,11 @@ export async function createDocListener<I = unknown>(
     return typeof identity === "string" || typeof identity === "number" ? String(identity) : JSON.stringify(identity);
   };
   // The cursor undo walks: named by a caller in this process, and over the
-  // socket the connection itself, so no one can walk another's.
-  const cursorOf = (msg: any, client: any): string | null =>
-    client?.data?.local ? (typeof msg.cursor === "string" ? msg.cursor : null) : (client?.data?.clientId ?? null);
+  // socket the connection itself -- signed in, the person and the connection
+  // together, so another person holding the same connection id (a client may
+  // choose it, to keep its cursor across a reconnect) cannot walk it.
+  const cursorOf = (msg: any, client: any, identity: I | undefined): string | null =>
+    client?.data?.local ? (typeof msg.cursor === "string" ? msg.cursor : null) : socketCursor(whoOf(identity), client?.data?.clientId);
   const tracked = new Map<string, DocState>();
 
   // Custom docs: prefix-keyed defs, per-docName cache + criteria + subscribers.
@@ -577,7 +580,7 @@ export async function createDocListener<I = unknown>(
   }));
 
   ws.on("delta", withDoc("delta", async ({ docName, type, ctx, msg, client, respond, identity }) => {
-    const by = ledger ? { who: whoOf(identity), cursor: cursorOf(msg, client), undoable: msg.undoable !== false } : undefined;
+    const by = ledger ? { who: whoOf(identity), cursor: cursorOf(msg, client, identity), undoable: msg.undoable !== false } : undefined;
     const result = await type.apply(ctx, docName, msg.ops, identity, by);
     respond({ result: ledger ? { ack: true, version: Number(result.version), ops: result.ops, inverse: result.inverse, entry: result.entry == null ? undefined : Number(result.entry) } : { ack: true, version: result.version } });
     log.info(`delta ${docName} v${result.version}`);
@@ -593,7 +596,7 @@ export async function createDocListener<I = unknown>(
         identity = gated as I;
       }
       try {
-        const cursor = cursorOf(msg, client);
+        const cursor = cursorOf(msg, client, identity);
         const { rows } =
           auth?.asSqlArg && identity !== undefined
             ? await pool.query(`SELECT delta_${way}_as($1, $2, $3) AS result`, [String(auth.asSqlArg(identity)), cursor, whoOf(identity)])
@@ -610,7 +613,7 @@ export async function createDocListener<I = unknown>(
     // A document's recent history, to whoever may open it: each entry says `mine`, never who wrote it.
     ws.on("history", withDoc("history", async ({ docName, type, ctx, msg, client, respond, identity }) => {
       if (!(await type.open(ctx, docName, msg, identity))) return respond({ error: { code: 404, message: "Not found" } });
-      const { rows } = await pool.query("SELECT delta_history($1, $2, $3) AS entries", [docName, cursorOf(msg, client), msg.limit ?? 50]);
+      const { rows } = await pool.query("SELECT delta_history($1, $2, $3) AS entries", [docName, cursorOf(msg, client, identity), msg.limit ?? 50]);
       respond({ result: rows[0]?.entries ?? [] });
     }));
   }

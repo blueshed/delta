@@ -120,3 +120,13 @@ export function createLedger(db: any): Ledger {
     },
   };
 }
+
+/**
+ * The cursor of a socket connection: the connection id alone for someone not signed in, and the
+ * person with it for someone who is -- so undo over a socket walks only what this person wrote
+ * on this connection, whoever else learns the id.
+ */
+export function socketCursor(who: string | null, clientId: string | undefined): string | null {
+  if (!clientId) return null;
+  return who === null ? clientId : JSON.stringify([who, clientId]);
+}

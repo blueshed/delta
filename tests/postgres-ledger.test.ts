@@ -117,6 +117,19 @@ describe("the Postgres ledger", () => {
     expect(await names()).toEqual([]);
   });
 
+  test("signed in, the cursor is the person and the connection: another person holding the same connection id cannot walk it", async () => {
+    const auth = { gate: (client: any) => client.data.identity ?? { error: "no one" } };
+    const ws = await process({ ledger: true, auth });
+    // a client chooses its connection id (?clientId=, to keep its cursor across a reconnect): one leaked or guessed
+    const alice = mockClient({ clientId: "c-1", identity: "alice" });
+    const mallory = mockClient({ clientId: "c-1", identity: "mallory" });
+    await sendAndAwait(ws, alice, add("alice's"));
+    expect((await sendAndAwait(ws, mallory, { action: "undo" })).result).toBeNull();
+    expect(await names()).toEqual(["alice's"]);
+    await sendAndAwait(ws, alice, { action: "undo" });
+    expect(await names()).toEqual([]);
+  });
+
   test("undo works across processes: a write in one, taken back from another, and both hear it", async () => {
     const a = await process();
     const b = await process();

@@ -142,4 +142,24 @@ describe("the cursor, over a socket", () => {
     expect(send(mallory, "undo", { cursor: "c-alice" }).result).toBeNull(); // named, and not honoured
     expect(send(alice, "undo", {}).result).toMatchObject({ ops: [{ op: "remove", path: "/messages/m1" }] });
   });
+
+  test("signed in, it is the person and the connection: another person holding the same connection id cannot walk it", async () => {
+    const db = new Database(":memory:");
+    createTables(db, schema);
+    const handlers = new Map<string, ActionHandler[]>();
+    const server = { on: (a: string, h: ActionHandler) => handlers.set(a, [...(handlers.get(a) ?? []), h]), publish() {} } as unknown as WsServer;
+    registerDocs(server, db, schema, [room], [], { ledger: true });
+    const send = (client: any, action: string, msg: any) => {
+      let answer: any;
+      for (const h of handlers.get(action) ?? []) h({ action, ...msg }, client, (r) => (answer ??= r));
+      return answer;
+    };
+    // a client chooses its connection id (?clientId=, to keep its cursor across a reconnect): one leaked or guessed
+    const alice = { data: { clientId: "c-1", identity: "alice" }, subscribe() {}, unsubscribe() {} };
+    const mallory = { data: { clientId: "c-1", identity: "mallory" }, subscribe() {}, unsubscribe() {} };
+    send(alice, "open", { doc: "room:a" });
+    send(alice, "delta", { doc: "room:a", ops: [{ op: "add", path: "/messages/m1", value: { text: "alice" } }] });
+    expect(send(mallory, "undo", {}).result).toBeNull();
+    expect(send(alice, "undo", {}).result).toMatchObject({ ops: [{ op: "remove", path: "/messages/m1" }] });
+  });
 });

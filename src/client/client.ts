@@ -148,7 +148,8 @@ export interface OpenDocEntry {
   /**
    * Last authoritative server doc version applied — seeded from `_v` on the
    * open snapshot and advanced by `v` on each broadcast. `undefined` means the
-   * backend doesn't version this doc (SQLite/JSON today, custom docs), so no
+   * backend doesn't version this doc (JSON files, custom docs, SQLite without a
+   * ledger), so no
    * gap detection runs and ops apply as-is.
    */
   serverVersion?: number;

@@ -20,7 +20,7 @@ import type { WsServer } from "./server";
 import { trackSubscribe, trackUnsubscribe, onClientDrop } from "./server";
 import { applyOps as deltaApplyOps, type DeltaOp, splitPath } from "../core";
 import { createLogger } from "./logger";
-import { createLedger } from "./ledger";
+import { createLedger, socketCursor } from "./ledger";
 import {
   type ColumnDef,
   type Schema,
@@ -172,9 +172,11 @@ export function registerDocs(
     return typeof identity === "string" || typeof identity === "number" ? String(identity) : JSON.stringify(identity);
   };
   // The cursor undo walks: named by a caller in this process (`createLocal`),
-  // and over the socket the connection itself, so no one can walk another's.
+  // and over the socket the connection itself -- signed in, the person and the
+  // connection together, so another person holding the same connection id
+  // (a client may choose it, to keep its cursor across a reconnect) cannot walk it.
   const cursorOf = (msg: any, client: any): string | null =>
-    client?.data?.local ? (typeof msg.cursor === "string" ? msg.cursor : null) : (client?.data?.clientId ?? null);
+    client?.data?.local ? (typeof msg.cursor === "string" ? msg.cursor : null) : socketCursor(whoOf(client), client?.data?.clientId);
   // Build lookup: prefix → DocDef
   const docByPrefix = new Map<string, DocDef>();
   for (const doc of docs) {

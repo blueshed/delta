@@ -51,7 +51,9 @@ and broadcasts are the same as in 0.5.1. Four changes to check when upgrading:
   ends no redo. `history` answers a document's newest entries to whoever may open it; each
   entry says whether the asker's cursor wrote it (`mine`), never who did. The cursor is named
   by a caller in this process (`cursor` on the message); over a socket it is the connection's
-  `clientId`, and a `cursor` on the message is ignored.
+  `clientId` -- for a signed-in connection, the person and the `clientId` together, so
+  another person holding the same id cannot walk it -- and a `cursor` on the message is
+  ignored.
 - **`who`**: the identity a write came from, as the auth module's `gate` gives it. Strings and
   numbers are written as they are, anything else as JSON; pass `who: (identity) => string` to
   choose.
