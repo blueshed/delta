@@ -132,11 +132,23 @@ You don't seed anything by hand — just have the cluster running and the
 - `src/client/` — `client.ts` (reconnecting WS + reactive `openDoc`),
   `dom-ops.ts` (`applyOpsToCollection`).
 - `src/server/server.ts` — `createWs` + JSON-file backend (`registerDoc`).
-- `src/server/sqlite.ts` — SQLite backend (`registerDocs`, custom docs).
+- `src/server/sqlite.ts` — SQLite backend (`registerDocs`, custom docs; with
+  `{ ledger: true }`, every write recorded and `undo` / `redo` / `history`).
+- `src/server/ledger.ts` — the ledger: a write, its inverse, its version, who
+  made it and the cursor undo walks (named in-process; the connection on a socket).
+- `src/server/local.ts` — `createLocal()`: delta in-process, no socket;
+  `as(identity)` for who is writing. Calls are async, so every backend answers through it.
+- `src/server/kinds.ts` — documents not stored in a database: `registerMemory` (live),
+  `registerStatic` (fixed for the release), `registerSource` (one shared reading from outside,
+  stamped `at`, `stale` when it goes quiet).
 - `src/server/postgres/` — Postgres backend (listener, registry, codegen,
   schema, bootstrap, auth).
 - `src/server/auth*.ts` — `DeltaAuth` contract + reference JWT impl.
 - `src/sql/001a–001f-*.sql` — framework stored functions (read-only contract).
+- `src/sql/001g-delta-ledger.sql` — the Postgres ledger: `delta_apply_logged` (the write and
+  its entry in one transaction, a lock per document so the inverse is read from what the write
+  replaced), `delta_undo` / `delta_redo` / `delta_history`, and their `_as` forms for RLS.
+  `createDocListener(ws, pool, { ledger: true })` turns it on.
 - `tests/` — `bun test`; `tests/setup.ts` is the shared harness.
 - `.claude/skills/delta-doc/` — the published skill (SKILL.md is the router,
   reference.md the manual). Version in SKILL.md frontmatter tracks

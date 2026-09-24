@@ -62,6 +62,9 @@ export async function resetState(pool: Pool): Promise<void> {
       IF to_regclass('_delta_ops_log') IS NOT NULL THEN
         EXECUTE 'TRUNCATE _delta_ops_log RESTART IDENTITY';
       END IF;
+      IF to_regclass('_delta_ledger') IS NOT NULL THEN
+        EXECUTE 'TRUNCATE _delta_ledger RESTART IDENTITY';
+      END IF;
     END $$;
   `);
 }

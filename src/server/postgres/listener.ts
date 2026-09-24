@@ -84,9 +84,26 @@ const FETCH_PAGE = 1000;
 export async function createDocListener<I = unknown>(
   ws: WsServer,
   pool: Pool,
-  opts?: { auth?: DeltaAuth<I>; custom?: CustomDocDef<any>[] },
+  opts?: {
+    auth?: DeltaAuth<I>;
+    custom?: CustomDocDef<any>[];
+    /** Keep the ledger (001g): every write with its inverse, who made it and the cursor undo walks; and `undo`, `redo`, `history`. */
+    ledger?: boolean;
+    /** How an identity is written in the ledger. Default: a string or number as it is, anything else as JSON. */
+    who?: (identity: I) => string;
+  },
 ) {
   const auth = opts?.auth;
+  const ledger = !!opts?.ledger;
+  const whoOf = (identity: I | undefined): string | null => {
+    if (identity === undefined || identity === null) return null;
+    if (opts?.who) return opts.who(identity);
+    return typeof identity === "string" || typeof identity === "number" ? String(identity) : JSON.stringify(identity);
+  };
+  // The cursor undo walks: named by a caller in this process, and over the
+  // socket the connection itself, so no one can walk another's.
+  const cursorOf = (msg: any, client: any): string | null =>
+    client?.data?.local ? (typeof msg.cursor === "string" ? msg.cursor : null) : (client?.data?.clientId ?? null);
   const tracked = new Map<string, DocState>();
 
   // Custom docs: prefix-keyed defs, per-docName cache + criteria + subscribers.
@@ -559,11 +576,44 @@ export async function createDocListener<I = unknown>(
     log.info(`opened ${docName} v${state.version}`);
   }));
 
-  ws.on("delta", withDoc("delta", async ({ docName, type, ctx, msg, respond, identity }) => {
-    const result = await type.apply(ctx, docName, msg.ops, identity);
-    respond({ result: { ack: true, version: result.version } });
+  ws.on("delta", withDoc("delta", async ({ docName, type, ctx, msg, client, respond, identity }) => {
+    const by = ledger ? { who: whoOf(identity), cursor: cursorOf(msg, client), undoable: msg.undoable !== false } : undefined;
+    const result = await type.apply(ctx, docName, msg.ops, identity, by);
+    respond({ result: ledger ? { ack: true, version: Number(result.version), ops: result.ops, inverse: result.inverse, entry: result.entry == null ? undefined : Number(result.entry) } : { ack: true, version: result.version } });
     log.info(`delta ${docName} v${result.version}`);
   }));
+
+  if (ledger) {
+    /** Undo or redo: the cursor's next entry, walked in the database (001g) and recorded as walking it. */
+    const walk = (way: "undo" | "redo") => async (msg: any, client: any, respond: (r: any) => void) => {
+      let identity: I | undefined;
+      if (auth) {
+        const gated = auth.gate(client);
+        if (isAuthError(gated)) return respond({ error: { code: 401, message: gated.error } });
+        identity = gated as I;
+      }
+      try {
+        const cursor = cursorOf(msg, client);
+        const { rows } =
+          auth?.asSqlArg && identity !== undefined
+            ? await pool.query(`SELECT delta_${way}_as($1, $2, $3) AS result`, [String(auth.asSqlArg(identity)), cursor, whoOf(identity)])
+            : await pool.query(`SELECT delta_${way}($1, $2) AS result`, [cursor, whoOf(identity)]);
+        const result = rows[0]?.result ?? null;
+        respond({ result: result && { ...result, version: Number(result.version), entry: result.entry == null ? undefined : Number(result.entry) } });
+      } catch (err) {
+        log.error(`${way} failed: ${errMsg(err)}`);
+        respond({ error: { code: 500, message: errMsg(err) } });
+      }
+    };
+    ws.on("undo", walk("undo"));
+    ws.on("redo", walk("redo"));
+    // A document's recent history, to whoever may open it: each entry says `mine`, never who wrote it.
+    ws.on("history", withDoc("history", async ({ docName, type, ctx, msg, client, respond, identity }) => {
+      if (!(await type.open(ctx, docName, msg, identity))) return respond({ error: { code: 404, message: "Not found" } });
+      const { rows } = await pool.query("SELECT delta_history($1, $2, $3) AS entries", [docName, cursorOf(msg, client), msg.limit ?? 50]);
+      respond({ result: rows[0]?.entries ?? [] });
+    }));
+  }
 
   ws.on("open_at", withDoc("open_at", async ({ docName, type, ctx, msg, respond, identity }) => {
     const at = msg.at as string;

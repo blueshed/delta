@@ -18,6 +18,9 @@ import type { DocDef } from "./schema";
 import type { DeltaOp } from "../../core";
 import type { DeltaAuth } from "../auth";
 
+/** Who is writing, for the ledger: the identity as the ledger has it, and the cursor undo walks. */
+export type Writer = { who: string | null; cursor: string | null; undoable?: boolean; undoes?: number | null };
+
 // ---------------------------------------------------------------------------
 // DocType — the unified handler contract
 // ---------------------------------------------------------------------------
@@ -39,13 +42,17 @@ export interface DocType<C = any, I = unknown> {
   ): Promise<{ result: any; version: number } | null>;
 
   /** Apply delta ops. Returns new version; ops may be omitted since broadcast
-   *  happens via LISTEN/NOTIFY, but returning them keeps the contract honest. */
+   *  happens via LISTEN/NOTIFY, but returning them keeps the contract honest.
+   *  Given `by` (the listener keeps a ledger), the write is recorded with its
+   *  inverse in the same transaction -- the framework's docs do; a custom type
+   *  that ignores `by` is simply not on the ledger. */
   apply(
     ctx: C,
     docName: string,
     ops: DeltaOp[],
     identity?: I,
-  ): Promise<{ version: number; ops?: any[] }>;
+    by?: Writer,
+  ): Promise<{ version: number; ops?: any[]; inverse?: any[]; entry?: number | null }>;
 
   /** Optional: snapshot read at a historical timestamp. Not every doc type
    *  supports this (e.g. venue-at: already embeds the timestamp in its name). */
@@ -142,9 +149,17 @@ export function docTypeFromDef<I = unknown>(
       return { result: doc, version };
     },
 
-    async apply(_ctx, docName, ops, identity) {
+    async apply(_ctx, docName, ops, identity, by) {
       let row: { result: any } | undefined;
-      if (usingAuth && identity !== undefined) {
+      if (by) {
+        // on the ledger: delta_apply with its entry, in one transaction (001g)
+        const logged = [docName, JSON.stringify(ops), by.who, by.cursor, by.undoable !== false, by.undoes ?? null];
+        const { rows } =
+          usingAuth && identity !== undefined
+            ? await pool.query("SELECT delta_apply_logged_as($1, $2, $3, $4, $5, $6, $7) AS result", [String(auth!.asSqlArg!(identity)), ...logged])
+            : await pool.query("SELECT delta_apply_logged($1, $2, $3, $4, $5, $6) AS result", logged);
+        row = rows[0];
+      } else if (usingAuth && identity !== undefined) {
         const { rows } = await pool.query(
           "SELECT delta_apply_as($1, $2, $3) AS result",
           [String(auth!.asSqlArg!(identity)), docName, JSON.stringify(ops)],

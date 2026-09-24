@@ -77,6 +77,8 @@ describe("package exports", () => {
     "./dom-ops": "applyOpsToCollection",
     "./server": "createWs",
     "./sqlite": "registerDocs",
+    "./local": "createLocal",
+    "./kinds": "registerSource",
     "./postgres": "createDocListener",
     "./logger": "createLogger",
     "./auth": "wireAuth",

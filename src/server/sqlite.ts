@@ -20,6 +20,7 @@ import type { WsServer } from "./server";
 import { trackSubscribe, trackUnsubscribe, onClientDrop } from "./server";
 import { applyOps as deltaApplyOps, type DeltaOp, splitPath } from "../core";
 import { createLogger } from "./logger";
+import { createLedger } from "./ledger";
 import {
   type ColumnDef,
   type Schema,
@@ -144,13 +145,36 @@ function sqlDefault(value: unknown): string {
 const log = createLogger("[delta-sqlite]");
 
 /** Register all doc definitions with the WebSocket server. */
+export interface RegisterOptions {
+  /**
+   * Keep a ledger (`./ledger`): every write recorded with its inverse, its
+   * version, who made it and the cursor undo walks; and `undo`, `redo` and
+   * `history` actions over it.
+   */
+  ledger?: boolean;
+  /** How an identity is written in the ledger. Default: a string or number as it is, anything else as JSON. */
+  who?: (identity: unknown) => string;
+}
+
 export function registerDocs(
   ws: WsServer,
   db: any,
   schema: Schema,
   docs: DocDef[],
   customDocs: CustomDocDef<any>[] = [],
+  options: RegisterOptions = {},
 ) {
+  const ledger = options.ledger ? createLedger(db) : undefined;
+  const whoOf = (client: any): string | null => {
+    const identity = client?.data?.identity;
+    if (identity === undefined || identity === null) return null;
+    if (options.who) return options.who(identity);
+    return typeof identity === "string" || typeof identity === "number" ? String(identity) : JSON.stringify(identity);
+  };
+  // The cursor undo walks: named by a caller in this process (`createLocal`),
+  // and over the socket the connection itself, so no one can walk another's.
+  const cursorOf = (msg: any, client: any): string | null =>
+    client?.data?.local ? (typeof msg.cursor === "string" ? msg.cursor : null) : (client?.data?.clientId ?? null);
   // Build lookup: prefix → DocDef
   const docByPrefix = new Map<string, DocDef>();
   for (const doc of docs) {
@@ -171,6 +195,30 @@ export function registerDocs(
 
   // In-memory doc cache: docName → loaded doc object
   const cache = new Map<string, any>();
+
+  // Open implied docs whose root row has not been written yet.
+  const implied = new Set<string>();
+
+  function emptyDoc(def: DocDef, docId: string): any {
+    const rootTable = schema.tables[def.root]!;
+    const root: any = { id: docId };
+    for (const [col, colDef] of Object.entries(rootTable.columns)) {
+      root[col] = colDef.default ?? (colDef.nullable ? null : defaultForType(colDef.type));
+    }
+    const doc: any = { [def.root]: root };
+    for (const coll of def.include) doc[coll] = {};
+    return doc;
+  }
+
+  function ensureImpliedRoot(def: DocDef, doc: any): void {
+    const rootTable = schema.tables[def.root]!;
+    const viewName = rootTable.temporal ? `current_${rootTable.name}` : rootTable.name;
+    const root = doc[def.root];
+    if (db.query(`SELECT 1 FROM ${viewName} WHERE id = ?`).get(root.id)) return;
+    const ts = now();
+    if (rootTable.temporal) { root.valid_from = ts; root.valid_to = null; }
+    insertRootRow(db, rootTable, root, ts);
+  }
 
   // Parsed criteria per open custom doc name (shared across clients of the same name).
   const customCriteria = new Map<string, unknown>();
@@ -207,6 +255,7 @@ export function registerDocs(
       if (subs.size === 0) {
         subscriptions.delete(docName);
         cache.delete(docName);
+        implied.delete(docName);
         customCriteria.delete(docName);
       }
     }
@@ -481,16 +530,10 @@ export function registerDocs(
     const match = findDoc(docName);
     if (!match) return;
 
-    const { def, docId } = match;
-    let doc = cache.get(docName);
+    const doc = load(docName, match.def, match.docId);
     if (!doc) {
-      const scope = resolveScope(def, docId);
-      doc = loadDocFromSql(def, scope);
-      if (!doc) {
-        respond({ error: { code: 404, message: "Not found" } });
-        return;
-      }
-      cache.set(docName, doc);
+      respond({ error: { code: 404, message: "Not found" } });
+      return;
     }
 
     trackSubscribe(client, docName);
@@ -498,11 +541,84 @@ export function registerDocs(
     subscriptions.get(docName)!.add(client);
     onClientDrop(client, releaseClient);
 
-    respond({ result: doc });
+    // with a ledger, the version the document is at, as the Postgres backend's open says it (`_v`),
+    // so a copy kept from the stream of changes knows where it starts
+    respond({ result: ledger ? { ...doc, _v: ledger.version(docName) } : doc });
     log.info(`opened ${docName}`);
   });
 
-  ws.on("delta", (msg, _client, respond) => {
+  /** A document from the cache, or loaded into it: an implied one opens empty, and its first write makes its row. */
+  function load(docName: string, def: DocDef, docId: string): any | null {
+    let doc = cache.get(docName);
+    if (doc) return doc;
+    doc = loadDocFromSql(def, resolveScope(def, docId));
+    if (!doc && def.implied) {
+      doc = emptyDoc(def, docId);
+      implied.add(docName);
+    }
+    if (doc) cache.set(docName, doc);
+    return doc;
+  }
+
+  type Written = { ops: DeltaOp[]; inverse: DeltaOp[]; version?: number; entry?: number };
+  type Failed = { error: { code: number; message: string } };
+
+  /**
+   * The one write path -- a fresh write, an undo, a redo: validated, applied in
+   * one transaction with its ledger entry (a savepoint inside a caller's own),
+   * and then told: to the document's subscribers, to the other open documents
+   * that share its rows, and to the custom documents that watch them.
+   */
+  function write(docName: string, def: DocDef, doc: any, ops: DeltaOp[], by: { who: string | null; cursor: string | null; undoes?: number; undoable?: boolean }): Written | Failed {
+    // Pre-flight validation — reject unknown collections/fields and bad types
+    // up front instead of silently acking an op that diverges cache/broadcast
+    // from what the DB can persist.
+    const validationErrors = validateOps(schema, def, ops);
+    if (validationErrors.length) {
+      return { error: { code: 400, message: validationErrors.map((e) => `${e.path}: ${e.message}`).join("; ") } };
+    }
+
+    const snapshot = structuredClone(doc); // for rollback, and for the inverse
+    let written: Written;
+    try {
+      // `db.transaction` rather than a bare BEGIN: inside a caller's own
+      // transaction (a server-side renderer writing several things as one, a
+      // test that rolls every case back) it becomes a savepoint, and still
+      // rolls back alone. Rollback owns only this region: a failure in the
+      // post-commit block below must not look like a failed write.
+      written = db.transaction(() => {
+        if (implied.has(docName)) ensureImpliedRoot(def, doc);
+        const applied = applyOps(docName, def, doc, ops);
+        const inverse = inverseOf(snapshot, applied);
+        const recorded = ledger?.record({ doc: docName, ops: applied, inverse, ...by });
+        return { ops: applied, inverse, version: recorded?.version, entry: recorded?.entry };
+      })();
+      implied.delete(docName);
+    } catch (err: any) {
+      cache.set(docName, snapshot); // restore in-memory cache
+      log.error(`delta failed: ${err.message}`);
+      return { error: { code: 500, message: err.message } };
+    }
+
+    // Committed. Fan-out is a post-commit side effect: a failure here must not
+    // roll back (the write is durable) nor masquerade as a write error.
+    try {
+      // Primary broadcast: to the doc's own subscribers -- and, through
+      // `createLocal().onPublish`, the one stream of changes an in-process
+      // caller (eta) redraws from
+      ws.publish(docName, { doc: docName, ops: written.ops, ...(written.version !== undefined ? { v: written.version } : {}) });
+      // Cross-doc fan-out: find other open docs affected by these changes
+      fanOut(ws, written.ops, docName);
+      // Custom-doc cross-pollination: predicate-based membership.
+      customFanOut(written.ops);
+    } catch (err: any) {
+      log.error(`delta fan-out failed (write committed): ${err.message}`);
+    }
+    log.info(`delta ${docName} [${ops.map((o: DeltaOp) => `${o.op} ${o.path}`).join(", ")}]`);
+    return written;
+  }
+
+  ws.on("delta", (msg, client, respond) => {
     const docName = msg.doc as string;
 
     if (findCustom(docName)) {
@@ -513,61 +629,41 @@ export function registerDocs(
     const match = findDoc(docName);
     if (!match) return;
 
-    const { def } = match;
     const doc = cache.get(docName);
     if (!doc) {
       respond({ error: { code: 404, message: "Doc not loaded" } });
       return;
     }
 
-    // Pre-flight validation — reject unknown collections/fields and bad types
-    // up front instead of silently acking an op that diverges cache/broadcast
-    // from what the DB can persist.
-    const validationErrors = validateOps(schema, def, msg.ops as DeltaOp[]);
-    if (validationErrors.length) {
-      respond({
-        error: {
-          code: 400,
-          message: validationErrors.map((e) => `${e.path}: ${e.message}`).join("; "),
-        },
-      });
-      return;
-    }
-
-    // Snapshot cache for rollback
-    const snapshot = structuredClone(doc);
-
-    let broadcastOps: DeltaOp[];
-    try {
-      db.run("BEGIN");
-      broadcastOps = applyOps(docName, def, doc, msg.ops as DeltaOp[]);
-      db.run("COMMIT");
-    } catch (err: any) {
-      // Rollback owns ONLY the BEGIN..COMMIT region. (A bare ROLLBACK after a
-      // successful COMMIT throws "no transaction is active", which would mask
-      // the real error and abort the handler — see the post-commit block.)
-      try { db.run("ROLLBACK"); } catch { /* no active tx */ }
-      cache.set(docName, snapshot); // restore in-memory cache
-      log.error(`delta failed: ${err.message}`);
-      respond({ error: { code: 500, message: err.message } });
-      return;
-    }
-
-    // Committed. Fan-out is a post-commit side effect: a failure here must not
-    // roll back (the write is durable) nor masquerade as a write error.
-    respond({ result: { ack: true } });
-    try {
-      // Primary broadcast: to the doc's own subscribers
-      ws.publish(docName, { doc: docName, ops: broadcastOps });
-      // Cross-doc fan-out: find other open docs affected by these changes
-      fanOut(ws, broadcastOps, docName);
-      // Custom-doc cross-pollination: predicate-based membership.
-      customFanOut(broadcastOps);
-    } catch (err: any) {
-      log.error(`delta fan-out failed (write committed): ${err.message}`);
-    }
-    log.info(`delta ${docName} [${(msg.ops as DeltaOp[]).map((o: DeltaOp) => `${o.op} ${o.path}`).join(", ")}]`);
+    const out = write(docName, match.def, doc, msg.ops as DeltaOp[], { who: whoOf(client), cursor: cursorOf(msg, client), undoable: msg.undoable !== false });
+    if ("error" in out) return respond(out);
+    // A writer that keeps its own history asks for the inverse (or keeps a
+    // ledger): what delta applied, walked back, read from the document as it
+    // was. Opt-in, so a browser writer is not sent rows it never asked for.
+    respond({ result: msg.inverse || ledger ? { ack: true, ...out } : { ack: true } });
   });
+
+  if (ledger) {
+    /** Undo or redo: the cursor's next entry, walked through the same write path, recorded as walking it. */
+    const walk = (way: "undo" | "redo") => (msg: any, client: any, respond: (r: any) => void) => {
+      const cursor = cursorOf(msg, client);
+      const entry = cursor === null ? undefined : way === "undo" ? ledger.nextUndo(cursor) : ledger.nextRedo(cursor);
+      if (!entry) return respond({ result: null });
+      const match = findDoc(entry.doc);
+      const doc = match && load(entry.doc, match.def, match.docId);
+      if (!match || !doc) return respond({ error: { code: 404, message: `Not found: ${entry.doc}` } });
+      const out = write(entry.doc, match.def, doc, entry.inverse, { who: whoOf(client), cursor, undoes: entry.id });
+      if (!subscriptions.has(entry.doc)) cache.delete(entry.doc); // loaded for this walk only
+      respond("error" in out ? out : { result: { doc: entry.doc, ...out } });
+    };
+    ws.on("undo", walk("undo"));
+    ws.on("redo", walk("redo"));
+    // A document's recent history: each entry says `mine`, never who wrote it.
+    ws.on("history", (msg, client, respond) => {
+      if (!findDoc(msg.doc)) return;
+      respond({ result: ledger.history(msg.doc, cursorOf(msg, client), msg.limit) });
+    });
+  }
 
   ws.on("close", (msg, client, respond) => {
     const docName = msg.doc as string;
@@ -580,6 +676,7 @@ export function registerDocs(
     if (subscriptions.get(docName)?.size === 0) {
       subscriptions.delete(docName);
       cache.delete(docName); // evict when no subscribers
+      implied.delete(docName);
       if (isCustom) customCriteria.delete(docName);
     }
 
@@ -634,6 +731,12 @@ export function registerDocs(
       // an included map — otherwise applying `/<coll>` would clobber the whole
       // collection map with one row object.
       const relevantOps: DeltaOp[] = [];
+      // Each op taken is applied to the target at once, so a row later in the write finds a
+      // parent that came earlier in it (a course and its drinks, put back together by an undo).
+      const take = (op: DeltaOp) => {
+        relevantOps.push(op);
+        if (cached) deltaApplyOps(cached, [op]);
+      };
       for (const op of ops) {
         const parts = splitPath(op.path);
         const collKey = parts[0];
@@ -642,10 +745,19 @@ export function registerDocs(
 
         const id = parts[1];
 
+        // The mirror of the rewrite below: a keyed row `/<coll>/<id>` from a source that holds
+        // <coll> as a map, onto a target whose ROOT is that row. Applied as it is, it would add a
+        // key to the root object; it is the root, replaced whole -- or, the row gone, null.
+        if (collKey === def.root && parts.length === 2) {
+          if (id !== docId) continue;
+          take({ op: "replace", path: `/${collKey}`, value: op.op === "remove" ? null : (op as any).value });
+          continue;
+        }
+
         if (op.op === "remove") {
           // Forward removes only if the id is currently in the target's cache.
           // If we don't have it, this row was never in the target's scope.
-          if (id != null && cached?.[collKey]?.[id] != null) relevantOps.push(op);
+          if (id != null && cached?.[collKey]?.[id] != null) take(op);
           continue;
         }
 
@@ -655,20 +767,17 @@ export function registerDocs(
           // Source root-level replace.
           if (collKey === def.root) {
             // Target also treats this collection as its single-object root.
-            if (row && String(row.id) === docId) relevantOps.push(op);
+            if (row && String(row.id) === docId) take(op);
           } else if (row && rowInScope(collKey, row, def, docId, cached)) {
             // Target treats it as an included map — rewrite to a keyed op.
-            relevantOps.push({ op: "replace", path: `/${collKey}/${row.id}`, value: row });
+            take({ op: "replace", path: `/${collKey}/${row.id}`, value: row });
           }
           continue;
         }
-        if (rowInScope(collKey, row, def, docId, cached)) relevantOps.push(op);
+        if (rowInScope(collKey, row, def, docId, cached)) take(op);
       }
 
       if (relevantOps.length === 0) continue;
-
-      // Apply deltas to cached doc
-      if (cached) deltaApplyOps(cached, relevantOps);
 
       // Broadcast the deltas
       ws.publish(docName, { doc: docName, ops: relevantOps });
@@ -744,9 +853,51 @@ export function registerDocs(
     /** Evict a doc from cache. */
     evict(docName: string) {
       cache.delete(docName);
+      implied.delete(docName);
       customCriteria.delete(docName);
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Inverse
+// ---------------------------------------------------------------------------
+
+/**
+ * The inverse of a write, from the document as it was before and the ops the
+ * backend applied. Applied ops are whole rows (`/coll/id`) or the root
+ * (`/root`), so the inverse of each is the row as it was: an add is removed,
+ * a remove is added back, a replace is replaced by its old self. Written in
+ * reverse order, except that a run of removes (a row and the children its
+ * removal cascaded to) is added back in its own order, parent first, so each
+ * child finds its parent in scope.
+ */
+/** A row as a write may carry it: its temporal columns are storage, not data. */
+function withoutStorage(row: any): any {
+  if (!row || typeof row !== "object" || !("valid_from" in row || "valid_to" in row)) return row;
+  const { valid_from: _from, valid_to: _to, ...data } = row;
+  return data;
+}
+
+export function inverseOf(before: any, applied: DeltaOp[]): DeltaOp[] {
+  const inverse: DeltaOp[] = [];
+  let run: DeltaOp[] = [];
+  const flush = () => {
+    inverse.unshift(...run);
+    run = [];
+  };
+  for (const op of applied) {
+    const [coll, id] = splitPath(op.path);
+    const prior = withoutStorage(id === undefined ? before[coll!] : before[coll!]?.[id]);
+    if (op.op === "remove") {
+      run.push({ op: "add", path: op.path, value: prior });
+      continue;
+    }
+    flush();
+    inverse.unshift(op.op === "add" ? { op: "remove", path: op.path } : { op: "replace", path: op.path, value: prior });
+  }
+  flush();
+  return inverse;
 }
 
 // ---------------------------------------------------------------------------

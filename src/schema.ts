@@ -67,6 +67,8 @@ export interface DocDef {
   root: string;
   include: string[];
   scope: Record<string, string>;
+  /** There before its root row is: opens empty, and its first write makes the row. */
+  implied?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +189,7 @@ export function defineSchema(defs: Record<string, TableDef>): Schema {
 
 export function defineDoc(
   prefix: string,
-  opts: { root: string; include: string[]; scope?: Record<string, string> },
+  opts: { root: string; include: string[]; scope?: Record<string, string>; implied?: boolean },
 ): DocDef {
   if (!DOC_PREFIX.test(prefix)) {
     throw new Error(
@@ -195,11 +197,15 @@ export function defineDoc(
     );
   }
   assertIdentifier(opts.root, "doc root");
+  if (opts.implied && opts.scope && Object.keys(opts.scope).length > 0) {
+    throw new Error(`An implied doc is keyed by its root id: ${prefix} cannot also declare a scope`);
+  }
   return {
     prefix,
     root: opts.root,
     include: opts.include,
     scope: opts.scope ?? {},
+    ...(opts.implied ? { implied: true } : {}),
   };
 }
 
