@@ -107,6 +107,11 @@ export async function createDocListener<I = unknown>(
   // choose it, to keep its cursor across a reconnect) cannot walk it.
   const cursorOf = (msg: any, client: any, identity: I | undefined): string | null =>
     client?.data?.local ? (typeof msg.cursor === "string" ? msg.cursor : null) : socketCursor(whoOf(identity), client?.data?.clientId);
+  // Who is writing, for the ledger: the identity the gate gives when there is
+  // an auth module; without one, the identity the client carries
+  // (`createLocal().as(identity)`, or one set at upgrade) -- as the SQLite backend reads it.
+  const writerOf = (identity: I | undefined, client: any): I | undefined =>
+    auth ? identity : (client?.data?.identity as I | undefined);
   const tracked = new Map<string, DocState>();
 
   // Custom docs: prefix-keyed defs, per-docName cache + criteria + subscribers.
@@ -580,7 +585,8 @@ export async function createDocListener<I = unknown>(
   }));
 
   ws.on("delta", withDoc("delta", async ({ docName, type, ctx, msg, client, respond, identity }) => {
-    const by = ledger ? { who: whoOf(identity), cursor: cursorOf(msg, client, identity), undoable: msg.undoable !== false } : undefined;
+    const writer = writerOf(identity, client);
+    const by = ledger ? { who: whoOf(writer), cursor: cursorOf(msg, client, writer), undoable: msg.undoable !== false } : undefined;
     const result = await type.apply(ctx, docName, msg.ops, identity, by);
     respond({ result: ledger ? { ack: true, version: Number(result.version), ops: result.ops, inverse: result.inverse, entry: result.entry == null ? undefined : Number(result.entry) } : { ack: true, version: result.version } });
     log.info(`delta ${docName} v${result.version}`);
@@ -596,11 +602,12 @@ export async function createDocListener<I = unknown>(
         identity = gated as I;
       }
       try {
-        const cursor = cursorOf(msg, client, identity);
+        const writer = writerOf(identity, client);
+        const cursor = cursorOf(msg, client, writer);
         const { rows } =
           auth?.asSqlArg && identity !== undefined
-            ? await pool.query(`SELECT delta_${way}_as($1, $2, $3) AS result`, [String(auth.asSqlArg(identity)), cursor, whoOf(identity)])
-            : await pool.query(`SELECT delta_${way}($1, $2) AS result`, [cursor, whoOf(identity)]);
+            ? await pool.query(`SELECT delta_${way}_as($1, $2, $3) AS result`, [String(auth.asSqlArg(identity)), cursor, whoOf(writer)])
+            : await pool.query(`SELECT delta_${way}($1, $2) AS result`, [cursor, whoOf(writer)]);
         const result = rows[0]?.result ?? null;
         respond({ result: result && { ...result, version: Number(result.version), entry: result.entry == null ? undefined : Number(result.entry) } });
       } catch (err) {
@@ -613,7 +620,7 @@ export async function createDocListener<I = unknown>(
     // A document's recent history, to whoever may open it: each entry says `mine`, never who wrote it.
     ws.on("history", withDoc("history", async ({ docName, type, ctx, msg, client, respond, identity }) => {
       if (!(await type.open(ctx, docName, msg, identity))) return respond({ error: { code: 404, message: "Not found" } });
-      const { rows } = await pool.query("SELECT delta_history($1, $2, $3) AS entries", [docName, cursorOf(msg, client, identity), msg.limit ?? 50]);
+      const { rows } = await pool.query("SELECT delta_history($1, $2, $3) AS entries", [docName, cursorOf(msg, client, writerOf(identity, client)), msg.limit ?? 50]);
       respond({ result: rows[0]?.entries ?? [] });
     }));
   }

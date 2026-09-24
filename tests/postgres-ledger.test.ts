@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { Pool } from "pg";
 import { clearRegistry, createDocListener, defineDoc, docTypeFromDef, registerDocType } from "../src/server/postgres";
 import { createWs } from "../src/server/server";
+import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
 import { applyFramework, applyItemsFixture, mockClient, newPool, resetState, sendAndAwait, waitFor } from "./setup";
 
@@ -158,6 +159,23 @@ describe("the Postgres ledger", () => {
     const { rows } = await pool.query("SELECT who FROM _delta_ledger ORDER BY id");
     expect(rows.map((r) => r.who)).toEqual(['{"id":7}', "ada", "user-8"]);
     expect((await sendAndAwait(ws, mockClient({}), { action: "undo" })).error?.code).toBe(401);
+  });
+
+  test("who, without an auth module: the identity the caller carries (createLocal().as), as the SQLite backend reads it; in-process the cursor is still named", async () => {
+    const local = createLocal();
+    listeners.push(await createDocListener(local.server, pool, { ledger: true }));
+    const ada = local.as("ada");
+    const write = (caller: { call: typeof local.call }, name: string, cursor: string) =>
+      caller.call("delta", { doc: "items:", ops: [{ op: "add", path: "/items/-", value: { name } }], cursor });
+    await write(ada, "ada's", "s1");
+    await write(local.as({ id: 7 }), "seven's", "s2");
+    await write(local, "no one's", "s3");
+    const { rows } = await pool.query("SELECT who, cursor FROM _delta_ledger ORDER BY id");
+    expect(rows).toEqual([{ who: "ada", cursor: "s1" }, { who: '{"id":7}', cursor: "s2" }, { who: null, cursor: "s3" }]);
+    const undone = await ada.call("undo", { cursor: "s1" });
+    expect(undone.result).toMatchObject({ doc: "items:", ops: [{ op: "remove" }] });
+    expect(await names()).toEqual(["no one's", "seven's"]);
+    expect((await pool.query("SELECT who, cursor FROM _delta_ledger ORDER BY id DESC LIMIT 1")).rows[0]).toEqual({ who: "ada", cursor: "s1" });
   });
 
   test("history, to whoever may open the document: mine or not, never who, never a cursor", async () => {
