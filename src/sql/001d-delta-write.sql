@@ -239,7 +239,7 @@ BEGIN
       IF v_id_text = '-' THEN
         EXECUTE format('SELECT nextval(%L)', 'seq_' || v_coll.table_name) INTO v_id;
       ELSE
-        v_id := v_id_text::BIGINT;
+        v_id := _delta_row_id(v_coll_key, v_id_text);
       END IF;
       v_new_row := jsonb_build_object('id', v_id) || (v_op->'value');
 
@@ -312,7 +312,7 @@ BEGIN
     -- Remove row:  remove /<collection>/<id>  (+ cascades)
     -- ---------------------------------------------------------------
     IF array_length(v_parts, 1) = 2 AND v_op->>'op' = 'remove' THEN
-      v_id := v_parts[2]::BIGINT;
+      v_id := _delta_row_id(v_coll_key, v_parts[2]);
       -- _delta_cascade_remove addresses rows by id alone, so without this gate a
       -- client could name any id and delete a sibling doc's row.
       IF NOT _delta_row_in_scope(v_def, p_doc_name, v_coll_key, v_id) THEN
@@ -330,7 +330,7 @@ BEGIN
     -- Field replace: replace /<collection>/<id>/field (single field shorthand)
     -- ---------------------------------------------------------------
     IF (array_length(v_parts, 1) = 2 OR array_length(v_parts, 1) = 3) AND v_op->>'op' = 'replace' THEN
-      v_id := v_parts[2]::BIGINT;
+      v_id := _delta_row_id(v_coll_key, v_parts[2]);
 
       -- Same gate as remove: the row is addressed by bare id, so it must belong
       -- to this doc. (The single-mode root branch above never reaches here — it

@@ -29,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snowflakes could collapse into one key). Under an array an index is `0` or `[1-9][0-9]*`, and
   `replace`/`add` past the end is an error (it used to leave holes). Nothing to change unless
   you relied on the coercion.
+- **Postgres framework SQL (`001a`, `001d`): `_delta_split_path` follows the same grammar.** It
+  used to strip every leading `/` (`//items` was `/items`), take a slashless path, and unescape
+  nothing. It now raises SQLSTATE `22023` on a malformed path, and `_delta_build_path` escapes
+  its segments. A row id that is not a number (`add /items/<uuid>`) raises `22P02` with
+  "Postgres mints row ids -- add to /items/- and read the id from the echo", where it used to
+  fail with `invalid input syntax for type bigint`. The listener answers both as **400**
+  (they were 500). The changes are `CREATE OR REPLACE`, so re-applying is safe: `applyFramework`
+  does it; a vendored copy needs `bunx @blueshed/delta init <dir> --upgrade`.
 
 ### Added
 

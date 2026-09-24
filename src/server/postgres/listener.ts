@@ -69,6 +69,17 @@ function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * The wire code for an error the database raised: the framework raises
+ * SQLSTATE 22023 for a malformed path and 22P02 for a row id it could not
+ * mint (a client's mistake, 400); anything else is the server's (500).
+ */
+const CODE_OF_SQLSTATE: Record<string, number> = { "22023": 400, "22P02": 400 };
+function wireCode(err: unknown): number {
+  const state = (err as { code?: unknown } | null)?.code;
+  return (typeof state === "string" && CODE_OF_SQLSTATE[state]) || 500;
+}
+
 // ---------------------------------------------------------------------------
 // State — per-doc subscriber tracking
 // ---------------------------------------------------------------------------
@@ -484,7 +495,7 @@ export async function createDocListener<I = unknown>(
       } catch (err) {
         const m = errMsg(err);
         log.error(`${label} failed: ${m}`);
-        respond({ error: { code: 500, message: m } });
+        respond({ error: { code: wireCode(err), message: m } });
       }
     };
   }
@@ -620,7 +631,7 @@ export async function createDocListener<I = unknown>(
         respond({ result: result && { ...result, version: Number(result.version), entry: result.entry == null ? undefined : Number(result.entry) } });
       } catch (err) {
         log.error(`${way} failed: ${errMsg(err)}`);
-        respond({ error: { code: 500, message: errMsg(err) } });
+        respond({ error: { code: wireCode(err), message: errMsg(err) } });
       }
     };
     ws.on("undo", walk("undo"));
