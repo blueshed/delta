@@ -156,6 +156,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `open` and `delta` in. The token's `exp` is kept with the identity, and once it has passed
   the gate signs the socket out ("Session expired: authenticate again", subscriptions dropped),
   as `logout` does. With `onConnect`, the client signs in again on its next connect.
+- **SQLite: a document whose root row has a parent can change its root fields** (TODO #5). The
+  root's row writer left the parent key out, so on a temporal table the new version failed
+  `NOT NULL constraint failed: <table>.<fk>`. The three row writers, which had drifted apart,
+  are one.
 - **SQLite errors name their fix.** A missing table says "call createTables(db, schema) before
   the first open" (it said `no such table: current_lists`), and a document with no root row
   says which row it looked for and that a SQLite document is one root row and its children

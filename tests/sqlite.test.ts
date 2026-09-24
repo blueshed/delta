@@ -2095,3 +2095,24 @@ describe("json columns keep their types across a cold read", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// TODO #5: a document whose root row has a parent. The root writer left the
+// parent key out, so a root-field replace on a temporal root failed NOT NULL.
+// ---------------------------------------------------------------------------
+
+describe("a root row that has a parent", () => {
+  test("a root-field replace keeps the parent key", async () => {
+    const db = new Database(":memory:");
+    createTables(db, schema);
+    db.run("INSERT INTO projects (id, name, status, valid_from) VALUES ('p1', 'P', 'active', '2020-01-01 00:00:00')");
+    db.run("INSERT INTO tasks (id, project_id, title, done, valid_from) VALUES ('t1', 'p1', 'T', 0, '2020-01-01 00:00:00')");
+    const ws = createWs();
+    registerDocs(ws, db, schema, [defineDoc("task:", { root: "tasks", include: [] })]);
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "task:t1" }));
+    await ws.websocket.message(sock, JSON.stringify({ id: 2, action: "delta", doc: "task:t1", ops: [{ op: "replace", path: "/tasks/title", value: "renamed" }] }));
+    expect(sock.sent[1].result).toEqual({ ack: true });
+    expect(db.query("SELECT project_id, title FROM current_tasks WHERE id = 't1'").all()).toEqual([{ project_id: "p1", title: "renamed" }]);
+  });
+});

@@ -147,7 +147,14 @@ stored "hello" → cold read "hello"  (ok — only non-JSON-parseable strings su
 Fix: always `JSON.stringify` on encode, always `JSON.parse` on decode. The
 `catch {}` around the decode also swallows genuine corruption — let it surface.
 
-### 5. `insertRootRow` drops the parent FK — REPORTED
+### 5. `insertRootRow` drops the parent FK — FIXED
+
+> **FIXED** (round 2): the three row writers (`insertRootRow`,
+> `insertCollectionRow`'s insert, `reinsertRow`) are one `insertRow`, which
+> writes the parent key. Confirmed first: a root-field replace on `task:t1`
+> (root `tasks`, parent `projects`) failed `NOT NULL constraint failed:
+> tasks.project_id`. Regression test: `tests/sqlite.test.ts` → "a root row
+> that has a parent".
 
 `src/server/sqlite.ts:1025`: `const cols = ["id", ...Object.keys(table.columns)]`.
 Unlike `reinsertRow` and `insertCollectionRow`, it never appends

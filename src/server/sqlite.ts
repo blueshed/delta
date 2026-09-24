@@ -229,7 +229,7 @@ export function registerDocs(
     if (db.query(`SELECT 1 FROM ${viewName} WHERE id = ?`).get(root.id)) return;
     const ts = now();
     if (rootTable.temporal) { root.valid_from = ts; root.valid_to = null; }
-    insertRootRow(db, rootTable, root, ts);
+    insertRow(db, rootTable, root, ts);
   }
 
   // Parsed criteria per open custom doc name (shared across clients of the same name).
@@ -479,7 +479,7 @@ export function registerDocs(
       for (const [field, value] of rootFieldUpdates) updated[field] = value;
       if (rootTable.temporal) {
         updated.valid_from = ts; updated.valid_to = null;
-        insertRootRow(db, rootTable, updated, ts);
+        insertRow(db, rootTable, updated, ts);
       } else {
         updateRow(db, rootTable, rootId, updated);
       }
@@ -501,7 +501,7 @@ export function registerDocs(
       for (const [field, value] of batch.fields) {
         updated[field] = value;
       }
-      if (batch.table.temporal) reinsertRow(db, batch.table, batch.id, updated, ts);
+      if (batch.table.temporal) insertRow(db, batch.table, updated, ts);
       else updateRow(db, batch.table, batch.id, updated);
       doc[collKey][batch.id] = updated;
       broadcastOps.push({ op: "replace", path: joinPath(collKey, batch.id), value: updated });
@@ -1277,12 +1277,19 @@ function closeRow(db: any, table: ResolvedTable, id: string, ts: string = now())
   return ts;
 }
 
-function insertRootRow(db: any, table: ResolvedTable, row: any, ts: string) {
-  const cols = ["id", ...Object.keys(table.columns)];
+/**
+ * Insert one version of a row -- a new row, a root row, or the next version of
+ * a temporal one: its id, its parent key, its columns, and on a temporal
+ * table `valid_from = ts`. The one row writer: the three it replaces had
+ * drifted, and the root's had lost the parent key (TODO #5).
+ */
+function insertRow(db: any, table: ResolvedTable, row: any, ts: string) {
+  const cols = ["id"];
+  if (table.parent) cols.push(table.parent.fkColumn);
+  cols.push(...Object.keys(table.columns));
   if (table.temporal) cols.push("valid_from");
-  const vals = cols.map((c) => c === "valid_from" ? ts : encodeValue(table, c, row[c]));
-  const placeholders = cols.map(() => "?").join(", ");
-  db.run(`INSERT INTO ${table.name} (${cols.join(", ")}) VALUES (${placeholders})`, vals);
+  const vals = cols.map((c) => (c === "valid_from" ? ts : encodeValue(table, c, row[c])));
+  db.run(`INSERT INTO ${table.name} (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`, vals);
 }
 
 /** An error the writer is answered with: `code` is its wire code. */
@@ -1335,37 +1342,11 @@ function insertCollectionRow(
     }
   }
 
-  const cols = ["id"];
-  if (table.parent) cols.push(table.parent.fkColumn);
-  cols.push(...Object.keys(table.columns));
-  if (table.temporal) cols.push("valid_from");
-
-  const vals = cols.map((c) => {
-    if (c === "valid_from") return ts;
-    return encodeValue(table, c, fullRow[c]);
-  });
-
-  const placeholders = cols.map(() => "?").join(", ");
-  db.run(`INSERT INTO ${table.name} (${cols.join(", ")}) VALUES (${placeholders})`, vals);
+  insertRow(db, table, fullRow, ts);
 
   // Decode for in-memory representation
   decodeRow(table, fullRow);
   return fullRow;
-}
-
-function reinsertRow(db: any, table: ResolvedTable, id: string, row: any, ts: string) {
-  const cols = ["id"];
-  if (table.parent) cols.push(table.parent.fkColumn);
-  cols.push(...Object.keys(table.columns));
-  if (table.temporal) cols.push("valid_from");
-
-  const vals = cols.map((c) => {
-    if (c === "valid_from") return ts;
-    return encodeValue(table, c, row[c]);
-  });
-
-  const placeholders = cols.map(() => "?").join(", ");
-  db.run(`INSERT INTO ${table.name} (${cols.join(", ")}) VALUES (${placeholders})`, vals);
 }
 
 /**
