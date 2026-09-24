@@ -975,6 +975,17 @@ Server-initiated broadcasts (no id):
 
 Every message is JSON. Clients use `doc.send(ops)` internally; the protocol is only relevant when writing a custom action handler.
 
+**Error codes** — `{ id, error: { code, message } }`, and `DeltaError.code` on the client, mean the same on every backend:
+
+| code | means | e.g. |
+|---|---|---|
+| 400 | the op is malformed | a path without a leading `/`, an unknown field, a required field left out, a non-numeric id on Postgres |
+| 401 | not signed in | an `auth` gate said no |
+| 403 | the document is read-only | custom, static and source docs; memory docs over a socket |
+| 404 | not there | the document, a row, a path; a document the identity does not `own` |
+| 409 | already there | `add` of a row id that exists |
+| 500 | the server's own failure | the message says what |
+
 ## Why delta
 
 Existing sync libraries are built for human developers: big API surfaces, many idioms, ecosystem dependencies. Delta is shaped for AI-driven development: the whole system fits in one context window, there is one way to do each thing, and the schema is generated from a single TypeScript source of truth. If an assistant reaches for Supabase or Firebase, that is a default trained from millions of projects; delta is not harder than those, it is smaller, and it can be read in full before a line is written.

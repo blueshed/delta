@@ -481,7 +481,7 @@ export function registerDocs(
     for (const [, batch] of rowFieldBatches) {
       const collKey = batch.table.docKey;
       const current = doc[collKey]?.[batch.id];
-      if (!current) throw new Error(`Row not found: ${collKey}/${batch.id}`);
+      if (!current) refuse(404, `Row not found: ${collKey}/${batch.id}`);
 
       const ts = now();
       if (batch.table.temporal) closeRow(db, batch.table, batch.id, ts);
@@ -1096,8 +1096,9 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
     }
 
     const fkCol = table.parent?.fkColumn;
-    const isKnownKey = (k: string) =>
-      k === "id" || k === fkCol || table.columns[k] !== undefined;
+    // Own columns only: `table.columns.toString` is Object.prototype's, not a column.
+    const columnOf = (k: string): ColumnDef | undefined => (Object.hasOwn(table.columns, k) ? table.columns[k] : undefined);
+    const isKnownKey = (k: string) => k === "id" || k === fkCol || columnOf(k) !== undefined;
 
     // One-segment paths: /<root> is a whole-root partial merge (replace only);
     // /<coll> on an included collection has no meaning for a client op — reject
@@ -1120,7 +1121,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
         if (!isKnownKey(key)) errors.push({ path: op.path, message: `Unknown field: ${key}` });
       }
       for (const [field, fieldValue] of Object.entries(value)) {
-        const colDef = table.columns[field];
+        const colDef = columnOf(field);
         if (!colDef) continue;
         const typeErr = validateFieldType(colDef, field, fieldValue);
         if (typeErr) errors.push({ path: `${op.path}/${field}`, message: typeErr });
@@ -1136,7 +1137,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
         continue;
       }
       const field = parts[1]!;
-      const colDef = table.columns[field];
+      const colDef = columnOf(field);
       if (!colDef) {
         errors.push({ path: op.path, message: `Unknown field: ${field}` });
         continue;
@@ -1179,7 +1180,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
 
       // Type-check the fields that map to declared columns.
       for (const [field, fieldValue] of Object.entries(value)) {
-        const colDef = table.columns[field];
+        const colDef = columnOf(field);
         if (!colDef) continue; // id / FK — not schema-typed
         const typeErr = validateFieldType(colDef, field, fieldValue);
         if (typeErr) errors.push({ path: `${op.path}/${field}`, message: typeErr });
@@ -1189,7 +1190,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
     // Field-level replace: /<coll>/<id>/field
     if (op.op === "replace" && parts.length === 3) {
       const field = parts[2]!;
-      const colDef = table.columns[field];
+      const colDef = columnOf(field);
       if (!colDef) {
         errors.push({ path: op.path, message: `Unknown field: ${field}` });
         continue;
@@ -1391,9 +1392,7 @@ function updateRow(db: any, table: ResolvedTable, id: string, row: any) {
 
 /** Throw unless `id` is a row this doc actually holds. */
 function assertRowInScope(doc: any, collKey: string, id: string): void {
-  if (doc[collKey]?.[id] == null) {
-    throw new Error(`Row not found: ${collKey}/${id}`);
-  }
+  if (doc[collKey]?.[id] == null) refuse(404, `Row not found: ${collKey}/${id}`);
 }
 
 /**
@@ -1412,7 +1411,7 @@ function assertParentInScope(
   if (!parent || parent.collection === def.root) return;
   const fk = row?.[parent.fkColumn];
   if (fk == null || doc[parent.collection]?.[String(fk)] == null) {
-    throw new Error(`Row not found: ${parent.collection}/${fk ?? ""}`);
+    refuse(404, `Row not found: ${parent.collection}/${fk ?? ""}`);
   }
 }
 

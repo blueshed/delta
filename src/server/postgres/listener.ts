@@ -70,13 +70,14 @@ function errMsg(err: unknown): string {
 }
 
 /**
- * The wire code for an error the database raised: the framework raises
- * SQLSTATE 22023 for a malformed path and 22P02 for a row id it could not
- * mint and 23502 for an add that leaves out a required field (a client's
- * mistake, 400), and 23505 for an add of a row that is already there (409);
- * anything else is the server's (500).
+ * The wire code for an error the database raised -- the same table as the
+ * other backends. The framework raises SQLSTATE 22023 for a malformed path or
+ * op, 22P02 for a row id it could not mint and 23502 for an add that leaves
+ * out a required field (a client's mistake, 400); P0002 for a row that is not
+ * there (404); 23505 for an add of a row that is (409). Anything else is the
+ * server's (500).
  */
-const CODE_OF_SQLSTATE: Record<string, number> = { "22023": 400, "22P02": 400, "23502": 400, "23505": 409 };
+const CODE_OF_SQLSTATE: Record<string, number> = { "22023": 400, "22P02": 400, "23502": 400, P0002: 404, "23505": 409 };
 function wireCode(err: unknown): number {
   const state = (err as { code?: unknown } | null)?.code;
   return (typeof state === "string" && CODE_OF_SQLSTATE[state]) || 500;

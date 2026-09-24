@@ -151,7 +151,7 @@ BEGIN
     SELECT * INTO v_coll FROM _delta_collections
      WHERE collection_key = v_coll_key;
     IF NOT FOUND THEN
-      RAISE EXCEPTION 'unknown collection: %', v_coll_key;
+      RAISE EXCEPTION 'unknown collection: %', v_coll_key USING ERRCODE = '22023';
     END IF;
 
     -- Scope guard: an op may only target the doc's root or an included
@@ -164,7 +164,7 @@ BEGIN
       RAISE EXCEPTION
         'op collection "%" is not part of doc "%" (root: %, include: %)',
         v_coll_key, v_def.prefix, v_def.root_collection, v_def.include
-        USING ERRCODE = 'P0001';
+        USING ERRCODE = '22023';
     END IF;
 
     v_view := _delta_source_view(v_coll.table_name, v_coll.temporal);
@@ -198,7 +198,7 @@ BEGIN
       END IF;
 
       IF v_row IS NULL THEN
-        RAISE EXCEPTION 'root row not found: %', v_def.root_collection;
+        RAISE EXCEPTION 'root row not found: %', v_def.root_collection USING ERRCODE = 'P0002';
       END IF;
 
       -- Merge partial value
@@ -276,7 +276,7 @@ BEGIN
                (v_new_row->>v_coll.parent_fk)::BIGINT) THEN
         RAISE EXCEPTION 'row not found: %/%',
           v_coll.parent_collection, COALESCE(v_new_row->>v_coll.parent_fk, '')
-          USING ERRCODE = 'P0001';
+          USING ERRCODE = 'P0002';
       END IF;
 
       -- A required column (not nullable, no declared default) the value leaves
@@ -327,7 +327,7 @@ BEGIN
       -- client could name any id and delete a sibling doc's row.
       IF NOT _delta_row_in_scope(v_def, p_doc_name, v_coll_key, v_id) THEN
         RAISE EXCEPTION 'row not found: %/%', v_coll_key, v_id
-          USING ERRCODE = 'P0001';
+          USING ERRCODE = 'P0002';
       END IF;
       v_broadcast_ops := v_broadcast_ops || _delta_cascade_remove(
         v_coll_key, v_id, v_def.include
@@ -347,7 +347,7 @@ BEGIN
       -- targets v_doc_id directly.)
       IF NOT _delta_row_in_scope(v_def, p_doc_name, v_coll_key, v_id) THEN
         RAISE EXCEPTION 'row not found: %/%', v_coll_key, v_id
-          USING ERRCODE = 'P0001';
+          USING ERRCODE = 'P0002';
       END IF;
 
       -- 3-segment: wrap single field into partial row value
@@ -368,7 +368,7 @@ BEGIN
       END IF;
 
       IF v_row IS NULL THEN
-        RAISE EXCEPTION 'row not found: %/%', v_coll_key, v_id;
+        RAISE EXCEPTION 'row not found: %/%', v_coll_key, v_id USING ERRCODE = 'P0002';
       END IF;
 
       -- Merge partial value into current row
@@ -416,7 +416,7 @@ BEGIN
       CONTINUE;
     END IF;
 
-    RAISE EXCEPTION 'invalid op: % %', v_op->>'op', v_op->>'path';
+    RAISE EXCEPTION 'invalid op: % %', v_op->>'op', v_op->>'path' USING ERRCODE = '22023';
   END LOOP;
 
   v_version := _delta_bump_and_notify(p_doc_name, v_broadcast_ops);

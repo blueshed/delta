@@ -116,6 +116,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   custom-doc fan-out). An id containing `/` or `~` was stored right but broadcast raw
   (`/messages/a/b`), so a peer's `applyOps` threw and its view silently diverged.
   `applyOpsToCollection` now reads paths with `splitPath`, so it finds such a row by its own id.
+- **One error-code table on every backend**: 400 for a malformed op (a bad path, an unknown or
+  missing field), 404 for a row or path that is not there, 409 for an add of a row that is, as
+  well as 401 and 403 as before. The JSON file answered `-1` for every failed op, SQLite 500
+  for a missing row, Postgres 500 for nearly everything. `applyOps` errors now carry their
+  `code`, `createWs` answers with it, and the Postgres framework raises SQLSTATE `22023` /
+  `P0002` for a client's mistake and a missing row (`001d`, `CREATE OR REPLACE`), which the
+  listener answers as 400 / 404. `tests/error-codes.test.ts` asks each backend the same.
+- **SQLite: a field named after an `Object.prototype` member (`toString`, `valueOf`) is an
+  unknown field (400).** Column lookups took inherited members for columns, so the op was
+  acked, cached and broadcast, and gone on the next cold read. Postgres's `validateOps` too.
 - **SQLite errors name their fix.** A missing table says "call createTables(db, schema) before
   the first open" (it said `no such table: current_lists`), and a document with no root row
   says which row it looked for and that a SQLite document is one root row and its children

@@ -18,7 +18,8 @@
  *     where an index is `0` or `[1-9][0-9]*` and `-` (add only) appends.
  *
  * `applyOps` applies a batch whole or not at all: an op that throws undoes the
- * ops before it, in place, and the error is rethrown.
+ * ops before it, in place, and the error is rethrown. Its errors carry a wire
+ * `code`: 400 for a malformed or unsafe path, 404 for one that is not there.
  */
 
 // ---------------------------------------------------------------------------
@@ -30,6 +31,11 @@ export type DeltaOp =
   | { op: "add"; path: string; value: unknown }
   | { op: "remove"; path: string };
 
+/** An Error with the wire code a backend answers it with. */
+function fail(code: 400 | 404, message: string): never {
+  throw Object.assign(new Error(message), { code });
+}
+
 // ---------------------------------------------------------------------------
 // Pointers
 // ---------------------------------------------------------------------------
@@ -38,10 +44,10 @@ export type DeltaOp =
 export function splitPath(path: string): string[] {
   if (path === "") return [];
   if (typeof path !== "string" || !path.startsWith("/")) {
-    throw new Error(`Invalid JSON Pointer ${JSON.stringify(path)}: a path starts with "/" ("" is the whole document)`);
+    fail(400, `Invalid JSON Pointer ${JSON.stringify(path)}: a path starts with "/" ("" is the whole document)`);
   }
   if (/~(?![01])/.test(path)) {
-    throw new Error(`Invalid JSON Pointer ${JSON.stringify(path)}: "~" is written "~0" and "/" is written "~1"`);
+    fail(400, `Invalid JSON Pointer ${JSON.stringify(path)}: "~" is written "~0" and "/" is written "~1"`);
   }
   // Empty segments are genuine keys ("/a//b" → ["a", "", "b"]); ~1 before ~0.
   return path.slice(1).split("/").map((s) => s.replace(/~1/g, "/").replace(/~0/g, "~"));
@@ -101,14 +107,14 @@ const INDEX = /^(0|[1-9][0-9]*)$/;
 /** The key `seg` names in `parent`: a string member, or an index where the parent is an array. */
 function keyIn(parent: any, seg: string, path: string): string | number {
   if (!Array.isArray(parent)) return seg;
-  if (!INDEX.test(seg)) throw new Error(`Invalid array index "${seg}" in ${path}`);
+  if (!INDEX.test(seg)) fail(400, `Invalid array index "${seg}" in ${path}`);
   return Number(seg);
 }
 
 function applyOne(doc: any, op: DeltaOp, undo: (() => void)[]): void {
   const segments = splitPath(op.path);
   for (const seg of segments) {
-    if (UNSAFE_KEYS.has(seg)) throw new Error(`Unsafe path segment "${seg}" in "${op.path}"`);
+    if (UNSAFE_KEYS.has(seg)) fail(400, `Unsafe path segment "${seg}" in "${op.path}"`);
   }
 
   // Root op (""): replace/clear the WHOLE doc IN PLACE. The value reference is
@@ -121,7 +127,7 @@ function applyOne(doc: any, op: DeltaOp, undo: (() => void)[]): void {
     const matches = Array.isArray(doc)
       ? Array.isArray(value)
       : !!value && typeof value === "object" && !Array.isArray(value);
-    if (!matches) throw new Error("root replace requires a matching container (object↔object / array↔array)");
+    if (!matches) fail(400, "root replace requires a matching container (object↔object / array↔array)");
     const before = Array.isArray(doc) ? [...doc] : { ...doc };
     undo.push(() => fillRoot(doc, before));
     fillRoot(doc, value);
@@ -132,7 +138,7 @@ function applyOne(doc: any, op: DeltaOp, undo: (() => void)[]): void {
   for (let i = 0; i < segments.length - 1; i++) {
     parent = parent[keyIn(parent, segments[i]!, op.path)];
     if (parent === null || typeof parent !== "object") {
-      throw new Error(`Path not found at segment ${segments[i]} in ${op.path}`);
+      fail(404, `Path not found at segment ${segments[i]} in ${op.path}`);
     }
   }
   const last = segments[segments.length - 1]!;
@@ -155,7 +161,7 @@ function applyOne(doc: any, op: DeltaOp, undo: (() => void)[]): void {
     // the framework keys collections by id-maps and appends with "/-". An index
     // past the end would leave holes, so it is refused.
     if (i > arr.length || (op.op === "replace" && i === arr.length)) {
-      throw new Error(`Path not found: index ${i} is past the end of ${op.path}`);
+      fail(404, `Path not found: index ${i} is past the end of ${op.path}`);
     }
     const had = i < arr.length;
     const was = arr[i];

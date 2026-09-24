@@ -268,9 +268,11 @@ export function createWs(opts?: WsOptions): WsServer {
           }
         } catch (err: any) {
           log.error(`error: ${err.message}`);
+          // An error that carries its wire code (applyOps: 400 / 404) is
+          // answered with it; anything else is -1, as before.
           if (id)
             ws.send(
-              JSON.stringify({ id, error: { code: -1, message: err.message } }),
+              JSON.stringify({ id, error: { code: typeof err?.code === "number" ? err.code : -1, message: err.message } }),
             );
         }
       },

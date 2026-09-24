@@ -87,7 +87,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
       const fkColumn = table.parent?.fkColumn;
       for (const key of Object.keys(value)) {
         if (
-          !table.columns[key] &&
+          !Object.hasOwn(table.columns, key) &&
           key !== "id" &&
           (fkColumn === undefined || key !== fkColumn)
         ) {
@@ -104,7 +104,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
     }
     if (op.op === "replace" && parts.length === 3) {
       const field = parts[2]!;
-      if (!table.columns[field]) {
+      if (!Object.hasOwn(table.columns, field)) {
         errors.push({ path: op.path, message: `Unknown field: ${field}` }); continue;
       }
     }
