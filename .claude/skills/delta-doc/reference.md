@@ -74,8 +74,12 @@ const ws = createWs();
 const auth = jwtAuth({ pool, secret: process.env.JWT_SECRET! });
 wireAuth(ws, auth);
 
+// With auth, say who owns each document: its name is the channel its writes go out on.
 registerDocType(
-  docTypeFromDef(defineDoc("items:", { root: "items", include: [] }), pool, { auth })
+  docTypeFromDef(defineDoc("items:", { root: "items", include: [], scope: { owner_id: ":id" } }), pool, {
+    auth,
+    owns: (user, docName) => docName === `items:${user.id}`,   // anyone else: 404
+  })
 );
 
 await createDocListener(ws, pool, { auth });
@@ -96,9 +100,9 @@ provide(WS, connectWs("/ws"));
 
 // Await authenticate BEFORE openDoc — an open sent on an unauthenticated
 // connection races ahead of auth and is rejected with 401.
-await call("authenticate", { token: localStorage.token });
+const me = await call<User>("authenticate", { token: localStorage.token });
 
-const items = openDoc<{ items: Record<string, Item> }>("items:");
+const items = openDoc<{ items: Record<string, Item> }>(`items:${me.id}`);
 effect(() => console.log(items.data.get()));
 
 try {
@@ -151,6 +155,8 @@ interface DocType<C = any, I = unknown> {
     Promise<{ version: number; ops?: any[]; inverse?: any[]; entry?: number | null }>;
   openAt?(ctx: C, docName: string, at: string, identity?: I):
     Promise<any | null>;
+  // With auth: may this identity open, write through and hear docName? False → 404.
+  owns?(identity: I, docName: string): boolean | Promise<boolean>;
 }
 
 // Writer — given to apply() when the listener keeps a ledger (`ledger: true`).
@@ -281,7 +287,7 @@ defineDoc("venue:", {
 
 **Per-user list isolation** — each user sees only their own rows. The most common multi-tenant shape.
 
-Two parts: (1) scope the generic doc by a user-id carried in the doc name, (2) wrap `docTypeFromDef` with an identity check that the doc-name id matches the authenticated identity. The wrap also injects the owner id on `add` so the user can't forge other users' rows.
+Two parts: (1) scope the generic doc by a user-id carried in the doc name, (2) tell `docTypeFromDef` who owns each name. A document's name is the channel its writes are broadcast on — whoever has it open hears every write made through it, **whatever RLS lets them read** — so the name, not RLS, is what keeps one user's rows off another user's socket. `owns` is that check: the listener asks it before `open`, `delta`, `open_at` and `history`, and answers 404 when it says no. With `auth`, `docTypeFromDef` throws unless it is given `owns` or `shared: true`.
 
 ```ts
 // types.ts
@@ -302,50 +308,25 @@ export const docs = [
 ```
 
 ```ts
-// server.ts — register a scoped-per-user DocType
-import { defineDoc, docTypeFromDef, registerDocType, type DocType } from "@blueshed/delta/postgres";
+// server.ts
+import { docTypeFromDef, registerDocType } from "@blueshed/delta/postgres";
 import type { User } from "@blueshed/delta/auth-jwt";
-import type { DeltaOp } from "@blueshed/delta/core";
 
-const generic = docTypeFromDef(
-  defineDoc("todos:", { root: "todos", include: [], scope: { owner_id: ":id" } }),
-  pool,
-  { auth },
-);
-
-const myTodos: DocType<{ userId: number }, User> = {
-  prefix: "todos:",
-  parse(name) {
-    const m = name.match(/^todos:(\d+)$/);
-    return m ? { userId: Number(m[1]) } : null;
-  },
-  async open(ctx, name, msg, identity) {
-    if (!identity || Number(identity.id) !== ctx.userId) return null; // 404, not 403
-    return generic.open({}, name, msg, identity);
-  },
-  async apply(ctx, name, ops, identity) {
-    if (!identity || Number(identity.id) !== ctx.userId) {
-      throw Object.assign(new Error("Forbidden"), { code: 403 });
-    }
-    // Inject owner_id on adds so the user can't forge rows for someone else.
-    const safeOps: DeltaOp[] = ops.map((op) =>
-      op.op === "add" && op.path === "/todos/-"
-        ? { ...op, value: { ...(op.value as object), owner_id: ctx.userId } }
-        : op,
-    );
-    return generic.apply({}, name, safeOps, identity);
-  },
-};
-registerDocType(myTodos);
+registerDocType(docTypeFromDef<User>(docs[0], pool, {
+  auth,
+  owns: (user, docName) => docName === `todos:${user.id}`,
+}));
 ```
 
 ```tsx
-// client — each user opens their own stream, channel isolation is automatic
+// client — each user opens their own name; another user's is a 404
 const me = (await call<User>("authenticate", { token })).id;
 const myTodos = openDoc<{ todos: Record<string, Todo> }>(`todos:${me}`);
 ```
 
-*Why inject `owner_id` AND have RLS `WITH CHECK`?* Two layers, each catches different failures cheaply. The policy is the authoritative guarantee — even a buggy server can't leak across users because the database refuses. The injection is an ergonomic wrapper: clients don't need to send `owner_id`, and a forged payload fails locally with a clear `Forbidden` rather than a round-trip to Postgres with a cryptic RLS error. Defence in depth, plus cleaner error surface.
+An `add /todos/-` on this list-mode doc takes `owner_id` from the scope (the doc name), not from the value, so a user cannot forge a row for someone else. RLS (`WITH CHECK`, below) is the second layer: even a buggy server cannot write across users, because the database refuses.
+
+**`shared: true`** says every identity that passes the gate may open every document of the prefix and hear every write to it — a team board, a public room. Never put `shared` on a table whose rows RLS hides from some of its readers: they would see those rows arrive on the channel. A custom `DocType` gets the same check by defining `owns`; one that leaves it out is trusted to refuse in its own `open`.
 
 ### Custom read docs — `defineCustomDoc`
 
@@ -488,7 +469,7 @@ const sessionAuth: DeltaAuth<{ id: number }> = {
 ```ts
 wireAuth(ws, auth);                            // auth.actions → WS "call" handlers
 ws.upgrade = upgradeWithAuth(ws, auth);        // auth.onUpgrade → HTTP handshake
-docTypeFromDef(def, pool, { auth });           // queries → withAppAuth (RLS session)
+docTypeFromDef(def, pool, { auth, owns });     // queries → *_as (RLS session); owns → who may have the doc
 createDocListener(ws, pool, { auth });         // gate every open / delta
 ```
 
@@ -559,11 +540,13 @@ const appPool   = new Pool({ connectionString: process.env.PG_APP_URL });    // 
 const auth = jwtAuth({ pool: adminPool, secret: process.env.JWT_SECRET! });
 
 // Doc queries use the app pool so RLS policies bind.
-registerDocType(docTypeFromDef(def, appPool, { auth }));
+registerDocType(docTypeFromDef(def, appPool, { auth, owns }));
 await createDocListener(ws, appPool, { auth });
 ```
 
 Under this setup `withAppAuth(appPool, ...)` sets `app.user_id` as the `app` role, and the policy `USING (owner_id = current_setting('app.user_id')::bigint)` filters without the role bypassing it.
+
+**RLS filters reads, not the channel.** A write is broadcast on the channel named after the document it went through, to every socket that opened that name. The listener reads the change log with no identity, so a policy never sees the broadcast. One name that several identities open, on a table whose rows RLS hides from some of them, hands each of them every row written through it. So: one name per owner, and `owns` to check it (*Per-user list isolation*, above). `tests/postgres-rls.test.ts` pins this under a `NOSUPERUSER` role.
 
 **Error surfaces leak names, not values.** `_delta_resolve_scope`'s fail-fast raises (unknown doc prefix, unknown root collection, invalid scope key) include the offending identifier in the error message, and `createDocListener` propagates those messages back to the client as `{error: {code: 500, message: ...}}`. That's deliberate — it's what makes delta easy to debug from a Claude session reading the error. The side-effect is a tenant with direct WS access can enumerate registered doc prefixes / collection columns by probing bad inputs. Two rules to stay clean: (1) don't encode tenant-sensitive identifiers in doc-name prefixes (`tenant-42:` bad; `boards:42` fine — the id is already per-identity-gated); (2) if your WS server is public-facing and column names are sensitive, scrub the `500` branch in `createDocListener` before sending to the wire.
 

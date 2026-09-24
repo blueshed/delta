@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **Postgres: with `auth`, `docTypeFromDef` needs to know who owns a document.** Pass
+  `owns: (identity, docName) => boolean` (who may open it, write through it and hear it), or
+  `shared: true` (every identity that passes the gate may); without either it throws at
+  registration. A document's name is the channel its writes are broadcast on, and the listener
+  reads the change log with no identity, so RLS filtered what `open` read but not what the
+  channel carried: one identity's socket received rows another identity wrote, rows RLS hid
+  from it (a list doc every user opened, and a per-user name opened by the wrong user, both
+  leaked). To move across: add `owns` (for a per-user name, `(user, name) => name ===
+  \`todos:${user.id}\``), or `shared: true` where every signed-in user may see every row. A
+  wrapper `DocType` that checked the name in `open` can go.
+
+### Added
+
+- **`DocType.owns?(identity, docName)`** (Postgres). The listener asks it before `open`,
+  `delta`, `open_at` and `history` when it has an `auth` module; false is a 404, as a missing
+  document is, and the socket never subscribes. `docTypeFromDef` sets it from `owns`.
+
+### Fixed
+
+- **Postgres: an RLS-hidden row no longer reaches another identity's socket** (see Breaking).
+  `tests/postgres-rls.test.ts` runs as a `NOSUPERUSER` role, so the policy really filters, and
+  pins both round-1 repros.
+
 ## [0.6.0] - 2026-09-24
 
 Delta in-process, for a server that renders documents itself: the ledger and undo on both

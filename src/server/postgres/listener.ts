@@ -7,8 +7,10 @@
  * Auth is pluggable via `opts.auth`. When provided, every doc message passes
  * through `auth.gate(client)` and the resulting identity is threaded into
  * `type.open / apply / openAt` so backends can scope queries (e.g. with
- * `withAppAuth` + RLS). When auth is omitted, no gate runs and identity is
- * undefined — delta itself has no opinion on authentication.
+ * `withAppAuth` + RLS), and a type's `owns(identity, docName)` decides whether
+ * that identity may have the document at all (404 when not). When auth is
+ * omitted, no gate runs and identity is undefined — delta itself has no
+ * opinion on authentication.
  */
 import type { WsServer } from "../server";
 import { trackSubscribe, trackUnsubscribe, onClientDrop } from "../server";
@@ -453,7 +455,8 @@ export async function createDocListener<I = unknown>(
     identity: I | undefined;
   };
 
-  function withDoc(label: string, fn: (dc: DocCtx) => Promise<void> | void) {
+  // `owned: false` for close alone: letting go of a document never needs the owner's say.
+  function withDoc(label: string, fn: (dc: DocCtx) => Promise<void> | void, { owned = true } = {}) {
     return async (msg: any, client: any, respond: (r: any) => void) => {
       let identity: I | undefined;
       if (auth) {
@@ -472,6 +475,11 @@ export async function createDocListener<I = unknown>(
         return respond({ error: { code: 404, message: `No handler for ${docName}` } });
       }
       try {
+        // The document's name is its channel: one this identity does not own is
+        // not there for it (404, as a missing one), so it never subscribes.
+        if (owned && auth && found.type.owns && !(await found.type.owns(identity as I, docName))) {
+          return respond({ error: { code: 404, message: "Not found" } });
+        }
         await fn({ docName, type: found.type, ctx: found.ctx, msg, client, respond, identity });
       } catch (err) {
         const m = errMsg(err);
@@ -646,7 +654,7 @@ export async function createDocListener<I = unknown>(
     }
     respond({ result: { ack: true } });
     log.debug(`closed ${docName}`);
-  }));
+  }, { owned: false }));
 
   return {
     evict(docName: string) {

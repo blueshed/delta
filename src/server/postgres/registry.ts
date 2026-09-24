@@ -62,6 +62,17 @@ export interface DocType<C = any, I = unknown> {
     at: string,
     identity?: I,
   ): Promise<any | null>;
+
+  /**
+   * With an `auth` module: may `identity` open `docName`, write through it and
+   * hear what is written to it? A document's name is its broadcast channel --
+   * whoever has it open hears every write made through it, whatever RLS lets
+   * them read -- so this is the check that keeps one identity's writes off
+   * another's socket. The listener asks it before open, delta, open_at and
+   * history; false answers 404. `docTypeFromDef` requires it (or
+   * `shared: true`) whenever it is given `auth`.
+   */
+  owns?(identity: I, docName: string): boolean | Promise<boolean>;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,17 +117,39 @@ export function clearRegistry(): void {
  *
  * When auth is omitted, queries run on the bare pool with the base
  * `delta_*` functions.
+ *
+ * With `auth`, pass `owns(identity, docName)` -- who may open a document of
+ * this prefix -- or `shared: true`; without either it throws. A document's
+ * name is the channel its writes are broadcast on, so RLS alone does not keep
+ * one identity's writes off another identity's socket.
  */
 export function docTypeFromDef<I = unknown>(
   def: DocDef,
   pool: Pool,
-  opts?: { auth?: DeltaAuth<I> },
+  opts?: {
+    auth?: DeltaAuth<I>;
+    /** Who may open a document of this prefix (see `DocType.owns`). Required with `auth`, unless `shared`. */
+    owns?: (identity: I, docName: string) => boolean | Promise<boolean>;
+    /** Every identity that passes the gate may open every document of this prefix and hear every write to it. */
+    shared?: boolean;
+  },
 ): DocType<{}, I> {
   const auth = opts?.auth;
   const usingAuth = !!auth?.asSqlArg;
+  // Default-deny: RLS filters what `open` reads, not what the document's
+  // channel carries, so a name several identities may open would hand each of
+  // them every row written through it. Say who owns it, or that it is shared.
+  if (auth && !opts?.owns && !opts?.shared) {
+    throw new Error(
+      `docTypeFromDef("${def.prefix}"): with auth, say who may open it -- ` +
+      `owns: (identity, docName) => boolean, or shared: true if every signed-in identity may hear every write to it. ` +
+      `A document's name is its broadcast channel: RLS filters what open reads, not what the channel carries.`,
+    );
+  }
 
   return {
     prefix: def.prefix,
+    ...(opts?.owns ? { owns: opts.owns } : {}),
 
     parse(docName) {
       return docName.startsWith(def.prefix) ? {} : null;

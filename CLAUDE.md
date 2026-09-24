@@ -82,10 +82,12 @@ on push, `publish.yml` on a published release) runs the same steps.
 
 ## Notes
 
-- **`delta` is a superuser** in the compose stack, so it bypasses row-level security. The
+- **`delta` is a superuser** in the compose stack, so it bypasses row-level security. Most
   Postgres tests check the RLS plumbing (`withAppAuth` sets `app.user_id`), not enforcement; a
-  test that must prove a policy blocks a read needs its own `NOSUPERUSER` role (see
-  `tests/auth-jwt.test.ts`).
+  test that must prove a policy blocks a read makes its own `NOSUPERUSER` role, as
+  `tests/postgres-rls.test.ts` does (`delta_rls`).
+- **With `auth`, a document says who owns it** (`owns`, or `shared: true`): its name is its
+  broadcast channel, and RLS does not filter the channel.
 - **The railroad devDependency** points at a railroad commit until railroad 0.12.0 is
   released; the lead switches it. Leave it alone.
 - `TODO.md` holds the open findings from the v0.5.0 review.
