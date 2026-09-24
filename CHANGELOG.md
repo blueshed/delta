@@ -54,18 +54,20 @@ and broadcasts are the same as in 0.5.1. Four changes to check when upgrading:
   `clientId` -- for a signed-in connection, the person and the `clientId` together, so
   another person holding the same id cannot walk it -- and a `cursor` on the message is
   ignored.
-- **`who`**: the identity a write came from, as the auth module's `gate` gives it. Strings and
-  numbers are written as they are, anything else as JSON; pass `who: (identity) => string` to
-  choose.
+- **`who`**: the identity a write came from: the one the client carries
+  (`client.data.identity`, which `createLocal().as(identity)` sets), or on Postgres with an
+  `auth` module, what its `gate` gives. Strings and numbers are written as they are, anything
+  else as JSON; pass `who: (identity) => string` to choose. The `Writer` type is exported from
+  `@blueshed/delta/postgres`.
 - **`createLocal()`** (`@blueshed/delta/local`): delta in the same process, with no socket.
   A backend registers on `local.server` as it would on `createWs()`. `local.call(action, msg)`
   runs `open`, `delta`, `close`, `call`, `undo`, `redo` and `history` and resolves with the
   answer, for every backend. `local.as(identity)` gives a caller that writes as that identity
   (one client per identity, carried as `client.data.identity`, where a `gate` and the ledger's
   `who` read it). `local.onPublish(fn)` hears every broadcast on every channel.
-- **One stream of changes.** With a ledger, both database backends publish
-  `{ doc, ops, v }` and `open` answers with `_v`, so a copy kept from the stream knows where it
-  starts. The memory and source kinds do the same.
+- **One stream of changes.** With a ledger, the SQLite backend now publishes `{ doc, ops, v }`
+  and `open` answers with `_v`, as the Postgres backend always has, so a copy kept from the
+  stream knows where it starts. The memory and source kinds do the same.
 - **Document kinds not stored in a database** (`@blueshed/delta/kinds`):
   - `registerMemory(ws, { prefix, empty, writable? })`: live documents held in memory, gone on
     restart, never on a ledger. Written by a caller in this process only, unless
@@ -93,9 +95,16 @@ and broadcasts are the same as in 0.5.1. Four changes to check when upgrading:
 
 ### Changed
 
-- **railroad `^0.11.0 || ^0.12.0`** as a peer (was `^0.11.0`). Delta's client passes its
-  tests on both. A test pins that an `openDoc` inside an `effect()` body is closed when the
-  effect runs again; the skill's reference says to open in the component or at module level.
+- **railroad `^0.11.0 || ^0.12.0`** as a peer (was `^0.11.0`). Delta's client works on both.
+  One test pins railroad 0.12's behaviour, and fails on 0.11.0: an `openDoc` inside an
+  `effect()` body is closed when the effect runs again. The devDependency will be `^0.12.0`
+  once railroad releases it. The skill's reference says to open in the component or at module
+  level.
+- **SQLite: a write now publishes before it answers.** In 0.5.1 the writer got its ack and
+  then its own broadcast; now the broadcast (to every subscriber, the writer included) goes out
+  first, then the ack. A client that waited for the ack before listening for its own echo would now miss it; the
+  delta client does not. The Postgres backend is unchanged (the broadcast follows `NOTIFY`,
+  after the ack).
 - **SQLite writes use `db.transaction()`** instead of a bare `BEGIN`, so they nest as a
   savepoint inside a caller's transaction (see Breaking).
 - **The release procedure** is `.claude/commands/publish.md`, the same text in railroad, delta
