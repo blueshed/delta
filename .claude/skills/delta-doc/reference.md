@@ -750,13 +750,19 @@ local.onPublish((channel, change) => redraw(channel, change));   // { doc, ops, 
 - **The cursor is yours to name.** An in-process client carries `data.local = true`, so the ledger takes `cursor` from the message (a session id: undo takes back what this session did). A socket client cannot.
 - **Any backend** registers on it: `registerDocs`, `createDocListener`, `registerDoc`, the kinds.
 
-**Savepoints (SQLite).** The SQLite backend writes with `db.transaction()`, so a write made inside your own transaction becomes a savepoint: it rolls back alone when it fails, and with yours when you roll back. Two things stay outside your transaction: the backend's cache and its broadcasts. If you roll back after delta has written, call `evict(docName)` (returned by `registerDocs`) so the next open reads the tables, and expect that subscribers already heard the change.
+**Savepoints (SQLite).** The SQLite backend writes with `db.transaction()`, so a write made inside your own transaction becomes a savepoint: it rolls back alone when it fails, and with yours when you roll back. Three things stay outside your transaction: the backend's cache, its broadcasts, and the version numbers it has handed out.
+
+So a rollback after delta has written means **subscribers have already heard a change that did not happen**, and the backend's cache still holds it. Evicting is not enough: a subscriber still attached to an evicted document gets 404 "Doc not loaded" on its next `delta` (TODO #6), and with a ledger the version is taken again from what is left in the ledger, so the rolled-back version number is reused — a browser already at that `v` drops the real change as one it has. What to do:
+
+- **Close every document the rolled-back write touched, and have every subscriber re-open it.** A re-open reads the tables and resets the subscriber's version from the snapshot's `_v`. In-process that is `close` then `open`; a browser re-opens every document when its socket reconnects, so dropping its connection does it. This is what eta's story harness does between cases.
+- Better still, keep writes that may roll back away from documents anyone is watching.
 
 ```ts
 db.exec("BEGIN");
 await local.call("delta", { doc: "room:a", ops });
 db.exec("ROLLBACK");
-evict("room:a");
+await local.call("close", { doc: "room:a" });   // with every other subscriber of room:a
+await local.call("open", { doc: "room:a" });    // reads the tables: the write is gone, _v as it was
 ```
 
 ## The ledger — undo, redo, history
@@ -764,12 +770,12 @@ evict("room:a");
 Pass `{ ledger: true }` and every write is recorded in the same transaction as the write: its ops, its inverse, the document's version, **who** made it and the **cursor** undo walks.
 
 ```ts
-registerDocs(ws, db, schema, docs, customDocs, { ledger: true, who: (identity) => String(identity.id) });   // SQLite
+registerDocs(ws, db, schema, docs, customDocs, { ledger: true, who: (identity) => String((identity as { id: number }).id) });   // SQLite: identity is unknown
 await createDocListener(ws, pool, { auth, ledger: true, who: (identity) => String(identity.id) });      // Postgres (needs 001g)
 ```
 
 - **SQLite** keeps it in a `delta_ledger` table the backend creates (`src/server/ledger.ts`). **Postgres** keeps it in `_delta_ledger` (`src/sql/001g-delta-ledger.sql`), in the database every process shares, so a write made in one process can be undone from another and every process broadcasts the undo over `NOTIFY`. `_delta_ops_log` stays a catch-up buffer pruned within the hour; the ledger is the history, kept. A lock per document holds from the read the inverse is taken from until the write commits, so concurrent writers each record the inverse of what they replaced.
-- **`who`** is the identity as the gate gives it (`client.data.identity`, or `auth.gate(client)` on Postgres): a string or number as it is, anything else as JSON, or what your `who(identity)` returns. It is for the audit.
+- **`who`** is the writer's identity: `client.data.identity` (what `createLocal().as(identity)` or an auth module's upgrade sets), or on Postgres with an `auth` module, what `auth.gate(client)` gives. A string or number as it is, anything else as JSON, or what your `who(identity)` returns. It is for the audit.
 - **The cursor** is what undo walks, opaque to delta. In-process (`createLocal`, or any client with `data.local`) the caller names it with `cursor` on the message. Over the socket it is the connection's `clientId`, and a `cursor` on the message is ignored; for a signed-in connection (an `auth` gate gave an identity) it is the person and the `clientId` together, so another person holding the same id cannot walk it. The `clientId` is random unless the browser passed `connectWs(url, { clientId })`; a client that chooses its `clientId` keeps its cursor across reconnects. Without sign-in, anyone who learns a chosen id could walk its cursor, so treat a chosen id as a secret there.
 - **A write answers** `{ ack: true, version, entry, ops, inverse }` (`ops` as applied: whole rows) and its broadcast carries `v`. An empty write records nothing.
 - **Facts.** A write sent with `undoable: false` (a price tick, a sensor reading) is recorded but never walked back by undo, and ends no redo.
@@ -822,7 +828,7 @@ reactor.stopAll();   // on shutdown
 
 The document is `{ reading, at, stale }`. `at` is when the reading was taken; `stale` turns true when no reading comes within `stale` ms, so a page can say so instead of showing an old number as now. A source that fails gives no reading: the last one ages and goes stale (a first read that fails opens as `{ reading: null, at: null, stale: true }`). A reading equal to the last only moves `at`. Every write is refused (403).
 
-**Static — the truth is the repository** (countries, SI units, a price list fixed for the release). A value per id, loaded on first open; a change is a deploy.
+**Static — the truth is the repository** (countries, SI units, a price list fixed for the release). A value per id, loaded on first open; a change is a deploy. The value must be an object: open answers it spread, with `_v: 1` added.
 
 ```ts
 registerStatic(ws, { prefix: "units:", value: (id) => UNITS[id] });   // undefined → 404
