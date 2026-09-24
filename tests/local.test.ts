@@ -183,3 +183,25 @@ describe("fan-out onto a document whose root is the row", () => {
   });
 });
 
+describe("fan-out of rows whose parent comes in the same write", () => {
+  const s = defineSchema({
+    weddings: { columns: { name: "text" }, temporal: false },
+    courses: { parent: "weddings", columns: { name: "text" }, temporal: false },
+    drinks: { parent: "courses", columns: { name: "text" }, temporal: false },
+  });
+
+  test("a course and its drinks, added in one write, reach the other document that holds them", async () => {
+    const db = new Database(":memory:");
+    createTables(db, s);
+    db.run("INSERT INTO weddings (id, name) VALUES ('w1', 'ours')");
+    const local = createLocal();
+    const heard: { channel: string; data: any }[] = [];
+    local.onPublish((channel, data) => heard.push({ channel, data }));
+    registerDocs(local.server, db, s, [defineDoc("board:", { root: "weddings", include: ["courses", "drinks"] }), defineDoc("menu:", { root: "weddings", include: ["courses", "drinks"] })]);
+    await local.call("open", { doc: "board:w1" });
+    await local.call("open", { doc: "menu:w1" });
+    await local.call("delta", { doc: "board:w1", ops: [{ op: "add", path: "/courses/c1", value: { name: "The toast" } }, { op: "add", path: "/drinks/d1", value: { courses_id: "c1", name: "Champagne" } }] });
+    expect(heard.filter((h) => h.channel === "menu:w1").flatMap((h) => h.data.ops.map((o: any) => o.path))).toEqual(["/courses/c1", "/drinks/d1"]);
+  });
+});
+

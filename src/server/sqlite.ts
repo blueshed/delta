@@ -731,6 +731,12 @@ export function registerDocs(
       // an included map — otherwise applying `/<coll>` would clobber the whole
       // collection map with one row object.
       const relevantOps: DeltaOp[] = [];
+      // Each op taken is applied to the target at once, so a row later in the write finds a
+      // parent that came earlier in it (a course and its drinks, put back together by an undo).
+      const take = (op: DeltaOp) => {
+        relevantOps.push(op);
+        if (cached) deltaApplyOps(cached, [op]);
+      };
       for (const op of ops) {
         const parts = splitPath(op.path);
         const collKey = parts[0];
@@ -744,14 +750,14 @@ export function registerDocs(
         // key to the root object; it is the root, replaced whole -- or, the row gone, null.
         if (collKey === def.root && parts.length === 2) {
           if (id !== docId) continue;
-          relevantOps.push({ op: "replace", path: `/${collKey}`, value: op.op === "remove" ? null : (op as any).value });
+          take({ op: "replace", path: `/${collKey}`, value: op.op === "remove" ? null : (op as any).value });
           continue;
         }
 
         if (op.op === "remove") {
           // Forward removes only if the id is currently in the target's cache.
           // If we don't have it, this row was never in the target's scope.
-          if (id != null && cached?.[collKey]?.[id] != null) relevantOps.push(op);
+          if (id != null && cached?.[collKey]?.[id] != null) take(op);
           continue;
         }
 
@@ -761,20 +767,17 @@ export function registerDocs(
           // Source root-level replace.
           if (collKey === def.root) {
             // Target also treats this collection as its single-object root.
-            if (row && String(row.id) === docId) relevantOps.push(op);
+            if (row && String(row.id) === docId) take(op);
           } else if (row && rowInScope(collKey, row, def, docId, cached)) {
             // Target treats it as an included map — rewrite to a keyed op.
-            relevantOps.push({ op: "replace", path: `/${collKey}/${row.id}`, value: row });
+            take({ op: "replace", path: `/${collKey}/${row.id}`, value: row });
           }
           continue;
         }
-        if (rowInScope(collKey, row, def, docId, cached)) relevantOps.push(op);
+        if (rowInScope(collKey, row, def, docId, cached)) take(op);
       }
 
       if (relevantOps.length === 0) continue;
-
-      // Apply deltas to cached doc
-      if (cached) deltaApplyOps(cached, relevantOps);
 
       // Broadcast the deltas
       ws.publish(docName, { doc: docName, ops: relevantOps });
