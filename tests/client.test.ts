@@ -518,7 +518,7 @@ describe("onConnect: saying who you are before the docs re-open", () => {
   // A server that answers `open` only on a socket that authenticated, and
   // takes a moment to authenticate (so a racing open would lose).
   function makeAuthServer(port: number, rows: string[]) {
-    return Bun.serve({
+    return Bun.serve<{ authed: boolean }>({
       port,
       fetch(req, s) { return s.upgrade(req, { data: { authed: false } }) ? undefined as any : new Response("no", { status: 400 }); },
       websocket: {
