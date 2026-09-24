@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-24
+
 Delta in-process, for a server that renders documents itself: the ledger and undo on both
 database backends, document kinds whose truth is not a database, and one stream of changes.
 
