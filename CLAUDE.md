@@ -96,7 +96,8 @@ on push, `publish.yml` on a published release) runs the same steps.
 - `src/server/logger.ts`: a copy of railroad's `logger.ts`, so a server needs no railroad (an
   optional peer only the client imports); `tests/server.test.ts` fails when the two differ.
 - `src/sql/001a–001f-*.sql`: the stored functions; `001g-delta-ledger.sql`: the Postgres
-  ledger (`delta_apply_logged`, `delta_undo`, `delta_redo`, `delta_history`, `_as` forms).
+  ledger (`delta_apply_logged`, `delta_walk` and its `_delta_walk_plan`, `delta_undo`, `delta_redo`,
+  `delta_history`, `_as` forms).
 - `src/server/auth*.ts`, `src/sql/auth-jwt.sql`: the `DeltaAuth` contract and the JWT reference.
 - `cli.ts`: `bunx @blueshed/delta` (open, watch, delta, call, init, sql, install-skills;
   install-skills copies `@blueshed/*` skills and the packages `claudeSkills` names).
