@@ -11,7 +11,7 @@
  *     normalization → fresh row reference → default Object.is notifies)
  *   - one flush per broadcast (batch() around data + dataVersion)
  *   - openDoc dedupe/refcount and doc.close() unregistration
- *   - scope-aware auto-close inside a railroad dispose scope
+ *   - scope-aware auto-close inside a railroad dispose scope, an effect run included
  *   - late provide(WS): register-on-send self-heal
  *
  * happy-dom supplies the DOM; its WebSocket stub is swapped back for Bun's
@@ -25,7 +25,7 @@ GlobalRegistrator.register({ url: "http://localhost/" });
 globalThis.WebSocket = NativeWebSocket;
 
 import {
-  effect, mount, when, list,
+  effect, mount, when, list, signal,
   provide, clearProviders, setLogLevel as railroadLogLevel, hasActiveDisposeScope,
 } from "@blueshed/railroad";
 import { connectWs, openDoc, WS, type Doc, type WsClient } from "../src/client/client";
@@ -77,8 +77,10 @@ wsrv.setServer(server);
 
 const client: WsClient = connectWs(`http://localhost:${server.port}/ws`);
 
-afterAll(() => {
+afterAll(async () => {
   client.close();
+  // the socket's close event arrives later: happy-dom must still be registered when it is dispatched
+  await until(() => !client.connected.peek());
   server.stop(true);
   clearProviders();
   for (const f of tmpFiles) { try { unlinkSync(f); } catch {} }
@@ -188,6 +190,24 @@ describe("railroad ↔ delta", () => {
     dispose();
     expect(client._docs.has("it:scope")).toBe(false);
     root.remove();
+  });
+
+  // railroad 0.12 makes every effect()/computed() run a scope of its own: what a run creates is
+  // disposed before the next. An openDoc in an effect body is therefore closed and re-opened on
+  // every re-run -- the reference says to open in the component or at module level instead.
+  test("a doc opened inside an effect() body closes when the effect runs again, and when it stops", () => {
+    const which = signal("a");
+    const stop = effect(() => {
+      openDoc(`it:effect-${which.get()}`, client);
+    });
+    expect(client._docs.has("it:effect-a")).toBe(true);
+
+    which.set("b");
+    expect(client._docs.has("it:effect-a")).toBe(false); // the run that opened it is over
+    expect(client._docs.has("it:effect-b")).toBe(true);
+
+    stop();
+    expect(client._docs.has("it:effect-b")).toBe(false);
   });
 
   test("late provide(WS): a parked doc self-heals on first send()", async () => {
