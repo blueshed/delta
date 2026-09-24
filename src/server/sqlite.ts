@@ -739,6 +739,15 @@ export function registerDocs(
 
         const id = parts[1];
 
+        // The mirror of the rewrite below: a keyed row `/<coll>/<id>` from a source that holds
+        // <coll> as a map, onto a target whose ROOT is that row. Applied as it is, it would add a
+        // key to the root object; it is the root, replaced whole -- or, the row gone, null.
+        if (collKey === def.root && parts.length === 2) {
+          if (id !== docId) continue;
+          relevantOps.push({ op: "replace", path: `/${collKey}`, value: op.op === "remove" ? null : (op as any).value });
+          continue;
+        }
+
         if (op.op === "remove") {
           // Forward removes only if the id is currently in the target's cache.
           // If we don't have it, this row was never in the target's scope.
