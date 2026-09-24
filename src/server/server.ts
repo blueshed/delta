@@ -328,6 +328,26 @@ export function normalizeForBroadcast(doc: unknown, ops: DeltaOp[]): DeltaOp[] {
   return out;
 }
 
+/**
+ * `add .../-` onto a map of rows (an object, not an array) is "a new row, the
+ * server names it": mint a uuid, put it in the path and in the value's `id`,
+ * so the op as applied -- and as broadcast -- names the row, as the SQL
+ * backends' echoes do. On an array, `/-` appends, as RFC 6902 says.
+ */
+function mintIds(doc: unknown, ops: DeltaOp[]): DeltaOp[] {
+  return ops.map((op) => {
+    if (op.op !== "add" || !op.path.endsWith("/-")) return op;
+    const segs = splitPath(op.path);
+    let parent: any = doc;
+    for (const seg of segs.slice(0, -1)) parent = parent?.[seg];
+    if (parent === null || typeof parent !== "object" || Array.isArray(parent)) return op;
+    const id = crypto.randomUUID();
+    const v = op.value;
+    const value = v !== null && typeof v === "object" && !Array.isArray(v) ? { ...v, id } : v;
+    return { op: "add", path: joinPath(...segs.slice(0, -1), id), value };
+  });
+}
+
 /** Register a persisted JSON document with the WebSocket server. */
 export async function registerDoc<T>(
   ws: Pick<WsServer, "on" | "publish">,
@@ -358,7 +378,8 @@ export async function registerDoc<T>(
     return done;
   }
 
-  function applyAndBroadcast(ops: DeltaOp[]) {
+  function applyAndBroadcast(sent: DeltaOp[]) {
+    const ops = mintIds(doc, sent);
     applyOps(doc, ops);
     log.info(`delta [${ops.map((o) => `${o.op} ${o.path}`).join(", ")}]`);
     ws.publish(name, { doc: name, ops: normalizeForBroadcast(doc, ops) });

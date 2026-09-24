@@ -251,7 +251,8 @@ BEGIN
             USING ERRCODE = '23505';
         END IF;
       END IF;
-      v_new_row := jsonb_build_object('id', v_id) || (v_op->'value');
+      -- The path names the row, whatever the value says.
+      v_new_row := (v_op->'value') || jsonb_build_object('id', v_id);
 
       -- Set FK: for list-mode root adds, apply scope equality values;
       -- for child collections in single-mode, set FK to root id. In list-mode

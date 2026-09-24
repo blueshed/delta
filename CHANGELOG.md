@@ -55,6 +55,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`add /<coll>/-` makes a new row on every backend.** On a collection of rows (an object, not
+  an array) the server mints the id: a uuid on the JSON file and SQLite, as the sequence does
+  on Postgres. The echo names the row (`/<coll>/<id>`) and the row carries it (`value.id`). The
+  JSON file and SQLite used to store it under the key `"-"`, so a second add collided. On an
+  array, `/-` still appends. This is the one create-row op that works unchanged from the JSON
+  file to Postgres.
+- **The path names the row, whatever the value's `id` says** (SQLite, Postgres `001d`). An
+  `add /coll/x` whose value carried `id: "y"` stored the row as `y` while broadcasting `/coll/x`.
 - **A batch applies whole or not at all** (`applyOps`). An op that throws undoes the ops before
   it, in place, so held references stay live. The JSON-file backend applied a failing batch's
   first ops to its live document: the writer got an error, the server kept the change and

@@ -404,7 +404,9 @@ export function registerDocs(
       }
 
       if (parts.length === 2) {
-        const id = parts[1]!;
+        // `add /<coll>/-` is a new row the server names: a uuid, carried by the
+        // broadcast path and the row, as Postgres does with its sequence.
+        const id = op.op === "add" && parts[1] === "-" ? crypto.randomUUID() : parts[1]!;
         if (op.op === "add") {
           // Add row
           const row = (op as any).value as Record<string, unknown>;
@@ -1289,7 +1291,7 @@ function insertCollectionRow(
   if (db.query(`SELECT 1 FROM ${live} WHERE id = ?`).get(id)) {
     refuse(409, `Row already exists: ${joinPath(table.docKey, id)} -- replace it, or add to ${joinPath(table.docKey, "-")} for a new id`);
   }
-  const fullRow: any = { id, ...row };
+  const fullRow: any = { ...row, id };   // the path names the row, whatever the value says
   if (table.temporal) { fullRow.valid_from = ts; fullRow.valid_to = null; }
 
   // Resolve FK column
