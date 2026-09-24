@@ -180,6 +180,23 @@ describe("jwtAuth.actions.authenticate", () => {
     expect("error" in outcome).toBe(true);
   });
 
+  test("a session ends when its token does (TODO #10)", async () => {
+    // gate() used to return the identity for the socket's whole life, so a
+    // token that ran out after authenticate still let every open and delta in.
+    const auth = jwtAuth({ pool, secret: SECRET });
+    const token = await new SignJWT({ sub: "42" })
+      .setProtectedHeader({ alg: "HS256" })
+      .setIssuedAt()
+      .setExpirationTime(Math.floor(Date.now() / 1000) + 1)
+      .sign(new TextEncoder().encode(SECRET));
+    const client = mockClient();
+    expect("result" in (await auth.actions!.authenticate({ token }, client))).toBe(true);
+    expect(auth.gate(client)).toEqual({ id: 42, name: undefined, email: undefined });
+    await Bun.sleep(1100);
+    expect(auth.gate(client)).toEqual({ error: "Session expired: authenticate again" });
+    expect(client.data.identity).toBeUndefined();
+  });
+
   test("missing token → { error }", async () => {
     const auth = jwtAuth({ pool, secret: SECRET });
     const outcome = await auth.actions!.authenticate({}, mockClient());

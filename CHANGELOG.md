@@ -151,6 +151,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   raw and parsed on the way back, so `"123"` came back as `123` and `"true"` as `true` after a
   restart or eviction. Every json value is now stored as JSON; a raw string an earlier release
   stored still reads back as the string it was.
+- **`jwtAuth`: a session ends when its token does** (TODO #10). `gate()` returned the identity
+  for the socket's whole life, so a token that ran out after `authenticate` still let every
+  `open` and `delta` in. The token's `exp` is kept with the identity, and once it has passed
+  the gate signs the socket out ("Session expired: authenticate again", subscriptions dropped),
+  as `logout` does. With `onConnect`, the client signs in again on its next connect.
 - **SQLite errors name their fix.** A missing table says "call createTables(db, schema) before
   the first open" (it said `no such table: current_lists`), and a document with no root row
   says which row it looked for and that a SQLite document is one root row and its children

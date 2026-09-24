@@ -240,7 +240,13 @@ cross-tenant read leak. No test covers this shape.
 
 ## P3 — API and packaging
 
-### 10. JWT sessions outlive their tokens — CONFIRMED
+### 10. JWT sessions outlive their tokens — FIXED
+
+> **FIXED** (round 2): `jwtAuth` keeps the token's `exp` with the identity
+> (from `authenticate`, `login` and `register`), and `gate()` signs the socket
+> out once it has passed: "Session expired: authenticate again", the identity
+> gone and its subscriptions dropped, as a logout does. Regression test:
+> `tests/auth-jwt.test.ts` → "a session ends when its token does".
 
 `src/server/auth-jwt.ts:180`. `gate()` returns `client.data?.identity` and never
 rechecks `exp`. `verifyToken` runs only inside the `authenticate` action, so once
