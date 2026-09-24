@@ -892,7 +892,7 @@ bunx delta sql ./types.ts --out init_db/003-tables.sql   # codegen tables from s
 
 `init` copies `001a-001g-*.sql` (and optionally `002-users.sql` from auth-jwt) into the target directory; `--upgrade` replaces existing files with `.bak` backups. `sql` runs the codegen. Both are idempotent.
 
-Vendor Claude Code skills — copies `.claude/skills/*` from this package and from any sibling package in `node_modules` that ships skills (e.g. `@blueshed/railroad` ships `railroad` and `bun-route`) into the consumer's `.claude/skills/` so Claude Code's project-skill autodiscovery picks them up:
+Vendor Claude Code skills — copies `.claude/skills/*` from this package and from the `@blueshed/*` packages in `node_modules` (e.g. `@blueshed/railroad` ships `railroad` and `bun-route`) into the consumer's `.claude/skills/` so Claude Code's project-skill autodiscovery picks them up. A skill is instructions an agent follows, so another package's skills are copied only when your `package.json` names it: `"claudeSkills": ["@acme/widgets"]`. Any other package that ships skills is skipped, with a line that says so:
 
 ```bash
 bunx delta install-skills              # → ./.claude/skills/

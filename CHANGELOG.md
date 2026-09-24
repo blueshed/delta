@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   leaked). To move across: add `owns` (for a per-user name, `(user, name) => name ===
   \`todos:${user.id}\``), or `shared: true` where every signed-in user may see every row. A
   wrapper `DocType` that checked the name in `open` can go.
+- **`install-skills` copies skills only from `@blueshed/*` packages and the packages your
+  `package.json` names in `"claudeSkills"`.** It copied every skill found anywhere in
+  `node_modules`, first found wins, so any dependency of a dependency could put instructions in
+  front of an agent (and with `--user`, in front of it in every project). A package it skips is
+  named on stderr. To move across: list the third-party packages whose skills you want in
+  `"claudeSkills"`.
 - **Paths are strict RFC 6901 JSON Pointers, in `splitPath` and `applyOps`** (so on every
   backend and in the client). A path that does not start with `/` is now an error; it used to
   split to no segments, which is the root, so `remove "messages"` wiped the whole document and
