@@ -1,153 +1,136 @@
 # @blueshed/delta
 
-**Use delta-doc for shared state.** That sentence is the whole pitch.
+Delta keeps JSON documents and tells everyone who has one open when it changes. A change is a
+list of ops with three verbs (`add`, `replace`, `remove`) on paths like `/items/milk/done`, and
+one WebSocket carries opens, writes and changes to the browser.
 
-Three op verbs (`add` / `replace` / `remove`), one path grammar (`/coll/id/field`), one WebSocket. Three backends ranked by complexity (JSON file → SQLite → Postgres). The browser code never changes when you move up the ladder.
+It exists because shared, live state should be one small idea rather than a stack of fetch
+calls, caches and sockets. The whole package is small enough to read in one sitting (and to
+fit in an AI's context), there is one way to do each thing, and the browser code stays the same
+wherever the truth is kept.
 
-It's smaller than the alternative you're reaching for. The whole system fits in one context window — your AI can read all of it before writing a line.
-
-Starting fresh? `bun create blueshed my-app` scaffolds a full app on this stack — delta + [`@blueshed/railroad`](https://www.npmjs.com/package/@blueshed/railroad) + invoket, agent wiring included.
-
-## The recipe — one command, three files, two browser tabs
+## Try it
 
 ```sh
-bun examples/shared-state/server.ts
+mkdir try-delta && cd try-delta && bun add @blueshed/delta
 ```
 
-A live multi-user chat. Two browser tabs at <http://localhost:3100>. Type in one, it appears in the other. Persists to a JSON file. No database, no schema, no codegen, no fetch calls.
-
-The whole sync layer:
+Save this as `try.ts`:
 
 ```ts
-// server.ts
-import index from "./index.html";
-import { createWs, registerDoc } from "@blueshed/delta/server";
+import { Database } from "bun:sqlite";
+import { createLocal } from "@blueshed/delta/local";
+import { setLogLevel } from "@blueshed/delta/logger";
+import { createTables, defineDoc, defineSchema, registerDocs } from "@blueshed/delta/sqlite";
 
-const ws = createWs();
-await registerDoc(ws, "chat:room", { file: "./chat-room.json", empty: { messages: {} } });
+setLogLevel("warn");
 
-const server = Bun.serve({
-  port: 3100,
-  routes: { "/": index, [ws.path]: ws.upgrade },
-  websocket: ws.websocket,
+// A shopping list: a row per list, its items in a map.
+const schema = defineSchema({
+  lists: { columns: { title: "text?" }, temporal: false },
+  items: { parent: "lists", columns: { text: "text", done: "boolean" }, temporal: false },
 });
-ws.setServer(server);
+const list = defineDoc("list:", { root: "lists", include: ["items"], implied: true });
+
+const db = new Database(":memory:");
+createTables(db, schema);
+
+// Delta in this process. registerDocs(createWs(), ...) serves the same documents to browsers.
+const delta = createLocal();
+registerDocs(delta.server, db, schema, [list], [], { ledger: true });
+delta.onPublish((doc, change) => console.log(doc, `v${change.v}`, JSON.stringify(change.ops)));
+
+const ada = delta.as("ada");
+const doc = "list:groceries";
+await ada.call("open", { doc });
+await ada.call("delta", { doc, cursor: "tab-1", ops: [{ op: "add", path: "/items/milk", value: { text: "milk" } }] });
+await ada.call("delta", { doc, cursor: "tab-1", ops: [{ op: "replace", path: "/items/milk/done", value: true }] });
+await ada.call("undo", { cursor: "tab-1" });
+
+console.log((await ada.call("open", { doc })).result.items);
 ```
+
+Run `bun try.ts`:
+
+```
+list:groceries v1 [{"op":"add","path":"/items/milk","value":{"id":"milk","text":"milk","lists_id":"groceries","done":false}}]
+list:groceries v2 [{"op":"replace","path":"/items/milk","value":{"id":"milk","text":"milk","lists_id":"groceries","done":true}}]
+list:groceries v3 [{"op":"replace","path":"/items/milk","value":{"id":"milk","text":"milk","lists_id":"groceries","done":false}}]
+{
+  milk: {
+    id: "milk",
+    text: "milk",
+    lists_id: "groceries",
+    done: false,
+  },
+}
+```
+
+Three writes, each heard as a change with its version. The last one is the undo, which the
+ledger worked out for itself. The document did not exist until its first write made it
+(`implied: true`).
+
+## Where the truth lives
+
+Each kind of document registers on the same server, and the browser opens every one of them the
+same way.
+
+| The truth is | Register it with | From |
+|---|---|---|
+| a JSON file | `registerDoc(ws, name, { file, empty })` | `@blueshed/delta/server` |
+| a SQLite database | `registerDocs(ws, db, schema, docs)` | `@blueshed/delta/sqlite` |
+| a Postgres database, shared by processes | `createDocListener(ws, pool)` and `registerDocType(docTypeFromDef(def, pool))` | `@blueshed/delta/postgres` |
+| this process (who is online) | `registerMemory(ws, { prefix, empty })` | `@blueshed/delta/kinds` |
+| outside (a sensor, an API) | `registerSource(ws, { prefix, read, every })` | `@blueshed/delta/kinds` |
+| the release (countries, units) | `registerStatic(ws, { prefix, value })` | `@blueshed/delta/kinds` |
+
+Start with a JSON file and move to a database when you need queries or more than one process.
+
+## Undo comes with the ledger
+
+Pass `{ ledger: true }` to the SQLite or Postgres backend and every write is recorded in its own
+transaction: what it did, its inverse, the document's version, who made it and the cursor undo
+walks. `undo`, `redo` and `history` then work with no more code. Over a socket the cursor is
+the connection, so a browser undoes only what it wrote. On Postgres the ledger is in the
+database, so a write made in one process can be undone from another.
+
+## In the browser, or in the same process
+
+Served over a socket with `createWs()`, a browser opens a document as a reactive value:
 
 ```ts
-// client.ts
 import { connectWs, openDoc } from "@blueshed/delta/client";
-import { applyOpsToCollection } from "@blueshed/delta/dom-ops";
 
-const doc = openDoc("chat:room", connectWs("/ws"));
-
-// One render path: first paint, live ops, and the whole-doc replace that
-// arrives on reconnect. `key` must return the same id the op paths use.
-const render = (ops) =>
-  applyOpsToCollection(log, "messages", ops, { key: (m) => m.id, create, update });
-
+const doc = openDoc("list:groceries", connectWs("/ws"));
 await doc.ready;
-render([{ op: "replace", path: "", value: doc.data.get() }]);
-doc.onOps(render);
-
-// Send: one verb, one path.
-const id = crypto.randomUUID();
-await doc.send([{ op: "add", path: `/messages/${id}`, value: { id, author, text } }]);
+doc.onOps((ops) => render(ops));   // every change, including your own
+await doc.send([{ op: "replace", path: "/items/milk/done", value: true }]);
 ```
 
-Walk into [`examples/shared-state/`](examples/shared-state/) for the complete, runnable version.
+`bun examples/shared-state/server.ts` runs a chat in two browser tabs on a JSON file, with no
+database and no schema.
 
-## Choose a backend (only when you need to)
+Run in the same process with `createLocal()`, as in the example above, a server that renders
+its own pages, a job or a test speaks to delta by function call. `as(identity)` says who is
+writing, and `onPublish` is the one stream of changes to redraw from.
 
-Same client (`openDoc` / `doc.send` / `doc.onOps`), same op verbs across all three. Default to JSON-file; graduate only when forced.
+## Pairs with
 
-| Tier | Pick when | Server |
-|---|---|---|
-| **JSON file** | Single doc, single process, prototyping. | `registerDoc(ws, name, { file, empty })` from `@blueshed/delta/server` |
-| **SQLite** | Many docs, relational queries, temporal history. | `registerDocs(ws, db, schema, docs, customDocs?)` from `@blueshed/delta/sqlite` |
-| **Postgres** | Cross-process fan-out, RLS, stored-function auth. | `createDocListener(ws, pool, { custom? })` + `registerDocType(...)` from `@blueshed/delta/postgres` |
+- [`@blueshed/railroad`](https://www.npmjs.com/package/@blueshed/railroad) draws in the browser.
+  `doc.data` is a railroad signal, so its `list()` renders a collection row by row.
+- delta keeps the documents.
+- eta, a private server-rendering kernel, builds on delta in-process through `createLocal()`.
 
-Browser code does not change when you graduate.
+Starting a new app? `bun create blueshed my-app` sets up delta and railroad together.
 
-## Custom doc types — derived views
+## Where to go next
 
-`defineCustomDoc(prefix, opts)` declares a read-only doc whose contents are a Bun-side derived view over one or more watched collections. Two modes: **membership** (`query` + `matches`) for a flat predicate view — bbox queries, tag filters, anything you'd express as `WHERE` in a live materialised view (SQLite and Postgres); and **recompute** (`recompute`) for a whole-doc view that's nested, joined, or identity-dependent — re-evaluated per subscriber and republished on each watched write (Postgres only). See [`examples/sites-bbox/`](examples/sites-bbox/) for the membership backends.
+- The `delta-doc` skill is the manual: [`SKILL.md`](.claude/skills/delta-doc/SKILL.md) routes,
+  [`reference.md`](.claude/skills/delta-doc/reference.md) has the API, patterns, auth, row-level
+  security, the ledger, the kinds and the wire protocol. `bunx delta install-skills` copies it
+  into your project for Claude Code.
+- [`examples/`](examples/): `shared-state` (JSON file), `sites-bbox` (custom views on SQLite
+  and Postgres), `kanban` (Postgres with railroad), `todos-vs-rls` (row-level security).
+- [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 
-## CLI
-
-After install, the `delta` bin is invokable via `bunx delta`:
-
-```sh
-# Talk to a running server
-bunx delta open  <docName>             # one-shot open + print + exit
-bunx delta watch <docName>             # stream broadcast ops
-bunx delta delta <docName> <opsJSON>   # apply ops
-bunx delta call  <method>  [paramsJSON]
-
-# Postgres setup
-bunx delta init init_db --with-auth
-bunx delta sql ./types.ts --out init_db/003-tables.sql
-
-# Claude Code skills (delta-doc + any sibling @scope/pkg that ships skills,
-# e.g. @blueshed/railroad ships `railroad` and `bun-route`)
-bunx delta install-skills              # → ./.claude/skills/
-bunx delta install-skills --user       # → ~/.claude/skills/
-```
-
-URL resolution: `--url` → `DELTA_WS_URL` → `.delta` file in cwd → `ws://localhost:${PORT:-3100}/ws`.
-
-## Layout
-
-```
-core.ts       — JSON-Patch applyOps + types (zero deps)
-client.ts     — reactive doc + reconnecting WS (peerDep: @blueshed/railroad)
-server.ts     — WS action router + JSON-file backend (registerDoc, registerMethod)
-sqlite.ts     — SQLite backend (schema codegen, temporal tables, doc lenses, custom docs)
-logger.ts     — tagged, level-gated console logger
-postgres/     — schema · sql · listener · registry · stored-function SQL
-examples/
-  shared-state/ — the canonical "use delta-doc for shared state" recipe
-  sites-bbox/   — custom doc types, both backends
-  kanban/       — full Postgres + auth example
-  todos-vs-rls/ — RLS / auth-jwt walkthrough
-```
-
-## Exports
-
-| Subpath | Runs | Purpose |
-|---|---|---|
-| `@blueshed/delta/core` | anywhere | `applyOps`, `DeltaOp` |
-| `@blueshed/delta/client` | browser | `connectWs`, `openDoc`, `call`, `WS` |
-| `@blueshed/delta/dom-ops` | browser | `applyOpsToCollection` — keyed-DOM op routing |
-| `@blueshed/delta/server` | Bun | `createWs`, `registerDoc` (JSON-file backend), `registerMethod` |
-| `@blueshed/delta/sqlite` | Bun | `defineSchema`, `defineDoc`, `defineCustomDoc`, `registerDocs(..., customDocs?)`, snapshots |
-| `@blueshed/delta/postgres` | Bun + pg | `defineSchema`, `defineDoc`, `defineCustomDoc`, `generateSql`, `applyFramework`, `createDocListener(ws, pool, { custom? })`, `registerDocType`, `docTypeFromDef`, `withAppAuth` |
-| `@blueshed/delta/logger` | anywhere | `createLogger`, `setLogLevel`, `loggedRequest` |
-| `@blueshed/delta/auth` | Bun | `DeltaAuth` interface, `wireAuth`, `upgradeWithAuth` |
-| `@blueshed/delta/auth-jwt` | Bun + pg + jose | `jwtAuth({ pool, secret })` — reference impl |
-
-## Vendor-first
-
-Delta's framework SQL is **copied into your `init_db/`** by `bunx delta init`, not read from `node_modules` at runtime. The philosophy is shadcn/ui for database schemas:
-
-- Files are explicit, git-tracked, and yours to read.
-- Upgrades run `delta init --upgrade` (with `.bak` backups) and tell you what changed.
-- Your `setup.ts` walks `init_db/` in alphabetical order — no hidden imports.
-
-TypeScript runtime is imported normally. Only SQL is vendored.
-
-## Why
-
-Existing sync libraries are built for human developers: big API surfaces, many idioms, ecosystem dependencies. Delta-doc is shaped for AI-driven development — the whole system fits in context, has one way to do each thing, and generates its schema from a single TypeScript source of truth.
-
-If your AI is reaching for Supabase or Firebase, that's a default trained from millions of projects. Delta-doc isn't harder than those — it's smaller. Your AI can read all of it.
-
-Lineage: started as dzql (Vue / Pinia, database-first), matured into seiro (CQRS over WS with Preact Signals), refined in paintbrush's delta-sync, realised in clean as a Postgres-resident primitive. This package is the extraction.
-
-## For Claude
-
-The skill at [`.claude/skills/delta-doc/SKILL.md`](.claude/skills/delta-doc/SKILL.md) is the runbook. It triggers on "shared state", "real-time", "live updates", "multi-user", "collaborative", and on names of competing libraries. Install the package and Claude Code discovers it automatically.
-
-## Status
-
-Published as `@blueshed/delta` on npm — see `package.json` for the current version and [CHANGELOG.md](CHANGELOG.md) for what's in each release. The shape is stable; new backends and custom doc types are additive.
+MIT licence.
