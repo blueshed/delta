@@ -838,12 +838,16 @@ await createDocListener(ws, pool, { auth, ledger: true, who: (identity) => Strin
 **The actions.**
 
 ```ts
-{ action: "undo",    cursor? }            // → { doc, ops, inverse, version, entry } | null when there is nothing to undo
-{ action: "redo",    cursor? }            // → the same, or null
+{ action: "undo",    cursor?, dry?, entry? }  // → { doc, ops, inverse, version, entry } | { doc, ops: [], conflict, … } | null when there is nothing to undo
+{ action: "redo",    cursor?, dry?, entry? }  // → the same
 { action: "history", doc, cursor?, limit? }  // → [{ id, doc, version, ops, inverse, at, undoable, mine }], newest first, limit 50
 ```
 
-Undo walks back what the cursor wrote, newest first, across documents; redo walks it forward; a fresh write by the cursor ends what could be redone. Each walk is itself a write through the same path — validated, recorded (linked to the entry it walked), broadcast — so every subscriber sees an undo as an ordinary change. A removed row comes back under its own id, a cascaded remove comes back parent first, and an undo reaches a document nobody has open (SQLite loads it for the walk and leaves it closed). `history` goes to whoever may open the document (Postgres checks `open` first); each entry says `mine` — whether the asker's cursor wrote it — never who did, never a cursor. On Postgres with `auth`, `undo` and `redo` pass the gate first (401 without an identity) and use the `_as` forms so RLS applies.
+Undo walks back what the cursor wrote, newest first, across documents; redo walks it forward; a fresh write by the cursor ends what could be redone. Each walk is itself a write through the same path — validated, recorded (linked to the entry it walked), broadcast — so every subscriber sees an undo as an ordinary change.
+
+**A walk sets back only what its entry changed, and only where the document still holds what the entry left.** A field someone else has written since is a **conflict**: the walk changes nothing and answers `conflict: [paths]` (a row it made and someone has edited is not removed; a row it removed and someone has put back is not added). The walk is recorded all the same — an entry with no ops that is never redone — so the next undo goes on to the entry before it; a walk the document refuses (the row's parent is gone) is recorded the same way. `null` still means nothing to walk.
+
+**Asking first.** `dry: true` answers what the walk would do — `{ doc, entry, ops, conflict? }` — and walks nothing, so a caller can ask whoever owns the document (a deadline, a permission) before it walks. `entry: <id>` then walks only if that is still the cursor's next entry, and answers 409 if it is not. A removed row comes back under its own id, a cascaded remove comes back parent first, and an undo reaches a document nobody has open (SQLite loads it for the walk and leaves it closed). `history` goes to whoever may open the document (Postgres checks `open` first); each entry says `mine` — whether the asker's cursor wrote it — never who did, never a cursor. On Postgres with `auth`, `undo` and `redo` pass the gate first (401 without an identity) and use the `_as` forms so RLS applies.
 
 **The inverse without a ledger (SQLite).** A `delta` message with `inverse: true` is answered `{ ack: true, ops, inverse }`: the ops as applied and what would take them back, read from the document as it was. For a writer that keeps its own history. `inverseOf(before, applied)` is exported from `@blueshed/delta/sqlite`: an add is removed, a remove added back, a replace replaced by its old self, in reverse order, except that a run of removes comes back parent first; temporal storage columns are left out. On Postgres the inverse comes with the ledger.
 
@@ -907,9 +911,10 @@ Apply `src/sql/001a-001g-*.sql` alphabetically to every database — idempotent.
 | `delta_open_at_as(user_id, doc_name, timestamptz)` | 1-RTT variant of `delta_open_at` |
 | `delta_apply_as(user_id, doc_name, ops jsonb)` | 1-RTT variant of `delta_apply` |
 | `delta_apply_logged(doc_name, ops, who, cursor, undoable?, undoes?)` | `delta_apply` with its ledger entry (`_delta_ledger`) in one transaction; returns `{ version, ops, inverse, entry }` (001g) |
-| `delta_undo(cursor, who?)` / `delta_redo(cursor, who?)` | walks the cursor's next entry through `delta_apply_logged`; returns its result with `doc`, or NULL |
+| `delta_walk(cursor, who, back, dry?, entry?)` | the cursor's next entry (`back`: to undo, else to redo), walked by its guarded plan (`_delta_walk_plan`) through `delta_apply_logged`; returns its result with `doc`, `{ doc, ops: [], conflict }` on a conflict, the plan with `dry`, or NULL |
+| `delta_undo(cursor, who?)` / `delta_redo(cursor, who?)` | `delta_walk` back / forward |
 | `delta_history(doc_name, cursor, limit?)` | the newest entries, each with `mine`, never who or a cursor |
-| `delta_apply_logged_as` / `delta_undo_as` / `delta_redo_as` | the same, with `app.user_id` set first for RLS |
+| `delta_apply_logged_as` / `delta_walk_as` / `delta_undo_as` / `delta_redo_as` | the same, with `app.user_id` set first for RLS |
 
 The `*_as` variants collapse the four identity-scoping round-trips (`BEGIN` → `set_config` → call → `COMMIT`) into one `SELECT`. The implicit transaction around the SELECT scopes `set_config(..., true)` to that statement, and RLS policies read it back exactly the same way. `docTypeFromDef({ auth })` uses them automatically — there's no opt-in. For arbitrary queries under an identity (escape hatch), `withAppAuth(pool, sqlArg, fn)` still exists and pays the extra RTTs.
 
