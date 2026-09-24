@@ -95,8 +95,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`joinPath(...segments)` and `escapeSegment(segment)`** (`@blueshed/delta/core`): a pointer
   built from ids, each segment escaped, the inverse of `splitPath`.
 - **`DocType.owns?(identity, docName)`** (Postgres). The listener asks it before `open`,
-  `delta`, `open_at` and `history` when it has an `auth` module; false is a 404, as a missing
-  document is, and the socket never subscribes. `docTypeFromDef` sets it from `owns`.
+  `delta`, `open_at` and `history` when it has an `auth` module, and before an `undo` or `redo`
+  writes to its entry's document (asked under the cursor's lock, so the entry asked about is
+  the one walked); false is a 404, as a missing document is, and the socket never subscribes.
+  `docTypeFromDef` sets it from `owns`. An identity taken off a document can no longer walk
+  its own entries there: its `delta` was refused, its `undo` still wrote.
 
 ### Changed
 

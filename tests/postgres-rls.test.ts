@@ -162,6 +162,24 @@ describe("RLS and the broadcast channel (NOSUPERUSER role)", () => {
     expect(back.result.ops).toHaveLength(1);
   });
 
+  test("an undo is a write: once the identity no longer owns the document, its undo is a 404 too", async () => {
+    await admin.query("TRUNCATE _delta_ledger RESTART IDENTITY");
+    const members = new Set([1]);
+    registerDocType(docTypeFromDef(mine, app, { auth, owns: (who, name) => members.has(who.id) && name === `rls-mine:${who.id}` }));
+    listener = await createDocListener(ws, app, { auth, ledger: true });
+    const alice = person(1);
+    await sendAndAwait(ws, alice, { action: "open", doc: "rls-mine:1" });
+    await sendAndAwait(ws, alice, { action: "delta", doc: "rls-mine:1", ops: [{ op: "add", path: "/rls_items/-", value: { name: "alice's" } }] });
+    members.delete(1);   // taken off the document
+    expect((await sendAndAwait(ws, alice, { action: "delta", doc: "rls-mine:1", ops: [] })).error?.code).toBe(404);
+    expect((await sendAndAwait(ws, alice, { action: "undo" })).error).toEqual({ code: 404, message: "Not found" });
+    expect((await sendAndAwait(ws, alice, { action: "undo", dry: true })).error?.code).toBe(404);
+    expect((await admin.query("SELECT name FROM rls_items WHERE owner_id = 1")).rows).toEqual([{ name: "alice's" }]);
+    members.add(1);
+    expect((await sendAndAwait(ws, alice, { action: "undo" })).result.ops).toEqual([{ op: "remove", path: expect.stringMatching(/^\/rls_items\/\d+$/) }]);
+    expect((await admin.query("SELECT name FROM rls_items WHERE owner_id = 1")).rows).toEqual([]);
+  });
+
   test("shared: true is the author saying every signed-in identity hears every write", async () => {
     registerDocType(docTypeFromDef(everyone, app, { auth, shared: true }));
     listener = await createDocListener(ws, app, { auth });

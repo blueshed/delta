@@ -346,7 +346,7 @@ defineDoc("venue:", {
 
 **Per-user list isolation** — each user sees only their own rows. The most common multi-tenant shape.
 
-Two parts: (1) scope the generic doc by a user-id carried in the doc name, (2) tell `docTypeFromDef` who owns each name. A document's name is the channel its writes are broadcast on — whoever has it open hears every write made through it, **whatever RLS lets them read** — so the name, not RLS, is what keeps one user's rows off another user's socket. `owns` is that check: the listener asks it before `open`, `delta`, `open_at` and `history`, and answers 404 when it says no. With `auth`, `docTypeFromDef` throws unless it is given `owns` or `shared: true`.
+Two parts: (1) scope the generic doc by a user-id carried in the doc name, (2) tell `docTypeFromDef` who owns each name. A document's name is the channel its writes are broadcast on — whoever has it open hears every write made through it, **whatever RLS lets them read** — so the name, not RLS, is what keeps one user's rows off another user's socket. `owns` is that check: the listener asks it before `open`, `delta`, `open_at` and `history`, and before an `undo` or `redo` writes to the entry's document, and answers 404 when it says no. With `auth`, `docTypeFromDef` throws unless it is given `owns` or `shared: true`.
 
 ```ts
 // types.ts

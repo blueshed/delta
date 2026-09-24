@@ -68,8 +68,9 @@ export interface DocType<C = any, I = unknown> {
    * hear what is written to it? A document's name is its broadcast channel --
    * whoever has it open hears every write made through it, whatever RLS lets
    * them read -- so this is the check that keeps one identity's writes off
-   * another's socket. The listener asks it before open, delta, open_at and
-   * history; false answers 404. `docTypeFromDef` requires it (or
+   * another's socket. The listener asks it before open, delta, open_at,
+   * history, and an undo or redo of an entry written through the document;
+   * false answers 404. `docTypeFromDef` requires it (or
    * `shared: true`) whenever it is given `auth`.
    */
   owns?(identity: I, docName: string): boolean | Promise<boolean>;

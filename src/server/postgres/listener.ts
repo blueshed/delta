@@ -628,19 +628,37 @@ export async function createDocListener<I = unknown>(
         if (isAuthError(gated)) return respond({ error: { code: 401, message: gated.error } });
         identity = gated as I;
       }
+      const db = await pool.connect();
       try {
         const writer = writerOf(identity, client);
         const cursor = cursorOf(msg, client, writer);
+        await db.query("BEGIN");
+        // A walk writes to its entry's document, so it asks owns as delta does:
+        // under the cursor's lock (delta_walk takes it again), so the entry
+        // asked about is the one walked.
+        if (auth && cursor !== null) {
+          await db.query("SELECT pg_advisory_xact_lock(hashtext('delta-cursor:' || $1::text))", [cursor]);
+          const tip = (await db.query("SELECT doc_name FROM _delta_ledger_tip($1, $2)", [cursor, way === "undo"])).rows[0]?.doc_name;
+          const found = tip ? resolveDoc(tip) : null;
+          if (found?.type.owns && !(await found.type.owns(identity as I, tip))) {
+            await db.query("ROLLBACK");
+            return respond({ error: { code: 404, message: "Not found" } });
+          }
+        }
         const args = [cursor, whoOf(writer), way === "undo", msg.dry === true, msg.entry ?? null];
         const { rows } =
           auth?.asSqlArg && identity !== undefined
-            ? await pool.query("SELECT delta_walk_as($1, $2, $3, $4, $5, $6) AS result", [String(auth.asSqlArg(identity)), ...args])
-            : await pool.query("SELECT delta_walk($1, $2, $3, $4, $5) AS result", args);
+            ? await db.query("SELECT delta_walk_as($1, $2, $3, $4, $5, $6) AS result", [String(auth.asSqlArg(identity)), ...args])
+            : await db.query("SELECT delta_walk($1, $2, $3, $4, $5) AS result", args);
+        await db.query("COMMIT");
         const result = rows[0]?.result ?? null;
         respond({ result: result && { ...result, ...(result.version != null ? { version: Number(result.version) } : {}), entry: result.entry == null ? undefined : Number(result.entry) } });
       } catch (err) {
+        try { await db.query("ROLLBACK"); } catch { /* the connection may be gone */ }
         log.error(`${way} failed: ${errMsg(err)}`);
         respond({ error: { code: wireCode(err), message: errMsg(err) } });
+      } finally {
+        db.release();
       }
     };
     ws.on("undo", walk("undo"));
