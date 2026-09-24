@@ -26,8 +26,8 @@ Bun only: never `npm`, `npx` or `node`.
 | Start / stop Postgres | `bun run db:up` / `bun run db:down` (Docker, `compose.yml`) |
 | Postgres tests | `bun run db:up`, then `bun run test:pg` or `bun test tests/postgres-ledger.test.ts` |
 | Everything | `bun run test:all` (Postgres must be up) |
-| **The gate** | **`bun run ci`**: `db:up` → `check` → `test:all` → `db:down` (432 tests at 0.6.0) |
-| Benchmarks | `bun run bench` |
+| **The gate** | **`bun run ci`**: `db:up` → `check` → `test:all` → `db:down` |
+| Benchmarks | `bun run db:up`, then `bun run bench` (it needs Postgres; `BENCH_PG_URL` to point elsewhere) |
 | Release | `/publish patch\|minor\|major` (`.claude/commands/publish.md`, shared with railroad and eta) |
 
 **Postgres runs in Docker.** `compose.yml` starts `postgres:18-alpine` with its data on tmpfs,
@@ -50,8 +50,11 @@ on push, `publish.yml` on a published release) runs the same steps.
 - **Fan-out differs by backend, on purpose.** SQLite forwards a write to every open document
   that holds the row; Postgres publishes only on the channel of the document written through.
   `tests/postgres-fanout.test.ts` and `tests/postgres-isolation.test.ts` pin the Postgres side.
-- **The cursor**: named by an in-process caller (`client.data.local`), the connection's
-  `clientId` over a socket. A socket client never names another's.
+- **The cursor**: named by an in-process caller (`client.data.local`); over a socket the
+  connection's `clientId`, and signed in, the person with it (`socketCursor` in
+  `src/server/ledger.ts`). A socket client never names another's.
+- **`who`** is `client.data.identity` on both backends, or on Postgres with an `auth` module,
+  what the gate gives.
 - **Changelog**: Keep a Changelog, with `## [Unreleased]` at the top written as work lands;
   `/publish` promotes it. The skill's `version:` is stamped by `/publish`; don't bump it by hand.
 
