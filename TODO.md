@@ -12,6 +12,11 @@ ops, so the depth-2 pollution path echoes unchanged.
 This list is closed, not a sample. It is what one review pass found; it is not
 growing as work proceeds.
 
+**Re-checked after the eta-engine merge (0.6.0, `f31e3ad`)**: the merge closed none of
+the open items below. Two changed: #5 has a second way in (an implied doc's first
+write makes its root row through `insertRootRow`), and #8's bare `BEGIN` is now
+`db.transaction()`, still deferred. Line numbers below predate the merge.
+
 Two confidence tiers:
 
 - **Confirmed** — reproduced by running code. Repro steps are given.
@@ -146,6 +151,8 @@ root-field replace on a doc whose **root table has a parent** fails the
 constraint and 500s.
 
 Narrow (most roots are top-level) and it fails loudly rather than corrupting.
+Since 0.6.0 an implied doc (`implied: true`) whose root table has a parent hits it
+too: its first write makes the root row through `insertRootRow`.
 Note the asymmetry introduced by the recent fix: the non-temporal path now goes
 through `updateRow`, which *does* write the FK, so only the temporal root path is
 affected. This is the same three-near-identical-row-writers drift described at
@@ -199,7 +206,8 @@ The server still has no disconnect-driven cleanup, so those still leak.
 
 ### 8. No `busy_timeout`, and `BEGIN` is deferred (SQLite) — REPORTED
 
-`src/server/sqlite.ts:495` issues a plain (deferred) `BEGIN`, and nothing
+`src/server/sqlite.ts:495` issues a plain (deferred) `BEGIN` (since 0.6.0,
+`db.transaction()`, which is deferred too; `.immediate()` is the fix), and nothing
 anywhere sets `PRAGMA busy_timeout` (grep returns zero hits). Two processes on
 one file → the first write after a read lock hits `SQLITE_BUSY` immediately with
 no retry, and a perfectly valid write 500s.
