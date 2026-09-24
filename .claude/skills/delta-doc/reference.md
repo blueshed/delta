@@ -30,7 +30,9 @@ bunx delta init init_db --with-auth
 bunx delta sql ./types.ts --out init_db/003-tables.sql
 ```
 
-`init` copies `001a-001f-*.sql` (and optionally `002-users.sql` from auth-jwt) into your directory. `sql` runs the codegen. Everything is idempotent.
+`init` copies `001a-001g-*.sql` (and optionally `002-users.sql` from auth-jwt) into your directory. `sql` runs the codegen. Everything is idempotent.
+
+**Vendor-first.** The framework SQL is copied into your `init_db/`, not read from `node_modules` at runtime — shadcn/ui for database schemas. The files are explicit, tracked in git and yours to read; `bunx delta init <dir> --upgrade` replaces them with `.bak` backups and tells you what changed (run it after upgrading delta: 0.6.0 added `001g-delta-ledger.sql`); your own `setup.ts` or `docker-entrypoint-initdb.d` walks `init_db/` in alphabetical order, with no hidden imports. Only the SQL is vendored; the TypeScript is imported as usual. `applyFramework(pool)` applies the same files programmatically.
 
 **`docker-entrypoint-initdb.d`** — the cleanest setup for a fresh volume: mount your `init_db/` into the Postgres image and let it apply the SQL on first start. No boot-time application code.
 
@@ -145,11 +147,16 @@ interface DocType<C = any, I = unknown> {
   parse(docName: string): C | null;
   open(ctx: C, docName: string, msg?: any, identity?: I):
     Promise<{ result: any; version: number } | null>;
-  apply(ctx: C, docName: string, ops: DeltaOp[], identity?: I):
-    Promise<{ version: number; ops?: any[] }>;
+  apply(ctx: C, docName: string, ops: DeltaOp[], identity?: I, by?: Writer):
+    Promise<{ version: number; ops?: any[]; inverse?: any[]; entry?: number | null }>;
   openAt?(ctx: C, docName: string, at: string, identity?: I):
     Promise<any | null>;
 }
+
+// Writer — given to apply() when the listener keeps a ledger (`ledger: true`).
+// docTypeFromDef writes through delta_apply_logged with it; a custom DocType
+// that ignores it is simply not on the ledger.
+type Writer = { who: string | null; cursor: string | null; undoable?: boolean; undoes?: number | null };
 
 // DocDef — used by docTypeFromDef for generic docs.
 interface DocDef {
@@ -157,6 +164,7 @@ interface DocDef {
   root: string;                      // main collection key
   include: string[];                 // additional collections in the lens
   scope: Record<string, string>;     // filter map: "<coll>.<col>" → "id" | literal
+  implied?: boolean;                 // SQLite: opens empty until its first write makes the root row
 }
 
 // DeltaAuth — pluggable authentication; identity is yours.
@@ -427,6 +435,34 @@ const venueAt: DocType<{ venueId: number; at: string }> = {
 registerDocType(venueAt);
 ```
 
+## Implied documents (SQLite)
+
+`defineDoc(prefix, { root, include, implied: true })` declares a document that is there before its root row is. Opening a name whose root row does not exist answers an empty document — the root `{ id: <doc id>, ...column defaults }` and an empty map per included collection — and makes no row. The first write makes the root row, in the same transaction as the write; a failed first write makes none. A chat room, a user's settings, a board keyed by a slug: anything a name can mean before anyone has written to it.
+
+```ts
+const room = defineDoc("room:", { root: "rooms", include: ["messages"], implied: true });
+// open "room:attic" → { rooms: { id: "attic", topic: null }, messages: {} }, no row yet
+// delta "room:attic" add /messages/m1 → the rooms row "attic" is made, then the message
+```
+
+An implied document is keyed by its root id, so it cannot also declare a `scope` (`defineDoc` throws). A document that is not implied still answers 404 for a missing root row. The Postgres backend ignores `implied`.
+
+## Fan-out — which open documents hear a write
+
+A write is always published on the channel of the document it was written through. Whether other open documents over the same rows hear it depends on the backend.
+
+**SQLite: every open document that holds the row hears it.** After a write commits, the backend walks the other documents in its cache and forwards each op that is in their scope (the root id, a child's parent key, a grandchild through its cached parent). Three rules keep what arrives right:
+
+- A row written where its table is a map (`board:w1` includes `households`) reaches a document whose **root** is that row (`household:h1`) as the root, replaced whole: `replace /households` with the row, or with `null` when the row is removed. Code rendering such a document should allow its root to be `null`.
+- A root-level replace from a document whose root is the row reaches a document holding the table as a map as a keyed row, `replace /households/<id>`.
+- Each op taken is applied to the target as it is taken, so a row finds a parent that came earlier in the same write (a course and its drinks added together, as an undo of a dropped course does).
+
+Removes are forwarded only when the target holds the row. Fan-out broadcasts carry no `v`: the target's version is not bumped, and the client applies them as they come.
+
+**Postgres: only the document written through hears it.** `delta_apply` logs its broadcast ops against that document and `NOTIFY` carries its name; the listener publishes on that channel alone. Another open document over the same rows is not told live — it reads the tables afresh on its next open, and every client re-opens its documents on reconnect. If two documents over the same rows must both be live, write through the one the other watches, or make the second a custom read doc (above) that watches the collection. `tests/postgres-fanout.test.ts` pins this.
+
+**Custom read docs** hear writes to the collections they `watch`, on both backends (membership), or recompute on them (Postgres).
+
 ## Authentication
 
 The extension surface is `DeltaAuth<Identity>`. Delta itself reads no credentials — JWT is just the reference.
@@ -689,9 +725,113 @@ If you catch yourself calling `openDoc` a second time, `fetch`-ing the doc over 
 
 **About latency.** Optimistic updates exist to hide round-trip time. Over delta's WebSocket the echo is typically sub-frame, so the honest default is to render from the echo and leave it. If a specific interaction genuinely needs instant local feedback, give *transient* feedback that isn't the data — disable the button, dim the row, show a spinner — and still let the authoritative collection update from the broadcast. Never fork the collection's source of truth into a local optimistic copy you then have to reconcile.
 
+## In-process — `createLocal()`
+
+`createLocal()` (`@blueshed/delta/local`) is a `WsServer` with no socket, whose only client is the caller in the same process. A backend registers on `local.server` exactly as on `createWs()`; the caller then speaks the same actions as function calls and hears what the backend would have broadcast. For a server that renders its own pages, a CLI, a job, and tests.
+
+```ts
+import { Database } from "bun:sqlite";
+import { createLocal } from "@blueshed/delta/local";
+import { createTables, registerDocs } from "@blueshed/delta/sqlite";
+
+const local = createLocal();
+const { evict } = registerDocs(local.server, db, schema, docs, [], { ledger: true });
+
+const doc = (await local.call("open", { doc: "room:general" })).result;
+const ada = local.as({ id: 7 });                       // who is writing
+await ada.call("delta", { doc: "room:general", ops, cursor: session });
+await ada.call("undo", { cursor: session });           // walks back what that cursor wrote
+local.onPublish((channel, change) => redraw(channel, change));   // { doc, ops, v? }
+```
+
+- **`local.call(action, msg)`** runs `open`, `delta`, `close`, `call`, `undo`, `redo`, `history` (whatever is registered) and resolves with the first answer, `{ result }` or `{ error: { code, message } }`. Calls are **async** for every backend: the SQLite backend answers at once, the Postgres backend after the database does. An action nothing handles answers `No handler matched`.
+- **`local.as(identity)`** gives a caller that is `identity`: one client per identity (keyed by its JSON), carrying it as `client.data.identity`, where an auth module's `gate` and the ledger's `who` read it. Identity crosses per call, not per connection. `local.call` itself is anonymous.
+- **`local.onPublish(fn)`** hears every broadcast on every channel — the one stream of changes. It returns the unsubscribe.
+- **The cursor is yours to name.** An in-process client carries `data.local = true`, so the ledger takes `cursor` from the message (a session id: undo takes back what this session did). A socket client cannot.
+- **Any backend** registers on it: `registerDocs`, `createDocListener`, `registerDoc`, the kinds.
+
+**Savepoints (SQLite).** The SQLite backend writes with `db.transaction()`, so a write made inside your own transaction becomes a savepoint: it rolls back alone when it fails, and with yours when you roll back. Two things stay outside your transaction: the backend's cache and its broadcasts. If you roll back after delta has written, call `evict(docName)` (returned by `registerDocs`) so the next open reads the tables, and expect that subscribers already heard the change.
+
+```ts
+db.exec("BEGIN");
+await local.call("delta", { doc: "room:a", ops });
+db.exec("ROLLBACK");
+evict("room:a");
+```
+
+## The ledger — undo, redo, history
+
+Pass `{ ledger: true }` and every write is recorded in the same transaction as the write: its ops, its inverse, the document's version, **who** made it and the **cursor** undo walks.
+
+```ts
+registerDocs(ws, db, schema, docs, customDocs, { ledger: true, who: (identity) => String(identity.id) });   // SQLite
+await createDocListener(ws, pool, { auth, ledger: true, who: (identity) => String(identity.id) });      // Postgres (needs 001g)
+```
+
+- **SQLite** keeps it in a `delta_ledger` table the backend creates (`src/server/ledger.ts`). **Postgres** keeps it in `_delta_ledger` (`src/sql/001g-delta-ledger.sql`), in the database every process shares, so a write made in one process can be undone from another and every process broadcasts the undo over `NOTIFY`. `_delta_ops_log` stays a catch-up buffer pruned within the hour; the ledger is the history, kept. A lock per document holds from the read the inverse is taken from until the write commits, so concurrent writers each record the inverse of what they replaced.
+- **`who`** is the identity as the gate gives it (`client.data.identity`, or `auth.gate(client)` on Postgres): a string or number as it is, anything else as JSON, or what your `who(identity)` returns. It is for the audit.
+- **The cursor** is what undo walks, opaque to delta. In-process (`createLocal`, or any client with `data.local`) the caller names it with `cursor` on the message. Over the socket it is the connection's `clientId`, and a `cursor` on the message is ignored. The `clientId` is random unless the browser passed `connectWs(url, { clientId })`; a client that chooses its `clientId` keeps its cursor across reconnects, and anyone who learns that id could walk it, so treat a chosen id as a secret.
+- **A write answers** `{ ack: true, version, entry, ops, inverse }` (`ops` as applied: whole rows) and its broadcast carries `v`. An empty write records nothing.
+- **Facts.** A write sent with `undoable: false` (a price tick, a sensor reading) is recorded but never walked back by undo, and ends no redo.
+
+**The actions.**
+
+```ts
+{ action: "undo",    cursor? }            // → { doc, ops, inverse, version, entry } | null when there is nothing to undo
+{ action: "redo",    cursor? }            // → the same, or null
+{ action: "history", doc, cursor?, limit? }  // → [{ id, doc, version, ops, inverse, at, undoable, mine }], newest first, limit 50
+```
+
+Undo walks back what the cursor wrote, newest first, across documents; redo walks it forward; a fresh write by the cursor ends what could be redone. Each walk is itself a write through the same path — validated, recorded (linked to the entry it walked), broadcast — so every subscriber sees an undo as an ordinary change. A removed row comes back under its own id, a cascaded remove comes back parent first, and an undo reaches a document nobody has open (SQLite loads it for the walk and leaves it closed). `history` goes to whoever may open the document (Postgres checks `open` first); each entry says `mine` — whether the asker's cursor wrote it — never who did, never a cursor. On Postgres with `auth`, `undo` and `redo` pass the gate first (401 without an identity) and use the `_as` forms so RLS applies.
+
+**The inverse without a ledger (SQLite).** A `delta` message with `inverse: true` is answered `{ ack: true, ops, inverse }`: the ops as applied and what would take them back, read from the document as it was. For a writer that keeps its own history. `inverseOf(before, applied)` is exported from `@blueshed/delta/sqlite`: an add is removed, a remove added back, a replace replaced by its old self, in reverse order, except that a run of removes comes back parent first; temporal storage columns are left out. On Postgres the inverse comes with the ledger.
+
+## One stream of changes — `v` and `_v`
+
+Every change reaches subscribers as `{ doc, ops, v }` on the document's channel: `v` is the document's version after the change. `open` answers with `_v`, the version the snapshot is at, so a copy kept from the stream knows where it starts. The Postgres backend always versions; the SQLite backend versions with a ledger; the memory and source kinds always do. The browser client strips `_v` from `doc.data`, applies a broadcast whose `v` is the next one, ignores one it already has, and re-opens the document when it sees a gap. Broadcasts without `v` (the JSON-file backend, SQLite without a ledger, fan-out onto other documents, custom docs) are applied as they come.
+
+In-process, `createLocal().onPublish` is that stream for every channel: a server that renders can redraw from it without subscribing per document.
+
+## Document kinds — memory, source, static
+
+Documents whose truth is not a database (`@blueshed/delta/kinds`). Each registers for a prefix on any `WsServer` (`createWs()` or `createLocal().server`) and speaks the same `open` / `delta` / `close`, so the browser opens them like any other doc. Several kinds and backends sit side by side on one server, each owning its prefix. Register them **before** `createDocListener`: the Postgres listener answers 404 for any name it does not own, and the first answer wins.
+
+**Memory — live, the truth is this process** (who is online, cursors, a game's lobby). Held in memory, gone on restart, never on a ledger. Written by a caller in this process — the server that knows who is connected — and refused (403) over a socket unless `writable: "any"`.
+
+```ts
+const here = registerMemory(ws, { prefix: "here:", empty: (id) => ({ people: {} }) });
+await local.call("delta", { doc: "here:general", ops: [{ op: "add", path: "/people/p1", value: "Ada" }] });
+here.peek("here:general");   // the value now, or undefined
+here.forget("here:general"); // starts again from empty
+```
+
+An op that does not land is refused (400) and changes nothing. Open answers `{ ...value, _v }`; a write answers `{ ack, version, ops }` and broadcasts `{ doc, ops, v }`.
+
+**Source — the truth is outside** (a thermometer, an exchange rate, another API). One reading, shared by every watcher: taken when the first watcher opens the document (two opening at once share one start), then polled every `every` ms or pushed by `subscribe`, and stopped when the last watcher closes or drops.
+
+```ts
+const reactor = registerSource(ws, {
+  prefix: "reactor:",
+  read: async (id) => (await fetch(`https://sensors.example/${id}`)).json(),
+  every: 5_000,      // poll while anyone watches; or subscribe: (id, push) => stop
+  stale: 30_000,     // no reading for 30s → the document says stale: true
+});
+// open "reactor:core" → { reading, at, stale, _v }
+reactor.stopAll();   // on shutdown
+```
+
+The document is `{ reading, at, stale }`. `at` is when the reading was taken; `stale` turns true when no reading comes within `stale` ms, so a page can say so instead of showing an old number as now. A source that fails gives no reading: the last one ages and goes stale (a first read that fails opens as `{ reading: null, at: null, stale: true }`). A reading equal to the last only moves `at`. Every write is refused (403).
+
+**Static — the truth is the repository** (countries, SI units, a price list fixed for the release). A value per id, loaded on first open; a change is a deploy.
+
+```ts
+registerStatic(ws, { prefix: "units:", value: (id) => UNITS[id] });   // undefined → 404
+// open "units:length" → { ...value, _v: 1 }; every delta refused (403)
+```
+
 ## Stored functions (read-only contract)
 
-Apply `src/sql/001a-001f-*.sql` alphabetically to every database — idempotent. Key functions:
+Apply `src/sql/001a-001g-*.sql` alphabetically to every database — idempotent. Key functions:
 
 | Function | Purpose |
 |---|---|
@@ -705,6 +845,10 @@ Apply `src/sql/001a-001f-*.sql` alphabetically to every database — idempotent.
 | `delta_open_as(user_id, doc_name)` | 1-RTT variant — `set_config('app.user_id', …, true)` + `delta_open` in one SELECT |
 | `delta_open_at_as(user_id, doc_name, timestamptz)` | 1-RTT variant of `delta_open_at` |
 | `delta_apply_as(user_id, doc_name, ops jsonb)` | 1-RTT variant of `delta_apply` |
+| `delta_apply_logged(doc_name, ops, who, cursor, undoable?, undoes?)` | `delta_apply` with its ledger entry (`_delta_ledger`) in one transaction; returns `{ version, ops, inverse, entry }` (001g) |
+| `delta_undo(cursor, who?)` / `delta_redo(cursor, who?)` | walks the cursor's next entry through `delta_apply_logged`; returns its result with `doc`, or NULL |
+| `delta_history(doc_name, cursor, limit?)` | the newest entries, each with `mine`, never who or a cursor |
+| `delta_apply_logged_as` / `delta_undo_as` / `delta_redo_as` | the same, with `app.user_id` set first for RLS |
 
 The `*_as` variants collapse the four identity-scoping round-trips (`BEGIN` → `set_config` → call → `COMMIT`) into one `SELECT`. The implicit transaction around the SELECT scopes `set_config(..., true)` to that statement, and RLS policies read it back exactly the same way. `docTypeFromDef({ auth })` uses them automatically — there's no opt-in. For arbitrary queries under an identity (escape hatch), `withAppAuth(pool, sqlArg, fn)` still exists and pays the extra RTTs.
 
@@ -756,7 +900,7 @@ bunx delta init init_db --with-auth                      # vendor framework SQL
 bunx delta sql ./types.ts --out init_db/003-tables.sql   # codegen tables from schema
 ```
 
-`init` copies `001a-001f-*.sql` (and optionally `002-users.sql` from auth-jwt) into the target directory. `sql` runs the codegen. Both are idempotent.
+`init` copies `001a-001g-*.sql` (and optionally `002-users.sql` from auth-jwt) into the target directory; `--upgrade` replaces existing files with `.bak` backups. `sql` runs the codegen. Both are idempotent.
 
 Vendor Claude Code skills — copies `.claude/skills/*` from this package and from any sibling package in `node_modules` that ships skills (e.g. `@blueshed/railroad` ships `railroad` and `bun-route`) into the consumer's `.claude/skills/` so Claude Code's project-skill autodiscovery picks them up:
 
@@ -776,8 +920,8 @@ newPool()                      // → Pool from DELTA_TEST_PG_URL (defaults to l
 applyFramework(pool)           // runs 001*-delta-*.sql in order
 applyAuthJwt(pool)             // runs auth-jwt.sql (users + login/register)
 applyItemsFixture(pool)        // runs tests/fixtures/items.sql
-resetState(pool)               // truncates items, users, _delta_versions, _delta_ops_log
-mockClient(data?)              // a WS-shaped test client
+resetState(pool)               // truncates items, users, _delta_versions, _delta_ops_log, _delta_ledger
+mockClient(data?)              // a WS-shaped test client; mockClient({ local: true }) is an in-process caller
 sendAndAwait(ws, client, msg)  // drives ws.websocket.message, waits for response
 waitFor(predicate, opts?)      // async poll until truthy
 ```
@@ -797,6 +941,8 @@ beforeEach(async () => {
 ```
 
 Run: `bun run db:up` (compose) → `bun run test:all` → `bun run db:down`. Or `bun run ci` (up + check + test + down).
+
+For SQLite and the kinds, `createLocal()` is the lightest harness: no socket, no mock — register on `local.server`, `await local.call(...)`, and collect `local.onPublish` into an array (see `tests/local.test.ts`, `tests/ledger.test.ts`, `tests/kinds.test.ts`).
 
 ### Client-side tests and one-shot scripts
 
@@ -819,8 +965,10 @@ All WebSocket messages have shape `{ id?: number, action: string, ...rest }`. Re
 
 | Client → Server | Payload | Server → Client |
 |---|---|---|
-| `{ action: "open", doc }` | | `{ id, result: <docContents> }` |
-| `{ action: "delta", doc, ops }` | | `{ id, result: { ack: true, version } }` |
+| `{ action: "open", doc }` | | `{ id, result: <docContents> }` — with `_v` where the backend versions |
+| `{ action: "delta", doc, ops, cursor?, undoable?, inverse? }` | `cursor` in-process only; `undoable: false` for a fact; `inverse: true` (SQLite) | `{ id, result: { ack: true, version? } }`; with a ledger also `ops`, `inverse`, `entry` |
+| `{ action: "undo", cursor? }` / `{ action: "redo", cursor? }` | ledger only | `{ id, result: { doc, ops, inverse, version, entry } \| null }` |
+| `{ action: "history", doc, cursor?, limit? }` | ledger only | `{ id, result: [{ id, doc, version, ops, inverse, at, undoable, mine }] }` |
 | `{ action: "open_at", doc, at }` | | `{ id, result: <snapshot> }` |
 | `{ action: "close", doc }` | | `{ id, result: { ack: true } }` |
 | `{ action: "call", method, params }` | | `{ id, result }` — e.g. `login`, `register`, `authenticate` |
@@ -829,6 +977,12 @@ Server-initiated broadcasts (no id):
 
 | Server → Client | Shape |
 |---|---|
-| Op broadcast | `{ doc, ops: DeltaOp[] }` |
+| Op broadcast | `{ doc, ops: DeltaOp[], v? }` — `v` is the version after the change, where the backend versions |
 
 Every message is JSON. Clients use `doc.send(ops)` internally; the protocol is only relevant when writing a custom action handler.
+
+## Why delta
+
+Existing sync libraries are built for human developers: big API surfaces, many idioms, ecosystem dependencies. Delta is shaped for AI-driven development: the whole system fits in one context window, there is one way to do each thing, and the schema is generated from a single TypeScript source of truth. If an assistant reaches for Supabase or Firebase, that is a default trained from millions of projects; delta is not harder than those, it is smaller, and it can be read in full before a line is written.
+
+Lineage: started as dzql (Vue / Pinia, database-first), matured into seiro (CQRS over WebSocket with Preact Signals), refined in paintbrush's delta-sync, realised in clean as a Postgres-resident primitive, and extracted as this package. eta, a server-rendering kernel, now builds on it in-process.
