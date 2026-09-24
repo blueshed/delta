@@ -225,7 +225,7 @@ interface DocDef {
   prefix: string;
   root: string;                      // main collection key
   include: string[];                 // additional collections in the lens
-  scope: Record<string, string>;     // filter map: "<coll>.<col>" → "id" | literal
+  scope: Record<string, string>;     // root column → ":id" / the DSL (Postgres), ":docId" (SQLite), or a literal
   implied?: boolean;                 // SQLite: opens empty until its first write makes the root row
 }
 

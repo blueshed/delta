@@ -177,7 +177,7 @@ Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/fi
 | `@blueshed/delta/server` | Bun | `createWs`, `registerDoc` (JSON-file backend), `registerMethod` |
 | `@blueshed/delta/local` | Bun | `createLocal` — delta in-process, no socket |
 | `@blueshed/delta/kinds` | Bun | `registerMemory`, `registerStatic`, `registerSource` |
-| `@blueshed/delta/sqlite` | Bun | `defineSchema`, `defineDoc`, `defineCustomDoc`, `registerDocs(..., customDocs?, { ledger?, who? })`, `inverseOf`, snapshots |
+| `@blueshed/delta/sqlite` | Bun | `defineSchema`, `defineDoc`, `defineCustomDoc`, `createTables`, `migrateSchema`, `registerDocs(..., customDocs?, { ledger?, who? })` → `{ evict }`, `validateOps`, `inverseOf`, `loadDocAt`, snapshots |
 | `@blueshed/delta/postgres` | Bun + pg | `defineSchema`, `defineDoc`, `defineCustomDoc`, `generateSql`, `applyFramework`, `createDocListener(ws, pool, { auth?, custom?, ledger?, who? })` → `{ destroy }`, `registerDocType`, `docTypeFromDef(def, pool, { auth?, owns?, shared? })`, `withAppAuth` |
 | `@blueshed/delta/logger` | anywhere | railroad's logger: `createLogger`, `setLogLevel`, `loggedRequest` |
 | `@blueshed/delta/auth` | Bun | `DeltaAuth` contract, `wireAuth`, `upgradeWithAuth` |
