@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fail with `invalid input syntax for type bigint`. The listener answers both as **400**
   (they were 500). The changes are `CREATE OR REPLACE`, so re-applying is safe: `applyFramework`
   does it; a vendored copy needs `bunx @blueshed/delta init <dir> --upgrade`.
+- **SQLite and Postgres: an `add` of a row that is already there is a 409**, "Row already exists:
+  /coll/id -- replace it, or add to /coll/- for a new id", from any document. On a temporal
+  table it used to insert a second live version of the row (the key is `(id, valid_from)`), so
+  a cold read or time travel found two; on a plain table it failed its key as a 500. A removed
+  row can still be added back under its id, as undo does. To move across: `replace` a row that
+  exists. (Postgres: `001d`, `CREATE OR REPLACE`.) The JSON-file backend keeps RFC 6902's
+  meaning, where `add` over a member replaces it.
 
 ### Added
 

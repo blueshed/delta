@@ -118,6 +118,7 @@ DECLARE
   v_field         TEXT;
   v_row           JSONB;
   v_new_row       JSONB;
+  v_exists        BOOLEAN;
   v_ts            TIMESTAMPTZ := NOW();
   v_version       BIGINT;
   v_broadcast_ops JSONB := '[]'::jsonb;
@@ -240,6 +241,15 @@ BEGIN
         EXECUTE format('SELECT nextval(%L)', 'seq_' || v_coll.table_name) INTO v_id;
       ELSE
         v_id := _delta_row_id(v_coll_key, v_id_text);
+        -- An add names a new row. A temporal key is (id, valid_from), so an add
+        -- of a live id would insert a second live version of it: refuse it
+        -- (SQLSTATE 23505, 409 on the wire), as a plain table's key does.
+        EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I WHERE id = $1)', v_view) INTO v_exists USING v_id;
+        IF v_exists THEN
+          RAISE EXCEPTION 'row already exists: % -- replace it, or add to % for a new id',
+            _delta_build_path(v_coll_key, v_id::text), _delta_build_path(v_coll_key, '-')
+            USING ERRCODE = '23505';
+        END IF;
       END IF;
       v_new_row := jsonb_build_object('id', v_id) || (v_op->'value');
 

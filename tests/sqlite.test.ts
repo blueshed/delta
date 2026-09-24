@@ -1970,3 +1970,49 @@ describe("todo fixes: whole-row replace (#3) + socket-drop cleanup (#7)", () => 
     expect(sockC.sent[0].result.projects.name).toBe("Alpha");
   });
 });
+
+// ---------------------------------------------------------------------------
+// D6: an add names a new row. On a temporal table the key is (id, valid_from),
+// so an add of a live id used to insert a second live version of it.
+// ---------------------------------------------------------------------------
+
+describe("an add of a row that is already there", () => {
+  let db: InstanceType<typeof Database>;
+  let ws: ReturnType<typeof createWs>;
+  const PAST = "2020-01-01 00:00:00";
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    createTables(db, schema);
+    ws = createWs();
+    registerDocs(ws, db, schema, [projectDoc]);
+    for (const p of ["p1", "p2"]) db.run("INSERT INTO projects (id, name, status, valid_from) VALUES (?, 'P', 'active', ?)", [p, PAST]);
+    db.run("INSERT INTO tasks (id, project_id, title, done, valid_from) VALUES ('t1', 'p1', 'first', 0, ?)", [PAST]);
+  });
+
+  const delta = async (doc: string, ops: any[]) => {
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc }));
+    await ws.websocket.message(sock, JSON.stringify({ id: 2, action: "delta", doc, ops }));
+    return sock.sent[1];
+  };
+  const liveTasks = (id: string) => db.query("SELECT title, project_id FROM tasks WHERE id = ? AND valid_to IS NULL").all(id);
+
+  test("is a 409 that names the fix, and leaves one live row", async () => {
+    const r = await delta("project:p1", [{ op: "add", path: "/tasks/t1", value: { title: "again", done: false } }]);
+    expect(r.error).toEqual({ code: 409, message: "Row already exists: /tasks/t1 -- replace it, or add to /tasks/- for a new id" });
+    expect(liveTasks("t1")).toEqual([{ title: "first", project_id: "p1" }]);
+  });
+
+  test("is a 409 from another document too, so no second live copy lands in its scope", async () => {
+    const r = await delta("project:p2", [{ op: "add", path: "/tasks/t1", value: { title: "stolen", done: false } }]);
+    expect(r.error.code).toBe(409);
+    expect(liveTasks("t1")).toEqual([{ title: "first", project_id: "p1" }]);
+  });
+
+  test("a removed row can be added back under its own id", async () => {
+    expect((await delta("project:p1", [{ op: "remove", path: "/tasks/t1" }])).result).toEqual({ ack: true });
+    expect((await delta("project:p1", [{ op: "add", path: "/tasks/t1", value: { title: "back", done: false } }])).result).toEqual({ ack: true });
+    expect(liveTasks("t1")).toEqual([{ title: "back", project_id: "p1" }]);
+  });
+});

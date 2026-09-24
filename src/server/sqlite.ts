@@ -599,7 +599,8 @@ export function registerDocs(
     } catch (err: any) {
       cache.set(docName, snapshot); // restore in-memory cache
       log.error(`delta failed: ${err.message}`);
-      return { error: { code: 500, message: err.message } };
+      // A refusal carries its wire code (`refuse`); anything else is the server's.
+      return { error: { code: typeof err.code === "number" ? err.code : 500, message: err.message } };
     }
 
     // Committed. Fan-out is a post-commit side effect: a failure here must not
@@ -1266,6 +1267,11 @@ function insertRootRow(db: any, table: ResolvedTable, row: any, ts: string) {
   db.run(`INSERT INTO ${table.name} (${cols.join(", ")}) VALUES (${placeholders})`, vals);
 }
 
+/** An error the writer is answered with: `code` is its wire code. */
+function refuse(code: number, message: string): never {
+  throw Object.assign(new Error(message), { code });
+}
+
 function insertCollectionRow(
   db: any,
   schema: Schema,
@@ -1276,6 +1282,13 @@ function insertCollectionRow(
   row: Record<string, unknown>,
   ts: string,
 ): any {
+  // An add names a new row. On a temporal table the key is (id, valid_from),
+  // so an add of a live id would insert a second live version of it (and on a
+  // plain table fail UNIQUE as a 500): refuse it, in any document's scope.
+  const live = table.temporal ? `current_${table.name}` : table.name;
+  if (db.query(`SELECT 1 FROM ${live} WHERE id = ?`).get(id)) {
+    refuse(409, `Row already exists: ${joinPath(table.docKey, id)} -- replace it, or add to ${joinPath(table.docKey, "-")} for a new id`);
+  }
   const fullRow: any = { id, ...row };
   if (table.temporal) { fullRow.valid_from = ts; fullRow.valid_to = null; }
 
