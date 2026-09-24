@@ -5,112 +5,95 @@ argument-hint: "patch | minor | major"
 
 # /publish
 
-Release pipeline. The bump level is `$ARGUMENTS` (one of `patch`, `minor`, `major`).
+The release procedure shared by railroad, delta and eta: the same steps in all three, with only
+the table below differing. The bump level is `$ARGUMENTS` (`patch`, `minor` or `major`).
 
-Execute the steps below **in order**. Abort on any failure without making further changes. Running this skill IS the authorisation to publish — complete it end-to-end, including the push, without pausing for mid-flight confirmation.
+| | |
+|---|---|
+| Package | `@blueshed/delta` |
+| Published | npm, public |
+| Gate | `bun run ci` |
+| Skills stamped with the version | `.claude/skills/delta-doc/SKILL.md` |
 
-## 1. Validate arguments
+Run the steps in order. Stop at the first failure without changing anything further. Running this
+command is the authorisation to release -- carry it through to the end, the push included, without
+asking again. Bun only: never `npm` or `npx`, and never `npm publish` from here (CI does it).
 
-If `$ARGUMENTS` is not exactly `patch`, `minor`, or `major`, abort and print:
+## 1. Arguments
 
-```
-Usage: /publish patch|minor|major
-```
+`$ARGUMENTS` must be exactly `patch`, `minor` or `major`; otherwise stop and print
+`Usage: /publish patch|minor|major`.
 
 ## 2. Preflight
 
-Run these checks. If any fails, report the problem and stop.
+1. The branch is `main`: `git rev-parse --abbrev-ref HEAD`.
+2. The working tree is clean: `git status --porcelain` prints nothing.
+3. Not behind origin: `git fetch --quiet origin main`, then `git rev-list --count HEAD..origin/main`
+   is `0`. Commits ahead of origin are fine -- they go out with the release in step 7.
+4. `CHANGELOG.md` has a `## [Unreleased]` section with something under it. It is the record of
+   what is shipping, written as the work landed; if it is missing or empty, stop and say so.
 
-1. **Branch is main.** `git rev-parse --abbrev-ref HEAD` must be `main`.
-2. **Worktree is clean.** `git status --porcelain` must be empty.
-3. **Up to date with origin.** Run `git fetch --quiet origin main`, then:
-   - `git rev-list --count HEAD..origin/main` must be `0` (not behind).
-   - `git rev-list --count origin/main..HEAD` must be `0` (not ahead). If ahead, tell the user to push their existing commits first.
+## 3. Gate
 
-## 3. CI gate
+Run the gate command in the table. If it fails, stop -- no file has been edited yet.
 
-Run `bun run ci` (compose up → type check → full test → compose down). If it exits non-zero, abort — do not edit any files.
+## 4. Bump
 
-## 4. Compute next version
+Parse `.version` in `package.json` as strict `x.y.z` (refuse anything else) and compute the next:
+`patch` → `x.y.(z+1)`, `minor` → `x.(y+1).0`, `major` → `(x+1).0.0`. Write it back, keeping the
+2-space indent and the trailing newline.
 
-Read `package.json` and parse `.version` as semver `x.y.z`. Compute:
+## 5. Stamp
 
-- `patch` → `x.y.(z+1)`
-- `minor` → `x.(y+1).0`
-- `major` → `(x+1).0.0`
+In each skill listed in the table, replace the frontmatter line `version: x.y.z` with the new
+version (insert it after `name:` if it is missing). Change nothing else in the skill.
 
-Refuse if the current version isn't strict `\d+\.\d+\.\d+`.
+## 6. Promote the changelog
 
-## 5. Bump package.json
+Replace the line `## [Unreleased]` with `## [<new version>] - <today, YYYY-MM-DD>`, and put a fresh,
+empty `## [Unreleased]` above it.
 
-Rewrite `.version` in `package.json` to the new value. Preserve formatting (2-space indent, trailing newline).
-
-## 6. Stamp version into SKILL.md
-
-`.claude/skills/delta-doc/SKILL.md` carries the package version in its frontmatter so an AI session reading the skill knows which release's API surface it's looking at. Replace the line matching `^version: \d+\.\d+\.\d+` with `version: <new-version>`. Keep the surrounding `name:` and `description:` fields untouched.
-
-If the `version:` line is missing (older skill), insert it on the line immediately after `name:`. Do NOT alter the body of the skill.
-
-## 7. Promote CHANGELOG
-
-Open `CHANGELOG.md`. There must be a `## [Unreleased]` section — that's the author's record of what's shipping. If it's missing, **abort** and tell the user to write the Unreleased section first; revert the `package.json` bump and the SKILL.md stamp before exiting.
-
-Replace the literal line `## [Unreleased]` with `## [<new-version>] — <today in YYYY-MM-DD>`.
-
-## 8. Commit and tag
+## 7. Commit, tag, push
 
 ```
 git add package.json CHANGELOG.md .claude/skills/delta-doc/SKILL.md
-git commit -m "Release v<new-version>"
-git tag -a v<new-version> -m "Release v<new-version>"
-```
-
-## 9. Push
-
-Run:
-
-```
+git commit -m "Release v<new version>"
+git tag -a v<new version> -m "Release v<new version>"
 git push origin main --follow-tags
 ```
 
-If the push fails (non-fast-forward, auth rejection, hook failure), report the exact error and stop — do NOT retry with `--force`, `--no-verify`, or any other bypass flag. The local commit and tag remain; the user can investigate and decide how to recover.
+If the push is refused (not a fast-forward, auth, a hook), report the exact error and stop. Never
+retry with `--force`, `--no-verify` or any other bypass: the commit and tag stay local for the
+person to decide.
 
-## 10. Create GitHub Release — this is what actually triggers npm publish
+## 8. GitHub release -- this is what publishes to npm
 
-`.github/workflows/publish.yml` fires on `release: published`, not on tag push. A tag alone runs CI but does NOT publish to npm. This step is mandatory; skipping it is the release silently failing.
+`.github/workflows/publish.yml` runs on `release: published`, not on a tag. A tag alone publishes
+nothing.
 
 ```
-gh release create v<new-version> -t v<new-version> --notes-from-tag
+gh release create v<new version> -t v<new version> --notes-from-tag
 ```
 
-If `gh` is missing or auth fails, report the exact error and stop. Do NOT fall back to the GitHub UI silently — the user needs to know manual intervention is required.
+If `gh` is missing or not signed in, report the exact error and stop: the release needs a person.
 
-## 11. Wait for the publish workflow and confirm npm
+## 9. Confirm on npm
 
 ```
 gh run watch $(gh run list --workflow=publish.yml --limit 1 --json databaseId --jq '.[0].databaseId') --exit-status
-```
-
-Then verify the new version is actually on the registry:
-
-```
 bun info @blueshed/delta version
 ```
 
-The reported version must equal `<new-version>`. If the workflow fails or npm still shows the prior version, report the failure with the run URL and stop.
+The version npm reports must be the new one. If the workflow fails or npm still has the old
+version, report the run's URL and stop.
 
-## 12. Report
-
-Report to the user in this shape:
+## 10. Report
 
 ```
-Released and published @blueshed/delta@<new-version>.
+Released @blueshed/delta@<new version>.
 
-  commit   <short-sha>
-  tag      v<new-version>
-  release  https://github.com/blueshed/delta/releases/tag/v<new-version>
-  npm      @blueshed/delta@<new-version>
-
-Inspect:
-  git show v<new-version>
+  commit   <short sha>
+  tag      v<new version>
+  release  https://github.com/blueshed/delta/releases/tag/v<new version>
+  npm      @blueshed/delta@<new version>
 ```
