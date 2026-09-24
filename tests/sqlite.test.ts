@@ -2116,3 +2116,34 @@ describe("a root row that has a parent", () => {
     expect(db.query("SELECT project_id, title FROM current_tasks WHERE id = 't1'").all()).toEqual([{ project_id: "p1", title: "renamed" }]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// TODO #6: evict() dropped a doc's copy but kept its subscribers, so a write
+// through it answered 404 "Doc not loaded" and fan-out onto it lost removes.
+// ---------------------------------------------------------------------------
+
+describe("a doc evicted while someone has it open", () => {
+  test("still takes writes, and still hears the removes fanned out to it", async () => {
+    const db = new Database(":memory:");
+    createTables(db, schema);
+    db.run("INSERT INTO projects (id, name, status, valid_from) VALUES ('p1', 'P', 'active', '2020-01-01 00:00:00')");
+    db.run("INSERT INTO tasks (id, project_id, title, done, valid_from) VALUES ('t1', 'p1', 'T', 0, '2020-01-01 00:00:00')");
+    const ws = createWs();
+    const tasksOnly = defineDoc("tasks-of:", { root: "projects", include: ["tasks"] });
+    const handle = registerDocs(ws, db, schema, [projectDoc, tasksOnly]);
+    const published: any[] = [];
+    ws.setServer({ publish: (ch: string, raw: string) => published.push({ ch, ...JSON.parse(raw) }) });
+    const a = mockSocket("a");
+    const b = mockSocket("b");
+    await ws.websocket.message(a, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+    await ws.websocket.message(b, JSON.stringify({ id: 1, action: "open", doc: "tasks-of:p1" }));
+    handle.evict("tasks-of:p1");
+
+    await ws.websocket.message(a, JSON.stringify({ id: 2, action: "delta", doc: "project:p1", ops: [{ op: "remove", path: "/tasks/t1" }] }));
+    expect(published.filter((m) => m.ch === "tasks-of:p1").map((m) => m.ops)).toEqual([[{ op: "remove", path: "/tasks/t1" }]]);
+
+    handle.evict("tasks-of:p1");
+    await ws.websocket.message(b, JSON.stringify({ id: 2, action: "delta", doc: "tasks-of:p1", ops: [{ op: "replace", path: "/projects/name", value: "renamed" }] }));
+    expect(b.sent[1].result).toEqual({ ack: true });
+  });
+});

@@ -520,16 +520,7 @@ export function registerDocs(
     // Custom doc path first (independent prefix space).
     const customMatch = findCustom(docName);
     if (customMatch) {
-      const { def, docId } = customMatch;
-      let doc = cache.get(docName);
-      if (!doc) {
-        const criteria = def.parse(docId);
-        const rowsByColl = def.query(db, criteria);
-        doc = {};
-        for (const coll of def.watch) doc[coll] = toMap(rowsByColl[coll] ?? []);
-        cache.set(docName, doc);
-        customCriteria.set(docName, criteria);
-      }
+      const doc = loadCustom(docName, customMatch.def, customMatch.docId);
 
       trackSubscribe(client, docName);
       if (!subscriptions.has(docName)) subscriptions.set(docName, new Set());
@@ -565,6 +556,20 @@ export function registerDocs(
     log.info(`opened ${docName}`);
   });
 
+  /** A custom document from the cache, or queried into it. */
+  function loadCustom(docName: string, def: CustomDocDef<any>, docId: string): any {
+    let doc = cache.get(docName);
+    if (!doc) {
+      const criteria = def.parse(docId);
+      const rowsByColl = def.query(db, criteria);
+      doc = {};
+      for (const coll of def.watch) doc[coll] = toMap(rowsByColl[coll] ?? []);
+      cache.set(docName, doc);
+      customCriteria.set(docName, criteria);
+    }
+    return doc;
+  }
+
   /** A document from the cache, or loaded into it: an implied one opens empty, and its first write makes its row. */
   function load(docName: string, def: DocDef, docId: string): any | null {
     let doc = cache.get(docName);
@@ -587,6 +592,21 @@ export function registerDocs(
    * and then told: to the document's subscribers, to the other open documents
    * that share its rows, and to the custom documents that watch them.
    */
+  /**
+   * Read back every doc someone has open that `evict()` dropped, before a
+   * write: fan-out checks a target's scope against its copy, and one with no
+   * copy used to lose its removes and grandchildren for good (TODO #6).
+   */
+  function reloadEvicted(): void {
+    for (const [name, subs] of subscriptions) {
+      if (!subs.size || cache.has(name)) continue;
+      const custom = findCustom(name);
+      const match = custom ? null : findDoc(name);
+      if (custom) loadCustom(name, custom.def, custom.docId);
+      else if (match) load(name, match.def, match.docId);
+    }
+  }
+
   function write(docName: string, def: DocDef, doc: any, ops: DeltaOp[], by: { who: string | null; cursor: string | null; undoes?: number; undoable?: boolean }): Written | Failed {
     // Pre-flight validation — reject unknown collections/fields and bad types
     // up front instead of silently acking an op that diverges cache/broadcast
@@ -649,9 +669,10 @@ export function registerDocs(
     const match = findDoc(docName);
     if (!match) return;
 
+    reloadEvicted();
     const doc = cache.get(docName);
     if (!doc) {
-      respond({ error: { code: 404, message: "Doc not loaded" } });
+      respond({ error: { code: 404, message: `Doc not loaded: open ${docName} before writing to it` } });
       return;
     }
 
@@ -870,7 +891,11 @@ export function registerDocs(
   }
 
   return {
-    /** Evict a doc from cache. */
+    /**
+     * Drop a doc's cached copy; the next open, write or fan-out that needs it
+     * reads it again from the tables (`reloadEvicted`). Its subscribers stay
+     * subscribed, and re-open to see what changed.
+     */
     evict(docName: string) {
       cache.delete(docName);
       implied.delete(docName);

@@ -160,6 +160,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   root's row writer left the parent key out, so on a temporal table the new version failed
   `NOT NULL constraint failed: <table>.<fk>`. The three row writers, which had drifted apart,
   are one.
+- **SQLite: a document evicted while someone has it open keeps working** (TODO #6). `evict()`
+  dropped the cached copy but kept its subscribers, so a write through it answered 404 "Doc
+  not loaded", and fan-out onto it lost removes and grandchildren for good. A write now reads
+  back every open document `evict()` dropped before it applies. A write to a document nobody
+  has open still answers 404, now "open <doc> before writing to it".
 - **SQLite errors name their fix.** A missing table says "call createTables(db, schema) before
   the first open" (it said `no such table: current_lists`), and a document with no root row
   says which row it looked for and that a SQLite document is one root row and its children
