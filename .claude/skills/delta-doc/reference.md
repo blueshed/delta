@@ -26,13 +26,13 @@ await applySql(pool, generateSql(schema, docs));   // your tables
 **CLI** (docker-entrypoint-initdb.d or a migration tool owns the DB):
 
 ```bash
-bunx delta init init_db --with-auth
-bunx delta sql ./types.ts --out init_db/003-tables.sql
+bunx @blueshed/delta init init_db --with-auth
+bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql
 ```
 
 `init` copies `001a-001g-*.sql` (and optionally `002-users.sql` from auth-jwt) into your directory. `sql` runs the codegen. Everything is idempotent.
 
-**Vendor-first.** The framework SQL is copied into your `init_db/`, not read from `node_modules` at runtime — shadcn/ui for database schemas. The files are explicit, tracked in git and yours to read; `bunx delta init <dir> --upgrade` replaces them with `.bak` backups and tells you what changed (run it after upgrading delta: 0.6.0 added `001g-delta-ledger.sql`); your own `setup.ts` or `docker-entrypoint-initdb.d` walks `init_db/` in alphabetical order, with no hidden imports. Only the SQL is vendored; the TypeScript is imported as usual. `applyFramework(pool)` applies the same files programmatically.
+**Vendor-first.** The framework SQL is copied into your `init_db/`, not read from `node_modules` at runtime — shadcn/ui for database schemas. The files are explicit, tracked in git and yours to read; `bunx @blueshed/delta init <dir> --upgrade` replaces them with `.bak` backups and tells you what changed (run it after upgrading delta: 0.6.0 added `001g-delta-ledger.sql`); your own `setup.ts` or `docker-entrypoint-initdb.d` walks `init_db/` in alphabetical order, with no hidden imports. Only the SQL is vendored; the TypeScript is imported as usual. `applyFramework(pool)` applies the same files programmatically.
 
 **`docker-entrypoint-initdb.d`** — the cleanest setup for a fresh volume: mount your `init_db/` into the Postgres image and let it apply the SQL on first start. No boot-time application code.
 
@@ -54,6 +54,54 @@ volumes:
 ```
 
 Postgres applies `.sql` files in the mounted dir alphabetically on the first boot against an empty data volume. Subsequent boots skip. Re-run `docker compose down -v` to start fresh.
+
+## Quick start (SQLite backend)
+
+For list-of-typed-records data in one process: a schema, validation (400s for unknown fields,
+wrong types and missing required ones), temporal history and the ledger, with no database server.
+
+```ts
+// server.ts
+import { Database } from "bun:sqlite";
+import index from "./index.html";
+import { createWs } from "@blueshed/delta/server";
+import { defineSchema, defineDoc, createTables, registerDocs } from "@blueshed/delta/sqlite";
+
+export const schema = defineSchema({
+  lists: { columns: { title: "text?" } },
+  todos: {
+    parent: "lists",                               // → the key column lists_id
+    columns: { text: "text", done: { type: "boolean", default: false } },
+  },
+});
+export const listDoc = defineDoc("list:", { root: "lists", include: ["todos"], implied: true });
+
+const db = new Database("app.db");
+createTables(db, schema);                          // before the first open: CREATE TABLE IF NOT EXISTS
+const ws = createWs();
+registerDocs(ws, db, schema, [listDoc]);           // , customDocs?, { ledger: true } for undo
+
+const server = Bun.serve({ routes: { "/": index, [ws.path]: ws.upgrade }, websocket: ws.websocket });
+ws.setServer(server);
+```
+
+```ts
+// client — the same client as every backend
+const doc = openDoc<{ lists: List; todos: Record<string, Todo> }>("list:groceries");
+// open → { lists: { id: "groceries", title: null }, todos: {} }
+await doc.send([{ op: "add", path: "/todos/-", value: { text: "milk" } }]);   // echo: add /todos/<uuid>
+```
+
+What is different from Postgres (the full list is SKILL.md → *Backends side by side*):
+
+- **A SQLite document is one root row and its children.** `defineDoc("list:", { root: "lists", … })` opened as `list:groceries` is the `lists` row `groceries`, its `todos`, and their children. There is **no list mode**: `defineDoc("todos:", { root: "todos" })` opened as `todos:` looks for the row `id = ""` and answers 404, saying so. Put the rows under a root row.
+- **The root row** must exist before the document opens — seed it with SQL, or declare the document `implied: true` and its first write makes it (*Implied documents*, below).
+- **`createTables(db, schema)` before the first open.** A missing table's error says so. `migrateSchema(db, schema)` adds columns a later schema declares.
+- **Ids are strings.** `add /todos/-` mints a uuid; a client-chosen id (`/todos/<id>`) works too. `add` of an id that exists is a 409.
+- **Scope** reads the doc name with `":docId"` only (see *`scope` syntax*); a Postgres binding such as `":id"` throws at `registerDocs`.
+- **No auth.** `registerDocs` has no gate: every socket may open every document of a prefix. Keep per-user data out of a shared SQLite backend, or put it behind Postgres.
+- **One process per file**: the backend caches documents in memory, and a second process would not hear the first's writes.
+- **Fan-out**: a write reaches every open document that holds the row (*Fan-out*, below).
 
 ## Quick start (Postgres backend)
 
@@ -82,14 +130,21 @@ registerDocType(
   })
 );
 
-await createDocListener(ws, pool, { auth });
+const listener = await createDocListener(ws, pool, { auth });
 
 const server = Bun.serve({
   routes: { [ws.path]: ws.upgrade },
   websocket: ws.websocket,
 });
 ws.setServer(server);   // REQUIRED — without it ws.publish() is a no-op and broadcasts never reach clients
+
+// Shutdown (a test's afterAll, a script's end): the listener holds a pool
+// client for LISTEN, so pool.end() waits on it until it is destroyed.
+await listener.destroy();
+await pool.end();
 ```
+
+`bun add pg` and, to type-check, `bun add -d @types/pg` — delta ships TypeScript source, so `skipLibCheck` does not cover its `pg` imports. Ids on Postgres are BIGINTs from `seq_<table>`: create rows with `add /<coll>/-` (a client-chosen id that is not a number is a 400 that says so), and expect ids back as numbers.
 
 ```tsx
 // client.tsx
@@ -111,7 +166,7 @@ effect(() => console.log(items.data.get()));
 
 try {
   await items.send([
-    { op: "add", path: "/items/-", value: { name: "hello", value: 1 } },
+    { op: "add", path: "/items/-", value: { name: "hello", value: 1 } },   // the id comes back in the echo
   ]);
 } catch (err) {
   if (DeltaError.isDeltaError(err)) console.warn(`${err.code}: ${err.message}`);
@@ -249,7 +304,7 @@ So on SQLite a Postgres-style `scope: { user_id: ":id" }` does **not** read from
 
 ## Doc patterns
 
-**List doc** — prefix matches the whole name; opens every row:
+**List doc** (Postgres only; SQLite has no list mode) — prefix matches the whole name; opens every row:
 
 ```ts
 defineDoc("items:", { root: "items", include: [] });
@@ -629,22 +684,35 @@ If the project has railroad in deps, the canonical client recipe changes — dro
 import { provide, list, when } from "@blueshed/railroad";
 import { connectWs, WS, openDoc } from "@blueshed/delta/client";
 
-interface Message { author: string; text: string; at: string }
+interface Message { id: string; author: string; text: string; at: string }
 interface ChatDoc { messages: Record<string, Message> }
 
 provide(WS, connectWs("/ws"));
 const doc = openDoc<ChatDoc>("chat:room");
 
+const say = (text: string) =>
+  doc.send([{ op: "add", path: "/messages/-", value: { author: "me", text, at: new Date().toISOString() } }]);
+
+function onSubmit(e: SubmitEvent) {
+  e.preventDefault();
+  const input = (e.currentTarget as HTMLFormElement).elements.namedItem("text") as HTMLInputElement;
+  if (input.value) say(input.value);   // send only: the echo renders it
+  input.value = "";
+}
+
 function Chat() {
   const messages = doc.data.map((d) => d ? Object.values(d.messages) : []);
   return when(doc.data, () => (
-    <div id="log">
-      {list(messages, (m) => m.at + m.author, (m$) => (
-        <div class="msg">
-          <span class="author">{m$.map((m) => m.author)}</span>
-          <span class="text">{m$.map((m) => m.text)}</span>
-        </div>
-      ))}
+    <div>
+      <div id="log">
+        {list(messages, (m) => String(m.id), (m$) => (
+          <div class="msg">
+            <span class="author">{m$.map((m) => m.author)}</span>
+            <span class="text">{m$.map((m) => m.text)}</span>
+          </div>
+        ))}
+      </div>
+      <form onsubmit={onSubmit}><input name="text" autocomplete="off" /> <button>Send</button></form>
     </div>
   ), () => <div>connecting…</div>);
 }
@@ -669,7 +737,7 @@ async function Board({ id }: { id: string }) {
 
 Awaiting *before* any `openDoc` and opening synchronously in the thunk is the whole rule. If you must open post-await, keep the handle and `close()` it yourself.
 
-Worked example: [`examples/kanban/`](../../../examples/kanban/) (boards → columns → cards, real-time sync via Postgres). The `serve.ts` + `client.tsx` files in that directory are the canonical railroad UX — a fullstack page using exactly the pattern above. The sibling `server.ts` + `run.ts` files are a headless three-client demo printing op transcripts to the terminal.
+Worked example: `examples/kanban/` in the repository (github.com/blueshed/delta; not in the npm package) — boards → columns → cards, real-time sync via Postgres. The `serve.ts` + `client.tsx` files in that directory are the canonical railroad UX — a fullstack page using exactly the pattern above. The sibling `server.ts` + `run.ts` files are a headless three-client demo printing op transcripts to the terminal.
 
 ## The write loop — send, don't touch (no optimistic updates, no reloads)
 
@@ -687,10 +755,10 @@ The sender is just another subscriber receiving its own op back (the code calls 
 ```ts
 // WRONG — double-applies when the op echoes back
 log.append(renderMessage(m));                                  // optimistic
-await doc.send([{ op: "add", path: `/messages/${id}`, value: m }]);
+await doc.send([{ op: "add", path: "/messages/-", value: m }]);
 
 // RIGHT — send only; onOps / doc.data render it when it echoes back
-await doc.send([{ op: "add", path: `/messages/${id}`, value: m }]);
+await doc.send([{ op: "add", path: "/messages/-", value: m }]);
 ```
 
 **A brute-force reload is never necessary — not after a write, not ever.** The framework issues exactly two full reads, both automatic, and a developer-issued one is always either redundant or actively harmful (it rebuilds the DOM and throws away the op-level precision the protocol gave you):
@@ -878,19 +946,21 @@ Collections register themselves via `_delta_collections` (`columns_def`, `parent
 Runtime — talk to a running server:
 
 ```bash
-bunx delta open  <docName>             # one-shot open + print + exit
-bunx delta watch <docName>             # stream broadcast ops live
-bunx delta delta <docName> <opsJSON>   # apply ops
-bunx delta call  <method>  [paramsJSON]  # invoke RPC
+bunx @blueshed/delta open  <docName>             # one-shot open + print + exit
+bunx @blueshed/delta watch <docName>             # stream broadcast ops live (never exits)
+bunx @blueshed/delta delta <docName> <opsJSON>   # apply ops
+bunx @blueshed/delta call  <method>  [paramsJSON]  # invoke RPC
 ```
+
+Always the scoped name: `bunx delta` without a local install runs an unrelated npm package called `delta`.
 
 URL resolution: `--url` → `DELTA_WS_URL` → `.delta` file in cwd → `ws://localhost:${PORT:-3100}/ws`.
 
 Build-time — Postgres only:
 
 ```bash
-bunx delta init init_db --with-auth                      # vendor framework SQL
-bunx delta sql ./types.ts --out init_db/003-tables.sql   # codegen tables from schema
+bunx @blueshed/delta init init_db --with-auth                      # vendor framework SQL
+bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql   # codegen tables from schema
 ```
 
 `init` copies `001a-001g-*.sql` (and optionally `002-users.sql` from auth-jwt) into the target directory; `--upgrade` replaces existing files with `.bak` backups. `sql` runs the codegen. Both are idempotent.
@@ -898,17 +968,19 @@ bunx delta sql ./types.ts --out init_db/003-tables.sql   # codegen tables from s
 Vendor Claude Code skills — copies `.claude/skills/*` from this package and from the `@blueshed/*` packages in `node_modules` (e.g. `@blueshed/railroad` ships `railroad` and `bun-route`) into the consumer's `.claude/skills/` so Claude Code's project-skill autodiscovery picks them up. A skill is instructions an agent follows, so another package's skills are copied only when your `package.json` names it: `"claudeSkills": ["@acme/widgets"]`. Any other package that ships skills is skipped, with a line that says so:
 
 ```bash
-bunx delta install-skills              # → ./.claude/skills/
-bunx delta install-skills --user       # → ~/.claude/skills/
-bunx delta install-skills --dry-run    # preview, touch nothing
+bunx @blueshed/delta install-skills              # → ./.claude/skills/
+bunx @blueshed/delta install-skills --user       # → ~/.claude/skills/
+bunx @blueshed/delta install-skills --dry-run    # preview, touch nothing
 ```
 
 Re-runs are idempotent: byte-identical destinations skip; locally edited copies are overwritten with a `.bak` backup. Re-run after upgrading `@blueshed/delta` (or any sibling that ships a skill) to pull in the latest skill text.
 
 ## Testing
 
+**In your app**, test through `createLocal()` (below) or a real `Bun.serve` on port 0 with `connectWs("ws://localhost:<port>/ws")`. The helpers below are this repository's own `tests/setup.ts`; they are not in the npm package, so copy what you need.
+
 ```ts
-// tests/setup.ts exports:
+// delta's tests/setup.ts (repository only):
 newPool()                      // → Pool from DELTA_TEST_PG_URL (defaults to localhost:5433)
 applyFramework(pool)           // runs 001*-delta-*.sql in order
 applyAuthJwt(pool)             // runs auth-jwt.sql (users + login/register)

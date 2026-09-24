@@ -7,7 +7,9 @@ one WebSocket carries opens, writes and changes to the browser.
 It exists because shared, live state should be one small idea rather than a stack of fetch
 calls, caches and sockets. The whole package is small enough to read in one sitting (and to
 fit in an AI's context), there is one way to do each thing, and the browser code stays the same
-wherever the truth is kept.
+wherever the truth is kept: the same client and the same three verbs, with rows created by
+`add /<coll>/-` on every backend. (What each backend enforces differs; the skill's
+*Backends side by side* table says how.)
 
 Delta runs on [Bun](https://bun.sh). It ships TypeScript source (the exports are `.ts` files),
 the SQLite backend uses `bun:sqlite` and the server uses `Bun.serve`. The browser code needs a
@@ -108,7 +110,7 @@ another.
 ## In the browser, or in the same process
 
 Served over a socket with `createWs()`, a browser opens a document as a reactive value (the
-client needs `@blueshed/railroad`: `bun add @blueshed/railroad`):
+client's signals are `@blueshed/railroad`'s, a required peer that installs with delta):
 
 ```ts
 import { connectWs, openDoc } from "@blueshed/delta/client";
@@ -154,7 +156,7 @@ need nothing else.
 
 - The `delta-doc` skill is the manual: [`SKILL.md`](.claude/skills/delta-doc/SKILL.md) routes,
   [`reference.md`](.claude/skills/delta-doc/reference.md) has the API, patterns, auth, row-level
-  security, the ledger, the kinds and the wire protocol. `bunx delta install-skills` copies it
+  security, the ledger, the kinds and the wire protocol. `bunx @blueshed/delta install-skills` copies it
   into your project for Claude Code.
 - [`examples/`](examples/): `shared-state` (JSON file), `sites-bbox` (custom views on SQLite
   and Postgres), `kanban` (Postgres with railroad), `todos-vs-rls` (row-level security).

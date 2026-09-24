@@ -74,6 +74,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The delta-doc skill says what each backend does.** SKILL.md has a *Backends side by side*
+  table (what a document is, creating a row, ids and their type, `add` of an existing id,
+  whole-row replace, schema, the root row, scope, auth, versions, undo, fan-out, processes,
+  shutdown, `@types/pg`) and the id rule, and it no longer says the browser code never
+  changes without saying what does. reference.md has a SQLite quick start, `destroy()` and
+  `@types/pg` in the Postgres one, `onConnect` in the sign-in flow, `bunx @blueshed/delta`
+  (the unscoped `delta` on npm is someone else's), and says `examples/` and `tests/setup.ts`
+  are in the repository, not the package. The canonical recipe creates rows with
+  `add /messages/-` and wires its form; the railroad recipe keys rows by id and wires its input.
 - **`await doc.send(ops)` resolves once the write's own echo is applied**, on every backend. The
   JSON file and SQLite broadcast before they answer, so this was already so; Postgres answers
   first and broadcasts through `NOTIFY`, so there the send now waits for the version its ack
