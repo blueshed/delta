@@ -701,6 +701,7 @@ export function registerDocs(
       if (msg.entry != null && msg.entry !== entry.id) {
         return respond({ error: { code: 409, message: `The cursor's next entry to ${way} is ${entry.id}, not ${msg.entry}` } });
       }
+      reloadEvicted();   // a walk is a write: its fan-out needs every open doc's copy, as delta's does
       const match = findDoc(entry.doc);
       const doc = match && load(entry.doc, match.def, match.docId);
       if (!match || !doc) return respond({ error: { code: 404, message: `Not found: ${entry.doc}` } });

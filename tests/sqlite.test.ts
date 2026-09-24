@@ -2146,4 +2146,25 @@ describe("a doc evicted while someone has it open", () => {
     await ws.websocket.message(b, JSON.stringify({ id: 2, action: "delta", doc: "tasks-of:p1", ops: [{ op: "replace", path: "/projects/name", value: "renamed" }] }));
     expect(b.sent[1].result).toEqual({ ack: true });
   });
+
+  test("hears the remove an undo fans out to it (the walk is a write too)", async () => {
+    const db = new Database(":memory:");
+    createTables(db, schema);
+    db.run("INSERT INTO projects (id, name, status, valid_from) VALUES ('p1', 'P', 'active', '2020-01-01 00:00:00')");
+    const ws = createWs();
+    const tasksOnly = defineDoc("tasks-of:", { root: "projects", include: ["tasks"] });
+    const handle = registerDocs(ws, db, schema, [projectDoc, tasksOnly], [], { ledger: true });
+    const published: any[] = [];
+    ws.setServer({ publish: (ch: string, raw: string) => published.push({ ch, ...JSON.parse(raw) }) });
+    const a = mockSocket("a");
+    const b = mockSocket("b");
+    await ws.websocket.message(a, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+    await ws.websocket.message(b, JSON.stringify({ id: 1, action: "open", doc: "tasks-of:p1" }));
+    await ws.websocket.message(a, JSON.stringify({ id: 2, action: "delta", doc: "project:p1", ops: [{ op: "add", path: "/tasks/t1", value: { title: "T", done: false } }] }));
+    handle.evict("tasks-of:p1");
+
+    await ws.websocket.message(a, JSON.stringify({ id: 3, action: "undo" }));
+    expect(a.sent.at(-1).result.ops).toEqual([{ op: "remove", path: "/tasks/t1" }]);
+    expect(published.filter((m) => m.ch === "tasks-of:p1").at(-1)?.ops).toEqual([{ op: "remove", path: "/tasks/t1" }]);
+  });
 });

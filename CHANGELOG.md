@@ -198,8 +198,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are one.
 - **SQLite: a document evicted while someone has it open keeps working** (v0.5.0 review #6). `evict()`
   dropped the cached copy but kept its subscribers, so a write through it answered 404 "Doc
-  not loaded", and fan-out onto it lost removes and grandchildren for good. A write now reads
-  back every open document `evict()` dropped before it applies. A write to a document nobody
+  not loaded", and fan-out onto it lost removes and grandchildren for good. A write, an undo
+  and a redo now read back every open document `evict()` dropped before they apply. A write to a document nobody
   has open still answers 404, now "open <doc> before writing to it".
 - **SQLite errors name their fix.** A missing table says "call createTables(db, schema) before
   the first open" (it said `no such table: current_lists`), and a document with no root row
