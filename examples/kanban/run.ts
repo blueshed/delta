@@ -12,8 +12,6 @@
  * `applyOps` dispatch. Nothing hand-rolled — every piece is the library.
  */
 
-// `connectWs` resolves URLs against `location` — shim it for Bun.
-(globalThis as any).location = { href: "http://localhost/", protocol: "http:" };
 
 import { newPool, applyAll, PG_URL } from "./setup";
 import { startServer } from "./server";

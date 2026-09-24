@@ -3,7 +3,7 @@
  *
  *   const ws  = connectWs("/ws");      // reconnecting WebSocket client
  *   const doc = openDoc("chat:room");   // reactive doc — auto-updates on every op
- *   doc.send([{ op: "add", path: "/messages/<id>", value: {...} }]);
+ *   doc.send([{ op: "add", path: "/messages/-", value: {...} }]);   // the server names the row
  *
  * No fetch, no polling. The shape lives in `doc.data.get()`; ops mutate it
  * in place; every subscriber receives the same op stream via `onOps`.
@@ -11,8 +11,8 @@
 import { connectWs, openDoc, type Doc } from "../../src/client/client";
 import { applyOpsToCollection } from "../../src/client/dom-ops";
 
-// `id` carries the same uuid the op path uses (`/messages/<id>`) — the DOM
-// renderer keys rows by it, so the per-op and whole-doc paths agree.
+// The server names each message: `add /messages/-` comes back as
+// `add /messages/<id>` with `id` in the row. The DOM renderer keys rows by it.
 interface Message { id: string; author: string; text: string; at: string }
 interface ChatDoc { messages: Record<string, Message> }
 
@@ -56,10 +56,9 @@ doc.onOps(render);                                             // live + reconne
 
 form.addEventListener("submit", async (ev) => {
   ev.preventDefault();
-  const id = crypto.randomUUID();
   await doc.send([{
-    op: "add", path: `/messages/${id}`,
-    value: { id, author: authorI.value, text: textI.value, at: new Date().toISOString() },
+    op: "add", path: "/messages/-",
+    value: { author: authorI.value, text: textI.value, at: new Date().toISOString() },
   }]);
   textI.value = "";
   textI.focus();
