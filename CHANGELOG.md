@@ -58,6 +58,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row can still be added back under its id, as undo does. To move across: `replace` a row that
   exists. (Postgres: `001d`, `CREATE OR REPLACE`.) The JSON-file backend keeps RFC 6902's
   meaning, where `add` over a member replaces it.
+- **One error-code table on every backend**: 400 for a malformed op (a bad path, an unknown or
+  missing field), 404 for a row or path that is not there, 409 for an add of a row that is, as
+  well as 401 and 403 as before. The JSON file answered `-1` for every failed op, SQLite 500
+  for a missing row, Postgres 500 for nearly everything. `applyOps` errors now carry their
+  `code`, `createWs` answers with it, and the Postgres framework raises SQLSTATE `22023` /
+  `P0002` for a client's mistake and a missing row (`001d`, `CREATE OR REPLACE`), which the
+  listener answers as 400 / 404. `tests/error-codes.test.ts` asks each backend the same.
+  `createWs`'s own answers follow the table too: a name no backend owns is 404 (`No handler
+  matched`, as Postgres's `No handler for`), an unknown action 400, a private method 403, and
+  a handler that throws 500. They were all `-1`. `createLocal` answers `No handler matched`
+  with 404. To move across: code that tested for `-1` (or for 500 on a missing row) should
+  test the code it means.
+- **Postgres: an op that names a field the collection does not have is a 400** ("Unknown field:
+  nope (not a column of items)"), as on SQLite. `delta_apply` merged it into the row it
+  broadcast and acked it, and `jsonb_populate_record` dropped it on the way to the table: the
+  subscribers were told a value that was never stored (`001a` adds `_delta_assert_fields`,
+  `001d` calls it; `CREATE OR REPLACE`). To move across: send only the table's columns (and
+  `id`, the parent key); keep client-only state out of the row.
+- **SQLite: a Postgres scope binding is refused at registration.** `scope: { user_id: ":id" }`
+  (or `"<=:end"`, `"like:prefix"`) was taken as a literal to match, so every open was a 404.
+  `registerDocs` now throws, saying SQLite reads the doc name with `":docId"`. To move across:
+  use `":docId"`, or a literal that does not start with a DSL prefix.
 
 ### Added
 
@@ -127,28 +149,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   custom-doc fan-out). An id containing `/` or `~` was stored right but broadcast raw
   (`/messages/a/b`), so a peer's `applyOps` threw and its view silently diverged.
   `applyOpsToCollection` now reads paths with `splitPath`, so it finds such a row by its own id.
-- **One error-code table on every backend**: 400 for a malformed op (a bad path, an unknown or
-  missing field), 404 for a row or path that is not there, 409 for an add of a row that is, as
-  well as 401 and 403 as before. The JSON file answered `-1` for every failed op, SQLite 500
-  for a missing row, Postgres 500 for nearly everything. `applyOps` errors now carry their
-  `code`, `createWs` answers with it, and the Postgres framework raises SQLSTATE `22023` /
-  `P0002` for a client's mistake and a missing row (`001d`, `CREATE OR REPLACE`), which the
-  listener answers as 400 / 404. `tests/error-codes.test.ts` asks each backend the same.
-  `createWs`'s own answers follow the table too: a name no backend owns is 404 (`No handler
-  matched`, as Postgres's `No handler for`), an unknown action 400, a private method 403, and
-  a handler that throws 500. They were all `-1`. `createLocal` answers `No handler matched`
-  with 404. Code that tested for `-1` should test the code it means.
 - **SQLite: a field named after an `Object.prototype` member (`toString`, `valueOf`) is an
   unknown field (400).** Column lookups took inherited members for columns, so the op was
   acked, cached and broadcast, and gone on the next cold read. Postgres's `validateOps` too.
-- **Postgres: an op that names a field the collection does not have is a 400** ("Unknown field:
-  nope (not a column of items)"), as on SQLite. `delta_apply` merged it into the row it
-  broadcast and acked it, and `jsonb_populate_record` dropped it on the way to the table: the
-  subscribers were told a value that was never stored (`001a` adds `_delta_assert_fields`,
-  `001d` calls it; `CREATE OR REPLACE`).
-- **SQLite: a Postgres scope binding is refused at registration.** `scope: { user_id: ":id" }`
-  (or `"<=:end"`, `"like:prefix"`) was taken as a literal to match, so every open was a 404.
-  `registerDocs` now throws, saying SQLite reads the doc name with `":docId"`.
 - **SQLite: a json column's string value survives a cold read** (v0.5.0 review #4). Strings were stored
   raw and parsed on the way back, so `"123"` came back as `123` and `"true"` as `true` after a
   restart or eviction. Every json value is now stored as JSON; a raw string an earlier release
