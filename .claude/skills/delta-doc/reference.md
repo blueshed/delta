@@ -550,6 +550,8 @@ localStorage.removeItem("token");
 
 The same teardown happens on an identity switch (a fresh `authenticate` after a `logout`): the old subscriptions are gone, so you must re-`openDoc` the docs the new user should see — their streams won't silently carry over from the previous identity.
 
+**A token that runs out.** `jwtAuth` keeps the token's `exp` with the identity. At the socket's first request after it, the gate answers 401 `Session expired: authenticate again` and drops the socket's subscriptions, as `logout` does. The socket stays connected, so `onConnect` does not run again: on that 401, `authenticate` with a fresh token and re-open the documents. Until that request the socket still hears the documents it has open (nothing checks the clock between requests).
+
 ## RLS with `app.user_id`
 
 With `auth.asSqlArg` set, every `docTypeFromDef` query runs inside `withAppAuth(pool, id, fn)`:
