@@ -153,6 +153,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with in-band `authenticate` each re-open was a 401, logged and dropped, and `doc.data` stayed
   as it was before the drop while `connected` said true. Re-authenticating from an `open`
   listener lost the race too. To move across: move the `authenticate` call into `onConnect`.
+- **A request made while the socket is not ready no longer hangs when a connect fails.** Every
+  drop swapped in a new "ready" gate, even when the last one had never opened, so a `send` or
+  `call` made before the first connect, during an outage with a failed retry, or while
+  `onConnect` ran and the socket dropped, waited on a gate nothing would open: it never
+  settled, though `connected` turned true. A drop now makes a new gate only once the last one
+  has opened.
 - **`connectWs` works outside a browser, and keeps an absolute URL's scheme.** It read
   `location` unconditionally (a Bun script threw `location is not defined`) and replaced the
   scheme with the page's (`wss://api…` became `ws://` from an http page). An absolute

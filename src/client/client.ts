@@ -257,6 +257,7 @@ export function connectWs(
   let ready = new Promise<void>((r) => {
     readyResolve = r;
   });
+  let isReady = false;
 
   /** A request on the socket as it is now. */
   function request(msg: any): Promise<any> {
@@ -321,6 +322,7 @@ export function connectWs(
       if (isClosed || ws.readyState !== WebSocket.OPEN) return;   // dropped meanwhile; the next open runs it again
     }
     connected.set(true);
+    isReady = true;
     readyResolve();
     listeners.get("open")?.forEach((fn) => fn({}));
 
@@ -337,9 +339,14 @@ export function connectWs(
   ws.addEventListener("close", () => {
     log.info("disconnected");
     connected.set(false);
-    ready = new Promise<void>((r) => {
-      readyResolve = r;
-    });
+    // A new gate only once the last one opened: what waits on one that never
+    // did (a failed attempt, a drop during onConnect) waits for the next connect.
+    if (isReady) {
+      isReady = false;
+      ready = new Promise<void>((r) => {
+        readyResolve = r;
+      });
+    }
     // Drain in-flight requests on EVERY socket drop (including those that will
     // reconnect) so outstanding `send`/`call` awaits fail fast instead of
     // hanging forever. Use a DISTINCT message ("disconnected") so callers can

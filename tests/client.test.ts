@@ -561,6 +561,47 @@ describe("onConnect: saying who you are before the docs re-open", () => {
     client.close();
   });
 
+  // A request waits for `ready`; a drop used to swap in a new `ready` even when
+  // the old one had never opened, so what waited on the old one hung for ever
+  // (connected true, the call never settled).
+  test("a request made while onConnect runs survives a drop before it finishes", async () => {
+    let first = true;
+    server = Bun.serve({
+      port: 0,
+      fetch(req, s) { return s.upgrade(req) ? undefined as any : new Response("no", { status: 400 }); },
+      websocket: {
+        open() {}, close() {},
+        message(ws: any, raw) {
+          const msg = JSON.parse(String(raw));
+          if (msg.method === "authenticate" && first) { first = false; ws.close(); return; }   // drop mid-onConnect
+          ws.send(JSON.stringify({ id: msg.id, result: msg.method }));
+        },
+      },
+    });
+    const client = connectWs(`ws://localhost:${server.port}/ws`, {
+      onConnect: (ws) => ws.send({ action: "call", method: "authenticate", params: {} }),
+    });
+    const answer = client.send({ action: "call", method: "ping" });
+    expect(await Promise.race([answer, Bun.sleep(4000).then(() => "hung")])).toBe("ping");
+    client.close();
+  });
+
+  test("a request made before the first connect survives a failed attempt", async () => {
+    const probe = Bun.serve({ port: 0, fetch: () => new Response("x") });
+    const port = probe.port;
+    probe.stop(true);
+    const client = connectWs(`ws://localhost:${port}/ws`);   // nothing listening: the first attempt fails
+    const answer = client.send({ action: "call", method: "ping" });
+    await Bun.sleep(200);
+    server = Bun.serve({
+      port,
+      fetch(req, s) { return s.upgrade(req) ? undefined as any : new Response("no", { status: 400 }); },
+      websocket: { message(ws, raw) { ws.send(JSON.stringify({ id: JSON.parse(String(raw)).id, result: "pong" })); } },
+    });
+    expect(await Promise.race([answer, Bun.sleep(4000).then(() => "hung")])).toBe("pong");
+    client.close();
+  });
+
   test("nothing else goes out before onConnect is done", async () => {
     server = makeAuthServer(0, ["x"]);
     const client = connectWs(`ws://localhost:${server.port}/ws`, {
