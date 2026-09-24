@@ -197,3 +197,66 @@ describe("the Postgres ledger", () => {
     expect((await sendAndAwait(ws, eta, { action: "undo", cursor: "s1" })).error?.message).toContain("Unknown action");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Undo beside someone else, on Postgres (eta F2a, F2b, F3): the same rule as
+// SQLite's planWalk, in 001g's _delta_walk_plan / delta_walk.
+// ---------------------------------------------------------------------------
+
+describe("undo beside someone else (Postgres)", () => {
+  const eta = () => mockClient({ local: true });   // in-process: names its cursor
+  const write = (ws: any, c: any, cursor: string, ops: any[]) => sendAndAwait(ws, c, { action: "delta", doc: "items:", ops, cursor });
+  const walk = (ws: any, c: any, cursor: string, more = {}, action = "undo") => sendAndAwait(ws, c, { action, cursor, ...more });
+  const row = async (id: number) => (await pool.query("SELECT name, value FROM items WHERE id = $1", [id])).rows[0];
+  const idOf = (answer: any) => Number(answer.result.ops[0].path.split("/")[2]);
+
+  test("an undo leaves a later write by someone else, and answers the conflict (F2a)", async () => {
+    const ws = await process();
+    const c = eta();
+    const id = idOf(await write(ws, c, "A", [{ op: "add", path: "/items/-", value: { name: "first" } }]));
+    await write(ws, c, "A", [{ op: "replace", path: `/items/${id}/name`, value: "A's" }]);
+    await write(ws, c, "B", [{ op: "replace", path: `/items/${id}/name`, value: "B's" }]);
+    const answer = await walk(ws, c, "A");
+    expect(answer.result).toMatchObject({ doc: "items:", ops: [], conflict: [`/items/${id}`] });
+    expect(await row(id)).toEqual({ name: "B's", value: 0 });
+  });
+
+  test("an undo sets back only the fields its write changed", async () => {
+    const ws = await process();
+    const c = eta();
+    const id = idOf(await write(ws, c, "B", [{ op: "add", path: "/items/-", value: { name: "first" } }]));
+    await write(ws, c, "A", [{ op: "replace", path: `/items/${id}/name`, value: "A's" }]);
+    await write(ws, c, "B", [{ op: "replace", path: `/items/${id}/value`, value: 5 }]);
+    expect((await walk(ws, c, "A")).result.conflict).toBeUndefined();
+    expect(await row(id)).toEqual({ name: "first", value: 5 });
+  });
+
+  test("an undo that no longer applies does not stick (F2b), and is never redone", async () => {
+    const ws = await process();
+    const c = eta();
+    const id = idOf(await write(ws, c, "B", [{ op: "add", path: "/items/-", value: { name: "first" } }]));
+    await write(ws, c, "A", [{ op: "replace", path: `/items/${id}/name`, value: "A2" }]);
+    const y = idOf(await write(ws, c, "A", [{ op: "add", path: "/items/-", value: { name: "y" } }]));
+    await write(ws, c, "B", [{ op: "remove", path: `/items/${y}` }]);
+    expect((await walk(ws, c, "A")).result).toMatchObject({ ops: [], conflict: [`/items/${y}`] });
+    expect((await walk(ws, c, "A")).result.conflict).toBeUndefined();
+    expect((await row(id)).name).toBe("first");
+    expect((await walk(ws, c, "A")).result).toBeNull();
+    await walk(ws, c, "A", {}, "redo");
+    expect((await row(id)).name).toBe("A2");
+    expect((await walk(ws, c, "A", {}, "redo")).result).toBeNull();   // the conflicted undo is not redone
+  });
+
+  test("dry: true answers the plan and walks nothing; entry: id walks only that entry (F3)", async () => {
+    const ws = await process();
+    const c = eta();
+    const id = idOf(await write(ws, c, "B", [{ op: "add", path: "/items/-", value: { name: "first" } }]));
+    const w = await write(ws, c, "A", [{ op: "replace", path: `/items/${id}/name`, value: "A's" }]);
+    const dry = await walk(ws, c, "A", { dry: true });
+    expect(dry.result).toEqual({ doc: "items:", entry: w.result.entry, ops: [{ op: "replace", path: `/items/${id}`, value: { name: "first" } }] });
+    expect((await row(id)).name).toBe("A's");
+    expect((await walk(ws, c, "A", { entry: w.result.entry + 99 })).error?.code).toBe(409);
+    expect((await walk(ws, c, "A", { entry: w.result.entry })).result.ops).toHaveLength(1);
+    expect((await row(id)).name).toBe("first");
+  });
+});

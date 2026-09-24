@@ -74,10 +74,10 @@ function errMsg(err: unknown): string {
  * other backends. The framework raises SQLSTATE 22023 for a malformed path or
  * op, 22P02 for a row id it could not mint and 23502 for an add that leaves
  * out a required field (a client's mistake, 400); P0002 for a row that is not
- * there (404); 23505 for an add of a row that is (409). Anything else is the
- * server's (500).
+ * there (404); 23505 for an add of a row that is, and 40001 for an undo of an
+ * entry that is not the cursor's next (409). Anything else is the server's (500).
  */
-const CODE_OF_SQLSTATE: Record<string, number> = { "22023": 400, "22P02": 400, "23502": 400, P0002: 404, "23505": 409 };
+const CODE_OF_SQLSTATE: Record<string, number> = { "22023": 400, "22P02": 400, "23502": 400, P0002: 404, "23505": 409, "40001": 409 };
 function wireCode(err: unknown): number {
   const state = (err as { code?: unknown } | null)?.code;
   return (typeof state === "string" && CODE_OF_SQLSTATE[state]) || 500;
@@ -615,7 +615,12 @@ export async function createDocListener<I = unknown>(
   }));
 
   if (ledger) {
-    /** Undo or redo: the cursor's next entry, walked in the database (001g) and recorded as walking it. */
+    /**
+     * Undo or redo: the cursor's next entry, walked in the database (001g
+     * `delta_walk`) by its guarded plan and recorded as walking it; a conflict
+     * changes nothing, answers `conflict`, and moves the cursor on. `dry: true`
+     * answers the plan; `entry: id` walks only that entry.
+     */
     const walk = (way: "undo" | "redo") => async (msg: any, client: any, respond: (r: any) => void) => {
       let identity: I | undefined;
       if (auth) {
@@ -626,12 +631,13 @@ export async function createDocListener<I = unknown>(
       try {
         const writer = writerOf(identity, client);
         const cursor = cursorOf(msg, client, writer);
+        const args = [cursor, whoOf(writer), way === "undo", msg.dry === true, msg.entry ?? null];
         const { rows } =
           auth?.asSqlArg && identity !== undefined
-            ? await pool.query(`SELECT delta_${way}_as($1, $2, $3) AS result`, [String(auth.asSqlArg(identity)), cursor, whoOf(writer)])
-            : await pool.query(`SELECT delta_${way}($1, $2) AS result`, [cursor, whoOf(writer)]);
+            ? await pool.query("SELECT delta_walk_as($1, $2, $3, $4, $5, $6) AS result", [String(auth.asSqlArg(identity)), ...args])
+            : await pool.query("SELECT delta_walk($1, $2, $3, $4, $5) AS result", args);
         const result = rows[0]?.result ?? null;
-        respond({ result: result && { ...result, version: Number(result.version), entry: result.entry == null ? undefined : Number(result.entry) } });
+        respond({ result: result && { ...result, ...(result.version != null ? { version: Number(result.version) } : {}), entry: result.entry == null ? undefined : Number(result.entry) } });
       } catch (err) {
         log.error(`${way} failed: ${errMsg(err)}`);
         respond({ error: { code: wireCode(err), message: errMsg(err) } });

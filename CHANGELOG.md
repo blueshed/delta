@@ -128,14 +128,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Undo no longer clobbers what someone else wrote since** (SQLite; Postgres below). A walk
+- **Undo no longer clobbers what someone else wrote since** (both backends). A walk
   wrote the recorded inverse as it was, the whole row as it stood before the write, so a later
   write by another cursor was lost, and that cursor's own undo brought back what had just been
   undone. A walk now sets back only the fields its entry changed, and only where each still
   holds what the entry left (a row it made is removed only if it is as it was left; a row it
   removed is put back only if nobody has). A field someone has written since is a conflict:
   the walk changes nothing and answers `{ doc, ops: [], conflict: [paths], entry, version }`,
-  which a caller can tell from `null` (nothing to walk).
+  which a caller can tell from `null` (nothing to walk). On Postgres the rule is
+  `_delta_walk_plan` and the walk `delta_walk(cursor, who, back, dry?, entry?)` (and
+  `delta_walk_as`), in `001g`, all `CREATE OR REPLACE`; `delta_undo` / `delta_redo` call it.
+  The walk takes the document's lock before it plans, so no writer lands between the plan and
+  the write.
 - **A walk that cannot apply no longer sticks the cursor** (both backends). Its failure rolled
   back and recorded nothing, so every undo met the same entry and nothing before it could be
   undone. A conflict, a walk the document refuses (4xx) and a walk that changes nothing are
