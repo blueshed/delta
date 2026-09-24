@@ -97,8 +97,9 @@ and broadcasts are the same as in 0.5.1. Four changes to check when upgrading:
 
 - **railroad `^0.11.0 || ^0.12.0`** as a peer (was `^0.11.0`). Delta's client works on both.
   One test pins railroad 0.12's behaviour, and fails on 0.11.0: an `openDoc` inside an
-  `effect()` body is closed when the effect runs again. The devDependency will be `^0.12.0`
-  once railroad releases it. The skill's reference says to open in the component or at module
+  `effect()` body is closed when the effect runs again. The devDependency is `^0.12.0`, and
+  the copies of railroad's skills kept here for working on delta are railroad 0.12.0's (they
+  are not in the package: a consumer has them from railroad). The skill's reference says to open in the component or at module
   level.
 - **SQLite: a write now publishes before it answers.** In 0.5.1 the writer got its ack and
   then its own broadcast; now the broadcast (to every subscriber, the writer included) goes out

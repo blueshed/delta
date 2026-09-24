@@ -1,12 +1,14 @@
 ---
 name: railroad
-version: 0.11.0
+version: 0.12.0
 description: "Railroad — reactive UI for the Bun fullstack runtime. Signals, JSX, hash router, DI, logger. Use when writing JSX with signals, when()/list()/routes(), or any import from @blueshed/railroad. Pair with @blueshed/delta for WebSocket document sync."
 ---
 
 Railroad is the reactive layer that fits the Bun 1.3 fullstack pipeline. **For scaffolding routes, server entries, or `Bun.WebView` test files, invoke the `bun-route` skill** — it auto-detects `@blueshed/railroad` in `package.json` and uses tsx-railroad mode. This skill covers what's railroad-specific: how the reactive primitives behave and the gotchas that bite in JSX.
 
 Source files (each has a JSDoc header — read for full API): `signals.ts` · `jsx.ts` · `routes.ts` · `shared.ts` · `logger.ts`
+
+Read `${CLAUDE_SKILL_DIR}/reference.md` for the full manual: setup, the signals/JSX/props/routes API tour, realtime patterns, testing, DI and logger, and the complete sharp-edges list. This file is the checklist of what bites.
 
 ## What railroad gives you on top of Bun
 
@@ -106,10 +108,29 @@ const c = signal(0);
 effect(() => console.log(c.get()));
 ```
 
-Dispose scopes are pushed by `createElement(Component)`, a `routes()` handler, `when()`, `list()`, and `mount()` — for the effects/computeds created **inside** them. Every `effect()`/`computed()` run is a scope too: whatever its body creates is disposed before the next run, so building computeds or UI inside an effect doesn't pile up. `route()` (singular) is **not** a scope provider: it returns a `ReadonlySignal` and does not dispose children for you.
+Dispose scopes are pushed by `createElement(Component)`, a `routes()` handler, `when()`, `list()`, and `mount()` — for the effects/computeds created **inside** them. Every `effect()`/`computed()` run is a scope too (0.12+): whatever its body creates — computeds, `.map()`s, nested effects, `when()`/`list()`, components, anything registered with `trackDispose()` — is disposed before the next run and when the effect is disposed, so building computeds or UI inside an effect doesn't pile up. `route()` (singular) is **not** a scope provider: it returns a `ReadonlySignal` and does not dispose children for you.
 
-Two consequences worth internalising:
+```tsx
+// ❌ Cached across runs — but released when the effect re-runs, so it goes dead
+let doc: Doc<Board> | undefined;       // (@blueshed/delta's openDoc registers with trackDispose)
+let title: ReadonlySignal<string> | undefined;
+effect(() => {
+  filter.get();
+  doc ??= openDoc<Board>("board:1");
+  title ??= name.map(n => n.toUpperCase());
+});
 
+// ✅ Long-lived resources and derivations live outside the effect body
+const doc = openDoc<Board>("board:1");
+const title = name.map(n => n.toUpperCase());
+effect(() => { filter.get(); /* use doc, title */ });
+```
+
+Opening a fresh resource on every run is fine when that *is* the intent (e.g. `` openDoc(`room:${room.get()}`) `` to follow `room`): the previous run's one is released for you.
+
+Three consequences worth internalising:
+
+- Anything meant to outlive one run of an effect must be created outside its body.
 - A top-level `effect()` you create yourself leaks unless you keep its disposer.
 - `when()` / `list()` created **outside** any parent scope leak — their driving effect's disposer is unreachable, so railroad **warns on the console**. Mount UI through a component, a `routes()` handler, or `mount()`. For an advanced custom root, bracket it yourself: `pushDisposeScope()` … build UI … `const dispose = popDisposeScope()`, or register cleanups with `trackDispose(fn)`; `hasActiveDisposeScope()` tells you whether one is open.
 
@@ -199,9 +220,9 @@ Why the thunk: effects created after an `await` have no owner scope — browser 
 
 ## Mental model
 
-Components run **once**. They return real DOM nodes. No virtual DOM, no reconciler, no diffing. Reactivity comes from signals — bare signals as children become reactive text nodes; signals as props become reactive attributes; function children and function props (other than `ref`/`on*`) auto-track signal reads. `when()` and `list()` render their initial content synchronously, so it is in the DOM when `mount()` returns.
+Components run **once**. They return real DOM nodes. No virtual DOM, no reconciler, no diffing. Reactivity comes from signals — bare signals as children become reactive text nodes; signals as props become reactive attributes; function children and function props (other than `ref`/`on*`) auto-track signal reads. `style` takes a CSS string or an object, static or reactive; `class`/`style` given `null`/`undefined`/`false` drop the attribute. `when()` and `list()` render their initial content synchronously, so it is in the DOM when `mount()` returns — tests need no tick after `mount()`.
 
-Effects and computeds auto-dispose when their parent scope (component, route, `when`, `list`, `mount`) tears down.
+Effects and computeds auto-dispose when their parent scope (component, route, `when`, `list`, `mount`) tears down, or when the effect/computed whose body created them re-runs.
 
 ## Routes — wildcard layouts
 
@@ -332,4 +353,5 @@ The `delta-doc` skill (installed with `@blueshed/delta`) has the full API surfac
 3. **No `.get()` in JSX children.** See section 1.
 4. **No shared DOM nodes across `when()` branches.** Each branch creates fresh nodes.
 5. **No effects at module top-level** unless you manually capture and dispose. See section 4.
-6. **No `transition-all` in CSS** near layout boundaries — use specific properties.
+6. **No long-lived resources inside an effect body.** They are released on the next run (0.12+). See section 4.
+7. **No `transition-all` in CSS** near layout boundaries — use specific properties.
