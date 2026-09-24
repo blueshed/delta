@@ -430,7 +430,7 @@ describe("version gap detection + resync", () => {
 
 // ---------------------------------------------------------------------------
 // Deferred registration guards on the SHARED entry, not one handle
-// (TODO.md addendum A1)
+// (v0.5.0 review A1)
 //
 // openDoc() called before provide(WS, ...) parks the entry and registers it in
 // a microtask. That microtask used to bail on the CREATING handle's `closed`

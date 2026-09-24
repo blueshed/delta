@@ -259,7 +259,7 @@ export function registerDocs(
   // Transport-level teardown (socket drop / logout via dropClientSubscriptions):
   // a dropped socket never sends the polite `close` action, so without this
   // every abandoned doc stayed cached forever and its dead socket sat in
-  // `subscriptions`, growing the fan-out set monotonically (TODO.md #7).
+  // `subscriptions`, growing the fan-out set monotonically (v0.5.0 review #7).
   // Mirrors the `close`-action eviction below.
   function releaseClient(client: any): void {
     for (const [docName, subs] of subscriptions) {
@@ -443,7 +443,7 @@ export function registerDocs(
           // field-batch writer below so it collapses with field-level ops on
           // the same row and shares the temporal/non-temporal write path.
           // validateOps accepted this shape all along, but it used to fall
-          // through here and ack as a silent no-op (TODO.md #3).
+          // through here and ack as a silent no-op (v0.5.0 review #3).
           const key = `${collKey}/${id}`;
           if (!rowFieldBatches.has(key)) {
             rowFieldBatches.set(key, { table, id, fields: new Map() });
@@ -595,7 +595,7 @@ export function registerDocs(
   /**
    * Read back every doc someone has open that `evict()` dropped, before a
    * write: fan-out checks a target's scope against its copy, and one with no
-   * copy used to lose its removes and grandchildren for good (TODO #6).
+   * copy used to lose its removes and grandchildren for good (v0.5.0 review #6).
    */
   function reloadEvicted(): void {
     for (const [name, subs] of subscriptions) {
@@ -1306,7 +1306,7 @@ function closeRow(db: any, table: ResolvedTable, id: string, ts: string = now())
  * Insert one version of a row -- a new row, a root row, or the next version of
  * a temporal one: its id, its parent key, its columns, and on a temporal
  * table `valid_from = ts`. The one row writer: the three it replaces had
- * drifted, and the root's had lost the parent key (TODO #5).
+ * drifted, and the root's had lost the parent key (v0.5.0 review #5).
  */
 function insertRow(db: any, table: ResolvedTable, row: any, ts: string) {
   const cols = ["id"];

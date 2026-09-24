@@ -5,7 +5,7 @@
  * key. When `exports` is present, `main` is IGNORED, so the bare specifier
  * `import ... from "@blueshed/delta"` threw ERR_PACKAGE_PATH_NOT_EXPORTED and
  * those two fields actively misled — while being the first import anyone
- * writes (TODO.md #11).
+ * writes (v0.5.0 review #11).
  *
  * Asserting the JSON alone would be circular, so each subpath is resolved for
  * real: a temp package with a symlink to this repo, importing through the

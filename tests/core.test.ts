@@ -116,7 +116,7 @@ describe("applyOps", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Prototype pollution (TODO.md #1)
+// Prototype pollution (v0.5.0 review #1)
 //
 // Op paths AND values are client-supplied on every backend. The JSON-file
 // backend applies them with no schema validation and echoes them verbatim to

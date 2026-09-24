@@ -74,6 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`TODO.md` is replaced by `todo.jsonl`**, one open item per line in eta's format. What the
+  v0.5.0 review found and round 2 fixed is recorded here; what is still open moved across.
 - **The delta-doc skill says what each backend does.** SKILL.md has a *Backends side by side*
   table (what a document is, creating a row, ids and their type, `add` of an existing id,
   whole-row replace, schema, the root row, scope, auth, versions, undo, fan-out, processes,
@@ -147,20 +149,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SQLite: a Postgres scope binding is refused at registration.** `scope: { user_id: ":id" }`
   (or `"<=:end"`, `"like:prefix"`) was taken as a literal to match, so every open was a 404.
   `registerDocs` now throws, saying SQLite reads the doc name with `":docId"`.
-- **SQLite: a json column's string value survives a cold read** (TODO #4). Strings were stored
+- **SQLite: a json column's string value survives a cold read** (v0.5.0 review #4). Strings were stored
   raw and parsed on the way back, so `"123"` came back as `123` and `"true"` as `true` after a
   restart or eviction. Every json value is now stored as JSON; a raw string an earlier release
   stored still reads back as the string it was.
-- **`jwtAuth`: a session ends when its token does** (TODO #10). `gate()` returned the identity
+- **`jwtAuth`: a session ends when its token does** (v0.5.0 review #10). `gate()` returned the identity
   for the socket's whole life, so a token that ran out after `authenticate` still let every
   `open` and `delta` in. The token's `exp` is kept with the identity, and once it has passed
   the gate signs the socket out ("Session expired: authenticate again", subscriptions dropped),
   as `logout` does. With `onConnect`, the client signs in again on its next connect.
-- **SQLite: a document whose root row has a parent can change its root fields** (TODO #5). The
+- **SQLite: a document whose root row has a parent can change its root fields** (v0.5.0 review #5). The
   root's row writer left the parent key out, so on a temporal table the new version failed
   `NOT NULL constraint failed: <table>.<fk>`. The three row writers, which had drifted apart,
   are one.
-- **SQLite: a document evicted while someone has it open keeps working** (TODO #6). `evict()`
+- **SQLite: a document evicted while someone has it open keeps working** (v0.5.0 review #6). `evict()`
   dropped the cached copy but kept its subscribers, so a write through it answered 404 "Doc
   not loaded", and fan-out onto it lost removes and grandchildren for good. A write now reads
   back every open document `evict()` dropped before it applies. A write to a document nobody

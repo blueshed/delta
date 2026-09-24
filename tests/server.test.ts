@@ -658,7 +658,7 @@ afterAll(() => {
 });
 
 // ---------------------------------------------------------------------------
-// Malformed frames (TODO.md #2)
+// Malformed frames (v0.5.0 review #2)
 //
 // `JSON.parse` used to sit OUTSIDE the try in an async handler, so any
 // non-JSON frame rejected with nothing to catch it — an unhandled rejection
@@ -730,7 +730,7 @@ describe("malformed frames", () => {
 });
 
 // ---------------------------------------------------------------------------
-// persist() serialization (TODO.md addendum A2)
+// persist() serialization (v0.5.0 review A2)
 //
 // `applyAndBroadcast` fired persist() without await, queue or catch: two rapid
 // deltas raced whole-file Bun.writes and the file could settle on the OLDER

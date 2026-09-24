@@ -1852,7 +1852,7 @@ describe("review fixes: temporal timestamps + op validation", () => {
 });
 
 // ---------------------------------------------------------------------------
-// TODO.md fixes — #3 whole-row replace acked-but-dropped + #7 socket-drop cleanup
+// v0.5.0 review fixes — #3 whole-row replace acked-but-dropped + #7 socket-drop cleanup
 // ---------------------------------------------------------------------------
 
 describe("todo fixes: whole-row replace (#3) + socket-drop cleanup (#7)", () => {
@@ -2071,7 +2071,7 @@ describe("errors that name their fix", () => {
 });
 
 // ---------------------------------------------------------------------------
-// TODO #4: a json column's string value survives a cold read. It was stored
+// v0.5.0 review #4: a json column's string value survives a cold read. It was stored
 // raw, so "123" came back as 123 and "true" as true.
 // ---------------------------------------------------------------------------
 
@@ -2097,7 +2097,7 @@ describe("json columns keep their types across a cold read", () => {
 });
 
 // ---------------------------------------------------------------------------
-// TODO #5: a document whose root row has a parent. The root writer left the
+// v0.5.0 review #5: a document whose root row has a parent. The root writer left the
 // parent key out, so a root-field replace on a temporal root failed NOT NULL.
 // ---------------------------------------------------------------------------
 
@@ -2118,7 +2118,7 @@ describe("a root row that has a parent", () => {
 });
 
 // ---------------------------------------------------------------------------
-// TODO #6: evict() dropped a doc's copy but kept its subscribers, so a write
+// v0.5.0 review #6: evict() dropped a doc's copy but kept its subscribers, so a write
 // through it answered 404 "Doc not loaded" and fan-out onto it lost removes.
 // ---------------------------------------------------------------------------
 

@@ -180,7 +180,7 @@ describe("jwtAuth.actions.authenticate", () => {
     expect("error" in outcome).toBe(true);
   });
 
-  test("a session ends when its token does (TODO #10)", async () => {
+  test("a session ends when its token does (v0.5.0 review #10)", async () => {
     // gate() used to return the identity for the socket's whole life, so a
     // token that ran out after authenticate still let every open and delta in.
     const auth = jwtAuth({ pool, secret: SECRET });
