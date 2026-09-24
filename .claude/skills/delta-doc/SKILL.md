@@ -239,5 +239,6 @@ Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/fi
 - *Stored functions* — `delta_open`, `delta_apply`, `*_as` 1-RTT variants, the ledger's `delta_apply_logged` / `delta_undo` / `delta_redo` / `delta_history`
 - *Composing doc operations from SQL* — call `delta_open_as` / `delta_apply_as` from your own `plpgsql`; identity-binding + `SECURITY DEFINER` caveats
 - *Testing* — `setup.ts` helpers, integration pattern
+- *Local development across repos* — a packed tarball, never `file:` (two railroads go inert)
 - *Wire-level protocol* — message shapes
 - *Why delta* — the reasoning and the lineage

@@ -107,6 +107,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (the unscoped `delta` on npm is someone else's), and says `examples/` and `tests/setup.ts`
   are in the repository, not the package. The canonical recipe creates rows with
   `add /messages/-` and wires its form; the railroad recipe keys rows by id and wires its input.
+  A *Local development across repos* section gives the packed-tarball recipe (a `file:` link
+  loads two railroads and the page goes inert).
 - **`await doc.send(ops)` resolves once the write's own echo is applied**, on every backend. The
   JSON file and SQLite broadcast before they answer, so this was already so; Postgres answers
   first and broadcasts through `NOTIFY`, so there the send now waits for the version its ack

@@ -1025,6 +1025,20 @@ Two things to know when driving `@blueshed/delta/client` from a Bun test or scri
 - **Pass an absolute URL** (`connectWs("ws://localhost:3000/ws")`): outside a browser there is no page to resolve `"/ws"` against, and `connectWs` says so. No `location` shim is needed. An absolute `wss://` stays `wss://`.
 - **`wsClient.close()` suppresses the reconnect loop.** `connectWs` returns a reconnecting socket; without `close()`, it tries to come back forever after the server stops, keeping the process alive. Always call `close()` (it's idempotent) before tearing a server down.
 
+## Local development across repos
+
+To run an app against a checkout of delta (or railroad), install a **packed tarball**, not a
+`file:` or `bun link` dependency. A linked checkout brings its own
+`node_modules/@blueshed/railroad`, so the page loads two railroads, delta's `doc.data` is a
+signal the app's railroad does not know, and the page sits on "connecting…" with no error.
+
+```sh
+cd ../delta && bun pm pack && cd ../app && bun add ../delta/blueshed-delta-<version>.tgz
+```
+
+After an edit, pack again and `bun add` the tarball again: a plain `bun install` keeps the old
+tarball's contents. railroad's skill has the same recipe under *Local development across repos*.
+
 ## Wire-level protocol
 
 All WebSocket messages have shape `{ id?: number, action: string, ...rest }`. Responses mirror the id.
