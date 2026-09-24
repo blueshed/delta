@@ -6,7 +6,7 @@
  * schema with optional scope filters.
  *
  * Usage:
- *   import { defineSchema, defineDoc, createTables, registerDocs } from "@blueshed/railroad/delta-sqlite";
+ *   import { defineSchema, defineDoc, createTables, registerDocs } from "@blueshed/delta/sqlite";
  *
  *   const schema = defineSchema({ ... });
  *   const itineraryDoc = defineDoc("itinerary:", { root: "itineraries", include: [...] });

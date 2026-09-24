@@ -825,3 +825,23 @@ describe("persist queue", () => {
     expect(handle.getDoc().n).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// F6: delta's logger was a stale fork of railroad's. With LOG_LEVEL=verbose
+// (a typo) it printed nothing at all, errors included, and it wrote ANSI
+// colour codes into pipes. It is railroad's logger now.
+// ---------------------------------------------------------------------------
+
+describe("the logger", () => {
+  test("an unknown LOG_LEVEL still shows errors, and a pipe gets no colour codes", async () => {
+    const LOGGER = new URL("../src/server/logger.ts", import.meta.url).pathname;
+    const proc = Bun.spawn(["bun", "-e", `const m = await import(${JSON.stringify(LOGGER)}); m.createLogger("[t]").error("ERROR-VISIBLE"); console.log("level=" + m.getLogLevel());`], {
+      stdout: "pipe", stderr: "pipe", env: { ...process.env, LOG_LEVEL: "verbose" },
+    });
+    const out = (await new Response(proc.stdout).text()) + (await new Response(proc.stderr).text());
+    await proc.exited;
+    expect(out).toContain("ERROR-VISIBLE");
+    expect(out).toContain("level=info");
+    expect(out).not.toContain("\x1b[");
+  });
+});

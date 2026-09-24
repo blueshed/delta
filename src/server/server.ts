@@ -8,7 +8,7 @@
  *                        starting with `_` are private and never wire-callable)
  *
  * Usage:
- *   import { createWs, registerDoc, registerMethod } from "@blueshed/railroad/delta-server";
+ *   import { createWs, registerDoc, registerMethod } from "@blueshed/delta/server";
  *
  *   const ws = createWs();
  *   await registerDoc<Message>(ws, "message", { file: "./message.json", empty: { message: "" } });

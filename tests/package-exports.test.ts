@@ -51,6 +51,13 @@ describe("package exports", () => {
     expect(code).toBe(0);
   });
 
+  test("railroad is a required peer: the client and the logger import it", () => {
+    // It was marked optional, but src/client/client.ts and src/server/logger.ts
+    // import it unconditionally, so an install without it could not build.
+    expect(pkg.peerDependencies["@blueshed/railroad"]).toBeDefined();
+    expect(pkg.peerDependenciesMeta?.["@blueshed/railroad"]).toBeUndefined();
+  });
+
   test('"." is declared and agrees with main/types', () => {
     // main/types are only reachable when a matching "." export exists; if a
     // future edit drops one of the three they must not drift apart silently.

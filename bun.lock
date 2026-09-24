@@ -19,7 +19,6 @@
         "pg": "^8.20.0",
       },
       "optionalPeers": [
-        "@blueshed/railroad",
         "jose",
         "pg",
       ],

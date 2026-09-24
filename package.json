@@ -47,9 +47,6 @@
     "jose": "^6.0.0"
   },
   "peerDependenciesMeta": {
-    "@blueshed/railroad": {
-      "optional": true
-    },
     "pg": {
       "optional": true
     },

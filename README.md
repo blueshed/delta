@@ -136,18 +136,19 @@ writing, and `onPublish` is the one stream of changes to redraw from.
 
 Starting a new app? `bun create blueshed my-app` sets up delta and railroad together.
 
-## Optional peers
+## Peers
 
-`bun add @blueshed/delta` installs none of these; add the ones the parts you use need.
+`@blueshed/railroad` is a required peer: the client's signals and every part's logger are
+railroad's, and `bun add @blueshed/delta` installs it. The others are optional; add the ones the
+parts you use need.
 
 | You use | Also add |
 |---|---|
-| `@blueshed/delta/client` (the browser) | `@blueshed/railroad` |
-| `@blueshed/delta/postgres` | `pg` |
+| `@blueshed/delta/postgres` | `pg` (and `@types/pg` to type-check: delta ships TypeScript source) |
 | `@blueshed/delta/auth-jwt` | `jose` and `pg` |
 
-The core, the JSON-file and SQLite backends, `local`, `kinds`, `dom-ops` and `logger` need
-nothing else.
+The core, the JSON-file and SQLite backends, `local`, `kinds`, `dom-ops`, `client` and `logger`
+need nothing else.
 
 ## Where to go next
 
