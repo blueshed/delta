@@ -63,6 +63,10 @@ on push, `publish.yml` on a published release) runs the same steps.
 - **Fan-out differs by backend, on purpose.** SQLite forwards a write to every open document
   that holds the row; Postgres publishes only on the channel of the document written through.
   `tests/postgres-fanout.test.ts` and `tests/postgres-isolation.test.ts` pin the Postgres side.
+- **A walk is guarded, the same on both backends**: `planWalk` (`src/server/ledger.ts`) and
+  `_delta_walk_plan` (`001g`) set back only what an entry changed, where the document still
+  holds what it left; a conflict walks nothing and is recorded as walked. Change them together
+  (`tests/ledger.test.ts`, `tests/postgres-ledger.test.ts`, "undo beside someone else").
 - **The cursor**: named by an in-process caller (`client.data.local`); over a socket the
   connection's `clientId`, and signed in, the person with it (`socketCursor` in
   `src/server/ledger.ts`). A socket client never names another's.
