@@ -41,6 +41,7 @@ function mistakes(there: string) {
   return {
     "a path without a leading slash": { ops: [{ op: "remove", path: "ec_messages" }], code: 400 },
     "a row that is not there": { ops: [{ op: "replace", path: "/ec_messages/404/text", value: "x" }], code: 404 },
+    "an unknown field": { ops: [{ op: "replace", path: `/ec_messages/${there}/nope`, value: "x" }], code: 400 },
     "a field named after Object.prototype": { ops: [{ op: "replace", path: `/ec_messages/${there}/toString`, value: "x" }], code: 400 },
     "an add of a row that is already there": { ops: [{ op: "add", path: `/ec_messages/${there}`, value: { text: "again" } }], code: 409 },
     "an add that leaves out a required field": { ops: [{ op: "add", path: "/ec_messages/-", value: {} }], code: 400 },
@@ -94,7 +95,6 @@ describe("the same mistake, the same code", () => {
       const listener = await createDocListener(ws, pool);
       try {
         for (const [name, { ops, code }] of Object.entries(mistakes("7"))) {
-          if (name === "a field named after Object.prototype") continue;   // unknown fields: next commit
           expect([name, await codeOf(ws, ops)]).toEqual([name, code]);
         }
       } finally {

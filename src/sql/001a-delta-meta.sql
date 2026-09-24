@@ -92,6 +92,30 @@ BEGIN
 END;
 $$;
 
+-- Refuse a value that is not an object, or names a field the collection does
+-- not have (SQLSTATE 22023 → 400). It used to be merged into the broadcast
+-- row, acked, and dropped by jsonb_populate_record: stored without it, told
+-- with it. id, the parent key and the temporal columns are the row's own.
+CREATE OR REPLACE FUNCTION _delta_assert_fields(
+  p_collection TEXT, p_columns JSONB, p_parent_fk TEXT, p_value JSONB
+) RETURNS void LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE
+  v_unknown TEXT;
+BEGIN
+  IF p_value IS NULL OR jsonb_typeof(p_value) <> 'object' THEN
+    RAISE EXCEPTION 'a row value for % must be an object', p_collection USING ERRCODE = '22023';
+  END IF;
+  SELECT string_agg(k, ', ' ORDER BY k) INTO v_unknown
+    FROM jsonb_object_keys(p_value) AS k
+   WHERE NOT COALESCE(p_columns, '{}'::jsonb) ? k
+     AND k NOT IN ('id', 'valid_from', 'valid_to')
+     AND k IS DISTINCT FROM p_parent_fk;
+  IF v_unknown IS NOT NULL THEN
+    RAISE EXCEPTION 'Unknown field: % (not a column of %)', v_unknown, p_collection USING ERRCODE = '22023';
+  END IF;
+END;
+$$;
+
 -- Pick the source relation for a collection.
 --   temporal + no timestamp → current_<table> view
 --   temporal + timestamp    → base <table> (caller filters with _delta_temporal_where)

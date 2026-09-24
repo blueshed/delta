@@ -126,6 +126,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SQLite: a field named after an `Object.prototype` member (`toString`, `valueOf`) is an
   unknown field (400).** Column lookups took inherited members for columns, so the op was
   acked, cached and broadcast, and gone on the next cold read. Postgres's `validateOps` too.
+- **Postgres: an op that names a field the collection does not have is a 400** ("Unknown field:
+  nope (not a column of items)"), as on SQLite. `delta_apply` merged it into the row it
+  broadcast and acked it, and `jsonb_populate_record` dropped it on the way to the table: the
+  subscribers were told a value that was never stored (`001a` adds `_delta_assert_fields`,
+  `001d` calls it; `CREATE OR REPLACE`).
 - **SQLite errors name their fix.** A missing table says "call createTables(db, schema) before
   the first open" (it said `no such table: current_lists`), and a document with no root row
   says which row it looked for and that a SQLite document is one root row and its children

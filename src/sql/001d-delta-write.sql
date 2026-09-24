@@ -183,6 +183,7 @@ BEGIN
       IF array_length(v_parts, 1) = 2 THEN
         v_op := jsonb_set(v_op, '{value}', jsonb_build_object(v_parts[2], v_op->'value'));
       END IF;
+      PERFORM _delta_assert_fields(v_coll_key, v_coll.columns_def, v_coll.parent_fk, v_op->'value');
 
       -- Read + lock
       IF v_coll.temporal THEN
@@ -236,6 +237,7 @@ BEGIN
     -- Add row:  add /<collection>/<id>
     -- ---------------------------------------------------------------
     IF array_length(v_parts, 1) = 2 AND v_op->>'op' = 'add' THEN
+      PERFORM _delta_assert_fields(v_coll_key, v_coll.columns_def, v_coll.parent_fk, v_op->'value');
       v_id_text := v_parts[2];
       -- Auto-generate ID from sequence if path ends with '-'
       IF v_id_text = '-' THEN
@@ -354,6 +356,7 @@ BEGIN
       IF array_length(v_parts, 1) = 3 THEN
         v_op := jsonb_set(v_op, '{value}', jsonb_build_object(v_parts[3], v_op->'value'));
       END IF;
+      PERFORM _delta_assert_fields(v_coll_key, v_coll.columns_def, v_coll.parent_fk, v_op->'value');
 
       IF v_coll.temporal THEN
         EXECUTE format(
