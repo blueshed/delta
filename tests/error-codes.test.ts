@@ -48,6 +48,19 @@ function mistakes(there: string) {
   } as Record<string, { ops: any[]; code: number }>;
 }
 
+describe("the protocol's own answers", () => {
+  test("a doc no backend owns is 404, an unknown action 400, a private method 403", async () => {
+    const ws = createWs();
+    ws.on("open", (msg, _c, respond) => { if (msg.doc === "chat:room") respond({ result: {} }); });   // a backend for one name
+    const c = mockClient();
+    expect((await sendAndAwait(ws, c, { action: "open", doc: "nobody:1" })).error.code).toBe(404);
+    expect((await sendAndAwait(ws, c, { action: "frobnicate" })).error.code).toBe(400);
+    expect((await sendAndAwait(ws, c, { action: "call", method: "_internal" })).error.code).toBe(403);
+    ws.on("call", () => { throw new Error("boom"); });
+    expect((await sendAndAwait(ws, c, { action: "call", method: "x" })).error).toEqual({ code: 500, message: "boom" });
+  });
+});
+
 describe("the same mistake, the same code", () => {
   test("JSON file: a malformed path is 400, a missing row 404", async () => {
     const file = `/tmp/delta-error-codes-${Date.now()}.json`;

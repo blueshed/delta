@@ -123,6 +123,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `code`, `createWs` answers with it, and the Postgres framework raises SQLSTATE `22023` /
   `P0002` for a client's mistake and a missing row (`001d`, `CREATE OR REPLACE`), which the
   listener answers as 400 / 404. `tests/error-codes.test.ts` asks each backend the same.
+  `createWs`'s own answers follow the table too: a name no backend owns is 404 (`No handler
+  matched`, as Postgres's `No handler for`), an unknown action 400, a private method 403, and
+  a handler that throws 500. They were all `-1`. `createLocal` answers `No handler matched`
+  with 404. Code that tested for `-1` should test the code it means.
 - **SQLite: a field named after an `Object.prototype` member (`toString`, `valueOf`) is an
   unknown field (400).** Column lookups took inherited members for columns, so the op was
   acked, cached and broadcast, and gone on the next cold read. Postgres's `validateOps` too.

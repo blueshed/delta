@@ -230,7 +230,7 @@ export function createWs(opts?: WsOptions): WsServer {
               ws.send(
                 JSON.stringify({
                   id,
-                  error: { code: -1, message: `Private method: ${msg.method}` },
+                  error: { code: 403, message: `Private method: ${msg.method}` },
                 }),
               );
             return;
@@ -242,7 +242,7 @@ export function createWs(opts?: WsOptions): WsServer {
               ws.send(
                 JSON.stringify({
                   id,
-                  error: { code: -1, message: `Unknown action: ${action}` },
+                  error: { code: 400, message: `Unknown action: ${action}` },
                 }),
               );
             return;
@@ -262,17 +262,18 @@ export function createWs(opts?: WsOptions): WsServer {
             ws.send(
               JSON.stringify({
                 id,
-                error: { code: -1, message: `No handler matched: ${action}` },
+                // No backend owns this name (or method): not there, as on Postgres.
+                error: { code: 404, message: `No handler matched: ${action}` },
               }),
             );
           }
         } catch (err: any) {
           log.error(`error: ${err.message}`);
           // An error that carries its wire code (applyOps: 400 / 404) is
-          // answered with it; anything else is -1, as before.
+          // answered with it; anything else is the server's own (500).
           if (id)
             ws.send(
-              JSON.stringify({ id, error: { code: typeof err?.code === "number" ? err.code : -1, message: err.message } }),
+              JSON.stringify({ id, error: { code: typeof err?.code === "number" ? err.code : 500, message: err.message } }),
             );
         }
       },
