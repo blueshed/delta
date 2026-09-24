@@ -132,7 +132,12 @@ You don't seed anything by hand — just have the cluster running and the
 - `src/client/` — `client.ts` (reconnecting WS + reactive `openDoc`),
   `dom-ops.ts` (`applyOpsToCollection`).
 - `src/server/server.ts` — `createWs` + JSON-file backend (`registerDoc`).
-- `src/server/sqlite.ts` — SQLite backend (`registerDocs`, custom docs).
+- `src/server/sqlite.ts` — SQLite backend (`registerDocs`, custom docs; with
+  `{ ledger: true }`, every write recorded and `undo` / `redo` / `history`).
+- `src/server/ledger.ts` — the ledger: a write, its inverse, its version, who
+  made it and the cursor undo walks (named in-process; the connection on a socket).
+- `src/server/local.ts` — `createLocal()`: delta in-process, no socket;
+  `as(identity)` for who is writing.
 - `src/server/postgres/` — Postgres backend (listener, registry, codegen,
   schema, bootstrap, auth).
 - `src/server/auth*.ts` — `DeltaAuth` contract + reference JWT impl.
