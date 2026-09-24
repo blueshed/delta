@@ -112,12 +112,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first and broadcasts through `NOTIFY`, so there the send now waits for the version its ack
   names (at most 5 s, for a backend that acks a version it never broadcasts). Code that
   awaited a send and then read `doc.data` now behaves the same after it graduates to Postgres.
-- **`@blueshed/railroad` is a required peer**, and **`@blueshed/delta/logger` is railroad's
-  logger**, re-exported. The client always imported railroad, so a project without it could
-  not build the client; the peer was marked optional all the same. Delta's logger was a stale
-  fork: with an unknown `LOG_LEVEL` (`verbose`) it printed nothing, errors included, and it
-  wrote colour codes into pipes and files. Now there is one logger, so one `setLogLevel` sets
-  delta's and railroad's level together. Bun installs a required peer by itself.
+- **`@blueshed/delta/logger` is railroad's logger again**, copied from railroad 0.12.0 as it is,
+  with a test that fails when the two differ. Delta's copy was a stale fork: with an unknown
+  `LOG_LEVEL` (`verbose`) it printed nothing, errors included, and it wrote colour codes into
+  pipes and files. It is a copy, not an import, so railroad stays an optional peer that only
+  the client needs; a test pins that nothing under `src/server` imports railroad.
 - **The client imports railroad's subpaths** (`/signals`, `/shared`, `/logger`), not the root
   barrel, whose global `JSX` namespace broke type-checking in a React or Preact app.
 

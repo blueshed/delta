@@ -179,7 +179,7 @@ Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/fi
 | `@blueshed/delta/kinds` | Bun | `registerMemory`, `registerStatic`, `registerSource` |
 | `@blueshed/delta/sqlite` | Bun | `defineSchema`, `defineDoc`, `defineCustomDoc`, `createTables`, `migrateSchema`, `registerDocs(..., customDocs?, { ledger?, who? })` → `{ evict }`, `validateOps`, `inverseOf`, `loadDocAt`, snapshots |
 | `@blueshed/delta/postgres` | Bun + pg | `defineSchema`, `defineDoc`, `defineCustomDoc`, `generateSql`, `applyFramework`, `createDocListener(ws, pool, { auth?, custom?, ledger?, who? })` → `{ destroy }`, `registerDocType`, `docTypeFromDef(def, pool, { auth?, owns?, shared? })`, `withAppAuth` |
-| `@blueshed/delta/logger` | anywhere | railroad's logger: `createLogger`, `setLogLevel`, `loggedRequest` |
+| `@blueshed/delta/logger` | anywhere | railroad's logger, kept in step: `createLogger`, `setLogLevel`, `loggedRequest` |
 | `@blueshed/delta/auth` | Bun | `DeltaAuth` contract, `wireAuth`, `upgradeWithAuth` |
 | `@blueshed/delta/auth-jwt` | Bun + pg + jose | `jwtAuth({ pool, secret })`, `applyAuthJwtSchema(pool)` |
 
@@ -191,7 +191,7 @@ Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/fi
 - **Don't reach for React/Supabase/Firebase patterns.** `doc.data` is a Signal; `doc.onOps` is the stream. No `useEffect`, no `useQuery`, no subscription config.
 - **Never optimistically update, never brute-force reload.** `doc.send` echoes the same op back through `onOps` / `doc.data` — local mutation double-applies, and a reload is *never* necessary (the framework re-opens every tracked doc on every reconnect, and on each reconnect `onOps` consumers also receive a synthetic whole-doc replace op — `{op:"replace", path:"", value:<full state>}` — that `applyOpsToCollection` reconciles, so the vanilla-DOM path self-heals too, not just `doc.data`). → `reference.md` → *The write loop*.
 - **Never rebuild a collection from `doc.data` inside an `effect`.** Use `applyOpsToCollection` (vanilla DOM) or `list()` (railroad). One per project; don't combine. → `reference.md` → *Rendering collections*.
-- **If the page renders with railroad's JSX, use `list()` not `applyOpsToCollection`.** `doc.data` IS a railroad `Signal<T>` (railroad is a required peer, so it is always installed; the vanilla recipe above is for a page without JSX). → `reference.md` → *Railroad recipe*.
+- **If the page renders with railroad's JSX, use `list()` not `applyOpsToCollection`.** `doc.data` IS a railroad `Signal<T>` (the client needs `@blueshed/railroad` installed either way; the vanilla recipe above is for a page without JSX). → `reference.md` → *Railroad recipe*.
 - **Never edit framework SQL** (`001a-001g-*.sql`). They are the stored-function contract.
 - **Regenerate `003-tables.sql` with the CLI**: `bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql` (always the scoped name: the unscoped `delta` on npm is someone else's package). Framework SQL is `001a–001g`, auth-jwt is `002`, your tables are `003`.
 - **Don't hand-roll an undo stack.** Turn on the ledger (`{ ledger: true }`) and send `undo` / `redo`; the inverse is read from the document as it was, in the write's own transaction. Over a socket the cursor is the connection; in-process, name it (`cursor: session`). A write that must not be undone (a fact) goes with `undoable: false`. → `reference.md` → *The ledger*.

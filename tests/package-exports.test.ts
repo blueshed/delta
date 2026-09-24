@@ -51,11 +51,17 @@ describe("package exports", () => {
     expect(code).toBe(0);
   });
 
-  test("railroad is a required peer: the client and the logger import it", () => {
-    // It was marked optional, but src/client/client.ts and src/server/logger.ts
-    // import it unconditionally, so an install without it could not build.
+  test("railroad is an optional peer: only the client imports it", async () => {
+    // A server that doesn't use delta's client needs no railroad, so nothing
+    // under src/server or src/core may import it (the logger is a copy).
     expect(pkg.peerDependencies["@blueshed/railroad"]).toBeDefined();
-    expect(pkg.peerDependenciesMeta?.["@blueshed/railroad"]).toBeUndefined();
+    expect(pkg.peerDependenciesMeta?.["@blueshed/railroad"]?.optional).toBe(true);
+    const glob = new Bun.Glob("src/{server,sql}/**/*.ts");
+    const root = new URL("..", import.meta.url).pathname;
+    for await (const f of glob.scan(root)) {
+      expect([f, (await Bun.file(root + f).text()).includes('from "@blueshed/railroad')]).toEqual([f, false]);
+    }
+    expect((await Bun.file(root + "src/core.ts").text()).includes("@blueshed/railroad")).toBe(false);
   });
 
   test('"." is declared and agrees with main/types', () => {

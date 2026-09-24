@@ -833,6 +833,13 @@ describe("persist queue", () => {
 // ---------------------------------------------------------------------------
 
 describe("the logger", () => {
+  test("is railroad's logger, line for line (re-sync it when railroad's changes)", async () => {
+    const code = (src: string) => src.slice(src.indexOf("export type LogLevel"));
+    const ours = await Bun.file(new URL("../src/server/logger.ts", import.meta.url)).text();
+    const railroads = await Bun.file(new URL("../node_modules/@blueshed/railroad/logger.ts", import.meta.url)).text();
+    expect(code(ours)).toBe(code(railroads));
+  });
+
   test("an unknown LOG_LEVEL still shows errors, and a pipe gets no colour codes", async () => {
     const LOGGER = new URL("../src/server/logger.ts", import.meta.url).pathname;
     const proc = Bun.spawn(["bun", "-e", `const m = await import(${JSON.stringify(LOGGER)}); m.createLogger("[t]").error("ERROR-VISIBLE"); console.log("level=" + m.getLogLevel());`], {

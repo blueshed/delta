@@ -110,7 +110,7 @@ another.
 ## In the browser, or in the same process
 
 Served over a socket with `createWs()`, a browser opens a document as a reactive value (the
-client's signals are `@blueshed/railroad`'s, a required peer that installs with delta):
+client needs `@blueshed/railroad`: `bun add @blueshed/railroad`):
 
 ```ts
 import { connectWs, openDoc } from "@blueshed/delta/client";
@@ -138,19 +138,18 @@ writing, and `onPublish` is the one stream of changes to redraw from.
 
 Starting a new app? `bun create blueshed my-app` sets up delta and railroad together.
 
-## Peers
+## Optional peers
 
-`@blueshed/railroad` is a required peer: the client's signals and every part's logger are
-railroad's, and `bun add @blueshed/delta` installs it. The others are optional; add the ones the
-parts you use need.
+`bun add @blueshed/delta` installs none of these; add the ones the parts you use need.
 
 | You use | Also add |
 |---|---|
+| `@blueshed/delta/client` (the browser) | `@blueshed/railroad` |
 | `@blueshed/delta/postgres` | `pg` (and `@types/pg` to type-check: delta ships TypeScript source) |
 | `@blueshed/delta/auth-jwt` | `jose` and `pg` |
 
-The core, the JSON-file and SQLite backends, `local`, `kinds`, `dom-ops`, `client` and `logger`
-need nothing else.
+The core, the JSON-file and SQLite backends, `local`, `kinds`, `dom-ops` and `logger` need
+nothing else.
 
 ## Where to go next
 

@@ -89,7 +89,8 @@ on push, `publish.yml` on a published release) runs the same steps.
   the listener relies on `delta_apply`'s own checks).
 - `src/server/postgres/`: the Postgres backend (`listener.ts`, `registry.ts` with `DocType`
   and `docTypeFromDef`'s `owns`, `codegen.ts`, `schema.ts`, `bootstrap.ts`, `auth.ts`).
-- `src/server/logger.ts`: railroad's logger, re-exported (railroad is a required peer).
+- `src/server/logger.ts`: a copy of railroad's `logger.ts`, so a server needs no railroad (an
+  optional peer only the client imports); `tests/server.test.ts` fails when the two differ.
 - `src/sql/001a–001f-*.sql`: the stored functions; `001g-delta-ledger.sql`: the Postgres
   ledger (`delta_apply_logged`, `delta_undo`, `delta_redo`, `delta_history`, `_as` forms).
 - `src/server/auth*.ts`, `src/sql/auth-jwt.sql`: the `DeltaAuth` contract and the JWT reference.
