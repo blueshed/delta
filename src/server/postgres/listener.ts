@@ -20,7 +20,7 @@ import { resolveDoc } from "./registry";
 import type { DocType } from "./registry";
 import type { DeltaAuth } from "../auth";
 import { isAuthError } from "../auth";
-import { type DeltaOp, splitPath } from "../../core";
+import { type DeltaOp, splitPath, joinPath } from "../../core";
 import { socketCursor } from "../ledger";
 
 const log = createLogger("[doc]");
@@ -394,13 +394,13 @@ export async function createDocListener<I = unknown>(
           if (!wasIn && shouldBeIn) {
             cached[coll] ??= {};
             cached[coll]![id] = row;
-            emitted.push({ op: "add", path: `/${coll}/${id}`, value: row });
+            emitted.push({ op: "add", path: joinPath(coll, id), value: row });
           } else if (wasIn && shouldBeIn) {
             cached[coll]![id] = row;
-            emitted.push({ op: "replace", path: `/${coll}/${id}`, value: row });
+            emitted.push({ op: "replace", path: joinPath(coll, id), value: row });
           } else if (wasIn && !shouldBeIn) {
             delete cached[coll]![id];
-            emitted.push({ op: "remove", path: `/${coll}/${id}` });
+            emitted.push({ op: "remove", path: joinPath(coll, id) });
           }
 
           if (emitted.length) ws.publish(docName, { doc: docName, ops: emitted });

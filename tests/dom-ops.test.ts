@@ -55,6 +55,26 @@ function makeCollection(updates: string[] = [], removes: string[] = []): DomColl
 }
 
 describe("applyOpsToCollection", () => {
+  test("an escaped id in the path finds the row keyed by its unescaped id (D7)", () => {
+    interface Odd { id: string; name: string }
+    const parent = new MockNode();
+    const col: DomCollection<Odd> = {
+      key: (r) => r.id,
+      create: (r) => { const n = new MockNode(); n.payload = { ...r }; return n as unknown as Node; },
+      update: (node, r) => { (node as unknown as MockNode).payload = { ...r }; },
+    };
+    const nodes = applyOpsToCollection<Odd>(parent as unknown as Node, "rows", [
+      { op: "add", path: "/rows/a~1b~0c", value: { id: "a/b~c", name: "odd" } },
+    ], col);
+    expect([...nodes.keys()]).toEqual(["a/b~c"]);
+    applyOpsToCollection<Odd>(parent as unknown as Node, "rows", [
+      { op: "replace", path: "/rows/a~1b~0c", value: { id: "a/b~c", name: "renamed" } },
+    ], col, nodes);
+    expect(parent.children.map((c) => c.payload.name)).toEqual(["renamed"]);
+    applyOpsToCollection<Odd>(parent as unknown as Node, "rows", [{ op: "remove", path: "/rows/a~1b~0c" }], col, nodes);
+    expect(parent.children).toEqual([]);
+  });
+
   test("add /coll/- appends a node keyed by value.id", () => {
     const parent = new MockNode();
     const col = makeCollection();

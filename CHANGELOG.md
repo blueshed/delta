@@ -44,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it, in place, so held references stay live. The JSON-file backend applied a failing batch's
   first ops to its live document: the writer got an error, the server kept the change and
   persisted it at the next write, and no one else heard of it.
+- **Paths built from ids are escaped** (SQLite broadcasts, fan-out and cascades; the Postgres
+  custom-doc fan-out). An id containing `/` or `~` was stored right but broadcast raw
+  (`/messages/a/b`), so a peer's `applyOps` threw and its view silently diverged.
+  `applyOpsToCollection` now reads paths with `splitPath`, so it finds such a row by its own id.
 - **`validateOps` (SQLite and Postgres) reports a malformed pointer** as a 400 with the reason,
   instead of throwing.
 - **Postgres: an RLS-hidden row no longer reaches another identity's socket** (see Breaking).

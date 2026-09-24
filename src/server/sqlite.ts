@@ -18,7 +18,7 @@
  */
 import type { WsServer } from "./server";
 import { trackSubscribe, trackUnsubscribe, onClientDrop } from "./server";
-import { applyOps as deltaApplyOps, type DeltaOp, splitPath } from "../core";
+import { applyOps as deltaApplyOps, type DeltaOp, splitPath, joinPath } from "../core";
 import { createLogger } from "./logger";
 import { createLedger, socketCursor } from "./ledger";
 import {
@@ -416,7 +416,7 @@ export function registerDocs(
           const ts = now();
           const fullRow = insertCollectionRow(db, schema, table, id, rootId, def, row, ts);
           doc[collKey][id] = fullRow;
-          broadcastOps.push({ op: "add", path: `/${collKey}/${id}`, value: fullRow });
+          broadcastOps.push({ op: "add", path: joinPath(collKey, id), value: fullRow });
         } else if (op.op === "remove") {
           // Remove row + cascades. `removeRow` addresses rows by id ALONE, so
           // without this gate a client could name any id and delete a sibling
@@ -472,7 +472,7 @@ export function registerDocs(
         updateRow(db, rootTable, rootId, updated);
       }
       doc[def.root] = updated;
-      broadcastOps.push({ op: "replace", path: `/${def.root}`, value: updated });
+      broadcastOps.push({ op: "replace", path: joinPath(def.root), value: updated });
     }
 
     // Apply batched field updates
@@ -492,7 +492,7 @@ export function registerDocs(
       if (batch.table.temporal) reinsertRow(db, batch.table, batch.id, updated, ts);
       else updateRow(db, batch.table, batch.id, updated);
       doc[collKey][batch.id] = updated;
-      broadcastOps.push({ op: "replace", path: `/${collKey}/${batch.id}`, value: updated });
+      broadcastOps.push({ op: "replace", path: joinPath(collKey, batch.id), value: updated });
     }
 
     return broadcastOps;
@@ -752,7 +752,7 @@ export function registerDocs(
         // key to the root object; it is the root, replaced whole -- or, the row gone, null.
         if (collKey === def.root && parts.length === 2) {
           if (id !== docId) continue;
-          take({ op: "replace", path: `/${collKey}`, value: op.op === "remove" ? null : (op as any).value });
+          take({ op: "replace", path: joinPath(collKey), value: op.op === "remove" ? null : (op as any).value });
           continue;
         }
 
@@ -772,7 +772,7 @@ export function registerDocs(
             if (row && String(row.id) === docId) take(op);
           } else if (row && rowInScope(collKey, row, def, docId, cached)) {
             // Target treats it as an included map — rewrite to a keyed op.
-            take({ op: "replace", path: `/${collKey}/${row.id}`, value: row });
+            take({ op: "replace", path: joinPath(collKey, row.id), value: row });
           }
           continue;
         }
@@ -835,13 +835,13 @@ export function registerDocs(
 
           if (!wasIn && shouldBeIn) {
             cached[coll][id] = row;
-            emitted.push({ op: "add", path: `/${coll}/${id}`, value: row });
+            emitted.push({ op: "add", path: joinPath(coll, id), value: row });
           } else if (wasIn && shouldBeIn) {
             cached[coll][id] = row;
-            emitted.push({ op: "replace", path: `/${coll}/${id}`, value: row });
+            emitted.push({ op: "replace", path: joinPath(coll, id), value: row });
           } else if (wasIn && !shouldBeIn) {
             delete cached[coll][id];
-            emitted.push({ op: "remove", path: `/${coll}/${id}` });
+            emitted.push({ op: "remove", path: joinPath(coll, id) });
           }
           // else: neither in nor becoming in — ignore.
 
@@ -1405,7 +1405,7 @@ function removeRow(
     db.run(`DELETE FROM ${table.name} WHERE id = ?`, [id]);
   }
   delete doc[collKey][id];
-  ops.push({ op: "remove", path: `/${collKey}/${id}` });
+  ops.push({ op: "remove", path: joinPath(collKey, id) });
 
   // Cascade via parent relationship (children)
   for (const childKey of table.children) {

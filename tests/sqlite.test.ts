@@ -7,6 +7,7 @@ import {
   type Schema, type DocDef,
 } from "../src/server/sqlite";
 import { createWs, dropClientSubscriptions } from "../src/server/server";
+import { applyOps } from "../src/core";
 import { setLogLevel } from "../src/server/logger";
 
 setLogLevel("silent");
@@ -1668,6 +1669,37 @@ describe("SQLite path escaping TDD", () => {
 
     const remaining = db.query("SELECT * FROM current_tasks WHERE id = 't/2'").all();
     expect(remaining).toHaveLength(0);
+  });
+
+  test("broadcast paths are escaped again, so a peer lands on the same row (D7)", async () => {
+    seedProject("p1", "Alpha", "active");
+    const published: any[] = [];
+    ws.setServer({ publish: (_ch: string, raw: string) => published.push(JSON.parse(raw)) });
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+    const peer = structuredClone(sock.sent[0].result);
+
+    const send = (id: number, ops: any[]) => ws.websocket.message(sock, JSON.stringify({ id, action: "delta", doc: "project:p1", ops }));
+    await send(2, [{ op: "add", path: "/tasks/a~1b~0c", value: { title: "odd id", done: false } }]);
+    await send(3, [{ op: "replace", path: "/tasks/a~1b~0c/done", value: true }]);
+    expect(published.map((m) => m.ops[0].path)).toEqual(["/tasks/a~1b~0c", "/tasks/a~1b~0c"]);
+    for (const m of published) applyOps(peer, m.ops);
+    expect(Object.keys(peer.tasks)).toEqual(["a/b~c"]);
+    expect(peer.tasks["a/b~c"].done).toBe(true);
+
+    await send(4, [{ op: "remove", path: "/tasks/a~1b~0c" }]);
+    expect(published[2].ops[0].path).toBe("/tasks/a~1b~0c");
+    applyOps(peer, published[2].ops);
+    expect(peer.tasks).toEqual({});
+  });
+
+  test("a path without a leading slash is a 400, not a write", async () => {
+    seedProject("p1", "Alpha", "active");
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+    await ws.websocket.message(sock, JSON.stringify({ id: 2, action: "delta", doc: "project:p1", ops: [{ op: "remove", path: "tasks" }] }));
+    expect(sock.sent[1].error.code).toBe(400);
+    expect(sock.sent[1].error.message).toContain('Invalid JSON Pointer "tasks"');
   });
 });
 
