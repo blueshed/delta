@@ -172,6 +172,30 @@ export function registerDocs(
   // In-memory doc cache: docName → loaded doc object
   const cache = new Map<string, any>();
 
+  // Open implied docs whose root row has not been written yet.
+  const implied = new Set<string>();
+
+  function emptyDoc(def: DocDef, docId: string): any {
+    const rootTable = schema.tables[def.root]!;
+    const root: any = { id: docId };
+    for (const [col, colDef] of Object.entries(rootTable.columns)) {
+      root[col] = colDef.default ?? (colDef.nullable ? null : defaultForType(colDef.type));
+    }
+    const doc: any = { [def.root]: root };
+    for (const coll of def.include) doc[coll] = {};
+    return doc;
+  }
+
+  function ensureImpliedRoot(def: DocDef, doc: any): void {
+    const rootTable = schema.tables[def.root]!;
+    const viewName = rootTable.temporal ? `current_${rootTable.name}` : rootTable.name;
+    const root = doc[def.root];
+    if (db.query(`SELECT 1 FROM ${viewName} WHERE id = ?`).get(root.id)) return;
+    const ts = now();
+    if (rootTable.temporal) { root.valid_from = ts; root.valid_to = null; }
+    insertRootRow(db, rootTable, root, ts);
+  }
+
   // Parsed criteria per open custom doc name (shared across clients of the same name).
   const customCriteria = new Map<string, unknown>();
 
@@ -207,6 +231,7 @@ export function registerDocs(
       if (subs.size === 0) {
         subscriptions.delete(docName);
         cache.delete(docName);
+        implied.delete(docName);
         customCriteria.delete(docName);
       }
     }
@@ -486,6 +511,12 @@ export function registerDocs(
     if (!doc) {
       const scope = resolveScope(def, docId);
       doc = loadDocFromSql(def, scope);
+      if (!doc && def.implied) {
+        // An implied document is there before its root row is: it opens
+        // empty, and its first write makes the row (ensureImpliedRoot).
+        doc = emptyDoc(def, docId);
+        implied.add(docName);
+      }
       if (!doc) {
         respond({ error: { code: 404, message: "Not found" } });
         return;
@@ -539,14 +570,17 @@ export function registerDocs(
 
     let broadcastOps: DeltaOp[];
     try {
-      db.run("BEGIN");
-      broadcastOps = applyOps(docName, def, doc, msg.ops as DeltaOp[]);
-      db.run("COMMIT");
+      // `db.transaction` rather than a bare BEGIN: inside a caller's own
+      // transaction (a server-side renderer writing several things as one, a
+      // test that rolls every case back) it becomes a savepoint, and still
+      // rolls back alone. Rollback owns only this region: a failure in the
+      // post-commit block below must not look like a failed write.
+      broadcastOps = db.transaction(() => {
+        if (implied.has(docName)) ensureImpliedRoot(def, doc);
+        return applyOps(docName, def, doc, msg.ops as DeltaOp[]);
+      })();
+      implied.delete(docName);
     } catch (err: any) {
-      // Rollback owns ONLY the BEGIN..COMMIT region. (A bare ROLLBACK after a
-      // successful COMMIT throws "no transaction is active", which would mask
-      // the real error and abort the handler — see the post-commit block.)
-      try { db.run("ROLLBACK"); } catch { /* no active tx */ }
       cache.set(docName, snapshot); // restore in-memory cache
       log.error(`delta failed: ${err.message}`);
       respond({ error: { code: 500, message: err.message } });
@@ -555,7 +589,10 @@ export function registerDocs(
 
     // Committed. Fan-out is a post-commit side effect: a failure here must not
     // roll back (the write is durable) nor masquerade as a write error.
-    respond({ result: { ack: true } });
+    // A writer that keeps its own history (undo, an audit) asks for the
+    // inverse: what delta applied, walked back, read from the document as it
+    // was. Opt-in, so a browser writer is not sent rows it never asked for.
+    respond({ result: msg.inverse ? { ack: true, ops: broadcastOps, inverse: inverseOf(snapshot, broadcastOps) } : { ack: true } });
     try {
       // Primary broadcast: to the doc's own subscribers
       ws.publish(docName, { doc: docName, ops: broadcastOps });
@@ -580,6 +617,7 @@ export function registerDocs(
     if (subscriptions.get(docName)?.size === 0) {
       subscriptions.delete(docName);
       cache.delete(docName); // evict when no subscribers
+      implied.delete(docName);
       if (isCustom) customCriteria.delete(docName);
     }
 
@@ -744,9 +782,44 @@ export function registerDocs(
     /** Evict a doc from cache. */
     evict(docName: string) {
       cache.delete(docName);
+      implied.delete(docName);
       customCriteria.delete(docName);
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Inverse
+// ---------------------------------------------------------------------------
+
+/**
+ * The inverse of a write, from the document as it was before and the ops the
+ * backend applied. Applied ops are whole rows (`/coll/id`) or the root
+ * (`/root`), so the inverse of each is the row as it was: an add is removed,
+ * a remove is added back, a replace is replaced by its old self. Written in
+ * reverse order, except that a run of removes (a row and the children its
+ * removal cascaded to) is added back in its own order, parent first, so each
+ * child finds its parent in scope.
+ */
+export function inverseOf(before: any, applied: DeltaOp[]): DeltaOp[] {
+  const inverse: DeltaOp[] = [];
+  let run: DeltaOp[] = [];
+  const flush = () => {
+    inverse.unshift(...run);
+    run = [];
+  };
+  for (const op of applied) {
+    const [coll, id] = splitPath(op.path);
+    const prior = id === undefined ? before[coll!] : before[coll!]?.[id];
+    if (op.op === "remove") {
+      run.push({ op: "add", path: op.path, value: prior });
+      continue;
+    }
+    flush();
+    inverse.unshift(op.op === "add" ? { op: "remove", path: op.path } : { op: "replace", path: op.path, value: prior });
+  }
+  flush();
+  return inverse;
 }
 
 // ---------------------------------------------------------------------------

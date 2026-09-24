@@ -15,6 +15,7 @@
     "./dom-ops": "./src/client/dom-ops.ts",
     "./server": "./src/server/server.ts",
     "./sqlite": "./src/server/sqlite.ts",
+    "./local": "./src/server/local.ts",
     "./postgres": "./src/server/postgres/index.ts",
     "./logger": "./src/server/logger.ts",
     "./auth": "./src/server/auth.ts",
