@@ -61,7 +61,7 @@ export {
   clearRegistry,
   docTypeFromDef,
 } from "./registry";
-export type { DocType } from "./registry";
+export type { DocType, Writer } from "./registry";
 
 export { withAppAuth } from "./auth";
 export type { DeltaAuth, AuthError, AuthAction } from "./auth";
