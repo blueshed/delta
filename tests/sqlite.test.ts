@@ -2045,6 +2045,17 @@ describe("errors that name their fix", () => {
     expect(sock.sent[0].error.message).toContain("call createTables(db, schema) before the first open");
   });
 
+  test("a Postgres scope binding is refused at registration, naming :docId (D9)", () => {
+    const db = new Database(":memory:");
+    createTables(db, schema);
+    const pgStyle = defineDoc("mine:", { root: "projects", include: [], scope: { status: ":id" } });
+    expect(() => registerDocs(createWs(), db, schema, [pgStyle])).toThrow(
+      'registerDocs("mine:"): scope { status: ":id" } is the Postgres scope DSL; SQLite reads the doc name with ":docId" only (scope: { status: ":docId" })',
+    );
+    const literal = defineDoc("active:", { root: "projects", include: [], scope: { status: "active" } });
+    expect(() => registerDocs(createWs(), db, schema, [literal])).not.toThrow();
+  });
+
   test("a missing root row says a SQLite document is one root row", async () => {
     const db = new Database(":memory:");
     createTables(db, schema);

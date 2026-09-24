@@ -180,6 +180,16 @@ export function registerDocs(
   // Build lookup: prefix → DocDef
   const docByPrefix = new Map<string, DocDef>();
   for (const doc of docs) {
+    // A Postgres scope binding would be taken here as a literal to match, and
+    // the document would open as 404 for every name: say so at registration.
+    for (const [col, binding] of Object.entries(doc.scope)) {
+      if (binding !== ":docId" && /^(:|=:|<=:|>=:|like:|at:)/.test(binding)) {
+        throw new Error(
+          `registerDocs("${doc.prefix}"): scope { ${col}: "${binding}" } is the Postgres scope DSL; ` +
+          `SQLite reads the doc name with ":docId" only (scope: { ${col}: ":docId" })`,
+        );
+      }
+    }
     docByPrefix.set(doc.prefix, doc);
   }
 

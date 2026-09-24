@@ -131,6 +131,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   broadcast and acked it, and `jsonb_populate_record` dropped it on the way to the table: the
   subscribers were told a value that was never stored (`001a` adds `_delta_assert_fields`,
   `001d` calls it; `CREATE OR REPLACE`).
+- **SQLite: a Postgres scope binding is refused at registration.** `scope: { user_id: ":id" }`
+  (or `"<=:end"`, `"like:prefix"`) was taken as a literal to match, so every open was a 404.
+  `registerDocs` now throws, saying SQLite reads the doc name with `":docId"`.
 - **SQLite errors name their fix.** A missing table says "call createTables(db, schema) before
   the first open" (it said `no such table: current_lists`), and a document with no root row
   says which row it looked for and that a SQLite document is one root row and its children
