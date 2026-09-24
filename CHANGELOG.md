@@ -83,6 +83,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`undo` / `redo` take `dry: true` and `entry: id`** (both backends). `dry` answers what the
+  walk would do (`{ doc, entry, ops, conflict? }`) and walks nothing, so a caller can ask
+  whoever owns the document before it walks; `entry` walks only if that is the cursor's next
+  entry, and answers 409 if it is not.
 - **`connectWs(url, { onConnect })`**: a hook run on every connect, the first and each
   reconnect, before `connected` turns true and before any document opens or re-opens. Its
   client sends at once; everything else waits for it. Sign in there
@@ -124,6 +128,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Undo no longer clobbers what someone else wrote since** (SQLite; Postgres below). A walk
+  wrote the recorded inverse as it was, the whole row as it stood before the write, so a later
+  write by another cursor was lost, and that cursor's own undo brought back what had just been
+  undone. A walk now sets back only the fields its entry changed, and only where each still
+  holds what the entry left (a row it made is removed only if it is as it was left; a row it
+  removed is put back only if nobody has). A field someone has written since is a conflict:
+  the walk changes nothing and answers `{ doc, ops: [], conflict: [paths], entry, version }`,
+  which a caller can tell from `null` (nothing to walk).
+- **A walk that cannot apply no longer sticks the cursor** (both backends). Its failure rolled
+  back and recorded nothing, so every undo met the same entry and nothing before it could be
+  undone. A conflict, a walk the document refuses (4xx) and a walk that changes nothing are
+  recorded as walked (an entry with no ops, not walkable, never redone), and the next undo goes
+  on to the entry before.
+- **SQLite: undo stays quick behind a feed of facts.** The cursor's query had no index on
+  `undoes` and scanned the ledger to join its tips (102 ms per undo at 400,000 rows of ticks);
+  with the index and the tips joined first it is 0.05 ms.
 - **A reconnect no longer freezes a signed-in client's documents** (with `onConnect`, above).
   `connectWs` re-opened every document on the new socket before anything could sign it in, so
   with in-band `authenticate` each re-open was a 401, logged and dropped, and `doc.data` stayed

@@ -20,7 +20,7 @@ import type { WsServer } from "./server";
 import { trackSubscribe, trackUnsubscribe, onClientDrop } from "./server";
 import { applyOps as deltaApplyOps, type DeltaOp, splitPath, joinPath } from "../core";
 import { createLogger } from "./logger";
-import { createLedger, socketCursor } from "./ledger";
+import { createLedger, planWalk, socketCursor } from "./ledger";
 import {
   type ColumnDef,
   type Schema,
@@ -685,17 +685,39 @@ export function registerDocs(
   });
 
   if (ledger) {
-    /** Undo or redo: the cursor's next entry, walked through the same write path, recorded as walking it. */
+    /**
+     * Undo or redo: the cursor's next entry, walked through the same write path
+     * and recorded as walking it -- only the fields it changed, guarded by what
+     * it left (`planWalk`). A walk that meets a later write by someone else, or
+     * that no longer applies, changes nothing and answers `conflict`; it is
+     * recorded all the same, so the next walk goes on to the entry before it.
+     * `dry: true` answers what the walk would do and walks nothing; `entry: id`
+     * walks only if that is the cursor's next entry (409 otherwise).
+     */
     const walk = (way: "undo" | "redo") => (msg: any, client: any, respond: (r: any) => void) => {
       const cursor = cursorOf(msg, client);
       const entry = cursor === null ? undefined : way === "undo" ? ledger.nextUndo(cursor) : ledger.nextRedo(cursor);
       if (!entry) return respond({ result: null });
+      if (msg.entry != null && msg.entry !== entry.id) {
+        return respond({ error: { code: 409, message: `The cursor's next entry to ${way} is ${entry.id}, not ${msg.entry}` } });
+      }
       const match = findDoc(entry.doc);
       const doc = match && load(entry.doc, match.def, match.docId);
       if (!match || !doc) return respond({ error: { code: 404, message: `Not found: ${entry.doc}` } });
-      const out = write(entry.doc, match.def, doc, entry.inverse, { who: whoOf(client), cursor, undoes: entry.id });
-      if (!subscriptions.has(entry.doc)) cache.delete(entry.doc); // loaded for this walk only
-      respond("error" in out ? out : { result: { doc: entry.doc, ...out } });
+      try {
+        const plan = planWalk(entry, doc);
+        if (msg.dry) return respond({ result: { doc: entry.doc, entry: entry.id, ops: plan.ops, ...(plan.conflict.length ? { conflict: plan.conflict } : {}) } });
+        const by = { who: whoOf(client), cursor };
+        const out = plan.conflict.length || !plan.ops.length ? null : write(entry.doc, match.def, doc, plan.ops, { ...by, undoes: entry.id });
+        if (out && !("error" in out) && out.entry !== undefined) return respond({ result: { doc: entry.doc, ...out } });
+        if (out && "error" in out && out.error.code >= 500) return respond(out);
+        // A conflict, a walk the document refuses, or one that changes nothing: walked all the same.
+        const skipped = ledger.skip({ doc: entry.doc, ...by, undoes: entry.id });
+        const conflict = plan.conflict.length ? plan.conflict : out && "error" in out ? plan.ops.map((o) => o.path) : undefined;
+        respond({ result: { doc: entry.doc, ops: [], inverse: [], version: skipped.version, entry: skipped.entry, ...(conflict ? { conflict } : {}) } });
+      } finally {
+        if (!subscriptions.has(entry.doc)) cache.delete(entry.doc); // loaded for this walk only
+      }
     };
     ws.on("undo", walk("undo"));
     ws.on("redo", walk("redo"));
