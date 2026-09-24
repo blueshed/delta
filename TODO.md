@@ -125,7 +125,12 @@ This is exactly the failure mode the comment at `sqlite.ts:~901` says the
 validator was hardened against. Either implement it (close + reinsert, same as
 the field batch) or reject it in `validateOps`. Postgres implements it correctly.
 
-### 4. JSON columns corrupt string values on cold read (SQLite) — CONFIRMED
+### 4. JSON columns corrupt string values on cold read (SQLite) — FIXED
+
+> **FIXED** (round 2): every json value is stored with `JSON.stringify`, strings
+> included, and decoded with `JSON.parse`. The decode still keeps a string it
+> cannot parse, because an earlier release stored strings raw. Regression test:
+> `tests/sqlite.test.ts` → "json columns keep their types across a cold read".
 
 `src/server/sqlite.ts:1210` (encode) and `:1221` (decode). Encode skips
 stringifying a value that is *already* a string; decode `JSON.parse`s any string

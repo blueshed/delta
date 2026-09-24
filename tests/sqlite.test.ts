@@ -2069,3 +2069,29 @@ describe("errors that name their fix", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// TODO #4: a json column's string value survives a cold read. It was stored
+// raw, so "123" came back as 123 and "true" as true.
+// ---------------------------------------------------------------------------
+
+describe("json columns keep their types across a cold read", () => {
+  test("strings that look like JSON stay strings", async () => {
+    const db = new Database(":memory:");
+    createTables(db, schema);
+    db.run("INSERT INTO projects (id, name, status, valid_from) VALUES ('p1', 'P', 'active', '2020-01-01 00:00:00')");
+    const write = createWs();
+    registerDocs(write, db, schema, [projectDoc]);
+    const sock = mockSocket();
+    await write.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+    const values = ["123", "true", "[1,2]", "hello", 7, { a: "1" }];
+    for (const [i, meta] of values.entries()) {
+      await write.websocket.message(sock, JSON.stringify({ id: 2 + i, action: "delta", doc: "project:p1", ops: [{ op: "replace", path: "/projects/meta", value: meta }] }));
+      const cold = createWs();                                  // a fresh backend: nothing cached
+      registerDocs(cold, db, schema, [projectDoc]);
+      const reader = mockSocket();
+      await cold.websocket.message(reader, JSON.stringify({ id: 1, action: "open", doc: "project:p1" }));
+      expect(reader.sent[0].result.projects.meta).toEqual(meta);
+    }
+  });
+});

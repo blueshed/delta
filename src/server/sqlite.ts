@@ -1482,7 +1482,9 @@ function encodeValue(table: ResolvedTable, col: string, value: unknown): any {
   const def = table.columns[col];
   if (!def) return value ?? null;
 
-  if (def.type === "json" && value != null && typeof value !== "string") {
+  // Every json value is stored as JSON, strings included: a string stored raw
+  // came back from a cold read parsed ("123" as 123, "true" as true).
+  if (def.type === "json" && value != null) {
     return JSON.stringify(value);
   }
   if (def.type === "boolean") {
@@ -1494,7 +1496,7 @@ function encodeValue(table: ResolvedTable, col: string, value: unknown): any {
 function decodeRow(table: ResolvedTable, row: any) {
   for (const [col, def] of Object.entries(table.columns)) {
     if (def.type === "json" && typeof row[col] === "string") {
-      try { row[col] = JSON.parse(row[col]); } catch {}
+      try { row[col] = JSON.parse(row[col]); } catch { /* a string an earlier release stored raw: keep it */ }
     }
     if (def.type === "boolean" && row[col] != null) {
       row[col] = !!row[col];

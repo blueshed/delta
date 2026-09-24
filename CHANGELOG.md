@@ -147,6 +147,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SQLite: a Postgres scope binding is refused at registration.** `scope: { user_id: ":id" }`
   (or `"<=:end"`, `"like:prefix"`) was taken as a literal to match, so every open was a 404.
   `registerDocs` now throws, saying SQLite reads the doc name with `":docId"`.
+- **SQLite: a json column's string value survives a cold read** (TODO #4). Strings were stored
+  raw and parsed on the way back, so `"123"` came back as `123` and `"true"` as `true` after a
+  restart or eviction. Every json value is now stored as JSON; a raw string an earlier release
+  stored still reads back as the string it was.
 - **SQLite errors name their fix.** A missing table says "call createTables(db, schema) before
   the first open" (it said `no such table: current_lists`), and a document with no root row
   says which row it looked for and that a SQLite document is one root row and its children
