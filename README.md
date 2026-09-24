@@ -32,7 +32,7 @@ setLogLevel("warn");
 // A shopping list: a row per list, its items in a map.
 const schema = defineSchema({
   lists: { columns: { title: "text?" }, temporal: false },
-  items: { parent: "lists", columns: { text: "text", done: "boolean" }, temporal: false },
+  items: { parent: "lists", columns: { text: "text", done: { type: "boolean", default: false } }, temporal: false },
 });
 const list = defineDoc("list:", { root: "lists", include: ["items"], implied: true });
 

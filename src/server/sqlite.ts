@@ -1315,7 +1315,8 @@ function insertCollectionRow(
   if (db.query(`SELECT 1 FROM ${live} WHERE id = ?`).get(id)) {
     refuse(409, `Row already exists: ${joinPath(table.docKey, id)} -- replace it, or add to ${joinPath(table.docKey, "-")} for a new id`);
   }
-  const fullRow: any = { ...row, id };   // the path names the row, whatever the value says
+  const fullRow: any = { id, ...row };
+  fullRow.id = id;   // the path names the row, whatever the value says
   if (table.temporal) { fullRow.valid_from = ts; fullRow.valid_to = null; }
 
   // Resolve FK column
