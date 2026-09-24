@@ -9,6 +9,10 @@ calls, caches and sockets. The whole package is small enough to read in one sitt
 fit in an AI's context), there is one way to do each thing, and the browser code stays the same
 wherever the truth is kept.
 
+Delta runs on [Bun](https://bun.sh). It ships TypeScript source (the exports are `.ts` files),
+the SQLite backend uses `bun:sqlite` and the server uses `Bun.serve`. The browser code needs a
+bundler; Bun's HTML imports do it with no configuration.
+
 ## Try it
 
 ```sh
@@ -77,7 +81,7 @@ same way.
 
 | The truth is | Register it with | From |
 |---|---|---|
-| a JSON file | `registerDoc(ws, name, { file, empty })` | `@blueshed/delta/server` |
+| a JSON file | `await registerDoc(ws, name, { file, empty })` | `@blueshed/delta/server` |
 | a SQLite database | `registerDocs(ws, db, schema, docs)` | `@blueshed/delta/sqlite` |
 | a Postgres database, shared by processes | `createDocListener(ws, pool)` and `registerDocType(docTypeFromDef(def, pool))` | `@blueshed/delta/postgres` |
 | this process (who is online) | `registerMemory(ws, { prefix, empty })` | `@blueshed/delta/kinds` |
@@ -88,15 +92,23 @@ Start with a JSON file and move to a database when you need queries or more than
 
 ## Undo comes with the ledger
 
-Pass `{ ledger: true }` to the SQLite or Postgres backend and every write is recorded in its own
-transaction: what it did, its inverse, the document's version, who made it and the cursor undo
+Pass `{ ledger: true }` to the SQLite or Postgres backend and every write is recorded in the
+write's own transaction: what it did, its inverse, the document's version, who made it and the cursor undo
 walks. `undo`, `redo` and `history` then work with no more code. Over a socket the cursor is
-the connection, so a browser undoes only what it wrote. On Postgres the ledger is in the
-database, so a write made in one process can be undone from another.
+the connection, so a browser undoes only what it wrote:
+
+```ts
+const ws = connectWs("/ws");
+await ws.send({ action: "undo" });   // or "redo"; answers null when there is nothing to walk
+```
+
+On Postgres the ledger is in the database, so a write made in one process can be undone from
+another.
 
 ## In the browser, or in the same process
 
-Served over a socket with `createWs()`, a browser opens a document as a reactive value:
+Served over a socket with `createWs()`, a browser opens a document as a reactive value (the
+client needs `@blueshed/railroad`: `bun add @blueshed/railroad`):
 
 ```ts
 import { connectWs, openDoc } from "@blueshed/delta/client";
@@ -107,6 +119,7 @@ doc.onOps((ops) => render(ops));   // every change, including your own
 await doc.send([{ op: "replace", path: "/items/milk/done", value: true }]);
 ```
 
+In a clone of this repository (`examples/` is not in the npm package),
 `bun examples/shared-state/server.ts` runs a chat in two browser tabs on a JSON file, with no
 database and no schema.
 
@@ -122,6 +135,19 @@ writing, and `onPublish` is the one stream of changes to redraw from.
 - eta, a private server-rendering kernel, builds on delta in-process through `createLocal()`.
 
 Starting a new app? `bun create blueshed my-app` sets up delta and railroad together.
+
+## Optional peers
+
+`bun add @blueshed/delta` installs none of these; add the ones the parts you use need.
+
+| You use | Also add |
+|---|---|
+| `@blueshed/delta/client` (the browser) | `@blueshed/railroad` |
+| `@blueshed/delta/postgres` | `pg` |
+| `@blueshed/delta/auth-jwt` | `jose` and `pg` |
+
+The core, the JSON-file and SQLite backends, `local`, `kinds`, `dom-ops` and `logger` need
+nothing else.
 
 ## Where to go next
 
