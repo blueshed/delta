@@ -20,22 +20,22 @@ function setup(options: Parameters<typeof registerDocs>[5] = { ledger: true }) {
   const heard: any[] = [];
   local.onPublish((_channel, data) => heard.push(data));
   registerDocs(local.server, db, schema, [room, board], [], options);
-  const say = (caller: { call: typeof local.call }, cursor: string, id: string, text: string, doc = "room:a") => {
-    caller.call("open", { doc });
-    return caller.call("delta", { doc, ops: [{ op: "add", path: `/messages/${id}`, value: { text } }], cursor });
+  const say = async (caller: { call: typeof local.call }, cursor: string, id: string, text: string, doc = "room:a") => {
+    await caller.call("open", { doc });
+    return await caller.call("delta", { doc, ops: [{ op: "add", path: `/messages/${id}`, value: { text } }], cursor });
   };
-  const texts = (doc = "room:a") => Object.values(local.call("open", { doc }).result.messages).map((m: any) => m.text).sort();
+  const texts = async (doc = "room:a") => Object.values((await local.call("open", { doc })).result.messages).map((m: any) => m.text).sort();
   return { db, local, heard, say, texts };
 }
 
 describe("the ledger", () => {
-  test("every write is recorded with its inverse and the document's version, and the answer and the broadcast say the version", () => {
+  test("every write is recorded with its inverse and the document's version, and the answer and the broadcast say the version", async () => {
     const { db, local, heard, say } = setup();
-    const first = say(local, "s1", "m1", "hi");
+    const first = await say(local, "s1", "m1", "hi");
     expect(first.result).toEqual({ ack: true, ops: [{ op: "add", path: "/messages/m1", value: { id: "m1", rooms_id: "a", text: "hi" } }], inverse: [{ op: "remove", path: "/messages/m1" }], version: 1, entry: 1 });
-    expect(say(local, "s1", "m2", "there").result.version).toBe(2);
-    expect(say(local, "s1", "m3", "elsewhere", "room:b").result.version).toBe(1); // versions are per document
-    expect(heard.at(-1)).toMatchObject({ doc: "room:b", version: 1 });
+    expect((await say(local, "s1", "m2", "there")).result.version).toBe(2);
+    expect((await say(local, "s1", "m3", "elsewhere", "room:b")).result.version).toBe(1); // versions are per document
+    expect(heard.at(-1)).toMatchObject({ doc: "room:b", v: 1 });
     expect(db.query("SELECT doc, version, cursor FROM delta_ledger ORDER BY id").all()).toEqual([
       { doc: "room:a", version: 1, cursor: "s1" },
       { doc: "room:a", version: 2, cursor: "s1" },
@@ -43,87 +43,87 @@ describe("the ledger", () => {
     ]);
   });
 
-  test("who: the identity a caller is, written as the auth module has it", () => {
+  test("who: the identity a caller is, written as the auth module has it", async () => {
     const { db, local, say } = setup();
-    say(local.as({ id: 7 }), "s1", "m1", "a");
-    say(local.as("ada"), "s2", "m2", "b");
-    say(local, "s3", "m3", "c");
+    await say(local.as({ id: 7 }), "s1", "m1", "a");
+    await say(local.as("ada"), "s2", "m2", "b");
+    await say(local, "s3", "m3", "c");
     expect(db.query("SELECT who FROM delta_ledger ORDER BY id").all()).toEqual([{ who: '{"id":7}' }, { who: "ada" }, { who: null }]);
     const named = setup({ ledger: true, who: (identity) => `user-${(identity as { id: number }).id}` });
-    named.say(named.local.as({ id: 7 }), "s1", "m1", "a");
+    await named.say(named.local.as({ id: 7 }), "s1", "m1", "a");
     expect(named.db.query("SELECT who FROM delta_ledger").get()).toEqual({ who: "user-7" });
     expect(local.as({ id: 7 })).toBe(local.as({ id: 7 })); // one client per identity
   });
 
-  test("undo walks back what its cursor wrote, newest first, and nobody else's; redo walks it forward; a fresh write ends redo", () => {
+  test("undo walks back what its cursor wrote, newest first, and nobody else's; redo walks it forward; a fresh write ends redo", async () => {
     const { local, say, texts } = setup();
-    say(local, "s1", "m1", "one");
-    say(local, "s2", "m2", "theirs");
-    say(local, "s1", "m3", "three");
+    await say(local, "s1", "m1", "one");
+    await say(local, "s2", "m2", "theirs");
+    await say(local, "s1", "m3", "three");
 
-    expect(local.call("undo", { cursor: "s1" }).result).toMatchObject({ doc: "room:a", ops: [{ op: "remove", path: "/messages/m3" }], version: 4 });
-    expect(texts()).toEqual(["one", "theirs"]);
-    local.call("undo", { cursor: "s1" });
-    expect(texts()).toEqual(["theirs"]);
-    expect(local.call("undo", { cursor: "s1" }).result).toBeNull(); // nothing left of s1's
+    expect((await local.call("undo", { cursor: "s1" })).result).toMatchObject({ doc: "room:a", ops: [{ op: "remove", path: "/messages/m3" }], version: 4 });
+    expect(await texts()).toEqual(["one", "theirs"]);
+    await local.call("undo", { cursor: "s1" });
+    expect(await texts()).toEqual(["theirs"]);
+    expect((await local.call("undo", { cursor: "s1" })).result).toBeNull(); // nothing left of s1's
 
-    local.call("redo", { cursor: "s1" });
-    expect(texts()).toEqual(["one", "theirs"]);
-    say(local, "s1", "m4", "fresh");
-    expect(local.call("redo", { cursor: "s1" }).result).toBeNull(); // the fresh write ended what could be redone
-    expect(local.call("undo", {}).result).toBeNull(); // no cursor, nothing to walk
+    await local.call("redo", { cursor: "s1" });
+    expect(await texts()).toEqual(["one", "theirs"]);
+    await say(local, "s1", "m4", "fresh");
+    expect((await local.call("redo", { cursor: "s1" })).result).toBeNull(); // the fresh write ended what could be redone
+    expect((await local.call("undo", {})).result).toBeNull(); // no cursor, nothing to walk
   });
 
-  test("a fact is recorded and never undone: undo passes over it, and it ends no redo", () => {
+  test("a fact is recorded and never undone: undo passes over it, and it ends no redo", async () => {
     const { local, say, texts } = setup();
-    say(local, "s1", "m1", "mine");
-    local.call("delta", { doc: "room:a", ops: [{ op: "add", path: "/messages/f1", value: { text: "fact" } }], cursor: "s1", undoable: false });
-    local.call("undo", { cursor: "s1" });
-    expect(texts()).toEqual(["fact"]);
-    local.call("delta", { doc: "room:a", ops: [{ op: "add", path: "/messages/f2", value: { text: "fact 2" } }], cursor: "s1", undoable: false });
-    local.call("redo", { cursor: "s1" });
-    expect(texts()).toEqual(["fact", "fact 2", "mine"]);
+    await say(local, "s1", "m1", "mine");
+    await local.call("delta", { doc: "room:a", ops: [{ op: "add", path: "/messages/f1", value: { text: "fact" } }], cursor: "s1", undoable: false });
+    await local.call("undo", { cursor: "s1" });
+    expect(await texts()).toEqual(["fact"]);
+    await local.call("delta", { doc: "room:a", ops: [{ op: "add", path: "/messages/f2", value: { text: "fact 2" } }], cursor: "s1", undoable: false });
+    await local.call("redo", { cursor: "s1" });
+    expect(await texts()).toEqual(["fact", "fact 2", "mine"]);
   });
 
-  test("undo reaches a document nobody has open, and leaves it closed", () => {
+  test("undo reaches a document nobody has open, and leaves it closed", async () => {
     const { local, say, texts } = setup();
-    say(local, "s1", "m1", "one");
-    local.call("close", { doc: "room:a" });
-    local.call("undo", { cursor: "s1" });
-    expect(texts()).toEqual([]);
+    await say(local, "s1", "m1", "one");
+    await local.call("close", { doc: "room:a" });
+    await local.call("undo", { cursor: "s1" });
+    expect(await texts()).toEqual([]);
   });
 
-  test("a temporal row comes back through undo: its storage columns are not written back", () => {
+  test("a temporal row comes back through undo: its storage columns are not written back", async () => {
     const { local } = setup();
-    local.call("open", { doc: "board:x" });
-    local.call("delta", { doc: "board:x", ops: [{ op: "add", path: "/cards/c1", value: { title: "card" } }], cursor: "s1" });
-    local.call("delta", { doc: "board:x", ops: [{ op: "remove", path: "/cards/c1" }], cursor: "s1" });
-    const undone = local.call("undo", { cursor: "s1" });
+    await local.call("open", { doc: "board:x" });
+    await local.call("delta", { doc: "board:x", ops: [{ op: "add", path: "/cards/c1", value: { title: "card" } }], cursor: "s1" });
+    await local.call("delta", { doc: "board:x", ops: [{ op: "remove", path: "/cards/c1" }], cursor: "s1" });
+    const undone = await local.call("undo", { cursor: "s1" });
     expect(undone.error).toBeUndefined();
-    expect(Object.values(local.call("open", { doc: "board:x" }).result.cards).map((c: any) => c.title)).toEqual(["card"]);
+    expect(Object.values((await local.call("open", { doc: "board:x" })).result.cards).map((c: any) => c.title)).toEqual(["card"]);
   });
 
-  test("history says, per entry, whether the asker wrote it -- never who did, never a cursor", () => {
+  test("history says, per entry, whether the asker wrote it -- never who did, never a cursor", async () => {
     const { local, say } = setup();
-    say(local, "s1", "m1", "one");
-    say(local.as("bob"), "s2", "m2", "two");
-    const entries = local.call("history", { doc: "room:a", cursor: "s1" }).result;
+    await say(local, "s1", "m1", "one");
+    await say(local.as("bob"), "s2", "m2", "two");
+    const entries = (await local.call("history", { doc: "room:a", cursor: "s1" })).result;
     expect(entries.map((e: any) => [e.version, e.mine])).toEqual([[2, false], [1, true]]);
     expect(JSON.stringify(entries)).not.toContain("bob");
     expect(JSON.stringify(entries)).not.toContain("s2");
-    expect(local.call("history", { doc: "elsewhere:1" }).error).toBeDefined(); // not a document this backend has
+    expect((await local.call("history", { doc: "elsewhere:1" })).error).toBeDefined(); // not a document this backend has
   });
 
-  test("without the ledger, nothing is recorded and the actions are not there", () => {
+  test("without the ledger, nothing is recorded and the actions are not there", async () => {
     const { db, local, say } = setup({});
-    expect(say(local, "s1", "m1", "one").result).toEqual({ ack: true });
+    expect((await say(local, "s1", "m1", "one")).result).toEqual({ ack: true });
     expect(db.query("SELECT name FROM sqlite_master WHERE name = 'delta_ledger'").get()).toBeNull();
-    expect(local.call("undo", { cursor: "s1" }).error?.message).toContain("No handler matched");
+    expect((await local.call("undo", { cursor: "s1" })).error?.message).toContain("No handler matched");
   });
 });
 
 describe("the cursor, over a socket", () => {
-  test("is the connection itself: a socket client cannot name another's", () => {
+  test("is the connection itself: a socket client cannot name another's", async () => {
     const db = new Database(":memory:");
     createTables(db, schema);
     const handlers = new Map<string, ActionHandler[]>();

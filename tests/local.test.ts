@@ -20,24 +20,24 @@ function setup() {
 }
 
 describe("createLocal", () => {
-  test("opens, writes and hears the broadcast, with no socket", () => {
+  test("opens, writes and hears the broadcast, with no socket", async () => {
     const { local, heard } = setup();
-    expect(local.call("open", { doc: "room:a" }).result).toEqual({ rooms: { id: "a", topic: null }, messages: {} });
-    expect(local.call("delta", { doc: "room:a", ops: [{ op: "add", path: "/messages/m1", value: { text: "hi" } }] }).result).toEqual({ ack: true });
+    expect((await local.call("open", { doc: "room:a" })).result).toEqual({ rooms: { id: "a", topic: null }, messages: {} });
+    expect((await local.call("delta", { doc: "room:a", ops: [{ op: "add", path: "/messages/m1", value: { text: "hi" } }] })).result).toEqual({ ack: true });
     expect(heard).toEqual([{ channel: "room:a", data: { doc: "room:a", ops: [{ op: "add", path: "/messages/m1", value: { id: "m1", rooms_id: "a", text: "hi" } }] } }]);
   });
 
-  test("an unknown action answers with an error", () => {
-    expect(setup().local.call("nope", {}).error?.message).toContain("No handler matched");
+  test("an unknown action answers with an error", async () => {
+    expect((await setup().local.call("nope", {})).error?.message).toContain("No handler matched");
   });
 
-  test("an asynchronous handler throws rather than answering nothing", () => {
+  test("a handler that answers after an await is waited for", async () => {
     const local = createLocal();
-    local.server.on("slow", async (_m, _c, respond) => { await Bun.sleep(0); respond({ result: 1 }); });
-    expect(() => local.call("slow", {})).toThrow("asynchronous");
+    local.server.on("slow", async (_m, _c, respond) => { await Bun.sleep(1); respond({ result: 1 }); });
+    expect((await local.call("slow", {})).result).toBe(1);
   });
 
-  test("unsubscribing from publish stops the hearing", () => {
+  test("unsubscribing from publish stops the hearing", async () => {
     const local = createLocal();
     const heard: string[] = [];
     const off = local.onPublish((channel) => heard.push(channel));
@@ -49,56 +49,56 @@ describe("createLocal", () => {
 });
 
 describe("implied docs", () => {
-  test("open empty without making a row; the first write makes it", () => {
+  test("open empty without making a row; the first write makes it", async () => {
     const { db, local } = setup();
-    local.call("open", { doc: "room:attic" });
+    await local.call("open", { doc: "room:attic" });
     expect(db.query("SELECT COUNT(*) AS n FROM rooms").get()).toEqual({ n: 0 });
-    local.call("delta", { doc: "room:attic", ops: [{ op: "add", path: "/messages/m1", value: { text: "up here" } }] });
+    await local.call("delta", { doc: "room:attic", ops: [{ op: "add", path: "/messages/m1", value: { text: "up here" } }] });
     expect(db.query("SELECT id FROM rooms").all()).toEqual([{ id: "attic" }]);
     expect(db.query("SELECT rooms_id FROM messages").all()).toEqual([{ rooms_id: "attic" }]);
   });
 
-  test("a failed first write makes no row", () => {
+  test("a failed first write makes no row", async () => {
     const { db, local } = setup();
-    local.call("open", { doc: "room:attic" });
-    const answer = local.call("delta", { doc: "room:attic", ops: [{ op: "replace", path: "/messages/ghost/text", value: "x" }] });
+    await local.call("open", { doc: "room:attic" });
+    const answer = await local.call("delta", { doc: "room:attic", ops: [{ op: "replace", path: "/messages/ghost/text", value: "x" }] });
     expect(answer.error).toBeDefined();
     expect(db.query("SELECT COUNT(*) AS n FROM rooms").get()).toEqual({ n: 0 });
   });
 
-  test("an implied doc cannot also declare a scope", () => {
+  test("an implied doc cannot also declare a scope", async () => {
     expect(() => defineDoc("x:", { root: "rooms", include: [], scope: { id: ":docId" }, implied: true })).toThrow("implied");
   });
 
-  test("a doc that is not implied still 404s", () => {
+  test("a doc that is not implied still 404s", async () => {
     const local = createLocal();
     const db = new Database(":memory:");
     createTables(db, schema);
     registerDocs(local.server, db, schema, [defineDoc("plain:", { root: "rooms", include: ["messages"] })]);
-    expect(local.call("open", { doc: "plain:nowhere" }).error?.code).toBe(404);
+    expect((await local.call("open", { doc: "plain:nowhere" })).error?.code).toBe(404);
   });
 });
 
 describe("savepoints", () => {
-  test("a write inside the caller's transaction rolls back with it", () => {
+  test("a write inside the caller's transaction rolls back with it", async () => {
     const { db, local, evict } = setup();
     db.exec("BEGIN");
-    local.call("open", { doc: "room:a" });
-    local.call("delta", { doc: "room:a", ops: [{ op: "add", path: "/messages/m1", value: { text: "hi" } }] });
+    await local.call("open", { doc: "room:a" });
+    await local.call("delta", { doc: "room:a", ops: [{ op: "add", path: "/messages/m1", value: { text: "hi" } }] });
     expect(db.query("SELECT COUNT(*) AS n FROM messages").get()).toEqual({ n: 1 });
     db.exec("ROLLBACK");
     evict("room:a");
     expect(db.query("SELECT COUNT(*) AS n FROM messages").get()).toEqual({ n: 0 });
-    expect(local.call("open", { doc: "room:a" }).result.messages).toEqual({});
+    expect((await local.call("open", { doc: "room:a" })).result.messages).toEqual({});
   });
 
-  test("a failed write inside the caller's transaction leaves the caller's own work alone", () => {
+  test("a failed write inside the caller's transaction leaves the caller's own work alone", async () => {
     const { db, local } = setup();
-    local.call("open", { doc: "room:a" });
-    local.call("delta", { doc: "room:a", ops: [{ op: "add", path: "/messages/m1", value: { text: "hi" } }] });
+    await local.call("open", { doc: "room:a" });
+    await local.call("delta", { doc: "room:a", ops: [{ op: "add", path: "/messages/m1", value: { text: "hi" } }] });
     db.exec("BEGIN");
     db.run("UPDATE messages SET text = 'mine' WHERE id = 'm1'");
-    const answer = local.call("delta", { doc: "room:a", ops: [{ op: "replace", path: "/messages/ghost/text", value: "x" }] });
+    const answer = await local.call("delta", { doc: "room:a", ops: [{ op: "replace", path: "/messages/ghost/text", value: "x" }] });
     expect(answer.error).toBeDefined();
     expect(db.query("SELECT text FROM messages").get()).toEqual({ text: "mine" });
     db.exec("COMMIT");
@@ -106,29 +106,29 @@ describe("savepoints", () => {
 });
 
 describe("inverse", () => {
-  test("asked for, the answer carries what was applied and its inverse", () => {
+  test("asked for, the answer carries what was applied and its inverse", async () => {
     const { local } = setup();
-    local.call("open", { doc: "room:a" });
-    const answer = local.call("delta", { doc: "room:a", ops: [{ op: "add", path: "/messages/m1", value: { text: "hi" } }], inverse: true });
+    await local.call("open", { doc: "room:a" });
+    const answer = await local.call("delta", { doc: "room:a", ops: [{ op: "add", path: "/messages/m1", value: { text: "hi" } }], inverse: true });
     expect(answer.result.ops).toEqual([{ op: "add", path: "/messages/m1", value: { id: "m1", rooms_id: "a", text: "hi" } }]);
     expect(answer.result.inverse).toEqual([{ op: "remove", path: "/messages/m1" }]);
   });
 
-  test("applying the inverse restores the document, and its own inverse is the write again", () => {
+  test("applying the inverse restores the document, and its own inverse is the write again", async () => {
     const { local } = setup();
-    const open = () => local.call("open", { doc: "room:a" }).result;
-    open();
-    local.call("delta", { doc: "room:a", ops: [{ op: "add", path: "/messages/m1", value: { text: "hi" } }, { op: "replace", path: "/rooms/topic", value: "tea" }] });
-    const before = structuredClone(open());
-    const write = local.call("delta", { doc: "room:a", ops: [{ op: "remove", path: "/messages/m1" }, { op: "replace", path: "/rooms/topic", value: "coffee" }], inverse: true });
-    const after = structuredClone(open());
-    const undo = local.call("delta", { doc: "room:a", ops: write.result.inverse, inverse: true });
-    expect(open()).toEqual(before);
-    local.call("delta", { doc: "room:a", ops: undo.result.inverse });
-    expect(open()).toEqual(after);
+    const open = async () => (await local.call("open", { doc: "room:a" })).result;
+    await open();
+    await local.call("delta", { doc: "room:a", ops: [{ op: "add", path: "/messages/m1", value: { text: "hi" } }, { op: "replace", path: "/rooms/topic", value: "tea" }] });
+    const before = structuredClone(await open());
+    const write = await local.call("delta", { doc: "room:a", ops: [{ op: "remove", path: "/messages/m1" }, { op: "replace", path: "/rooms/topic", value: "coffee" }], inverse: true });
+    const after = structuredClone(await open());
+    const undo = await local.call("delta", { doc: "room:a", ops: write.result.inverse, inverse: true });
+    expect(await open()).toEqual(before);
+    await local.call("delta", { doc: "room:a", ops: undo.result.inverse });
+    expect(await open()).toEqual(after);
   });
 
-  test("a run of removes comes back parent first; other ops in reverse", () => {
+  test("a run of removes comes back parent first; other ops in reverse", async () => {
     const before = { p: { 1: { id: "1" } }, c: { 2: { id: "2", p_id: "1" } }, r: { id: "r", x: 1 } };
     expect(inverseOf(before, [
       { op: "replace", path: "/r", value: { id: "r", x: 2 } },

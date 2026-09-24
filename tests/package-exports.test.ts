@@ -78,6 +78,7 @@ describe("package exports", () => {
     "./server": "createWs",
     "./sqlite": "registerDocs",
     "./local": "createLocal",
+    "./kinds": "registerSource",
     "./postgres": "createDocListener",
     "./logger": "createLogger",
     "./auth": "wireAuth",

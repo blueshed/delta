@@ -137,7 +137,10 @@ You don't seed anything by hand — just have the cluster running and the
 - `src/server/ledger.ts` — the ledger: a write, its inverse, its version, who
   made it and the cursor undo walks (named in-process; the connection on a socket).
 - `src/server/local.ts` — `createLocal()`: delta in-process, no socket;
-  `as(identity)` for who is writing.
+  `as(identity)` for who is writing. Calls are async, so every backend answers through it.
+- `src/server/kinds.ts` — documents not stored in a database: `registerMemory` (live),
+  `registerStatic` (fixed for the release), `registerSource` (one shared reading from outside,
+  stamped `at`, `stale` when it goes quiet).
 - `src/server/postgres/` — Postgres backend (listener, registry, codegen,
   schema, bootstrap, auth).
 - `src/server/auth*.ts` — `DeltaAuth` contract + reference JWT impl.

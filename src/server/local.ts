@@ -20,10 +20,9 @@
  * `gate` and the ledger's `who` read it. A caller here is trusted to name the
  * cursor undo walks; one on the socket is not (its cursor is its connection).
  *
- * Calls are synchronous: the SQLite backend's handlers are, and a caller
- * inside its own transaction needs them to be. A handler that answers only
- * after an `await` (the Postgres backend) throws here rather than returning
- * nothing.
+ * Calls are asynchronous, so any backend answers through them: the SQLite
+ * backend's handlers answer at once, the Postgres backend's after the
+ * database does.
  */
 import type { ActionHandler, WsServer } from "./server";
 
@@ -34,8 +33,8 @@ type LocalClient = { data: Record<string, unknown>; subscribe(channel: string): 
 export interface Caller {
   /** The client its calls come from: subscriptions are recorded on it, as on a socket. */
   client: LocalClient;
-  /** Runs `action` with `msg` through the registered handlers and returns the first answer. */
-  call(action: string, msg: Record<string, unknown>): LocalAnswer;
+  /** Runs `action` with `msg` through the registered handlers and resolves with the first answer -- at once from a handler that answers at once (SQLite), when it answers from one that awaits (Postgres). */
+  call(action: string, msg: Record<string, unknown>): Promise<LocalAnswer>;
 }
 
 export interface Local extends Caller {
@@ -72,12 +71,11 @@ export function createLocal(): Local {
     websocket: { idleTimeout: 0, sendPings: false, publishToSelf: true, open() {}, message() {}, close() {} },
   };
 
-  function callAs(from: LocalClient, action: string, msg: Record<string, unknown>): LocalAnswer {
+  async function callAs(from: LocalClient, action: string, msg: Record<string, unknown>): Promise<LocalAnswer> {
     let answer: LocalAnswer | undefined;
     for (const handler of actions.get(action) ?? []) {
-      const pending = handler({ action, ...msg }, from, (response) => (answer ??= response));
+      await handler({ action, ...msg }, from, (response) => (answer ??= response));
       if (answer) return answer;
-      if (pending instanceof Promise) throw new Error(`delta local: the ${action} handler is asynchronous; createLocal() calls are synchronous`);
     }
     return { error: { code: -1, message: `No handler matched: ${action}` } };
   }

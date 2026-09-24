@@ -16,6 +16,7 @@
     "./server": "./src/server/server.ts",
     "./sqlite": "./src/server/sqlite.ts",
     "./local": "./src/server/local.ts",
+    "./kinds": "./src/server/kinds.ts",
     "./postgres": "./src/server/postgres/index.ts",
     "./logger": "./src/server/logger.ts",
     "./auth": "./src/server/auth.ts",

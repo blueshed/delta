@@ -541,7 +541,9 @@ export function registerDocs(
     subscriptions.get(docName)!.add(client);
     onClientDrop(client, releaseClient);
 
-    respond({ result: doc });
+    // with a ledger, the version the document is at, as the Postgres backend's open says it (`_v`),
+    // so a copy kept from the stream of changes knows where it starts
+    respond({ result: ledger ? { ...doc, _v: ledger.version(docName) } : doc });
     log.info(`opened ${docName}`);
   });
 
@@ -604,7 +606,7 @@ export function registerDocs(
       // Primary broadcast: to the doc's own subscribers -- and, through
       // `createLocal().onPublish`, the one stream of changes an in-process
       // caller (eta) redraws from
-      ws.publish(docName, { doc: docName, ops: written.ops, ...(written.version !== undefined ? { version: written.version } : {}) });
+      ws.publish(docName, { doc: docName, ops: written.ops, ...(written.version !== undefined ? { v: written.version } : {}) });
       // Cross-doc fan-out: find other open docs affected by these changes
       fanOut(ws, written.ops, docName);
       // Custom-doc cross-pollination: predicate-based membership.
