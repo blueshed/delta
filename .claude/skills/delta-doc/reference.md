@@ -96,13 +96,17 @@ ws.setServer(server);   // REQUIRED — without it ws.publish() is a no-op and b
 import { provide, effect } from "@blueshed/railroad";
 import { connectWs, WS, openDoc, call, DeltaError } from "@blueshed/delta/client";
 
-provide(WS, connectWs("/ws"));
+// Sign in on EVERY connect -- the first and each reconnect -- before any doc
+// opens or re-opens. `onConnect` runs first and everything else waits for it.
+// (An `await call("authenticate")` made once is not enough: a reconnect
+// re-opens every doc on a new, unauthenticated socket, they 401 and stop.)
+let signedIn!: (user: User) => void;
+const me = new Promise<User>((resolve) => (signedIn = resolve));
+provide(WS, connectWs("/ws", {
+  onConnect: async (ws) => signedIn(await call<User>("authenticate", { token: localStorage.token }, ws)),
+}));
 
-// Await authenticate BEFORE openDoc — an open sent on an unauthenticated
-// connection races ahead of auth and is rejected with 401.
-const me = await call<User>("authenticate", { token: localStorage.token });
-
-const items = openDoc<{ items: Record<string, Item> }>(`items:${me.id}`);
+const items = openDoc<{ items: Record<string, Item> }>(`items:${(await me).id}`);
 effect(() => console.log(items.data.get()));
 
 try {
@@ -118,29 +122,26 @@ try {
 await call("logout");
 ```
 
-**Session restore** — the client above assumes `localStorage.token` is set. For the full restore-on-load flow (present everywhere a real app ships), wrap bootstrap in a check:
+**Session restore** — the client above assumes `localStorage.token` is set. For the full restore-on-load flow (present everywhere a real app ships), read the token in the hook, so every connect signs in with the one stored now:
 
 ```ts
-async function bootstrap() {
-  const token = localStorage.getItem("token");
-  if (!token) return showLogin();
-  try {
-    const user = await call<User>("authenticate", { token });
-    showApp(user);
-  } catch {
-    localStorage.removeItem("token");  // stale or revoked
-    showLogin();
-  }
-}
+provide(WS, connectWs("/ws", {
+  onConnect: async (ws) => {
+    const token = localStorage.getItem("token");
+    if (!token) return showLogin();
+    try { showApp(await call<User>("authenticate", { token }, ws)); }   // on every connect: showApp must be idempotent
+    catch { localStorage.removeItem("token"); showLogin(); }           // stale or revoked
+  },
+}));
 
 async function login(email: string, password: string) {
   const user = await call<User & { token: string }>("login", { email, password });
-  localStorage.setItem("token", user.token);
+  localStorage.setItem("token", user.token);   // the next reconnect signs in with it
   showApp(user);
 }
 ```
 
-Token never goes in the WS URL — it's always in-band via `call("authenticate", ...)`.
+Token never goes in the WS URL — it's always in-band via `call("authenticate", ...)`. Cookie / `Authorization` auth at upgrade (`onUpgrade`) needs no hook: every new socket arrives signed in.
 
 ## Contracts
 
@@ -676,7 +677,7 @@ Worked example: [`examples/kanban/`](../../../examples/kanban/) (boards → colu
 
 All three backends broadcast **row-level** ops: SQLite/Postgres rewrite field writes server-side, and the JSON-file backend normalizes at broadcast time (`/cards/5/title` goes out as a whole-row replace of `/cards/5`). A keyed railroad `list()` therefore always sees a fresh row reference when a row changes — its default `Object.is` equality just works. Only a *custom* stream that mutates row objects in place and `touch()`es needs railroad's `list(..., keyFn, render, { equals: () => false })` (railroad ≥ 0.10.1).
 
-The sender is just another subscriber receiving its own op back (the code calls these "echoes"). Two consequences trip up anyone arriving from REST/Firebase/optimistic-UI habits:
+The sender is just another subscriber receiving its own op back (the code calls these "echoes"). **`await doc.send(ops)` resolves once that echo has been applied to `doc.data`**, on every backend: the JSON file and SQLite broadcast before they answer, and Postgres answers first, so the client waits for the version its ack names. Two consequences trip up anyone arriving from REST/Firebase/optimistic-UI habits:
 
 **Don't optimistically update.** Do not mutate the DOM or push into your local collection right after `send`. The echo already does it — doing it yourself double-applies: an `add` shows the row twice, a `replace` counter you also bump locally lands at +2, a chat line appears once optimistically and again on echo. The send path and the render path are the same path; keep all rendering on the render path.
 
@@ -946,6 +947,7 @@ Two things to know when driving `@blueshed/delta/client` from a Bun test or scri
   const bobDoc   = openDoc<Board>("board:1", bob);
   ```
 
+- **Pass an absolute URL** (`connectWs("ws://localhost:3000/ws")`): outside a browser there is no page to resolve `"/ws"` against, and `connectWs` says so. No `location` shim is needed. An absolute `wss://` stays `wss://`.
 - **`wsClient.close()` suppresses the reconnect loop.** `connectWs` returns a reconnecting socket; without `close()`, it tries to come back forever after the server stops, keeping the process alive. Always call `close()` (it's idempotent) before tearing a server down.
 
 ## Wire-level protocol

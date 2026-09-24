@@ -8,7 +8,7 @@
  *
  * Usage:
  *   import { connectWs, openDoc, call, WS } from "@blueshed/delta/client";
- *   import { provide } from "@blueshed/railroad";
+ *   import { provide } from "@blueshed/railroad/shared";
  *
  *   provide(WS, connectWs("/ws"));
  *
@@ -26,10 +26,11 @@
  * equivalent for projects without a keyed reactive list primitive; pick one
  * per project.
  */
-import {
-  signal, batch, createLogger, key, inject, tryInject,
-  hasActiveDisposeScope, trackDispose,
-} from "@blueshed/railroad";
+// Subpaths, not the root barrel: the barrel loads railroad's JSX, whose global
+// `JSX` namespace clashes with React's in an app that only wants the socket.
+import { signal, batch, hasActiveDisposeScope, trackDispose } from "@blueshed/railroad/signals";
+import { key, inject, tryInject } from "@blueshed/railroad/shared";
+import { createLogger } from "@blueshed/railroad/logger";
 import { applyOps, type DeltaOp } from "../core";
 
 export type { DeltaOp } from "../core";
@@ -158,18 +159,86 @@ export interface OpenDocEntry {
   /** True once the first open response has landed. Broadcasts arriving before
    *  that are dropped — the open snapshot is the authoritative starting state. */
   opened?: boolean;
+  /** `send()`s acked at a version this doc has not applied yet: each resolves when it has. */
+  echoWaiters?: Array<{ v: number; done: () => void }>;
+}
+
+/**
+ * Resolve the sends waiting for a version the doc has now applied -- all of
+ * them when the doc no longer versions, or is let go (`all`).
+ */
+function settleEchoes(entry: OpenDocEntry, all = false): void {
+  if (!entry.echoWaiters?.length) return;
+  const sv = entry.serverVersion;
+  entry.echoWaiters = entry.echoWaiters.filter((w) => {
+    if (!all && sv != null && w.v > sv) return true;
+    w.done();
+    return false;
+  });
+}
+
+/** How long a send waits for its echo before it resolves anyway (a backend that acks a version it never broadcasts). */
+const ECHO_WAIT_MS = 5000;
+
+/**
+ * `doc.send()` resolves once the doc has applied the write's own echo, on
+ * every backend: the JSON file and SQLite broadcast before they answer, and
+ * Postgres answers first and broadcasts through NOTIFY, so on Postgres the
+ * send waits for the version its ack names.
+ */
+function afterEcho(entry: OpenDocEntry, result: any): Promise<any> {
+  const v = Number(result?.version);
+  if (!Number.isFinite(v) || entry.serverVersion == null || entry.serverVersion >= v) return Promise.resolve(result);
+  return new Promise((resolve) => {
+    const waiter = { v, done: () => { clearTimeout(timer); resolve(result); } };
+    const timer = setTimeout(() => {
+      entry.echoWaiters = entry.echoWaiters?.filter((w) => w !== waiter);
+      resolve(result);
+    }, ECHO_WAIT_MS);
+    (entry.echoWaiters ??= []).push(waiter);
+  });
 }
 
 export const WS = key<WsClient>("ws");
 
+export interface ConnectOptions {
+  /** Keep this id across reconnects (the server's `clientId`, and so the ledger's cursor). */
+  clientId?: string;
+  /**
+   * Runs on every connect -- the first and each reconnect -- before
+   * `connected` turns true and before any document is opened or re-opened. Say
+   * who you are here, and a reconnect's re-opens go out signed in:
+   *
+   *   connectWs("/ws", { onConnect: (ws) => call("authenticate", { token }, ws) })
+   *
+   * The client it is given sends at once; everything else waits for it. A hook
+   * that throws is logged, and the documents open anyway (and may 401).
+   */
+  onConnect?: (client: WsClient) => unknown;
+}
+
+/**
+ * The socket URL: an absolute `ws:`/`wss:` URL as it is, `http:`/`https:` as
+ * `ws:`/`wss:`, and a relative one against the page, taking the page's
+ * scheme. Outside a browser there is no page, so the URL must be absolute.
+ */
+function socketUrl(wsPath: string): URL {
+  const page = typeof location === "undefined" ? undefined : location.href;
+  let url: URL;
+  try { url = new URL(wsPath, page); }
+  catch { throw new Error(`connectWs("${wsPath}"): outside a browser the URL must be absolute, e.g. ws://localhost:3000/ws`); }
+  if (url.protocol === "http:") url.protocol = "ws:";
+  else if (url.protocol === "https:") url.protocol = "wss:";
+  return url;
+}
+
 /** Connect to a delta-server WebSocket endpoint. */
 export function connectWs(
   wsPath: string = "/ws",
-  opts?: { clientId?: string },
+  opts?: ConnectOptions,
 ): WsClient {
   const log = createLogger("[ws]");
-  const url = new URL(wsPath, location.href);
-  url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  const url = socketUrl(wsPath);
   if (opts?.clientId) url.searchParams.set("clientId", opts.clientId);
   const connected = signal(false);
   const ws = reconnectingWebSocket(url.href);
@@ -189,15 +258,22 @@ export function connectWs(
     readyResolve = r;
   });
 
-  async function sendInternal(msg: any): Promise<any> {
-    if (isClosed) throw { code: 0, message: "closed" };
-    await ready;
+  /** A request on the socket as it is now. */
+  function request(msg: any): Promise<any> {
+    if (isClosed) return Promise.reject({ code: 0, message: "closed" });
     return new Promise((resolve, reject) => {
       const id = nextId++;
       pending.set(id, { resolve, reject });
       log.debug(`#${id} ${msg.action} ${msg.doc ?? msg.method ?? ""}`);
       ws.send(JSON.stringify({ ...msg, id }));
     });
+  }
+
+  /** A request once the socket is ready: connected, and `onConnect` done. */
+  async function sendInternal(msg: any): Promise<any> {
+    if (isClosed) throw { code: 0, message: "closed" };
+    await ready;
+    return request(msg);
   }
 
   // Apply a broadcast's ops: fire onOps subscribers FIRST (so DOM patchers see
@@ -235,8 +311,15 @@ export function connectWs(
       .catch((err: any) => { entry.resyncing = false; docLog.error(`resync ${name}: ${err.message}`); });
   }
 
-  ws.addEventListener("open", () => {
+  ws.addEventListener("open", async () => {
     log.info("connected");
+    if (opts?.onConnect) {
+      // Before anything else goes out: its requests skip the `ready` queue,
+      // and the re-opens below wait for it.
+      try { await opts.onConnect({ ...client, send: request }); }
+      catch (err: any) { log.error(`onConnect: ${err?.message ?? String(err)}`); }
+      if (isClosed || ws.readyState !== WebSocket.OPEN) return;   // dropped meanwhile; the next open runs it again
+    }
     connected.set(true);
     readyResolve();
     listeners.get("open")?.forEach((fn) => fn({}));
@@ -311,11 +394,13 @@ export function connectWs(
                 // Contiguous (v === sv + 1) — apply and advance.
                 applyBroadcast(entry, msg.ops);
                 entry.serverVersion = v;
+                settleEchoes(entry);
               }
             } else {
               // Unversioned backend (or no baseline yet) — apply as-is.
               applyBroadcast(entry, msg.ops);
               if (v != null) entry.serverVersion = v;
+              settleEchoes(entry);
             }
           }
         }
@@ -325,7 +410,7 @@ export function connectWs(
     }) as EventListener,
   );
 
-  return {
+  const client: WsClient = {
     connected,
     send: sendInternal,
     on(event: string, handler: NotifyHandler): () => void {
@@ -338,12 +423,14 @@ export function connectWs(
       isClosed = true;
       (ws as any).close?.();
       listeners.clear();
+      for (const entry of docs.values()) settleEchoes(entry, true);
       docs.clear();
       pending.forEach(({ reject }) => reject({ code: 0, message: "closed" }));
       pending.clear();
     },
     _docs: docs,
   };
+  return client;
 }
 
 // ---------------------------------------------------------------------------
@@ -354,6 +441,11 @@ export interface Doc<T> {
   data: ReturnType<typeof signal<T | null>>;
   dataVersion: ReturnType<typeof signal<number>>;
   ready: Promise<void>;
+  /**
+   * Send ops; resolves with the ack once this doc has applied the write's own
+   * echo, on every backend (on Postgres the echo follows the ack). Rejects
+   * with a `DeltaError`.
+   */
   send(ops: DeltaOp[]): Promise<any>;
   /**
    * Subscribe to the raw JSON-Patch ops as they arrive — BEFORE they are
@@ -430,6 +522,7 @@ function createEntry(): OpenDocEntry {
         }
       }
       entry.opened = true;
+      settleEchoes(entry, entry.serverVersion == null);
       const resolvers = entry.readyResolvers;
       entry.readyResolvers = [];
       for (const r of resolvers) r();
@@ -556,7 +649,8 @@ export function openDoc<T>(name: string, client?: WsClient): Doc<T> {
     get dataVersion() { return cur().dataVersion; },
     ready,
     send(ops: DeltaOp[]) {
-      return ensureClient().send({ action: "delta", doc: name, ops });
+      // Resolves once this doc has applied the write's echo (see afterEcho).
+      return ensureClient().send({ action: "delta", doc: name, ops }).then((result) => afterEcho(cur(), result));
     },
     onOps(handler) {
       cur().opsHandlers.add(handler);
@@ -568,6 +662,7 @@ export function openDoc<T>(name: string, client?: WsClient): Doc<T> {
       const e = cur();
       e.refs--;
       if (e.refs > 0) return;
+      settleEchoes(e, true);
       if (pendingDocs.get(name) === e) pendingDocs.delete(name);
       if (e.client) {
         e.client._docs.delete(name);

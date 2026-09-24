@@ -507,3 +507,141 @@ describe("deferred registration refcount", () => {
     expect(b.data.get()).toEqual({ seeded: true });
   });
 });
+
+// ---------------------------------------------------------------------------
+// D2: a reconnect re-opens every doc on a socket that has not said who it is
+// yet, so an in-band-authenticated client's docs 401'd and froze. onConnect
+// runs before the re-opens, on every connect.
+// ---------------------------------------------------------------------------
+
+describe("onConnect: saying who you are before the docs re-open", () => {
+  // A server that answers `open` only on a socket that authenticated, and
+  // takes a moment to authenticate (so a racing open would lose).
+  function makeAuthServer(port: number, rows: string[]) {
+    return Bun.serve({
+      port,
+      fetch(req, s) { return s.upgrade(req, { data: { authed: false } }) ? undefined as any : new Response("no", { status: 400 }); },
+      websocket: {
+        open() {},
+        close() {},
+        async message(ws: any, raw) {
+          const msg = JSON.parse(String(raw));
+          if (msg.action === "call" && msg.method === "authenticate") {
+            await Bun.sleep(30);
+            ws.data.authed = true;
+            ws.send(JSON.stringify({ id: msg.id, result: { id: 1 } }));
+          } else if (msg.action === "open") {
+            ws.send(JSON.stringify(ws.data.authed
+              ? { id: msg.id, result: { rows } }
+              : { id: msg.id, error: { code: 401, message: "Authentication required" } }));
+          }
+        },
+      },
+    });
+  }
+
+  test("a reconnect re-opens the docs signed in, so they don't freeze", async () => {
+    server = makeAuthServer(0, ["before"]);
+    const port = server.port;
+    let connects = 0;
+    const client = connectWs(`ws://localhost:${port}/ws`, {
+      onConnect: async (ws) => { connects++; await ws.send({ action: "call", method: "authenticate", params: { token: "t" } }); },
+    });
+    const doc = openDoc<{ rows: string[] }>("rows:", client);
+    await doc.ready;
+    expect(doc.data.peek()).toEqual({ rows: ["before"] });
+
+    server.stop(true);
+    await Bun.sleep(50);
+    server = makeAuthServer(port, ["before", "after the drop"]);
+    const deadline = Date.now() + 8000;
+    while (doc.data.peek()?.rows.length !== 2 && Date.now() < deadline) await Bun.sleep(25);
+    expect(doc.data.peek()).toEqual({ rows: ["before", "after the drop"] });
+    expect(connects).toBe(2);
+    client.close();
+  });
+
+  test("nothing else goes out before onConnect is done", async () => {
+    server = makeAuthServer(0, ["x"]);
+    const client = connectWs(`ws://localhost:${server.port}/ws`, {
+      onConnect: (ws) => ws.send({ action: "call", method: "authenticate", params: {} }),
+    });
+    const doc = openDoc<{ rows: string[] }>("rows:", client);   // opened while connecting
+    await doc.ready;
+    expect(doc.data.peek()).toEqual({ rows: ["x"] });
+    client.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D8: `await doc.send()` meant "echo applied" on the JSON file and SQLite
+// (they broadcast before they answer) and "not yet" on Postgres (it answers,
+// then broadcasts through NOTIFY). It now waits for the version its ack names.
+// ---------------------------------------------------------------------------
+
+describe("send resolves after its own echo", () => {
+  test("an ack that comes before its echo waits for it (the Postgres order)", async () => {
+    const subs = new Set<any>();
+    server = Bun.serve({
+      port: 0,
+      fetch(req, s) { return s.upgrade(req) ? undefined as any : new Response("no", { status: 400 }); },
+      websocket: {
+        open(ws) { subs.add(ws); },
+        close(ws) { subs.delete(ws); },
+        message(ws, raw) {
+          const msg = JSON.parse(String(raw));
+          if (msg.action === "open") ws.send(JSON.stringify({ id: msg.id, result: { n: 0, _v: 0 } }));
+          if (msg.action === "delta") {
+            ws.send(JSON.stringify({ id: msg.id, result: { ack: true, version: 1 } }));     // ack first
+            setTimeout(() => { for (const s of subs) s.send(JSON.stringify({ doc: msg.doc, ops: msg.ops, v: 1 })); }, 60);
+          }
+        },
+      },
+    });
+    const client = connectWs(`ws://localhost:${server.port}/ws`);
+    const doc = openDoc<{ n: number }>("n:", client);
+    await doc.ready;
+    const ack = await doc.send([{ op: "replace", path: "/n", value: 1 }]);
+    expect(ack).toEqual({ ack: true, version: 1 });
+    expect(doc.data.peek()).toEqual({ n: 1 });   // the echo has landed
+    client.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D10: connectWs read `location` unconditionally (a Bun script threw
+// "location is not defined") and forced the page's scheme onto an absolute
+// URL (wss:// became ws:// from an http page). Run in a fresh process: this
+// file shims `location` for every other test.
+// ---------------------------------------------------------------------------
+
+describe("connectWs outside a browser", () => {
+  const CLIENT = new URL("../src/client/client.ts", import.meta.url).pathname;
+  async function run(prelude: string, body: string): Promise<string> {
+    const script = `${prelude}
+      const urls = [];
+      globalThis.WebSocket = class { static OPEN = 1; readyState = 0; constructor(u) { urls.push(u); } addEventListener() {} send() {} close() {} };
+      const { connectWs } = await import(${JSON.stringify(CLIENT)});
+      try { ${body} } catch (e) { urls.push("THREW " + e.message); }
+      console.log(JSON.stringify(urls));`;
+    const proc = Bun.spawn(["bun", "-e", script], { stdout: "pipe", stderr: "pipe", env: { ...process.env, LOG_LEVEL: "silent" } });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    return out.trim();
+  }
+
+  test("an absolute URL needs no location, and wss stays wss", async () => {
+    const out = await run("", `connectWs("ws://localhost:1/ws").close(); connectWs("wss://api.example/ws").close(); connectWs("http://localhost:2/ws").close();`);
+    expect(JSON.parse(out)).toEqual(["ws://localhost:1/ws", "wss://api.example/ws", "ws://localhost:2/ws"]);
+  });
+
+  test("a relative URL without a page says it must be absolute", async () => {
+    const out = await run("", `connectWs("/ws");`);
+    expect(JSON.parse(out)[0]).toContain("outside a browser the URL must be absolute");
+  });
+
+  test("in a page, a relative URL takes the page's scheme; an absolute one keeps its own", async () => {
+    const out = await run(`globalThis.location = { href: "http://app.example/x" };`, `connectWs("/ws").close(); connectWs("wss://api.example/ws").close();`);
+    expect(JSON.parse(out)).toEqual(["ws://app.example/ws", "wss://api.example/ws"]);
+  });
+});

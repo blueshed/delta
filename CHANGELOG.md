@@ -47,14 +47,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`connectWs(url, { onConnect })`**: a hook run on every connect, the first and each
+  reconnect, before `connected` turns true and before any document opens or re-opens. Its
+  client sends at once; everything else waits for it. Sign in there
+  (`onConnect: (ws) => call("authenticate", { token }, ws)`) and a reconnect's re-opens go out
+  signed in. The `ConnectOptions` type is exported.
 - **`joinPath(...segments)` and `escapeSegment(segment)`** (`@blueshed/delta/core`): a pointer
   built from ids, each segment escaped, the inverse of `splitPath`.
 - **`DocType.owns?(identity, docName)`** (Postgres). The listener asks it before `open`,
   `delta`, `open_at` and `history` when it has an `auth` module; false is a 404, as a missing
   document is, and the socket never subscribes. `docTypeFromDef` sets it from `owns`.
 
+### Changed
+
+- **`await doc.send(ops)` resolves once the write's own echo is applied**, on every backend. The
+  JSON file and SQLite broadcast before they answer, so this was already so; Postgres answers
+  first and broadcasts through `NOTIFY`, so there the send now waits for the version its ack
+  names (at most 5 s, for a backend that acks a version it never broadcasts). Code that
+  awaited a send and then read `doc.data` now behaves the same after it graduates to Postgres.
+- **The client imports railroad's subpaths** (`/signals`, `/shared`, `/logger`), not the root
+  barrel, whose global `JSX` namespace broke type-checking in a React or Preact app.
+
 ### Fixed
 
+- **A reconnect no longer freezes a signed-in client's documents** (with `onConnect`, above).
+  `connectWs` re-opened every document on the new socket before anything could sign it in, so
+  with in-band `authenticate` each re-open was a 401, logged and dropped, and `doc.data` stayed
+  as it was before the drop while `connected` said true. Re-authenticating from an `open`
+  listener lost the race too. To move across: move the `authenticate` call into `onConnect`.
+- **`connectWs` works outside a browser, and keeps an absolute URL's scheme.** It read
+  `location` unconditionally (a Bun script threw `location is not defined`) and replaced the
+  scheme with the page's (`wss://api…` became `ws://` from an http page). An absolute
+  `ws:`/`wss:` URL is used as it is, `http:`/`https:` become `ws:`/`wss:`, and a relative one
+  outside a page is an error that says to pass an absolute URL.
 - **`add /<coll>/-` makes a new row on every backend.** On a collection of rows (an object, not
   an array) the server mints the id: a uuid on the JSON file and SQLite, as the sequence does
   on Postgres. The echo names the row (`/<coll>/<id>`) and the row carries it (`value.id`). The
