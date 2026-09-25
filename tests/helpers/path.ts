@@ -242,6 +242,17 @@ export function documentCases(backend: () => PathBackend): void {
       await expectTold(b, "fo-board:1", [result.ops]);
     });
 
+    test("a row told of an add is, key for key, the row a fresh open reads -- as JSON, the same text", async () => {
+      const b = backend();
+      await openAll(b.process, ["fo-board:1"]);
+      const { ops } = await write(b.process, "fo-board:1", [{ op: "add", path: "/courses/-", value: { name: "Fish" } }]);
+      await b.quiet();
+      const toldRow = JSON.stringify(told(b.process, "fo-board:1")[0]![0] && (told(b.process, "fo-board:1")[0]![0] as any).value);
+      const fresh = (await b.process.call("open", { doc: "fo-board:1" })).result.courses[ops[0].path.split("/")[2]];
+      expect(toldRow).toBe(JSON.stringify(fresh));
+      expect(JSON.stringify(ops[0].value)).toBe(JSON.stringify(fresh));
+    });
+
     test("the same mistake is refused with the same code: a row not there 404, an unknown field 400, a row already there 409", async () => {
       const b = backend();
       await openAll(b.process, ["fo-board:1"]);

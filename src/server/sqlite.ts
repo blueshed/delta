@@ -1540,9 +1540,14 @@ function insertCollectionRow(
 
   insertRow(db, table, fullRow, ts);
 
-  // Decode for in-memory representation
-  decodeRow(table, fullRow);
-  return fullRow;
+  // The row as a fresh read gives it -- its columns in the table's order -- so a
+  // row told of an add, and the same row read back (by an undo's inverse, a
+  // redo, a reopen), are the same row, keys and all.
+  const read: any = { id: fullRow.id };
+  if (table.parent) read[table.parent.fkColumn] = fullRow[table.parent.fkColumn];
+  for (const col of Object.keys(table.columns)) read[col] = fullRow[col];
+  decodeRow(table, read);
+  return read;
 }
 
 /**
