@@ -15,9 +15,11 @@
     "./dom-ops": "./src/client/dom-ops.ts",
     "./server": "./src/server/server.ts",
     "./sqlite": "./src/server/sqlite.ts",
+    "./json": "./src/server/json.ts",
     "./local": "./src/server/local.ts",
     "./kinds": "./src/server/kinds.ts",
     "./postgres": "./src/server/postgres/index.ts",
+    "./pglite": "./src/server/pglite.ts",
     "./logger": "./src/server/logger.ts",
     "./auth": "./src/server/auth.ts",
     "./auth-jwt": "./src/server/auth-jwt.ts"
@@ -33,7 +35,7 @@
   ],
   "scripts": {
     "check": "bunx tsc --noEmit",
-    "test": "bun test tests/core.test.ts tests/server.test.ts tests/sqlite.test.ts tests/auth.test.ts tests/railroad-client.test.ts",
+    "test": "bun test tests/core.test.ts tests/server.test.ts tests/sqlite.test.ts tests/auth.test.ts tests/railroad-client.test.ts tests/path-json.test.ts tests/path-sqlite.test.ts tests/path-pglite.test.ts",
     "test:pg": "bun test tests/postgres.test.ts tests/auth-jwt.test.ts",
     "test:all": "bun test tests/",
     "db:up": "docker compose up -d --wait",
@@ -44,7 +46,8 @@
   "peerDependencies": {
     "@blueshed/railroad": "^0.11.0 || ^0.12.0 || ^0.13.0 || ^0.14.0",
     "pg": "^8.20.0",
-    "jose": "^6.0.0"
+    "jose": "^6.0.0",
+    "@electric-sql/pglite": "^0.5.4"
   },
   "peerDependenciesMeta": {
     "@blueshed/railroad": {
@@ -54,6 +57,9 @@
       "optional": true
     },
     "jose": {
+      "optional": true
+    },
+    "@electric-sql/pglite": {
       "optional": true
     }
   },

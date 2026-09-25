@@ -42,6 +42,12 @@ export type Ledger = {
   /** Records a write; returns its version and entry id. An empty write records nothing and keeps the version. */
   record(entry: { doc: string; ops: DeltaOp[]; inverse: DeltaOp[]; who: string | null; cursor: string | null; undoes?: number; undoable?: boolean }): { version: number; entry?: number };
   version(doc: string): number;
+  /**
+   * A document told of a change written through another document: its next
+   * version, with no entry of its own (nothing to undo through it), so its
+   * readers see its changes in order and notice one they missed.
+   */
+  bump(doc: string): number;
   /** The newest entries for a document, newest first, each saying whether `cursor` wrote it — never who did. */
   history(doc: string, cursor: string | null, limit?: number): (LedgerEntry & { mine: boolean })[];
   /** The write this cursor would walk back next. */
@@ -141,6 +147,8 @@ export function createLedger(db: any): Ledger {
     undoable INTEGER NOT NULL DEFAULT 1
   )`);
   db.run("CREATE INDEX IF NOT EXISTS idx_delta_ledger_doc ON delta_ledger (doc, version)");
+  // Each document's version: advanced by a write through it (with an entry) and by a change told to it (without one).
+  db.run("CREATE TABLE IF NOT EXISTS delta_versions (doc TEXT PRIMARY KEY, version INTEGER NOT NULL)");
   db.run("CREATE INDEX IF NOT EXISTS idx_delta_ledger_cursor ON delta_ledger (cursor)");
   // The walk up a cursor's chains follows `undoes`: without this, each step scanned the table.
   db.run("CREATE INDEX IF NOT EXISTS idx_delta_ledger_undoes ON delta_ledger (undoes)");
@@ -155,7 +163,10 @@ export function createLedger(db: any): Ledger {
     tips AS (
       SELECT c.id, c.depth FROM chain c WHERE NOT EXISTS (SELECT 1 FROM delta_ledger w WHERE w.undoes = c.id)
     )`;
-  const versionStmt = db.query("SELECT MAX(version) AS version FROM delta_ledger WHERE doc = ?");
+  const versionStmt = db.query(
+    "SELECT MAX(COALESCE((SELECT version FROM delta_versions WHERE doc = ?1), 0), COALESCE((SELECT MAX(version) FROM delta_ledger WHERE doc = ?1), 0)) AS version",
+  );
+  const setVersionStmt = db.query("INSERT INTO delta_versions (doc, version) VALUES (?, ?) ON CONFLICT (doc) DO UPDATE SET version = excluded.version");
   const insertStmt = db.query(
     "INSERT INTO delta_ledger (doc, version, ops, inverse, who, cursor, at, undoes, undoable) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
   );
@@ -179,7 +190,13 @@ export function createLedger(db: any): Ledger {
       if (ops.length === 0) return { version: version(doc) };
       const next = version(doc) + 1;
       const result = insertStmt.run(doc, next, JSON.stringify(ops), JSON.stringify(inverse), who, cursor, Date.now(), undoes ?? null, undoable ? 1 : 0);
+      setVersionStmt.run(doc, next);
       return { version: next, entry: Number(result.lastInsertRowid) };
+    },
+    bump(doc) {
+      const next = version(doc) + 1;
+      setVersionStmt.run(doc, next);
+      return next;
     },
     history(doc, cursor, limit = 50) {
       return (historyStmt.all(doc, limit) as Row[]).map((r) => ({ ...toEntry(r), mine: cursor !== null && r.cursor === cursor }));

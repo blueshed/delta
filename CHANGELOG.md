@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+One app, every place its truth can live. A project can start on a JSON file, move to SQLite,
+then to Postgres in this process, and deliver on a Postgres server without changing the app:
+the same schema, documents and writes, the same answers, the same data with the same serial
+ids. `tests/helpers/path.ts` asks every case of all four; `tests/postgres-path.test.ts`
+carries one app's data from the JSON file to the server and reads it the same at every step.
+
+### Breaking
+
+- **SQLite answers as Postgres does.** Where the two differed, SQLite now takes Postgres's way:
+  - **ids are serials, kept as numbers.** `add /<coll>/-` names the row with the collection's
+    next serial (a `_delta_sequences` table; a collection with none yet starts from the largest
+    id it holds), not a UUID. New tables declare `id` and the parent key `INT`, so a serial is
+    stored and read as a number (a text id, as a session's token, stays text); a path's numeric
+    id is kept as a number. To move across: read ids as numbers (or key by `String(row.id)`), and
+    create rows with `/-`. Existing tables keep their columns and read their ids as before.
+  - **a temporal row comes without `valid_from` / `valid_to`**, in opens and broadcasts, as
+    Postgres strips them; they stay in the table for `open_at` and history.
+  - **a scope reads the doc name by Postgres's rule** (`src/server/scope.ts`): `:name`, `=:`,
+    ranges, `like:`, `at:`; a plain value (`{ status: "active" }`) is a param named from the
+    doc name, not a literal. A scope without `id` is list mode -- every root row it admits, keyed
+    by id, its included collections in full -- where it used to be the first matching row; and
+    an empty doc id is every root row, where it was a 404. `registerDocs` no longer refuses the
+    operators. To move across: a document scoped by something other than its id is now a list
+    (`result.wishlists.w1`, not `result.wishlists`); a literal pin becomes part of the name.
+  - **a write's own channel is told what changed for it**, as every other document is (below):
+    the ops as written for any row it still holds, a remove for a row that left it (a parent
+    key rewritten). The write's answer and ledger entry keep the ops as written.
+- **Framework SQL (`001b`, `001d`) changes, idempotently** (`CREATE OR REPLACE`): re-vendor it
+  (`bunx @blueshed/delta init`, or `applyFramework`). `delta_apply` now tells every document
+  that holds a row it changes (below), logging each its own ops and version.
+
+### Fixed
+
+- **Postgres tells a write to every document that holds a row it changed (todo #28).** It told
+  only the document written through; a board and a household over the same rows, or a venue's
+  map and a promoter's occasion over the same sites, disagreed until one was reopened. Now
+  `delta_apply` works out, in the writer's transaction, who held each changed row before the
+  write and who holds it after (`_delta_holders`, judged on the row's values by the rule
+  `delta_open` reads by) and tells each what changed for it (`_delta_tell`): an add where a row
+  arrives, a replace where it stays, a remove where it leaves -- a moved row, a list's condition
+  no longer met, a cascade -- and where the row is the root, a replace (null when it leaves).
+  Each document gets one version and one NOTIFY per write, so every process's listener hears
+  it and a reader behind catches up from `delta_fetch_ops`. The documents considered are those
+  ever opened (`_delta_versions`) and the writer's. The listener is unchanged.
+- **SQLite tells a row's departure too.** A row moved out of a document's scope (its parent key
+  written), or out of a list's condition, is a remove there and an add where it arrives; before,
+  the document it left kept it. Every told document's copy is read again from the tables.
+- **A document told of another's write gets its own version (todo #29).** With a ledger,
+  SQLite's fan-out now advances each told document's version (`delta_versions`) and sends `v`,
+  as Postgres does, so a client notices one it missed.
+- **SQLite can write a row's parent key** (`replace /<coll>/<id>/<parent>_id`): the row moves, as
+  on Postgres. It was refused as an unknown field.
+
+### Added
+
+- **`@blueshed/delta/json`: the app's rows in one JSON file** -- `registerDocs(ws, file, schema,
+  docs, customDocs?, { ledger? })`, the same documents as SQLite (SQLite in memory, loaded from
+  the file and saved to it after every change), the ledger kept in the file so undo carries
+  across a restart. `registerDoc` stays for one free-form document.
+- **`@blueshed/delta/pglite`: Postgres in this process.** `openPglite(dir?)` answers the slice of
+  `pg`'s Pool delta uses over PGlite, so `@blueshed/delta/postgres` -- the stored functions, the
+  listener, the ledger -- runs on it unchanged; a client's transaction holds PGlite's one
+  session, and `LISTEN` is PGlite's `listen`. `@electric-sql/pglite` is an optional peer.
+  From epsilon's `pglite.ts`.
+- **`exportTables` / `importTables` on every backend** (`./json`, `./sqlite`, `./postgres`): an
+  app's rows as a `Snapshot` -- every row by collection, every version of a temporal row, each
+  collection's last minted id -- carried from one backend into the next, ids kept and each
+  sequence set past them.
+- **SQLite: list-mode documents and `open_at`.** A list-mode document (above) opens, is written
+  through and is fanned out to as on Postgres; `open_at` reads a document as it stood at a time
+  (`loadDocAt`, which now takes ISO-8601 and reads by the scope rule).
+
 ## [0.8.0] - 2026-09-25
 
 ### Breaking

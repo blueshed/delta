@@ -1,11 +1,10 @@
 /**
  * Property tests: per-doc isolation in the Postgres backend.
  *
- * The architecture-level reason isolation holds for Postgres is that
- * `delta_apply` emits NOTIFY tagged with the writer's docName, and the
- * listener publishes only to subscribers of that exact channel. There's
- * no cross-doc fan-out path. This suite pins that down so a future
- * refactor can't reintroduce the leak the SQLite backend hit.
+ * Postgres tells a write to every document that holds a row it changed
+ * (`_delta_holders`, `_delta_tell`) -- and to no other. This suite pins the
+ * second half: a sibling document of the same prefix over other rows is never
+ * told, so the fan-out can't reintroduce the leak the SQLite backend once hit.
  */
 import { describe, test, beforeAll, beforeEach, afterAll, afterEach } from "bun:test";
 import { readFileSync } from "node:fs";

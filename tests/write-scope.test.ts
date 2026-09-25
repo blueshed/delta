@@ -215,7 +215,8 @@ describe("write scoping (sqlite)", () => {
     });
     expect(addChild.result).toEqual({ ack: true });
     // Direct child: FK injected server-side from the doc id.
-    expect(db.query("SELECT tenant_id FROM current_projects WHERE id = 'p9'").get()).toEqual({ tenant_id: "1" });
+    // a serial key is kept as a number, as Postgres keeps it
+    expect(db.query("SELECT tenant_id FROM current_projects WHERE id = 'p9'").get()).toEqual({ tenant_id: 1 });
 
     const addGrandchild = await send(sock, {
       action: "delta", doc: "tenant:1",

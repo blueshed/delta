@@ -21,14 +21,18 @@ import { trackSubscribe, trackUnsubscribe, onClientDrop } from "./server";
 import { applyOps as deltaApplyOps, type DeltaOp, splitPath, joinPath } from "../core";
 import { createLogger } from "./logger";
 import { createLedger, planWalk, socketCursor } from "./ledger";
+import { meets, resolveScope, rowId, sameId, whereOf, type Scope } from "./scope";
 import {
   type ColumnDef,
   type Schema,
   type ResolvedTable,
   type DocDef,
   type ValidationError,
+  type Snapshot,
   defineSchema as defineSchemaShared,
   defineDoc as defineDocShared,
+  isoTime,
+  lastId,
 } from "../schema";
 
 export type {
@@ -40,6 +44,7 @@ export type {
   ResolvedTable,
   DocDef,
   ValidationError,
+  Snapshot,
 } from "../schema";
 export const defineSchema = defineSchemaShared;
 export const defineDoc = defineDocShared;
@@ -75,13 +80,18 @@ export function defineCustomDoc<C>(
 /** Generate CREATE TABLE statements from the schema and execute them. */
 export function createTables(db: any, schema: Schema) {
   db.run("PRAGMA journal_mode = WAL");
+  createSequences(db);
 
   for (const [, table] of Object.entries(schema.tables)) {
-    const cols: string[] = ["id TEXT NOT NULL"];
+    // Ids and parent keys have integer affinity: a serial is kept, and read, as
+    // a number -- as Postgres keeps it -- and an id that is not one (a session's
+    // token) as the text it is. `INT`, not `INTEGER`: an INTEGER key would be
+    // the rowid, and refuse the text.
+    const cols: string[] = ["id INT NOT NULL"];
 
     // FK columns from parent
     if (table.parent) {
-      cols.push(`${table.parent.fkColumn} TEXT NOT NULL`);
+      cols.push(`${table.parent.fkColumn} INT NOT NULL`);
     }
 
     // User-defined columns
@@ -154,6 +164,8 @@ export interface RegisterOptions {
   ledger?: boolean;
   /** How an identity is written in the ledger. Default: a string or number as it is, anything else as JSON. */
   who?: (identity: unknown) => string;
+  /** Called after every change that committed -- a write, an undo or redo, a walk recorded as skipped: the JSON file saves itself from it. */
+  committed?: () => void;
 }
 
 export function registerDocs(
@@ -179,19 +191,8 @@ export function registerDocs(
     client?.data?.local ? (typeof msg.cursor === "string" ? msg.cursor : null) : socketCursor(whoOf(client), client?.data?.clientId);
   // Build lookup: prefix → DocDef
   const docByPrefix = new Map<string, DocDef>();
-  for (const doc of docs) {
-    // A Postgres scope binding would be taken here as a literal to match, and
-    // the document would open as 404 for every name: say so at registration.
-    for (const [col, binding] of Object.entries(doc.scope)) {
-      if (binding !== ":docId" && /^(:|=:|<=:|>=:|like:|at:)/.test(binding)) {
-        throw new Error(
-          `registerDocs("${doc.prefix}"): scope { ${col}: "${binding}" } is the Postgres scope DSL; ` +
-          `SQLite reads the doc name with ":docId" only (scope: { ${col}: ":docId" })`,
-        );
-      }
-    }
-    docByPrefix.set(doc.prefix, doc);
-  }
+  // A scope reads the document's name by the same rule as on Postgres (./scope).
+  for (const doc of docs) docByPrefix.set(doc.prefix, doc);
 
   // Custom doc lookup: prefix → CustomDocDef
   const customByPrefix = new Map<string, CustomDocDef<any>>();
@@ -213,7 +214,7 @@ export function registerDocs(
 
   function emptyDoc(def: DocDef, docId: string): any {
     const rootTable = schema.tables[def.root]!;
-    const root: any = { id: docId };
+    const root: any = { id: rowId(docId) };
     for (const [col, colDef] of Object.entries(rootTable.columns)) {
       root[col] = colDef.default ?? (colDef.nullable ? null : defaultForType(colDef.type));
     }
@@ -238,13 +239,13 @@ export function registerDocs(
   // Track which doc names are subscribed (for scoped fan-out)
   const subscriptions = new Map<string, Set<any>>(); // docName → Set<ws clients>
 
+  /** The definition a name belongs to: the longest prefix it starts with, as Postgres's `_delta_find_doc`. */
   function findDoc(docName: string): { def: DocDef; docId: string } | null {
+    let found: DocDef | undefined;
     for (const [prefix, def] of docByPrefix) {
-      if (docName.startsWith(prefix)) {
-        return { def, docId: docName.slice(prefix.length) };
-      }
+      if (docName.startsWith(prefix) && (!found || prefix.length > found.prefix.length)) found = def;
     }
-    return null;
+    return found ? { def: found, docId: docName.slice(found.prefix.length) } : null;
   }
 
   function findCustom(docName: string): { def: CustomDocDef<any>; docId: string } | null {
@@ -273,41 +274,36 @@ export function registerDocs(
     }
   }
 
-  function resolveScope(def: DocDef, docId: string): Record<string, string> {
-    const resolved: Record<string, string> = {};
-    if (Object.keys(def.scope).length === 0) {
-      // Default: root table PK = docId
-      resolved["id"] = docId;
-    } else {
-      // Split docId by ":" for compound scopes
-      const parts = docId.split(":");
-      let i = 0;
-      for (const [col, binding] of Object.entries(def.scope)) {
-        if (binding === ":docId") {
-          resolved[col] = parts[i++] ?? docId;
-        } else {
-          resolved[col] = binding;
-        }
-      }
-    }
-    return resolved;
-  }
-
   // ---------------------------------------------------------------------------
   // Load doc from SQL
   // ---------------------------------------------------------------------------
 
-  function loadDocFromSql(def: DocDef, scope: Record<string, string>): any | null {
+  /**
+   * A document as its scope reads it from the tables: single mode, one root row
+   * and its children; list mode, every root row the scope admits and each
+   * included collection in full -- as Postgres's `delta_open` reads it.
+   */
+  function loadDocFromSql(def: DocDef, scope: Scope): any | null {
     const rootTable = schema.tables[def.root];
     if (!rootTable) return null;
 
     const viewName = rootTable.temporal ? `current_${rootTable.name}` : rootTable.name;
+    const where = whereOf(scope);
+    const rows = db.query(`SELECT * FROM ${viewName} WHERE ${where.sql}`).all(...(where.params as any[]));
 
-    // Build WHERE clause from scope
-    const whereParts = Object.keys(scope).map((k) => `${k} = ?`);
-    const whereParams = Object.values(scope);
+    if (scope.mode === "list") {
+      for (const row of rows) decodeRow(rootTable, row);
+      const doc: any = { [def.root]: toMap(rows) };
+      for (const collKey of def.include) {
+        const table = schema.tables[collKey];
+        if (!table) continue;
+        const all = db.query(`SELECT * FROM ${table.temporal ? `current_${table.name}` : table.name}`).all();
+        for (const row of all) decodeRow(table, row);
+        doc[collKey] = toMap(all);
+      }
+      return doc;
+    }
 
-    const rows = db.query(`SELECT * FROM ${viewName} WHERE ${whereParts.join(" AND ")}`).all(...whereParams);
     if (rows.length === 0) return null;
     if (rows.length > 1) {
       // A single-mode doc exposes exactly one root row. A scope that matches
@@ -375,13 +371,112 @@ export function registerDocs(
   // Delta ops → SQL
   // ---------------------------------------------------------------------------
 
-  function applyOps(docName: string, def: DocDef, doc: any, ops: DeltaOp[]): DeltaOp[] {
+  /** A row of the write, for the telling: who held it before, and what it is now (null: gone). */
+  type Touched = { coll: string; id: string | number; before: string[]; after: any | null };
+
+  /** The view a collection's current rows are read from. */
+  const current = (table: ResolvedTable) => (table.temporal ? `current_${table.name}` : table.name);
+
+  /**
+   * The id of the `root` row that `row` (of `coll`) hangs from, following parent
+   * keys up through the tables as they stand; null when the chain does not
+   * reach `root`. The twin of Postgres's `_delta_chain_root`.
+   */
+  function chainRoot(coll: string, row: any, root: string): unknown {
+    if (coll === root) return row.id;
+    let table = schema.tables[coll];
+    if (!table?.parent) return null;
+    let id: unknown = row[table.parent.fkColumn];
+    let cur = table.parent.collection;
+    for (let depth = 0; depth < 32 && id != null; depth++) {
+      if (cur === root) return id;
+      table = schema.tables[cur];
+      if (!table?.parent) return null;
+      id = (db.query(`SELECT ${table.parent.fkColumn} AS fk FROM ${current(table)} WHERE id = ?`).get(id as any) as { fk: unknown } | null)?.fk ?? null;
+      cur = table.parent.collection;
+    }
+    return null;
+  }
+
+  /**
+   * Does the document (`def`, read by `scope`) hold `row` of `coll`? Judged on
+   * the row's values, so a row as it was before a write is judged as well as
+   * one as it is after -- Postgres's `_delta_doc_holds`.
+   */
+  function holds(def: DocDef, scope: Scope, coll: string, row: any): boolean {
+    if (!row) return false;
+    if (coll !== def.root && !def.include.includes(coll)) return false;
+    if (coll === def.root) return (scope.mode === "list" || sameId(row.id, scope.id)) && meets(scope, row);
+    if (scope.mode === "list" || !schema.tables[coll]?.parent) return true;   // in full
+    return sameId(chainRoot(coll, row, def.root), scope.id);
+  }
+
+  /** The open documents -- and the writer's own -- that hold `row` of `coll`. */
+  function holders(coll: string, row: any, writer: string): string[] {
+    if (!row) return [];
+    const names = new Set([...subscriptions.keys(), writer]);
+    const out: string[] = [];
+    for (const name of names) {
+      const m = findDoc(name);
+      if (m && holds(m.def, resolveScope(m.def, m.docId), coll, row)) out.push(name);
+    }
+    return out;
+  }
+
+  /** A row as the tables hold it now, as a document reads it; null when not there. */
+  function readRow(table: ResolvedTable, id: string | number): any | null {
+    const row = db.query(`SELECT * FROM ${current(table)} WHERE id = ?`).get(id as any);
+    if (!row) return null;
+    decodeRow(table, row);
+    return row;
+  }
+
+  /** The rows `removeRow` would take, read before it takes them, in its order. */
+  function cascadeRows(table: ResolvedTable, id: string | number, def: DocDef): { table: ResolvedTable; row: any }[] {
+    const row = readRow(table, id);
+    if (!row) return [];
+    const out = [{ table, row }];
+    for (const childKey of table.children) {
+      if (!def.include.includes(childKey)) continue;
+      const child = schema.tables[childKey];
+      if (!child?.parent) continue;
+      for (const r of db.query(`SELECT id FROM ${current(child)} WHERE ${child.parent.fkColumn} = ?`).all(id as any) as any[]) {
+        out.push(...cascadeRows(child, r.id, def));
+      }
+    }
+    for (const ref of table.referencedBy) {
+      if (!def.include.includes(ref.collection)) continue;
+      const refTable = schema.tables[ref.collection];
+      if (!refTable) continue;
+      for (const r of db.query(`SELECT id FROM ${current(refTable)} WHERE ${ref.fkColumn} = ?`).all(id as any) as any[]) {
+        out.push(...cascadeRows(refTable, r.id, def));
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The next serial for a collection: its sequence advanced. A collection with
+   * no sequence yet starts from the largest id it holds -- rows put in by
+   * hand -- and from then on counts on, as a Postgres sequence does.
+   */
+  function nextId(table: ResolvedTable): number {
+    const seq = db.query("SELECT last FROM _delta_sequences WHERE collection = ?").get(table.docKey) as { last: number } | null;
+    const start = seq?.last ?? ((db.query(`SELECT MAX(id) AS m FROM ${table.name} WHERE typeof(id) = 'integer'`).get() as { m: number | null } | null)?.m ?? 0);
+    const next = start + 1;
+    db.run("INSERT INTO _delta_sequences (collection, last) VALUES (?, ?) ON CONFLICT (collection) DO UPDATE SET last = excluded.last", [table.docKey, next]);
+    return next;
+  }
+
+  function applyOps(docName: string, def: DocDef, doc: any, ops: DeltaOp[]): { applied: DeltaOp[]; touched: Touched[] } {
     const scope = resolveScope(def, docName.slice(def.prefix.length));
-    const rootId = scope["id"] ?? doc[def.root]?.id;
+    const list = scope.mode === "list";
+    const rootId = list ? undefined : rowId(scope.id ?? doc[def.root]?.id);
     const broadcastOps: DeltaOp[] = [];
+    const touched: Touched[] = [];
 
     // Separate row-field updates for batching
-    const rowFieldBatches = new Map<string, { table: ResolvedTable; id: string; fields: Map<string, unknown> }>();
+    const rowFieldBatches = new Map<string, { table: ResolvedTable; id: string | number; fields: Map<string, unknown> }>();
     // Root-level field updates are batched too: applying them one-at-a-time
     // did closeRow+insert per op, so two root-field replaces in one delta
     // collided on the temporal PK (same valid_from). Accumulate and emit one
@@ -393,18 +488,17 @@ export function registerDocs(
       const collKey = parts[0]!;
       const table = schema.tables[collKey];
 
-      // Root-level field update: /<root>/fieldName
-      if (collKey === def.root && parts.length === 2) {
+      // A single-mode document's root is one row: /<root>/fieldName is a field of it...
+      if (!list && collKey === def.root && parts.length === 2) {
         if (op.op !== "replace") throw new Error(`Root fields only support replace`);
         rootFieldUpdates.set(parts[1]!, (op as any).value);
         continue;
       }
 
-      // Whole-root replace: /<root> — merge the value's fields into the root
-      // row (Postgres parity: delta_apply merges over the current row). The
-      // path carries the row identity, so `id` and the temporal columns are
-      // ignored rather than trusted from the value.
-      if (collKey === def.root && parts.length === 1) {
+      // ...and /<root> a partial merge into it (Postgres parity: delta_apply
+      // merges over the current row). The path carries the row identity, so
+      // `id` and the temporal columns are ignored rather than trusted from the value.
+      if (!list && collKey === def.root && parts.length === 1) {
         if (op.op !== "replace") throw new Error(`Root supports replace only`);
         for (const [field, value] of Object.entries((op as any).value as Record<string, unknown>)) {
           if (field === "id" || field === "valid_from" || field === "valid_to") continue;
@@ -413,34 +507,44 @@ export function registerDocs(
         continue;
       }
 
-      if (!table || !def.include.includes(collKey)) {
+      // Everything else is a row of a map: an included collection, or a list-mode document's root.
+      if (!table || (collKey !== def.root && !def.include.includes(collKey))) {
         throw new Error(`Unknown collection: ${collKey}`);
       }
 
       if (parts.length === 2) {
-        // `add /<coll>/-` is a new row the server names: a uuid, carried by the
-        // broadcast path and the row, as Postgres does with its sequence.
-        const id = op.op === "add" && parts[1] === "-" ? crypto.randomUUID() : parts[1]!;
+        // `add /<coll>/-` is a new row the store names: the next serial, as
+        // Postgres takes nextval -- carried by the broadcast path and the row.
+        const id = op.op === "add" && parts[1] === "-" ? nextId(table) : rowId(parts[1]!);
         if (op.op === "add") {
           // Add row
-          const row = (op as any).value as Record<string, unknown>;
+          const row = { ...((op as any).value as Record<string, unknown>) };
+          // A list-mode document's root row is given its scope's equality bindings, as on Postgres.
+          if (list && collKey === def.root) Object.assign(row, Object.fromEntries(Object.entries(scope.values).map(([k, v]) => [k, rowId(v)])));
           // A DIRECT child's FK is forced to `rootId` by insertCollectionRow, but a
           // grandchild's comes verbatim from the client. Unchecked, that grafts the
           // new row onto another doc's parent — a cross-doc write. Require the named
           // parent to be in THIS doc's scope.
-          assertParentInScope(doc, def, table, row);
+          assertParentInScope(doc, def, table, row, list);
           const ts = now();
-          const fullRow = insertCollectionRow(db, schema, table, id, rootId, def, row, ts);
+          const fullRow = insertCollectionRow(db, schema, table, id, rootId, def, row, ts, list);
           doc[collKey][id] = fullRow;
-          broadcastOps.push({ op: "add", path: joinPath(collKey, id), value: fullRow });
+          broadcastOps.push({ op: "add", path: joinPath(collKey, String(id)), value: fullRow });
+          touched.push({ coll: collKey, id, before: [], after: fullRow });
         } else if (op.op === "remove") {
           // Remove row + cascades. `removeRow` addresses rows by id ALONE, so
           // without this gate a client could name any id and delete a sibling
           // doc's row (the field-replace path below has always made the
           // equivalent check via `doc[collKey]?.[id]`).
           assertRowInScope(doc, collKey, id);
+          // who holds the row and every row the cascade takes, asked before any is gone
+          const befores = new Map(cascadeRows(table, id, def).map(({ table: t, row }) => [`${t.docKey}/${row.id}`, holders(t.docKey, row, docName)]));
           const cascadeOps = removeRow(db, schema, table, collKey, id, doc, def);
           broadcastOps.push(...cascadeOps);
+          for (const removed of cascadeOps) {
+            const [coll, rid] = splitPath(removed.path) as [string, string];
+            touched.push({ coll, id: rowId(rid), before: befores.get(`${coll}/${rowId(rid)}`) ?? [], after: null });
+          }
         } else if (op.op === "replace") {
           // Whole-row replace: /<coll>/<id> — a partial merge over the current
           // row (Postgres parity: delta_apply does `v_row || value`). Rides the
@@ -460,7 +564,7 @@ export function registerDocs(
         }
       } else if (parts.length === 3 && op.op === "replace") {
         // Field update — batch per row
-        const id = parts[1]!;
+        const id = rowId(parts[1]!);
         const field = parts[2]!;
         const key = `${collKey}/${id}`;
         if (!rowFieldBatches.has(key)) {
@@ -477,41 +581,70 @@ export function registerDocs(
     // reinsert would collide).
     if (rootFieldUpdates.size > 0) {
       const rootTable = schema.tables[def.root]!;
+      const before = holders(def.root, doc[def.root], docName);
       const ts = now();
-      if (rootTable.temporal) closeRow(db, rootTable, rootId, ts);
+      if (rootTable.temporal) closeRow(db, rootTable, rootId!, ts);
       const updated = { ...doc[def.root] };
       for (const [field, value] of rootFieldUpdates) updated[field] = value;
-      if (rootTable.temporal) {
-        updated.valid_from = ts; updated.valid_to = null;
-        insertRow(db, rootTable, updated, ts);
-      } else {
-        updateRow(db, rootTable, rootId, updated);
-      }
+      if (rootTable.temporal) insertRow(db, rootTable, updated, ts);
+      else updateRow(db, rootTable, rootId!, updated);
       doc[def.root] = updated;
       broadcastOps.push({ op: "replace", path: joinPath(def.root), value: updated });
+      touched.push({ coll: def.root, id: rootId!, before, after: updated });
     }
 
     // Apply batched field updates
     for (const [, batch] of rowFieldBatches) {
       const collKey = batch.table.docKey;
-      const current = doc[collKey]?.[batch.id];
-      if (!current) refuse(404, `Row not found: ${collKey}/${batch.id}`);
+      const present = doc[collKey]?.[batch.id];
+      if (!present) refuse(404, `Row not found: ${collKey}/${batch.id}`);
+      const before = holders(collKey, present, docName);
 
       const ts = now();
       if (batch.table.temporal) closeRow(db, batch.table, batch.id, ts);
 
-      const updated = { ...current };
-      if (batch.table.temporal) { updated.valid_from = ts; updated.valid_to = null; }
+      const updated = { ...present };
       for (const [field, value] of batch.fields) {
         updated[field] = value;
       }
       if (batch.table.temporal) insertRow(db, batch.table, updated, ts);
       else updateRow(db, batch.table, batch.id, updated);
       doc[collKey][batch.id] = updated;
-      broadcastOps.push({ op: "replace", path: joinPath(collKey, batch.id), value: updated });
+      broadcastOps.push({ op: "replace", path: joinPath(collKey, String(batch.id)), value: updated });
+      touched.push({ coll: collKey, id: batch.id, before, after: updated });
     }
 
-    return broadcastOps;
+    return { applied: broadcastOps, touched };
+  }
+
+  /**
+   * What each document that held or holds a row the write changed is told, the
+   * writer's first -- Postgres's `_delta_tell`: a row that arrives is an add,
+   * one that stays a replace, one that leaves a remove; where the row is the
+   * document's root, a replace of the root (null when it leaves).
+   */
+  function tell(writer: string, touched: Touched[]): Map<string, DeltaOp[]> {
+    const rows = touched.map((t) => ({ ...t, now: holders(t.coll, t.after, writer) }));
+    const targets = new Set<string>([writer]);
+    for (const t of rows) for (const name of [...t.before, ...t.now]) targets.add(name);
+    const told = new Map<string, DeltaOp[]>();
+    for (const target of targets) {
+      const m = findDoc(target);
+      if (!m) continue;
+      const single = resolveScope(m.def, m.docId).mode === "single";
+      const ops: DeltaOp[] = [];
+      for (const t of rows) {
+        const was = t.before.includes(target);
+        const is = t.now.includes(target);
+        if (!was && !is) continue;
+        const root = single && t.coll === m.def.root;
+        const path = root ? joinPath(t.coll) : joinPath(t.coll, String(t.id));
+        if (is) ops.push({ op: was || root ? "replace" : "add", path, value: t.after });
+        else ops.push(root ? { op: "replace", path, value: null } : { op: "remove", path });
+      }
+      told.set(target, ops);
+    }
+    return told;
   }
 
   // ---------------------------------------------------------------------------
@@ -543,9 +676,7 @@ export function registerDocs(
     try { doc = load(docName, match.def, match.docId); }
     catch (err: any) { return respond({ error: { code: 500, message: named(err).message } }); }
     if (!doc) {
-      // Say why: a SQLite document is one root row (there is no list mode).
-      const where = Object.entries(resolveScope(match.def, match.docId)).map(([k, v]) => `${k} = ${JSON.stringify(v)}`).join(" and ");
-      respond({ error: { code: 404, message: `Not found: no ${match.def.root} row where ${where}. A SQLite document is one root row and its children: make the row first, or declare the document implied: true` } });
+      respond({ error: { code: 404, message: `Not found: no ${match.def.root} row ${match.docId}. Make the row first, or declare the document implied: true` } });
       return;
     }
 
@@ -615,13 +746,15 @@ export function registerDocs(
     // Pre-flight validation — reject unknown collections/fields and bad types
     // up front instead of silently acking an op that diverges cache/broadcast
     // from what the DB can persist.
-    const validationErrors = validateOps(schema, def, ops);
+    const list = resolveScope(def, docName.slice(def.prefix.length)).mode === "list";
+    const validationErrors = validateOps(schema, def, ops, { list });
     if (validationErrors.length) {
       return { error: { code: 400, message: validationErrors.map((e) => `${e.path}: ${e.message}`).join("; ") } };
     }
 
     const snapshot = structuredClone(doc); // for rollback, and for the inverse
     let written: Written;
+    let touched: Touched[] = [];
     try {
       // `db.transaction` rather than a bare BEGIN: inside a caller's own
       // transaction (a server-side renderer writing several things as one, a
@@ -630,10 +763,11 @@ export function registerDocs(
       // post-commit block below must not look like a failed write.
       written = db.transaction(() => {
         if (implied.has(docName)) ensureImpliedRoot(def, doc);
-        const applied = applyOps(docName, def, doc, ops);
-        const inverse = inverseOf(snapshot, applied);
-        const recorded = ledger?.record({ doc: docName, ops: applied, inverse, ...by });
-        return { ops: applied, inverse, version: recorded?.version, entry: recorded?.entry };
+        const done = applyOps(docName, def, doc, ops);
+        touched = done.touched;
+        const inverse = inverseOf(snapshot, done.applied);
+        const recorded = ledger?.record({ doc: docName, ops: done.applied, inverse, ...by });
+        return { ops: done.applied, inverse, version: recorded?.version, entry: recorded?.entry };
       })();
       implied.delete(docName);
     } catch (err: any) {
@@ -644,22 +778,43 @@ export function registerDocs(
       return { error: { code: typeof err.code === "number" ? err.code : 500, message: err.message } };
     }
 
-    // Committed. Fan-out is a post-commit side effect: a failure here must not
-    // roll back (the write is durable) nor masquerade as a write error.
+    // Committed. The telling is a post-commit side effect: a failure here must
+    // not roll back (the write is durable) nor masquerade as a write error.
     try {
-      // Primary broadcast: to the doc's own subscribers -- and, through
+      // Every document that held or holds a row the write changed is told what
+      // changed for it (todo #28) -- the writer's own first, with the version
+      // its write made; each other, with a version of its own. Through
       // `createLocal().onPublish`, the one stream of changes an in-process
-      // caller (eta) redraws from
-      ws.publish(docName, { doc: docName, ops: written.ops, ...(written.version !== undefined ? { v: written.version } : {}) });
-      // Cross-doc fan-out: find other open docs affected by these changes
-      fanOut(ws, written.ops, docName);
+      // caller (eta) redraws from.
+      const told = tell(docName, touched);
+      for (const [name, tOps] of told) {
+        if (name === docName) {
+          ws.publish(docName, { doc: docName, ops: tOps, ...(written.version !== undefined ? { v: written.version } : {}) });
+        } else if (tOps.length > 0) {
+          const v = ledger?.bump(name);
+          ws.publish(name, { doc: name, ops: tOps, ...(v !== undefined ? { v } : {}) });
+        }
+        // an open copy is read again from the tables: it holds exactly what a fresh open would
+        if (cache.has(name) || name === docName) refresh(name);
+      }
       // Custom-doc cross-pollination: predicate-based membership.
       customFanOut(written.ops);
+      options.committed?.();
     } catch (err: any) {
       log.error(`delta fan-out failed (write committed): ${err.message}`);
     }
     log.info(`delta ${docName} [${ops.map((o: DeltaOp) => `${o.op} ${o.path}`).join(", ")}]`);
     return written;
+  }
+
+  /** Read an open document's copy again from the tables. */
+  function refresh(docName: string): void {
+    const m = findDoc(docName);
+    if (!m) return;
+    const doc = loadDocFromSql(m.def, resolveScope(m.def, m.docId));
+    if (doc) cache.set(docName, doc);
+    else if (m.def.implied) { cache.set(docName, emptyDoc(m.def, m.docId)); implied.add(docName); }
+    else cache.delete(docName);
   }
 
   ws.on("delta", (msg, client, respond) => {
@@ -718,6 +873,7 @@ export function registerDocs(
         if (out && "error" in out && out.error.code >= 500) return respond(out);
         // A conflict, a walk the document refuses, or one that changes nothing: walked all the same.
         const skipped = ledger.skip({ doc: entry.doc, ...by, undoes: entry.id });
+        options.committed?.();
         const conflict = plan.conflict.length ? plan.conflict : out && "error" in out ? plan.ops.map((o) => o.path) : undefined;
         respond({ result: { doc: entry.doc, ops: [], inverse: [], version: skipped.version, entry: skipped.entry, ...(conflict ? { conflict } : {}) } });
       } finally {
@@ -732,6 +888,15 @@ export function registerDocs(
       respond({ result: ledger.history(msg.doc, cursorOf(msg, client), msg.limit) });
     });
   }
+
+  // A document as it stood at a time (`at`, ISO-8601): its temporal rows as they were then, as on Postgres.
+  ws.on("open_at", (msg, _client, respond) => {
+    const match = findDoc(msg.doc as string);
+    if (!match) return;
+    if (!msg.at) return respond({ error: { code: 400, message: "at is required" } });
+    const doc = loadDocAt(db, schema, match.def, match.docId, String(msg.at));
+    respond(doc ? { result: doc } : { error: { code: 404, message: "Not found" } });
+  });
 
   ws.on("close", (msg, client, respond) => {
     const docName = msg.doc as string;
@@ -751,106 +916,6 @@ export function registerDocs(
     respond({ result: { ack: true } });
     log.debug(`closed ${docName}`);
   });
-
-  // ---------------------------------------------------------------------------
-  // Cross-doc fan-out
-  // ---------------------------------------------------------------------------
-
-  /**
-   * True if `row` (in `coll`) belongs to the doc identified by (`def`,`docId`),
-   * tracing the parent-FK chain. For grandchildren, walks up via `cached` —
-   * the target doc's own cache — because each link of the chain must already
-   * be in scope for the row itself to be in scope.
-   */
-  function rowInScope(
-    coll: string,
-    row: any,
-    def: DocDef,
-    docId: string,
-    cached: any,
-  ): boolean {
-    if (!row) return false;
-    if (coll === def.root) return String(row.id) === docId;
-    const table = schema.tables[coll];
-    if (!table?.parent) return true;                  // no parent: loaded in full, so every document holds it
-    const fkVal = row[table.parent.fkColumn];
-    if (fkVal == null) return false;
-    const parentColl = table.parent.collection;
-    if (parentColl === def.root) return String(fkVal) === docId;
-    const parentRow = cached?.[parentColl]?.[String(fkVal)];
-    if (!parentRow) return false;                     // parent isn't in this doc's scope
-    return rowInScope(parentColl, parentRow, def, docId, cached);
-  }
-
-  /** Forward relevant delta ops to other subscribed docs that share affected collections. */
-  function fanOut(ws: WsServer, ops: DeltaOp[], sourceDocName: string) {
-    for (const [docName] of subscriptions) {
-      if (docName === sourceDocName) continue;
-
-      const match = findDoc(docName);
-      if (!match) continue;
-      const { def, docId } = match;
-      const cached = cache.get(docName);
-
-      // Filter to ops that (a) affect a collection this doc includes AND
-      // (b) belong to this doc's scope by parent-FK lineage. A root-level
-      // `replace /<coll>` from the source (its single-object root) must be
-      // REWRITTEN to a keyed `/<coll>/<id>` when the target treats <coll> as
-      // an included map — otherwise applying `/<coll>` would clobber the whole
-      // collection map with one row object.
-      const relevantOps: DeltaOp[] = [];
-      // Each op taken is applied to the target at once, so a row later in the write finds a
-      // parent that came earlier in it (a course and its drinks, put back together by an undo).
-      const take = (op: DeltaOp) => {
-        relevantOps.push(op);
-        if (cached) deltaApplyOps(cached, [op]);
-      };
-      for (const op of ops) {
-        const parts = splitPath(op.path);
-        const collKey = parts[0];
-        if (!collKey) continue;
-        if (!def.include.includes(collKey) && collKey !== def.root) continue;
-
-        const id = parts[1];
-
-        // The mirror of the rewrite below: a keyed row `/<coll>/<id>` from a source that holds
-        // <coll> as a map, onto a target whose ROOT is that row. Applied as it is, it would add a
-        // key to the root object; it is the root, replaced whole -- or, the row gone, null.
-        if (collKey === def.root && parts.length === 2) {
-          if (id !== docId) continue;
-          take({ op: "replace", path: joinPath(collKey), value: op.op === "remove" ? null : (op as any).value });
-          continue;
-        }
-
-        if (op.op === "remove") {
-          // Forward removes only if the id is currently in the target's cache.
-          // If we don't have it, this row was never in the target's scope.
-          if (id != null && cached?.[collKey]?.[id] != null) take(op);
-          continue;
-        }
-
-        // add / replace — `value` is the full row (per applyOps' broadcastOps).
-        const row = (op as any).value;
-        if (parts.length === 1) {
-          // Source root-level replace.
-          if (collKey === def.root) {
-            // Target also treats this collection as its single-object root.
-            if (row && String(row.id) === docId) take(op);
-          } else if (row && rowInScope(collKey, row, def, docId, cached)) {
-            // Target treats it as an included map — rewrite to a keyed op.
-            take({ op: "replace", path: joinPath(collKey, row.id), value: row });
-          }
-          continue;
-        }
-        if (rowInScope(collKey, row, def, docId, cached)) take(op);
-      }
-
-      if (relevantOps.length === 0) continue;
-
-      // Broadcast the deltas
-      ws.publish(docName, { doc: docName, ops: relevantOps });
-    }
-  }
 
   // ---------------------------------------------------------------------------
   // Custom-doc cross-pollination
@@ -976,12 +1041,27 @@ export function inverseOf(before: any, applied: DeltaOp[]): DeltaOp[] {
 // Time-travel
 // ---------------------------------------------------------------------------
 
-/** Load a doc as it existed at a specific point in time. */
+/** Load a doc as it existed at a specific point in time (`at`: ISO-8601, or SQLite's own form). */
 export function loadDocAt(db: any, schema: Schema, def: DocDef, docId: string, at: string): any | null {
   const rootTable = schema.tables[def.root];
   if (!rootTable) return null;
+  const when = sqliteTime(at);
+  const scope = resolveScope(def, docId);
+  const where = whereOf(scope);
 
-  const rootRows = temporalQuery(db, rootTable, "id = ?", [docId], at);
+  const rootRows = temporalQuery(db, rootTable, where.sql, where.params as any[], when);
+  if (scope.mode === "list") {
+    for (const row of rootRows) decodeRow(rootTable, row);
+    const doc: any = { [def.root]: toMap(rootRows) };
+    for (const collKey of def.include) {
+      const table = schema.tables[collKey];
+      if (!table) continue;
+      const rows = temporalQuery(db, table, "1 = 1", [], when);
+      for (const row of rows) decodeRow(table, row);
+      doc[collKey] = toMap(rows);
+    }
+    return doc;
+  }
   if (rootRows.length === 0) return null;
   const rootRow = rootRows[0];
   decodeRow(rootTable, rootRow);
@@ -992,7 +1072,7 @@ export function loadDocAt(db: any, schema: Schema, def: DocDef, docId: string, a
     const table = schema.tables[collKey];
     if (!table) continue;
 
-    const collRows = loadCollectionAt(db, schema, table, def, rootRow, at);
+    const collRows = loadCollectionAt(db, schema, table, def, rootRow, when);
     for (const row of collRows) decodeRow(table, row);
     doc[collKey] = toMap(collRows);
   }
@@ -1133,8 +1213,10 @@ export function migrateSchema(db: any, schema: Schema): string[] {
 // ---------------------------------------------------------------------------
 
 /** Validate delta ops against the schema. Returns an array of errors (empty = valid). */
-export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): ValidationError[] {
+export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: { list?: boolean } = {}): ValidationError[] {
   const errors: ValidationError[] = [];
+  // A list-mode document's root is a map of rows, like an included collection.
+  const single = (collKey: string) => collKey === def.root && !opts.list;
 
   for (const op of ops) {
     let parts: string[];
@@ -1167,7 +1249,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
     // /<coll> on an included collection has no meaning for a client op — reject
     // it here so it 400s instead of reaching the executor's throw (500).
     if (parts.length === 1) {
-      if (collKey !== def.root) {
+      if (!single(collKey)) {
         errors.push({ path: op.path, message: `Whole-collection ops are not supported: ${op.op} ${op.path}` });
         continue;
       }
@@ -1192,9 +1274,9 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
       continue;
     }
 
-    // Root collection is single-mode: /<root>/<field> is a FIELD replace
+    // A single-mode root: /<root>/<field> is a FIELD replace
     // (not /<root>/<id> row), so validate parts[1] as a column name.
-    if (collKey === def.root && parts.length === 2) {
+    if (single(collKey) && parts.length === 2) {
       if (op.op !== "replace") {
         errors.push({ path: op.path, message: "Root fields only support replace" });
         continue;
@@ -1250,9 +1332,10 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): Valida
       }
     }
 
-    // Field-level replace: /<coll>/<id>/field
+    // Field-level replace: /<coll>/<id>/field -- a column, or the parent key (the row moves, as on Postgres)
     if (op.op === "replace" && parts.length === 3) {
       const field = parts[2]!;
+      if (field === fkCol) continue;
       const colDef = columnOf(field);
       if (!colDef) {
         errors.push({ path: op.path, message: `Unknown field: ${field}` });
@@ -1296,6 +1379,65 @@ function validateFieldType(def: ColumnDef, field: string, value: unknown): strin
 }
 
 // ---------------------------------------------------------------------------
+// Carrying rows between backends
+// ---------------------------------------------------------------------------
+
+/** The sequences a collection's serials are minted from (`add /coll/-`), as Postgres's `seq_<table>`. */
+function createSequences(db: any): void {
+  db.run("CREATE TABLE IF NOT EXISTS _delta_sequences (collection TEXT PRIMARY KEY, last INTEGER NOT NULL)");
+}
+
+/** A time in SQLite's own sortable form, "YYYY-MM-DD HH:MM:SS.mmm" in UTC, from ISO-8601 or that form. */
+function sqliteTime(value: unknown): string {
+  const iso = isoTime(value);
+  return iso && /^\d{4}-\d{2}-\d{2}T/.test(iso) ? iso.replace("T", " ").replace("Z", "") : String(value);
+}
+
+/**
+ * Every row of the schema's tables -- every version of a temporal row, with
+ * its validity -- and each collection's last minted id: the `Snapshot` every
+ * backend gives and takes, so the data moves along the path unchanged.
+ */
+export function exportTables(db: any, schema: Schema): Snapshot {
+  createSequences(db);
+  const tables: Snapshot["tables"] = {};
+  const sequences: Record<string, number> = {};
+  for (const [key, table] of Object.entries(schema.tables)) {
+    const rows = db.query(`SELECT * FROM ${table.name} ORDER BY id${table.temporal ? ", valid_from" : ""}`).all() as any[];
+    tables[key] = rows.map((row) => {
+      const validity = table.temporal ? { valid_from: isoTime(row.valid_from), valid_to: isoTime(row.valid_to) } : {};
+      decodeRow(table, row);
+      return { ...row, ...validity };
+    });
+    const seq = db.query("SELECT last FROM _delta_sequences WHERE collection = ?").get(key) as { last: number } | null;
+    sequences[key] = Math.max(seq?.last ?? 0, lastId({ tables }, key));
+  }
+  return { tables, sequences };
+}
+
+/**
+ * Put a snapshot's rows into the schema's tables as they are (ids kept) and
+ * set each collection's sequence past them, so the next row named follows the
+ * last one named where the rows came from. The tables should be empty.
+ */
+export function importTables(db: any, schema: Schema, snapshot: Snapshot): void {
+  createSequences(db);
+  db.transaction(() => {
+    for (const [key, table] of Object.entries(schema.tables)) {
+      const cols = ["id", ...(table.parent ? [table.parent.fkColumn] : []), ...Object.keys(table.columns), ...(table.temporal ? ["valid_from", "valid_to"] : [])];
+      const insert = db.query(`INSERT INTO ${table.name} (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`);
+      for (const row of snapshot.tables[key] ?? []) {
+        insert.run(...cols.map((c) =>
+          c === "valid_from" ? sqliteTime(row.valid_from ?? new Date().toISOString())
+          : c === "valid_to" ? (row.valid_to == null ? null : sqliteTime(row.valid_to))
+          : encodeValue(table, c, row[c])));
+      }
+      db.run("INSERT INTO _delta_sequences (collection, last) VALUES (?, ?) ON CONFLICT (collection) DO UPDATE SET last = excluded.last", [key, lastId(snapshot, key)]);
+    }
+  })();
+}
+
+// ---------------------------------------------------------------------------
 // SQL helpers
 // ---------------------------------------------------------------------------
 
@@ -1325,7 +1467,7 @@ function toMap(arr: any[]): Record<string, any> {
 // row's valid_from — otherwise (with monotonic sub-second now()) the close
 // lands a tick later than the reinsert, leaving a temporal overlap that makes
 // half-open time-travel reads (valid_to > at) match two versions at once.
-function closeRow(db: any, table: ResolvedTable, id: string, ts: string = now()) {
+function closeRow(db: any, table: ResolvedTable, id: string | number, ts: string = now()) {
   db.run(`UPDATE ${table.name} SET valid_to = ? WHERE id = ? AND valid_to IS NULL`, [ts, id]);
   return ts;
 }
@@ -1362,29 +1504,30 @@ function insertCollectionRow(
   db: any,
   schema: Schema,
   table: ResolvedTable,
-  id: string,
-  rootId: string,
+  id: string | number,
+  rootId: string | number | undefined,
   def: DocDef,
   row: Record<string, unknown>,
   ts: string,
+  list = false,
 ): any {
   // An add names a new row. On a temporal table the key is (id, valid_from),
   // so an add of a live id would insert a second live version of it (and on a
   // plain table fail UNIQUE as a 500): refuse it, in any document's scope.
   const live = table.temporal ? `current_${table.name}` : table.name;
   if (db.query(`SELECT 1 FROM ${live} WHERE id = ?`).get(id)) {
-    refuse(409, `Row already exists: ${joinPath(table.docKey, id)} -- replace it, or add to ${joinPath(table.docKey, "-")} for a new id`);
+    refuse(409, `Row already exists: ${joinPath(table.docKey, String(id))} -- replace it, or add to ${joinPath(table.docKey, "-")} for a new id`);
   }
   const fullRow: any = { id, ...row };
   fullRow.id = id;   // the path names the row, whatever the value says
-  if (table.temporal) { fullRow.valid_from = ts; fullRow.valid_to = null; }
 
-  // Resolve FK column
+  // A single-mode document's direct child hangs from its root; any other row
+  // names its parent (a grandchild, a list-mode document's rows), as on Postgres.
   if (table.parent) {
-    if (table.parent.collection === def.root) {
+    if (!list && table.parent.collection === def.root) {
       fullRow[table.parent.fkColumn] = rootId;
-    } else {
-      // FK should already be in the row (e.g. node_id for activities)
+    } else if (fullRow[table.parent.fkColumn] != null) {
+      fullRow[table.parent.fkColumn] = rowId(fullRow[table.parent.fkColumn] as string | number);
     }
   }
 
@@ -1412,7 +1555,7 @@ function insertCollectionRow(
  * unupdatable. UPDATE rather than DELETE+INSERT (which is what the Postgres
  * backend does) so the row is never briefly absent.
  */
-function updateRow(db: any, table: ResolvedTable, id: string, row: any) {
+function updateRow(db: any, table: ResolvedTable, id: string | number, row: any) {
   const cols: string[] = [];
   if (table.parent) cols.push(table.parent.fkColumn);
   cols.push(...Object.keys(table.columns));
@@ -1436,7 +1579,7 @@ function updateRow(db: any, table: ResolvedTable, id: string, row: any) {
 // exists to someone probing ids.
 
 /** Throw unless `id` is a row this doc actually holds. */
-function assertRowInScope(doc: any, collKey: string, id: string): void {
+function assertRowInScope(doc: any, collKey: string, id: string | number): void {
   if (doc[collKey]?.[id] == null) refuse(404, `Row not found: ${collKey}/${id}`);
 }
 
@@ -1451,9 +1594,13 @@ function assertParentInScope(
   def: DocDef,
   table: ResolvedTable,
   row: Record<string, unknown> | undefined,
+  list = false,
 ): void {
   const parent = table.parent;
-  if (!parent || parent.collection === def.root) return;
+  if (!parent) return;
+  // single mode: a direct child's key is the root's; list mode: an included collection is whole
+  if (!list && parent.collection === def.root) return;
+  if (list && parent.collection !== def.root) return;
   const fk = row?.[parent.fkColumn];
   if (fk == null || doc[parent.collection]?.[String(fk)] == null) {
     refuse(404, `Row not found: ${parent.collection}/${fk ?? ""}`);
@@ -1465,7 +1612,7 @@ function removeRow(
   schema: Schema,
   table: ResolvedTable,
   collKey: string,
-  id: string,
+  id: string | number,
   doc: any,
   def: DocDef,
 ): DeltaOp[] {
@@ -1477,7 +1624,7 @@ function removeRow(
     db.run(`DELETE FROM ${table.name} WHERE id = ?`, [id]);
   }
   delete doc[collKey][id];
-  ops.push({ op: "remove", path: joinPath(collKey, id) });
+  ops.push({ op: "remove", path: joinPath(collKey, String(id)) });
 
   // Cascade via parent relationship (children)
   for (const childKey of table.children) {
@@ -1528,6 +1675,8 @@ function encodeValue(table: ResolvedTable, col: string, value: unknown): any {
 }
 
 function decodeRow(table: ResolvedTable, row: any) {
+  // A temporal row's validity is storage, not data: a document holds the row as it is, as Postgres gives it.
+  if (table.temporal) { delete row.valid_from; delete row.valid_to; }
   for (const [col, def] of Object.entries(table.columns)) {
     if (def.type === "json" && typeof row[col] === "string") {
       try { row[col] = JSON.parse(row[col]); } catch { /* a string an earlier release stored raw: keep it */ }

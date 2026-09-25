@@ -965,11 +965,12 @@ describe("registerDocs", () => {
       const sock = mockSocket();
       await sws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "wishlist:peter" }));
 
-      expect(sock.sent[0].result).not.toBeNull();
-      expect(sock.sent[0].result.wishlists.title).toBe("My List");
+      // No id in the scope: a list of the wishlists the name admits, as on Postgres.
+      expect(Object.keys(sock.sent[0].result.wishlists)).toEqual(["w1"]);
+      expect(sock.sent[0].result.wishlists.w1.title).toBe("My List");
     });
 
-    test("static scope binding", async () => {
+    test("a plain binding is a parameter read from the doc name, as on Postgres", async () => {
       const s = defineSchema({
         settings: { columns: { value: "text" } },
       });
@@ -989,9 +990,10 @@ describe("registerDocs", () => {
       registerDocs(sws, sdb, s, [doc]);
 
       const sock = mockSocket();
-      await sws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "global:x" }));
+      await sws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "global:app" }));
 
-      expect(sock.sent[0].result.settings.category).toBe("app");
+      expect(Object.keys(sock.sent[0].result.settings)).toEqual(["s1"]);
+      expect(sock.sent[0].result.settings.s1.category).toBe("app");
     });
   });
 
@@ -2045,28 +2047,37 @@ describe("errors that name their fix", () => {
     expect(sock.sent[0].error.message).toContain("call createTables(db, schema) before the first open");
   });
 
-  test("a Postgres scope binding is refused at registration, naming :docId (D9)", () => {
+  test("a scope reads the doc name by the same rule as Postgres: :name, =:, ranges, like", async () => {
     const db = new Database(":memory:");
     createTables(db, schema);
-    const pgStyle = defineDoc("mine:", { root: "projects", include: [], scope: { status: ":id" } });
-    expect(() => registerDocs(createWs(), db, schema, [pgStyle])).toThrow(
-      'registerDocs("mine:"): scope { status: ":id" } is the Postgres scope DSL; SQLite reads the doc name with ":docId" only (scope: { status: ":docId" })',
-    );
-    const literal = defineDoc("active:", { root: "projects", include: [], scope: { status: "active" } });
-    expect(() => registerDocs(createWs(), db, schema, [literal])).not.toThrow();
+    db.run("INSERT INTO projects (id, name, status, valid_from) VALUES (1, 'Alpha', 'active', ?), (2, 'Beta', 'done', ?), (3, 'Alfa', 'active', ?)", ["2020-01-01 00:00:00", "2020-01-01 00:00:00", "2020-01-01 00:00:00"]);
+    const ws = createWs();
+    registerDocs(ws, db, schema, [
+      defineDoc("by-status:", { root: "projects", include: [], scope: { status: ":id" } }),
+      defineDoc("named:", { root: "projects", include: [], scope: { name: "like:start" } }),
+    ]);
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "by-status:active" }));
+    // `:id` binds the name's first part: here to status, so it is a list, not a row
+    expect(Object.keys(sock.sent[0].result.projects).sort()).toEqual(["1", "3"]);
+    await ws.websocket.message(sock, JSON.stringify({ id: 2, action: "open", doc: "named:al" }));
+    expect(Object.keys(sock.sent[1].result.projects).sort()).toEqual(["1", "3"]);
   });
 
-  test("a missing root row says a SQLite document is one root row", async () => {
+  test("a missing root row says what to do; a name with no id is a list of every root row", async () => {
     const db = new Database(":memory:");
     createTables(db, schema);
+    db.run("INSERT INTO projects (id, name, status, valid_from) VALUES (1, 'Alpha', 'active', ?)", ["2020-01-01 00:00:00"]);
     const ws = createWs();
     registerDocs(ws, db, schema, [projectDoc, defineDoc("projects:", { root: "projects", include: [] })]);
     const sock = mockSocket();
-    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "projects:" }));   // a Postgres-style list doc
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "project:9" }));
     expect(sock.sent[0].error).toEqual({
       code: 404,
-      message: 'Not found: no projects row where id = "". A SQLite document is one root row and its children: make the row first, or declare the document implied: true',
+      message: "Not found: no projects row 9. Make the row first, or declare the document implied: true",
     });
+    await ws.websocket.message(sock, JSON.stringify({ id: 2, action: "open", doc: "projects:" }));   // list mode, as on Postgres
+    expect(Object.keys(sock.sent[1].result.projects)).toEqual(["1"]);
   });
 });
 

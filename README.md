@@ -83,14 +83,20 @@ same way.
 
 | The truth is | Register it with | From |
 |---|---|---|
-| a JSON file | `await registerDoc(ws, name, { file, empty })` | `@blueshed/delta/server` |
+| a JSON file | `registerDocs(ws, file, schema, docs)` | `@blueshed/delta/json` |
 | a SQLite database | `registerDocs(ws, db, schema, docs)` | `@blueshed/delta/sqlite` |
+| Postgres in this process | `openPglite(dir?)`, then as a Postgres database | `@blueshed/delta/pglite` |
 | a Postgres database, shared by processes | `createDocListener(ws, pool)` and `registerDocType(docTypeFromDef(def, pool))` | `@blueshed/delta/postgres` |
+| one free-form JSON document | `await registerDoc(ws, name, { file, empty })` | `@blueshed/delta/server` |
 | this process (who is online) | `registerMemory(ws, { prefix, empty })` | `@blueshed/delta/kinds` |
 | outside (a sensor, an API) | `registerSource(ws, { prefix, read, every })` | `@blueshed/delta/kinds` |
 | the release (countries, units) | `registerStatic(ws, { prefix, value })` | `@blueshed/delta/kinds` |
 
-Start with a JSON file and move to a database when you need queries or more than one process.
+Start with a JSON file; move to SQLite, then Postgres in this process, then a Postgres server,
+without changing the app: the same schema, the same documents, the same writes, and the same
+answers from each -- serial ids, a write told to every open document that holds the rows it
+changed, one scope rule. Carry the data with `exportTables` from where it is and
+`importTables` into where it goes; ids and sequences carry, so the next row named follows on.
 
 ## Undo comes with the ledger
 

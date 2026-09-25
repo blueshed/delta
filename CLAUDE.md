@@ -63,9 +63,22 @@ on push, `publish.yml` on a published release) runs the same steps.
 - **Broadcasts are row-level**: a field write goes out as the whole row, on every backend.
 - **Opt-in stays opt-in.** Without `ledger: true` / `inverse: true`, answers and broadcasts
   keep their 0.5 shapes.
-- **Fan-out differs by backend, on purpose.** SQLite forwards a write to every open document
-  that holds the row; Postgres publishes only on the channel of the document written through.
-  `tests/postgres-fanout.test.ts` and `tests/postgres-isolation.test.ts` pin the Postgres side.
+- **One app, every backend.** The JSON file (`./json`), SQLite, Postgres in process (`./pglite`)
+  and a Postgres server take the same schema, documents and writes, and answer the same:
+  serial ids (numbers), no validity columns in rows, list mode and one scope rule
+  (`src/server/scope.ts` is `_delta_resolve_scope`'s twin), `open_at`, the error table.
+  `tests/helpers/path.ts` asks every case of each (`tests/path-*.test.ts`,
+  `tests/postgres-path.test.ts`, which also carries one app's data through all four). A
+  backend that answers differently is wrong: change both sides together.
+- **Fan-out is the same on every backend.** A write is told to every document that held or
+  holds a row it changed, each what changed for it (arrived: add; stayed: replace; left:
+  remove; the root: replaced, or null). On Postgres it is worked out in `delta_apply`
+  (`_delta_holders`, `_delta_tell`, `001b`/`001d`), so every process hears it; on SQLite and
+  the JSON file, in `write()` (`holders`, `tell`). `tests/postgres-isolation.test.ts` and
+  `tests/sqlite-isolation.test.ts` pin that nobody else is told.
+- **Rows carry from one backend to the next** with `exportTables` / `importTables` (the same
+  `Snapshot` on each): every row, every temporal version, and each sequence, so the next serial
+  follows on.
 - **A walk is guarded, the same on both backends**: `planWalk` (`src/server/ledger.ts`) and
   `_delta_walk_plan` (`001g`) set back only what an entry changed, where the document still
   holds what it left; a conflict walks nothing and is recorded as walked. Change them together
@@ -87,7 +100,13 @@ on push, `publish.yml` on a published release) runs the same steps.
   imports railroad's subpaths, never the root barrel.
 - `src/server/server.ts`: `createWs`, the JSON-file backend (`registerDoc`), `WsServer`.
 - `src/server/sqlite.ts`: the SQLite backend (`registerDocs`, custom docs, fan-out, implied
-  docs, `inverseOf`; with `{ ledger: true }`, `undo` / `redo` / `history`).
+  docs, `inverseOf`, `exportTables` / `importTables`; with `{ ledger: true }`, `undo` / `redo` /
+  `history`).
+- `src/server/json.ts`: the JSON file, the same documents as SQLite (SQLite in memory, loaded
+  from the file and saved to it after every change).
+- `src/server/pglite.ts`: Postgres in process -- PGlite behind the slice of `pg`'s Pool delta
+  uses, so `./postgres` runs on it unchanged (from epsilon's `pglite.ts`).
+- `src/server/scope.ts`: a doc name's scope, for the backends that are not Postgres.
 - `src/server/ledger.ts`: the SQLite ledger (entries, the cursor's chains).
 - `src/server/local.ts`: `createLocal()`, delta in-process with no socket.
 - `src/server/kinds.ts`: `registerMemory`, `registerStatic`, `registerSource`.

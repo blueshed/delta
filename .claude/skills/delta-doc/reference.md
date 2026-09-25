@@ -280,42 +280,36 @@ if (errors.length) throw new Error(errors.map(e => e.message).join("\n"));
 
 ## `scope` syntax
 
-> **Postgres-only DSL.** The rich operator DSL below is implemented in the Postgres SQL resolver (`src/sql/001b-delta-scope.sql`). The **SQLite** backend uses a simpler positional scheme — see *SQLite scope behaviour* at the end of this section. Don't copy `":id"`, `"<=:end"`, `"like:prefix"` etc. into a SQLite `defineDoc`; they won't resolve.
+One rule on every backend: the Postgres resolver (`_delta_resolve_scope`, `src/sql/001b-delta-scope.sql`) and its TypeScript twin for SQLite and the JSON file (`src/server/scope.ts`) read a document's name the same way.
 
-`defineDoc`'s `scope` map uses a compact DSL. Values with a leading colon read **from the doc-name context** (positional params extracted after the prefix). Plain strings are literal captures (normally just `"id"` — the first positional param from the doc name). **The leading `:` matters.**
+`defineDoc`'s `scope` map binds a root column to a value read **from the doc name** (positional params after the prefix). **The leading `:` is optional**: a plain value names a param, as on Postgres -- it is not a literal.
 
 | Value | Meaning |
 |---|---|
 | `":id"` | `col = <id-from-doc-name>` — positional param named `id` |
 | `":name"` | `col = <name-from-doc-name>` — positional param named `name` |
-| `"id"` | literal capture — equivalent to `":id"` but older form used in scoped-single docs |
+| `"name"` | the same as `":name"` |
 | `"=:name"` | explicit equality |
-| `"<=:end"` | `col <= <end-param>` |
-| `">=:start"` | `col >= <start-param>` |
-| `"like:prefix"` | `col ILIKE <prefix-param>%` |
+| `"<=:end"` | `col <= <end-param>` (also `>=`, `<`, `>`, `!=`) |
+| `"like:prefix"` | `col` starts with the value, any case (`ILIKE <prefix>%`) |
 | `"at:when"` | temporal snapshot (not a WHERE) |
 
-Named params are resolved positionally from the colon-separated doc id. `id` always takes position 1; other names are alphabetical. `todos:5` has one param; `venue-at:42:2026-06-16` has two (`id=42`, second positional).
+Named params are resolved positionally from the colon-separated doc id. `id` always takes position 1; other names are alphabetical. `todos:5` has one param; `venue-at:42:2026-06-16` has two (`id=42`, second positional). An empty value sets no condition.
+
+**Single or list.** A scope that binds `id` (or no scope and a non-empty doc id) is **single mode**: one root row and its children. Anything else is **list mode**: every root row the conditions admit, keyed by id, with each included collection **in full**. `items:` (no scope, empty id) is every item; `by-status:active` with `scope: { status: ":id" }` is every row whose status is `active` -- `:id` names the param, not the row.
 
 **Scope keys must be real columns of the root collection.** `scope: { id: ":id" }` works; `scope: { "items.id": ":id" }` raises at open time with `scope key "items.id" is not a column of "items" (valid keys: id, …)`. For a scoped-single doc, you can omit `scope` entirely — the framework defaults to `WHERE id = <doc-id>`.
 
-**SQLite scope behaviour (not the DSL above).** The SQLite backend (`src/server/sqlite.ts`, `resolveScope`) does **not** implement the operator DSL. It is positional and literal:
-
-- **Empty scope** → `WHERE id = <doc-id>` (same default as Postgres single-mode).
-- **Otherwise**, the only dynamic placeholder is the literal string `":docId"`. The doc-id is split on `:` into positional parts, and each `":docId"` binding consumes the next part. **Any other binding value is treated as a literal column match** — it is not parsed for operators or param names.
-
-So on SQLite a Postgres-style `scope: { user_id: ":id" }` does **not** read from the doc name — it produces `WHERE user_id = ':id'` (the literal string `:id`). To scope a SQLite doc by the doc-id, use `scope: { user_id: ":docId" }`; to pin a static value, use a plain literal like `scope: { tenant: "acme" }`.
-
 ## Doc patterns
 
-**List doc** (Postgres only; SQLite has no list mode) — prefix matches the whole name; opens every row:
+**List doc** (every backend) — prefix matches the whole name; opens every row:
 
 ```ts
 defineDoc("items:", { root: "items", include: [] });
 // open "items:" → { items: { "1": { id: 1, ... }, "2": { ... } } }
 ```
 
-**Catalog doc** — list-mode root + included child collections loaded in full. Postgres only. The right shape when a small reference table and its children all open together (e.g. a product catalog with parts, faces, face_products).
+**Catalog doc** — list-mode root + included child collections loaded in full, on every backend. The right shape when a small reference table and its children all open together (e.g. a product catalog with parts, faces, face_products).
 
 ```ts
 defineDoc("catalog:", {
@@ -503,23 +497,22 @@ const room = defineDoc("room:", { root: "rooms", include: ["messages"], implied:
 // delta "room:attic" add /messages/m1 → the rooms row "attic" is made, then the message
 ```
 
-An implied document is keyed by its root id, so it cannot also declare a `scope` (`defineDoc` throws). A document that is not implied still answers 404 for a missing root row. The Postgres backend ignores `implied`.
+An implied document is keyed by its root id, so it cannot also declare a `scope` (`defineDoc` throws). A document that is not implied still answers 404 for a missing root row. The Postgres backend ignores `implied` (todo: an implied document keyed by a name, `room:attic`, cannot move to Postgres, whose ids are serials).
 
 ## Fan-out — which open documents hear a write
 
-A write is always published on the channel of the document it was written through. Whether other open documents over the same rows hear it depends on the backend.
+**A write is told to every document that holds a row it changed**, on every backend: the one written through, and every other open document over the same rows. Each is told what changed **for it**, worked out from who held each row before the write and who holds it after (judged on the row's values, by the same rule a document is read by):
 
-**SQLite: every open document that holds the row hears it.** After a write commits, the backend walks the other documents in its cache and forwards each op that is in their scope (the root id, a child's parent key, a grandchild through its cached parent). Three rules keep what arrives right:
+- a row that **arrives** (added, or moved into the document's scope) is an `add /<coll>/<id>`;
+- a row that **stays** is a `replace /<coll>/<id>` with the row whole;
+- a row that **leaves** (removed, or moved out: a parent key rewritten, a list's condition no longer met) is a `remove /<coll>/<id>`;
+- where the row is the document's **root** (`household:1` over a `households` row), a `replace /<root>` with the row -- or `null` when it leaves. Code rendering such a document should allow its root to be `null`.
 
-- A row written where its table is a map (`board:w1` includes `households`) reaches a document whose **root** is that row (`household:h1`) as the root, replaced whole: `replace /households` with the row, or with `null` when the row is removed. Code rendering such a document should allow its root to be `null`.
-- A root-level replace from a document whose root is the row reaches a document holding the table as a map as a keyed row, `replace /households/<id>`.
-- Each op taken is applied to the target as it is taken, so a row finds a parent that came earlier in the same write (a course and its drinks added together, as an undo of a dropped course does).
+A parent and a child added in one write arrive parent first; a removal's cascade arrives with it. The writer's own document is told first, once; its answer (and its ledger entry) keep the ops as written, so an undo walks back exactly what was done. With a version (`v`, below), each told document advances its own.
 
-Removes are forwarded only when the target holds the row. Fan-out broadcasts carry no `v`: the target's version is not bumped, and the client applies them as they come.
+**Where it is worked out.** On Postgres, in the database: `delta_apply` asks `_delta_holders` for each changed row before and after, and `_delta_tell` logs each document's ops and NOTIFYs its name -- so every process's listener, and a reader catching up from `delta_fetch_ops`, hears it. The documents considered are those ever opened (a name in `_delta_versions`) and the writer's. On SQLite and the JSON file, in the process, over the documents open there; each told document's copy is then read again from the tables.
 
-**Postgres: only the document written through hears it.** `delta_apply` logs its broadcast ops against that document and `NOTIFY` carries its name; the listener publishes on that channel alone. Another open document over the same rows is not told live — it reads the tables afresh on its next open, and every client re-opens its documents on reconnect. If two documents over the same rows must both be live, write through the one the other watches, or make the second a custom read doc (above) that watches the collection. `tests/postgres-fanout.test.ts` pins this.
-
-**Custom read docs** hear writes to the collections they `watch`, on both backends (membership), or recompute on them (Postgres).
+**Custom read docs** hear writes to the collections they `watch`, on both backends (membership), or recompute on them (Postgres). `tests/helpers/path.ts` asks every case of every backend.
 
 ## Authentication
 
