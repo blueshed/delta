@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **SQLite: an included collection with no `parent` is loaded in full**, in every document of
+  the prefix, as Postgres loads it. `loadCollection` filtered it by the root's scope columns
+  (with the default scope, `WHERE id = <doc id>`: at most one row, the one that happened to
+  share the document's id), while the fan-out treated every row as in scope and `loadDocAt`
+  returned none: a row added through `list:a` was broadcast to an open `list:b` that would not
+  hold it when opened again. Open, `loadDocAt` and the fan-out now agree (todo #2). An
+  unparented collection met only on the way up from an included grandchild is not in the
+  document, as before. To move across: a collection that belongs to one document needs a
+  `parent` (its key to the root, or to an included collection).
+
 ## [0.7.0] - 2026-09-25
 
 ### Breaking

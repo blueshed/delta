@@ -102,6 +102,7 @@ What is different from Postgres (the full list is SKILL.md → *Backends side by
 - **No auth.** `registerDocs` has no gate: every socket may open every document of a prefix. Keep per-user data out of a shared SQLite backend, or put it behind Postgres.
 - **One process per file**: the backend caches documents in memory, and a second process would not hear the first's writes.
 - **Fan-out**: a write reaches every open document that holds the row (*Fan-out*, below).
+- **An included collection with no `parent` is shared**: nothing ties its rows to one document, so every document of the prefix holds all of them (open, `loadDocAt` and the fan-out agree), as on Postgres. Give it a `parent` to make it per document.
 
 ## Quick start (Postgres backend)
 
@@ -340,6 +341,8 @@ defineDoc("venue:", {
 });
 // open "venue:42" → { venues: {...}, areas: {...}, sites: {...} } for venue 42 only.
 // The includes are filtered by their parent_fk (venues_id = 42) via _delta_load_collection.
+// An included collection with no parent has no key to filter by: it is loaded in
+// full, in every venue, on both backends (a shared reference table).
 // You can omit `scope` entirely — an empty scope on a single-mode open defaults to
 // `WHERE id = <doc-id>` which is the same thing.
 ```

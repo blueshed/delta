@@ -10,8 +10,9 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import {
-  defineSchema, defineDoc, createTables, registerDocs,
+  defineSchema, defineDoc, createTables, registerDocs, loadDocAt,
 } from "../src/server/sqlite";
+import { createLocal } from "../src/server/local";
 import { createWs, type WsServer } from "../src/server/server";
 import { setLogLevel } from "../src/server/logger";
 
@@ -179,5 +180,57 @@ describe("fanOut — parent-FK scope check (issue.md)", () => {
     expect(ops).toContainEqual(expect.objectContaining({
       op: "add", path: "/brands/b-alice-2",
     }));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// An included collection with no parent (todo #2). It has no key to the root,
+// so nothing ties a row of it to one document: it is loaded in full, as the
+// Postgres backend loads it (`_delta_load_collection`, no parent). Open, the
+// fan-out and `loadDocAt` must agree on that.
+// ---------------------------------------------------------------------------
+
+describe("an included collection with no parent is loaded in full, on every path", () => {
+  const shared = defineSchema({
+    lists: { columns: { title: "text?" } },
+    tags: { columns: { label: "text" } },          // no parent: shared by every list
+  });
+  const listDoc = defineDoc("list:", { root: "lists", include: ["tags"] });
+
+  function setup() {
+    const db = new Database(":memory:");
+    createTables(db, shared);
+    db.run(`INSERT INTO lists (id, title, valid_from, valid_to) VALUES ('a', 'A', '${PAST}', NULL), ('b', 'B', '${PAST}', NULL)`);
+    db.run(`INSERT INTO tags (id, label, valid_from, valid_to) VALUES ('t1', 'red', '${PAST}', NULL), ('t2', 'blue', '${PAST}', NULL)`);
+    const local = createLocal();
+    registerDocs(local.server, db, shared, [listDoc]);
+    const heard: { channel: string; data: any }[] = [];
+    local.onPublish((channel, data) => heard.push({ channel, data }));
+    return { db, local, heard };
+  }
+
+  test("open holds every row of it, in each document", async () => {
+    const { local } = setup();
+    expect(Object.keys((await local.call("open", { doc: "list:a" })).result.tags).sort()).toEqual(["t1", "t2"]);
+    expect(Object.keys((await local.call("open", { doc: "list:b" })).result.tags).sort()).toEqual(["t1", "t2"]);
+  });
+
+  test("a row added through one document is held by the others: heard live, and there when opened afresh", async () => {
+    const { local, heard } = setup();
+    await local.call("open", { doc: "list:a" });
+    await local.call("open", { doc: "list:b" });
+    const w = await local.call("delta", { doc: "list:a", ops: [{ op: "add", path: "/tags/t3", value: { label: "green" } }] });
+    expect(w.error).toBeUndefined();
+    expect(heard.find((h) => h.channel === "list:b")?.data.ops).toEqual([
+      { op: "add", path: "/tags/t3", value: expect.objectContaining({ id: "t3", label: "green" }) },
+    ]);
+    await local.call("close", { doc: "list:b" });
+    expect(Object.keys((await local.call("open", { doc: "list:b" })).result.tags).sort()).toEqual(["t1", "t2", "t3"]);
+  });
+
+  test("loadDocAt reads it in full too", () => {
+    const { db } = setup();
+    const doc = loadDocAt(db, shared, listDoc, "a", "2021-01-01 00:00:00");
+    expect(Object.keys(doc.tags).sort()).toEqual(["t1", "t2"]);
   });
 });

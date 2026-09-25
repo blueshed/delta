@@ -327,7 +327,7 @@ export function registerDocs(
       const table = schema.tables[collKey];
       if (!table) continue;
 
-      const collRows = loadCollection(table, def, rootRow, scope);
+      const collRows = loadCollection(table, def, rootRow);
       // Apply field codecs
       for (const row of collRows) {
         decodeRow(table, row);
@@ -339,12 +339,16 @@ export function registerDocs(
   }
 
   /** Recursively load a collection's rows by walking up to find the join path to the root. */
-  function loadCollection(table: ResolvedTable, def: DocDef, rootRow: any, scope: Record<string, string>): any[] {
+  function loadCollection(table: ResolvedTable, def: DocDef, rootRow: any): any[] {
     if (!table.parent) {
-      // No parent — must be filtered by scope directly
+      // No parent: no key ties a row of it to one document. Included, it is
+      // loaded in full, as the Postgres backend loads it: every document of
+      // the prefix holds every row, and the fan-out (rowInScope) and loadDocAt
+      // say the same. Met only on the way up from an included grandchild, it
+      // is not in the document, and so neither is anything under it.
+      if (!def.include.includes(table.docKey)) return [];
       const viewName = table.temporal ? `current_${table.name}` : table.name;
-      const whereParts = Object.keys(scope).map((k) => `${k} = ?`);
-      return db.query(`SELECT * FROM ${viewName} WHERE ${whereParts.join(" AND ")}`).all(...Object.values(scope));
+      return db.query(`SELECT * FROM ${viewName}`).all();
     }
 
     const parentCollection = table.parent.collection;
@@ -358,7 +362,7 @@ export function registerDocs(
     // Grandchild — load parent rows first, then filter by their IDs
     const parentTable = schema.tables[parentCollection];
     if (!parentTable) return [];
-    const parentRows = loadCollection(parentTable, def, rootRow, scope);
+    const parentRows = loadCollection(parentTable, def, rootRow);
     const parentIds = parentRows.map((r: any) => r.id);
     if (parentIds.length === 0) return [];
 
@@ -768,7 +772,7 @@ export function registerDocs(
     if (!row) return false;
     if (coll === def.root) return String(row.id) === docId;
     const table = schema.tables[coll];
-    if (!table?.parent) return true;                  // unscoped collection — preserve existing behaviour
+    if (!table?.parent) return true;                  // no parent: loaded in full, so every document holds it
     const fkVal = row[table.parent.fkColumn];
     if (fkVal == null) return false;
     const parentColl = table.parent.collection;
@@ -1006,7 +1010,8 @@ function temporalQuery(db: any, table: ResolvedTable, where: string, params: any
 }
 
 function loadCollectionAt(db: any, schema: Schema, table: ResolvedTable, def: DocDef, rootRow: any, at: string): any[] {
-  if (!table.parent) return [];
+  // No parent: in full when included, as open loads it; else not in the document.
+  if (!table.parent) return def.include.includes(table.docKey) ? temporalQuery(db, table, "TRUE", [], at) : [];
 
   if (table.parent.collection === def.root) {
     return temporalQuery(db, table, `${table.parent.fkColumn} = ?`, [rootRow.id], at);
