@@ -108,6 +108,14 @@ No Vite, no webpack, no Rollup config, no `tsx-loader`, no
 `@vitejs/plugin-react`. HMR works, TSX compiles, sourcemaps are emitted, CSS
 bundles, and asset URLs are content-hashed out of the box.
 
+**JSX types.** Railroad declares no global `JSX` namespace, so it sits beside
+React's types in one app. The automatic runtime above (`jsx: react-jsx`,
+`jsxImportSource`) finds them in `@blueshed/railroad/jsx-runtime`; the classic
+runtime (`"jsx": "react"`, `"jsxFactory": "createElement"`,
+`"jsxFragmentFactory": "Fragment"`, importing `createElement` in each file)
+finds them on the factory, `createElement.JSX`. To annotate, import the type:
+`import type { JSX } from "@blueshed/railroad"`; `JSX.Element` is a DOM `Node`.
+
 ## Signals
 
 ```ts
@@ -229,8 +237,16 @@ Props are applied after the element's children, which is what lets a
 `condition` is a signal or a function (wrapped in a computed). The branch is
 rebuilt only when truthiness flips (falsy ↔ truthy); a value change inside the
 same branch (`"a"` → `"b"`) does not re-render, so a value read with `.get()`
-in the branch stays the first one. Pass a signal into the branch instead:
-`when(user, () => <Profile name={user.map(u => u?.name ?? "")} />)`. The branch renders **synchronously** (0.12+): it is in
+in the branch stays the first one. The truthy branch is given the value
+instead: `v$`, a `ReadonlySignal` of the current truthy value, narrowed to
+`NonNullable<T>` (no `!`), which notifies whenever the condition does while
+it stays truthy (an in-place `.touch()` included):
+
+```tsx
+{when(user, (u$) => <Profile name={u$.map(u => u.name)} />, () => <Login />)}
+```
+
+The branch renders **synchronously** (0.12+): it is in
 the returned fragment, and so in the DOM as soon as `mount()` / the parent
 append returns. The branch lives between `<!--when-->` and `<!--/when-->`
 comments, and each branch gets its own dispose scope.
@@ -271,7 +287,11 @@ Hash-based client router. Handlers receive `(params, params$)` — the second is
 a reactive `ReadonlySignal` that updates when params change within the same
 pattern (`/users/1` → `/users/2` does not re-render). The handler runs once per
 pattern, so `params` is the first match: `({ id }) => <h1>{id}</h1>` still
-shows `1` at `/users/2`. Read anything that changes through `params$`.
+shows `1` at `/users/2`. Read anything that changes through `params$`, or make
+the route **keyed**: a table value `{ handler, keyed: true }` re-runs its
+handler (disposing the old run) whenever the params change, as Solid's
+`<Show keyed>` does. Don't key a wildcard layout: its `params["*"]` changes on
+every sub-path, so it would remount each time.
 
 ```tsx
 import { routes, navigate, route, when } from "@blueshed/railroad";
@@ -279,6 +299,7 @@ import { routes, navigate, route, when } from "@blueshed/railroad";
 routes(app, {
   "/":          () => <Home />,
   "/users/:id": (_p, params$) => <User id={params$.map(p => p.id)} />,
+  "/posts/:id": { keyed: true, handler: ({ id }) => <Post id={id} /> },  // re-runs per id
   "/sites/*":   () => <SitesLayout />,    // wildcard keeps layout mounted
 });
 
@@ -287,12 +308,12 @@ function SitesLayout() {
   return (
     <div>
       <SitesNav />
-      {when(detail, () => <SiteDetail />, () => <SitesList />)}
+      {when(detail, (d$) => <SiteDetail id={d$.map(d => d.id)} />, () => <SitesList />)}
     </div>
   );
 }
 
-navigate("/users/42");
+navigate("/users/42");   // route() and the router are current as it returns
 ```
 
 `/sites` → `/sites/42` → `/sites/99`: `SitesLayout` stays mounted, only the
@@ -426,7 +447,9 @@ itself uses `bun run test:webview`) — bare `bun test` can drop files under
 `tests/` from discovery. The `bun-route` skill's reference has the full
 WebView patterns.
 
-After `navigate(...)` in a test, `hashchange` lands on the next macrotask:
+`navigate(path)` updates the route synchronously, so a unit test needs no
+tick after it. Setting `location.hash` yourself (or following a `#/…` link)
+lands on the next `hashchange`, a macrotask later:
 `await new Promise(r => setTimeout(r, 0))`.
 
 ## Shared (DI) and logger
@@ -483,5 +506,5 @@ import { signal, computed, effect } from "@blueshed/railroad/signals";
 - **`provide`/`inject` is a process-global singleton.** Great for client apps and app-wide services; on the server it is shared across all requests, so don't use it for per-request state.
 - **`.mutate()` uses `structuredClone`** — it only works on plain-data signals (no functions, class instances, or DOM nodes in the value).
 - **In-place row mutation + `.touch()` needs `list()`'s `equals` option.** A keyed `list()` pushes updates into each row's item signal; a patch stream that mutates row objects in place re-delivers the same reference, which the default `Object.is` swallows — the row's DOM goes silently stale. Pass `{ equals: () => false }` as the fourth argument for such streams. (`@blueshed/delta` broadcasts whole rows, so its docs don't need it.) Same-reference projections have the same trap: `doc.map(d => d.settings)` returns the same ref after a `.touch()`, so the computed bails — project to fresh values (`Object.values(...)`, primitives) or pass `{ equals: () => false }` to `.map()`.
-- **Async components resolve to a thunk.** `async function Profile() { const u = await fetchUser(); return () => <div>{u.name}</div>; }` renders a placeholder (plus an optional `fallback={() => <p>loading…</p>}` prop) and fills in on resolution. The `() =>` on the return line is the whole contract: effects created after an `await` have no owner scope (browser JS has no AsyncContext), so the thunk gives railroad a synchronous moment to bracket them — teardown then works no matter when the promise settles. A bare-Node resolution gets a pointed console.error naming the fix. The same contract applies to async `routes()` handlers (`Promise<() => Node>`); a bare `Promise<Node>` still renders, but its post-await bindings outlive the route.
+- **Async components resolve to a thunk.** `async function Profile() { const u = await fetchUser(); return () => <div>{u.name}</div>; }` renders a placeholder (plus an optional `fallback={() => <p>loading…</p>}` prop) and fills in on resolution. The `() =>` on the return line is the whole contract: effects created after an `await` have no owner scope (browser JS has no AsyncContext), so the thunk gives railroad a synchronous moment to bracket them — teardown then works no matter when the promise settles. A bare-Node resolution gets a pointed console.error naming the fix. The same contract applies to async `routes()` handlers (`Promise<() => Node>`); a bare `Promise<Node>` is deprecated: it still renders, but its post-await bindings outlive the route, and a later release drops it from the type.
 - **The index-based `list()` form rebuilds every row on every change.** It disposes and re-renders each row per sync; that's its contract. Use the keyed form (`list(items, keyFn, render)`) for anything that updates — rows then patch in place through their item signals.

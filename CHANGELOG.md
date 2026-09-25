@@ -50,6 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **railroad 0.14.0 is accepted** as the peer (`^0.11.0 || … || ^0.14.0`), and the vendored
+  `railroad` and `bun-route` skills are synced to it.
+
 - **`examples/todos-vs-rls` is built from delta's own parts**: the todos table is made by
   `generateSql`, read and written through `docTypeFromDef` with `owns` (`todos-mine:<id>`,
   `todos-team:<id>`) and summarised by a recompute custom doc with `owns`, in process with
