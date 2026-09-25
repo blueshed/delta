@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-25
+
 ### Breaking
 
 - **Postgres: with `auth`, every document says who owns it, not only `docTypeFromDef`'s.** A
