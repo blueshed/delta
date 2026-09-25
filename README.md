@@ -1,30 +1,28 @@
 # @blueshed/delta
 
-**delta keeps everyone's screens true to the data, from the first prototype to production, without the app changing on the way.**
+**delta keeps shared documents live in every browser that has one open: plain tables underneath,
+one WebSocket between, from a JSON file on day one to a Postgres server in production.**
 
 An app is a set of documents: a venue's map, a caterer's menu, a person's calendar. Each is a
 live view over ordinary tables. A browser opens a document and changes it with three verbs
-(add, replace, remove) over one socket. Every document that holds a changed row hears about it
-straight away: the row arriving, changing, or leaving. Every write can be undone, and every
-change is kept, so you can read a document as it stood last March.
+(`add`, `replace`, `remove`) on paths like `/courses/3/name`. Every open document that
+holds a changed row hears about it straight away: the row arriving, changing, or leaving. With
+the ledger on, each person can undo their own writes while others keep writing, and a table
+keeps every version of its rows (unless you turn that off), so a document can be read as it
+stood last March.
 
-You can start with a JSON file, move to SQLite, then to Postgres in the same process, and
-deliver on a Postgres server. The schema, the documents, the writes and the data stay the same
-all the way, and ids carry across. No rewrite, no second data layer, no reload logic.
+Start on a JSON file, move to SQLite, then to Postgres in the same process, and deliver on a
+Postgres server. Each step changes the few lines that say where the truth lives, and nothing
+else: the schema, the documents, the writes and the data stay the same, and the rows move with
+their ids. No rewrite, no second data layer, no reload logic.
 
-In one line: **live, undoable, time-aware documents over plain tables, from a file on day one
-to a Postgres server in production, with the same app throughout.**
-
-Delta keeps JSON documents and tells everyone who has one open when it changes. A change is a
-list of ops with three verbs (`add`, `replace`, `remove`) on paths like `/items/milk/done`, and
-one WebSocket carries opens, writes and changes to the browser.
+In one line: **live, undoable documents over plain tables, from a file to a Postgres server
+without rewriting the app.**
 
 It exists because shared, live state should be one small idea rather than a stack of fetch
 calls, caches and sockets. The whole package is small enough to read in one sitting (and to
-fit in an AI's context), there is one way to do each thing, and the browser code stays the same
-wherever the truth is kept: the same client and the same three verbs, with rows created by
-`add /<coll>/-` on every backend. (The skill's *Backends side by side* says what is the same
-on each, and the little that differs.)
+fit in an AI's context), and there is one way to do each thing. (The skill's *Backends side by
+side* says what is the same on every backend, and the little that differs.)
 
 Delta runs on [Bun](https://bun.sh). It ships TypeScript source (the exports are `.ts` files),
 the SQLite backend uses `bun:sqlite` and the server uses `Bun.serve`. The browser code needs a
@@ -115,7 +113,7 @@ changed, one scope rule. Carry the data with `exportTables` from where it is and
 
 ## Undo comes with the ledger
 
-Pass `{ ledger: true }` to the SQLite or Postgres backend and every write is recorded in the
+Pass `{ ledger: true }` to the JSON file, SQLite or Postgres and every write is recorded in the
 write's own transaction: what it did, its inverse, the document's version, who made it and the cursor undo
 walks. `undo`, `redo` and `history` then work with no more code. Over a socket the cursor is
 the connection, so a browser undoes only what it wrote:
