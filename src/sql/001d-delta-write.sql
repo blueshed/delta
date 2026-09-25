@@ -89,6 +89,133 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- ---------------------------------------------------------------------------
+-- _delta_cascade_rows: the rows _delta_cascade_remove would take, read before
+-- it takes them, in the order it emits their removes -- so who holds each can
+-- be asked while every row of every chain is still there.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION _delta_cascade_rows(
+  p_collection_key TEXT,
+  p_id             BIGINT,
+  p_include        TEXT[]
+) RETURNS JSONB AS $$
+DECLARE
+  v_coll  RECORD;
+  v_view  TEXT;
+  v_row   JSONB;
+  v_child RECORD;
+  v_ref   RECORD;
+  v_id    BIGINT;
+  v_rows  JSONB := '[]'::jsonb;
+BEGIN
+  SELECT * INTO v_coll FROM _delta_collections WHERE collection_key = p_collection_key;
+  IF NOT FOUND THEN RETURN v_rows; END IF;
+  v_view := _delta_source_view(v_coll.table_name, v_coll.temporal);
+  EXECUTE format('SELECT to_jsonb(t) FROM %I t WHERE t.id = $1', v_view) INTO v_row USING p_id;
+  IF v_row IS NULL THEN RETURN v_rows; END IF;
+  v_rows := jsonb_build_array(jsonb_build_object('coll', p_collection_key, 'id', p_id, 'row', _delta_strip_temporal(v_row)));
+
+  FOR v_child IN
+    SELECT * FROM _delta_collections
+     WHERE parent_collection = p_collection_key AND collection_key = ANY(p_include)
+  LOOP
+    FOR v_id IN EXECUTE format('SELECT id FROM %I WHERE %I = $1', _delta_source_view(v_child.table_name, v_child.temporal), v_child.parent_fk) USING p_id
+    LOOP
+      v_rows := v_rows || _delta_cascade_rows(v_child.collection_key, v_id, p_include);
+    END LOOP;
+  END LOOP;
+
+  FOR v_ref IN
+    SELECT c.collection_key, c.table_name, c.temporal, elem->>'fk' AS fk_column
+      FROM _delta_collections c, jsonb_array_elements(c.cascade_on) AS elem
+     WHERE elem->>'collection' = p_collection_key AND c.collection_key = ANY(p_include)
+  LOOP
+    FOR v_id IN EXECUTE format('SELECT id FROM %I WHERE %I = $1', _delta_source_view(v_ref.table_name, v_ref.temporal), v_ref.fk_column) USING p_id
+    LOOP
+      v_rows := v_rows || _delta_cascade_rows(v_ref.collection_key, v_id, p_include);
+    END LOOP;
+  END LOOP;
+
+  RETURN v_rows;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+-- ---------------------------------------------------------------------------
+-- _delta_tell: tell every document that holds a row a write changed what
+-- changed for it (todo #28), and answer the writer's new version.
+--
+-- `p_touched` is the write's rows in order, each {coll, id, before, after}:
+-- `before` the documents that held it before the write (_delta_holders, asked
+-- then), `after` the row as it now is (null when it is gone). For each
+-- document that held it before or holds it now: a row that arrives is an add,
+-- one that stays a replace, one that leaves a remove -- and where the row is
+-- the document's root, a replace of the root (null when it leaves). The
+-- writer's document is always told, and told first; each other document is
+-- told only what concerns it, with a version of its own, one per write.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION _delta_tell(p_writer TEXT, p_touched JSONB)
+RETURNS BIGINT AS $$
+DECLARE
+  v_rows    JSONB := '[]'::jsonb;
+  v_t       JSONB;
+  v_after   JSONB;
+  v_targets TEXT[] := ARRAY[]::text[];
+  v_target  TEXT;
+  v_def     _delta_docs;
+  v_single  BOOLEAN;
+  v_told    JSONB;
+  v_was     BOOLEAN;
+  v_is      BOOLEAN;
+  v_root    BOOLEAN;
+  v_path    TEXT;
+  v_version BIGINT;
+BEGIN
+  -- who holds each row now, and every document concerned
+  FOR v_t IN SELECT jsonb_array_elements(p_touched) LOOP
+    v_after := CASE WHEN jsonb_typeof(v_t->'after') = 'object' THEN v_t->'after' END;
+    v_t := v_t || jsonb_build_object('holders', to_jsonb(_delta_holders(v_t->>'coll', v_after, p_writer)));
+    v_rows := v_rows || jsonb_build_array(v_t);
+    v_targets := v_targets
+      || ARRAY(SELECT jsonb_array_elements_text(v_t->'before'))
+      || ARRAY(SELECT jsonb_array_elements_text(v_t->'holders'));
+  END LOOP;
+
+  FOR v_target IN
+    SELECT p_writer
+    UNION ALL
+    SELECT DISTINCT t FROM unnest(v_targets) AS t WHERE t IS DISTINCT FROM p_writer
+  LOOP
+    v_def := _delta_find_doc(v_target);
+    CONTINUE WHEN v_def.prefix IS NULL;
+    v_single := (_delta_resolve_scope(v_def, v_target)->>'mode') = 'single';
+    v_told := '[]'::jsonb;
+    FOR v_t IN SELECT jsonb_array_elements(v_rows) LOOP
+      v_was := (v_t->'before') ? v_target;
+      v_is  := (v_t->'holders') ? v_target;
+      CONTINUE WHEN NOT v_was AND NOT v_is;
+      v_root := v_single AND (v_t->>'coll') = v_def.root_collection;
+      v_path := CASE WHEN v_root THEN _delta_build_path(v_t->>'coll') ELSE _delta_build_path(v_t->>'coll', v_t->>'id') END;
+      IF v_is THEN
+        v_told := v_told || jsonb_build_array(jsonb_build_object(
+          'op', CASE WHEN v_was OR v_root THEN 'replace' ELSE 'add' END, 'path', v_path, 'value', v_t->'after'));
+      ELSIF v_root THEN
+        v_told := v_told || jsonb_build_array(jsonb_build_object('op', 'replace', 'path', v_path, 'value', 'null'::jsonb));
+      ELSE
+        v_told := v_told || jsonb_build_array(jsonb_build_object('op', 'remove', 'path', v_path));
+      END IF;
+    END LOOP;
+    IF v_target = p_writer THEN
+      v_version := _delta_bump_and_notify(p_writer, v_told);
+    ELSIF jsonb_array_length(v_told) > 0 THEN
+      PERFORM _delta_bump_and_notify(v_target, v_told);
+    END IF;
+  END LOOP;
+  RETURN v_version;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ---------------------------------------------------------------------------
 -- delta_apply: apply delta ops to relational tables, bump version, NOTIFY
 --
 -- Handles:
@@ -123,6 +250,13 @@ DECLARE
   v_ts            TIMESTAMPTZ := NOW();
   v_version       BIGINT;
   v_broadcast_ops JSONB := '[]'::jsonb;
+  -- the rows this write changes, in order, for _delta_tell: {coll, id, before, after}
+  v_touched       JSONB := '[]'::jsonb;
+  v_before        TEXT[];
+  v_befores       JSONB;
+  v_removed       JSONB;
+  v_r             JSONB;
+  v_rp            TEXT[];
 BEGIN
   -- Guard: ops must be a JSON array
   IF p_ops IS NULL OR jsonb_typeof(p_ops) != 'array' THEN
@@ -201,6 +335,7 @@ BEGIN
       IF v_row IS NULL THEN
         RAISE EXCEPTION 'root row not found: %', v_def.root_collection USING ERRCODE = 'P0002';
       END IF;
+      v_before := _delta_holders(v_coll_key, _delta_strip_temporal(v_row), p_doc_name);
 
       -- Merge partial value
       v_new_row := v_row || (v_op->'value');
@@ -230,6 +365,8 @@ BEGIN
       v_broadcast_ops := v_broadcast_ops || jsonb_build_array(
         jsonb_build_object('op', 'replace', 'path', _delta_build_path(v_def.root_collection), 'value', v_new_row)
       );
+      v_touched := v_touched || jsonb_build_array(jsonb_build_object(
+        'coll', v_coll_key, 'id', v_doc_id, 'before', to_jsonb(v_before), 'after', v_new_row));
       CONTINUE;
     END IF;
 
@@ -321,6 +458,8 @@ BEGIN
       v_broadcast_ops := v_broadcast_ops || jsonb_build_array(
         jsonb_build_object('op', 'add', 'path', _delta_build_path(v_coll_key, v_id::text), 'value', v_new_row)
       );
+      v_touched := v_touched || jsonb_build_array(jsonb_build_object(
+        'coll', v_coll_key, 'id', v_id, 'before', '[]'::jsonb, 'after', v_new_row));
       CONTINUE;
     END IF;
 
@@ -335,9 +474,20 @@ BEGIN
         RAISE EXCEPTION 'row not found: %/%', v_coll_key, v_id
           USING ERRCODE = 'P0002';
       END IF;
-      v_broadcast_ops := v_broadcast_ops || _delta_cascade_remove(
-        v_coll_key, v_id, v_def.include
-      );
+      -- who holds the row and every row the cascade takes, asked before any is gone
+      v_befores := '{}'::jsonb;
+      FOR v_r IN SELECT jsonb_array_elements(_delta_cascade_rows(v_coll_key, v_id, v_def.include)) LOOP
+        v_befores := v_befores || jsonb_build_object(
+          (v_r->>'coll') || '/' || (v_r->>'id'), to_jsonb(_delta_holders(v_r->>'coll', v_r->'row', p_doc_name)));
+      END LOOP;
+      v_removed := _delta_cascade_remove(v_coll_key, v_id, v_def.include);
+      v_broadcast_ops := v_broadcast_ops || v_removed;
+      FOR v_r IN SELECT jsonb_array_elements(v_removed) LOOP
+        v_rp := _delta_split_path(v_r->>'path');
+        v_touched := v_touched || jsonb_build_array(jsonb_build_object(
+          'coll', v_rp[1], 'id', v_rp[2]::BIGINT,
+          'before', COALESCE(v_befores->(v_rp[1] || '/' || v_rp[2]), '[]'::jsonb), 'after', NULL));
+      END LOOP;
       CONTINUE;
     END IF;
 
@@ -377,6 +527,7 @@ BEGIN
       IF v_row IS NULL THEN
         RAISE EXCEPTION 'row not found: %/%', v_coll_key, v_id USING ERRCODE = 'P0002';
       END IF;
+      v_before := _delta_holders(v_coll_key, _delta_strip_temporal(v_row), p_doc_name);
 
       -- Merge partial value into current row
       v_new_row := v_row || (v_op->'value');
@@ -420,13 +571,18 @@ BEGIN
           jsonb_build_object('op', 'replace', 'path', _delta_build_path(v_coll_key, v_id::text), 'value', v_new_row)
         );
       END IF;
+      v_touched := v_touched || jsonb_build_array(jsonb_build_object(
+        'coll', v_coll_key, 'id', v_id, 'before', to_jsonb(v_before), 'after', v_new_row));
       CONTINUE;
     END IF;
 
     RAISE EXCEPTION 'invalid op: % %', v_op->>'op', v_op->>'path' USING ERRCODE = '22023';
   END LOOP;
 
-  v_version := _delta_bump_and_notify(p_doc_name, v_broadcast_ops);
+  -- Told: the writer's document and every other that holds a row changed,
+  -- each what changed for it. The answer (and the ledger) keep the ops as
+  -- written, so an undo walks back exactly what was done.
+  v_version := _delta_tell(p_doc_name, v_touched);
   RETURN jsonb_build_object('version', v_version, 'ops', v_broadcast_ops);
 END;
 $$ LANGUAGE plpgsql;

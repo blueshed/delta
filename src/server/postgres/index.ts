@@ -43,6 +43,9 @@ export {
 } from "./sql";
 
 export { generateSql } from "./codegen";
+
+export { exportTables, importTables } from "./carry";
+export type { Snapshot } from "../../schema";
 export type { GenerateSqlOptions } from "./codegen";
 
 export {

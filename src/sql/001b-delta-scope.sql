@@ -296,6 +296,135 @@ END;
 $$ LANGUAGE plpgsql STABLE;
 
 -- ---------------------------------------------------------------------------
+-- Who holds a row: the fan-out (todo #28)
+--
+-- A write is told to every document that holds a row it changed -- the one
+-- written through, and every other opened document over the same rows -- as
+-- the SQLite backend tells its open documents. These answer, from a row's
+-- values (as it was before the write, or as it is after), which documents
+-- hold it; delta_apply tells each what changed for it.
+-- ---------------------------------------------------------------------------
+
+-- _delta_chain_root: the id of the `p_root` row that `p_row` (of `p_coll`)
+-- hangs from, following parent keys up through the tables as they stand;
+-- NULL when the chain does not reach p_root (an unparented collection on the
+-- way, or a row not there).
+CREATE OR REPLACE FUNCTION _delta_chain_root(p_coll TEXT, p_row JSONB, p_root TEXT)
+RETURNS BIGINT AS $$
+DECLARE
+  v_coll  RECORD;
+  v_cur   TEXT;
+  v_id    BIGINT;
+  v_view  TEXT;
+  v_depth INT := 0;
+BEGIN
+  IF p_row IS NULL THEN RETURN NULL; END IF;
+  IF p_coll = p_root THEN RETURN (p_row->>'id')::BIGINT; END IF;
+  SELECT * INTO v_coll FROM _delta_collections WHERE collection_key = p_coll;
+  IF NOT FOUND OR v_coll.parent_collection IS NULL THEN RETURN NULL; END IF;
+  v_id  := (p_row->>v_coll.parent_fk)::BIGINT;
+  v_cur := v_coll.parent_collection;
+  LOOP
+    v_depth := v_depth + 1;
+    IF v_depth > 32 OR v_id IS NULL THEN RETURN NULL; END IF;   -- malformed chain, or a row not there
+    IF v_cur = p_root THEN RETURN v_id; END IF;
+    SELECT * INTO v_coll FROM _delta_collections WHERE collection_key = v_cur;
+    IF NOT FOUND OR v_coll.parent_collection IS NULL THEN RETURN NULL; END IF;
+    v_view := _delta_source_view(v_coll.table_name, v_coll.temporal);
+    EXECUTE format('SELECT t.%I FROM %I t WHERE t.id = $1', v_coll.parent_fk, v_view)
+      INTO v_id USING v_id;
+    v_cur := v_coll.parent_collection;
+  END LOOP;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+-- _delta_doc_holds: does the document `p_doc_name` (of `p_def`) hold `p_row`
+-- of `p_coll`? Judged on the row's values, so a row as it was before a write
+-- is judged as well as one as it is after -- the same rule delta_open reads by.
+CREATE OR REPLACE FUNCTION _delta_doc_holds(p_def _delta_docs, p_doc_name TEXT, p_coll TEXT, p_row JSONB)
+RETURNS BOOLEAN AS $$
+DECLARE
+  v_scope JSONB;
+  v_coll  RECORD;
+  v_ok    BOOLEAN;
+BEGIN
+  IF p_row IS NULL THEN RETURN FALSE; END IF;
+  IF p_coll IS DISTINCT FROM p_def.root_collection
+     AND NOT (p_coll = ANY(COALESCE(p_def.include, ARRAY[]::text[]))) THEN
+    RETURN FALSE;
+  END IF;
+  v_scope := _delta_resolve_scope(p_def, p_doc_name);
+  SELECT * INTO v_coll FROM _delta_collections WHERE collection_key = p_coll;
+  IF NOT FOUND THEN RETURN FALSE; END IF;
+
+  -- The root: the one row a single-mode document is named for, or the rows a
+  -- list-mode document's condition reads -- tested on the row's own values.
+  IF p_coll = p_def.root_collection THEN
+    IF (v_scope->>'mode') = 'single'
+       AND (p_row->>'id')::BIGINT IS DISTINCT FROM (v_scope->'values'->>'id')::BIGINT THEN
+      RETURN FALSE;
+    END IF;
+    EXECUTE format(
+      'SELECT EXISTS (SELECT 1 FROM jsonb_populate_record(null::%I, $1) t WHERE %s)',
+      v_coll.table_name, COALESCE(v_scope->>'where', 'TRUE')
+    ) INTO v_ok USING p_row;
+    RETURN v_ok;
+  END IF;
+
+  -- An included collection: a list-mode document, or an unparented
+  -- collection, holds every row of it (loaded in full); else the row hangs
+  -- from this document's root.
+  IF (v_scope->>'mode') = 'list' OR v_coll.parent_collection IS NULL THEN RETURN TRUE; END IF;
+  RETURN _delta_chain_root(p_coll, p_row, p_def.root_collection)
+         IS NOT DISTINCT FROM (v_scope->'values'->>'id')::BIGINT;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+-- _delta_holders: the documents that hold `p_row` of `p_coll` -- every one
+-- ever opened (a name in _delta_versions), and the writer's own `p_writer`.
+-- A single-mode document of an unscoped definition is found by its name,
+-- prefix || the root the row hangs from; a scoped or list-mode one, or one
+-- holding an unparented collection, by the opened names of its prefix.
+CREATE OR REPLACE FUNCTION _delta_holders(p_coll TEXT, p_row JSONB, p_writer TEXT)
+RETURNS TEXT[] AS $$
+DECLARE
+  v_def   _delta_docs;
+  v_coll  RECORD;
+  v_names TEXT[] := ARRAY[]::text[];
+  v_rid   BIGINT;
+  v_all   BOOLEAN;
+  v_cand  TEXT;
+BEGIN
+  IF p_row IS NULL THEN RETURN v_names; END IF;
+  SELECT * INTO v_coll FROM _delta_collections WHERE collection_key = p_coll;
+  IF NOT FOUND THEN RETURN v_names; END IF;
+
+  FOR v_def IN
+    SELECT * FROM _delta_docs
+     WHERE root_collection = p_coll OR p_coll = ANY(include)
+  LOOP
+    v_all := v_def.scope <> '{}'::jsonb
+             OR (p_coll IS DISTINCT FROM v_def.root_collection AND v_coll.parent_collection IS NULL);
+    v_rid := CASE WHEN v_all THEN NULL ELSE _delta_chain_root(p_coll, p_row, v_def.root_collection) END;
+    FOR v_cand IN
+      SELECT doc_name FROM _delta_versions
+       WHERE (v_all AND starts_with(doc_name, v_def.prefix))
+          OR (NOT v_all AND doc_name IN (v_def.prefix, v_def.prefix || v_rid::text))
+      UNION
+      SELECT p_writer WHERE p_writer IS NOT NULL AND starts_with(p_writer, v_def.prefix)
+    LOOP
+      IF NOT (v_cand = ANY(v_names))
+         AND (_delta_find_doc(v_cand)).prefix = v_def.prefix     -- the longest prefix owns the name
+         AND _delta_doc_holds(v_def, v_cand, p_coll, p_row) THEN
+        v_names := v_names || v_cand;
+      END IF;
+    END LOOP;
+  END LOOP;
+  RETURN v_names;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+-- ---------------------------------------------------------------------------
 -- _delta_strip_temporal: remove valid_from/valid_to/override from a JSONB row
 -- ---------------------------------------------------------------------------
 

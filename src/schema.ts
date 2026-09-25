@@ -217,3 +217,38 @@ export interface ValidationError {
   path: string;
   message: string;
 }
+
+// ---------------------------------------------------------------------------
+// Snapshot — an app's rows, as they carry from one backend to the next.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every row an app holds, by collection key, and the last id each collection
+ * has minted: what `exportTables` gives and `importTables` takes, on every
+ * backend, so the same data moves from a JSON file to SQLite to Postgres in
+ * process to a Postgres server with its ids and sequences unchanged. A row has
+ * its id (a number), its parent key and its columns; a temporal table's rows
+ * are every version, each with `valid_from` and `valid_to` (ISO-8601, null
+ * while current), so its history carries too. A missing sequence is the
+ * largest id among the collection's rows.
+ */
+export interface Snapshot {
+  tables: Record<string, Record<string, unknown>[]>;
+  sequences?: Record<string, number>;
+}
+
+/** The last id a collection has minted, as a snapshot says or its rows imply. */
+export function lastId(snapshot: Snapshot, key: string): number {
+  const said = snapshot.sequences?.[key];
+  const most = Math.max(0, ...(snapshot.tables[key] ?? []).map((r) => Number(r.id)).filter(Number.isFinite));
+  return Math.max(said ?? 0, most);
+}
+
+/** A timestamp as a snapshot carries it: ISO-8601 in UTC, or null. */
+export function isoTime(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const text = String(value);
+  // SQLite keeps "YYYY-MM-DD HH:MM:SS[.sss]" in UTC; Postgres and ISO strings parse as they are.
+  const d = new Date(/^\d{4}-\d{2}-\d{2} \d/.test(text) && !/[zZ+]/.test(text.slice(10)) ? `${text.replace(" ", "T")}Z` : text);
+  return Number.isNaN(d.getTime()) ? text : d.toISOString();
+}
