@@ -118,6 +118,7 @@ const sitesInBbox: CustomDocDef<{ minLng: number; minLat: number; maxLng: number
     },
     matches: (_coll, row, c) =>
       row.lng >= c.minLng && row.lng <= c.maxLng && row.lat >= c.minLat && row.lat <= c.maxLat,
+    shared: true,   // with auth, every signed-in identity may open every bbox
   });
 
 // ===========================================================================

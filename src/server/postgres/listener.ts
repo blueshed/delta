@@ -15,8 +15,8 @@
 import type { WsServer } from "../server";
 import { trackSubscribe, trackUnsubscribe, onClientDrop } from "../server";
 import { createLogger } from "../logger";
-import type { Pool } from "pg";
-import { resolveDoc } from "./registry";
+import type { Pool, PoolClient } from "pg";
+import { resolveDoc, holdAuth, ownerless } from "./registry";
 import type { DocType } from "./registry";
 import type { DeltaAuth } from "../auth";
 import { isAuthError } from "../auth";
@@ -29,7 +29,7 @@ const log = createLogger("[doc]");
 // Custom doc — predicate-based membership view over watched collections.
 // ---------------------------------------------------------------------------
 
-export interface CustomDocDef<C = unknown> {
+export interface CustomDocDef<C = unknown, I = any> {
   /** Doc name prefix (e.g. "sites-in-bbox:"). */
   prefix: string;
   /** Collections whose writes trigger fan-out (per-row for a membership def, whole-doc for a recompute def). */
@@ -38,15 +38,19 @@ export interface CustomDocDef<C = unknown> {
   parse: (docId: string) => C;
   /**
    * MEMBERSHIP def (flat, per-row fan-out) — provide `query` + `matches`.
-   * Initial load: rows this doc exposes, keyed by collection. NOTE: `query`
-   * runs once per doc name and its result is SHARED across all subscribers —
-   * it is NOT identity-aware (no per-client identity is passed). If a doc must
-   * be scoped per identity (RLS), use a `recompute` def instead, which is
-   * re-evaluated per subscriber under that client's identity.
+   * Initial load: rows this doc exposes, keyed by collection. It runs once per
+   * doc name and identity (`identity` is the gated identity, undefined without
+   * auth), and its result is cached and shared by the subscribers of that name
+   * who are that identity -- never by another. Bind the identity yourself
+   * (`withAppAuth(pool, id, …)`) so RLS scopes what it reads, as recompute does.
    */
-  query?: (pool: Pool, criteria: C) => Promise<Record<string, any[]>>;
-  /** True when `row` belongs in a doc opened under `criteria` (membership def). */
-  matches?: (collection: string, row: any, criteria: C) => boolean;
+  query?: (pool: Pool, criteria: C, identity?: I) => Promise<Record<string, any[]>>;
+  /**
+   * True when `row` belongs in a doc opened under `criteria` (membership def),
+   * for the subscribers who are `identity`. The row comes from the change log,
+   * which RLS does not filter: check it against the identity here.
+   */
+  matches?: (collection: string, row: any, criteria: C, identity?: I) => boolean;
   /**
    * RECOMPUTE def (whole-doc, identity-aware) — provide `recompute` INSTEAD of query/matches.
    * On open, and on any write to a watched collection, the WHOLE doc is re-evaluated and
@@ -55,13 +59,21 @@ export interface CustomDocDef<C = unknown> {
    * applies correctly), hence the evaluator binds `app.user_id` itself (e.g. via `withAppAuth`).
    * `identity` is the gated WS identity, or undefined when unauthenticated.
    */
-  recompute?: (pool: Pool, criteria: C, identity?: unknown) => Promise<any>;
+  recompute?: (pool: Pool, criteria: C, identity?: I) => Promise<any>;
+  /**
+   * With an `auth` module: may `identity` open `docName`? False answers 404, as
+   * `DocType.owns` does. With auth, a custom doc needs this or `shared: true`:
+   * `createDocListener` refuses one with neither.
+   */
+  owns?: (identity: I, docName: string) => boolean | Promise<boolean>;
+  /** With an `auth` module: every identity that passes the gate may open every doc of this prefix. */
+  shared?: boolean;
 }
 
-export function defineCustomDoc<C>(
+export function defineCustomDoc<C, I = any>(
   prefix: string,
-  opts: Omit<CustomDocDef<C>, "prefix">,
-): CustomDocDef<C> {
+  opts: Omit<CustomDocDef<C, I>, "prefix">,
+): CustomDocDef<C, I> {
   return { prefix, ...opts };
 }
 
@@ -111,6 +123,15 @@ export async function createDocListener<I = unknown>(
   },
 ) {
   const auth = opts?.auth;
+  // Default-deny, as docTypeFromDef is: with auth, every document -- a custom
+  // one, a registered type -- says who owns it, or that it is shared. Asked
+  // before the pool is touched, so a refusal leaves nothing to clean up.
+  let releaseAuth = () => {};
+  if (auth) {
+    const unowned = (opts?.custom ?? []).find((d) => !d.owns && !d.shared);
+    if (unowned) throw ownerless(unowned.prefix, "defineCustomDoc");
+    releaseAuth = holdAuth();
+  }
   const ledger = !!opts?.ledger;
   const whoOf = (identity: I | undefined): string | null => {
     if (identity === undefined || identity === null) return null;
@@ -137,7 +158,14 @@ export async function createDocListener<I = unknown>(
   const watchedCollections = new Set<string>();
   for (const def of opts?.custom ?? []) for (const c of def.watch) watchedCollections.add(c);
 
-  const customCache = new Map<string, Record<string, Record<string, any>>>();
+  // Membership docs: one view per doc name and identity (without auth, per
+  // name) -- its query's rows, and the subscribers who are that identity -- so
+  // one identity's rows are never served to another from the cache.
+  type View = { docName: string; criteria: unknown; identity: I | undefined; doc: Record<string, Record<string, any>>; subs: Set<any> };
+  const views = new Map<string, View>();
+  const viewKey = (docName: string, identity: I | undefined): string =>
+    auth ? `${docName}\u0000${auth.asSqlArg && identity !== undefined ? String(auth.asSqlArg(identity)) : JSON.stringify(identity)}` : docName;
+  // Recompute docs: evaluated per subscriber, never cached.
   const customCriteria = new Map<string, unknown>();
   const customSubs = new Map<string, Set<any>>();
   // Serialize recompute pushes per doc name: a write's recompute chains after
@@ -161,7 +189,9 @@ export async function createDocListener<I = unknown>(
   }
 
   // Single LISTEN connection with auto-reconnect
-  let listener = await pool.connect();
+  let listener: PoolClient;
+  try { listener = await pool.connect(); }
+  catch (err) { releaseAuth(); throw err; }
   let destroyed = false;
   let reconnecting = false;
 
@@ -234,6 +264,7 @@ export async function createDocListener<I = unknown>(
   } catch (err) {
     detachListener(listener);
     listener.release();
+    releaseAuth();
     throw err;
   }
 
@@ -371,7 +402,9 @@ export async function createDocListener<I = unknown>(
       }
     }
 
-    // Membership defs — per-row add/replace/remove.
+    // Membership defs — per-row add/replace/remove, per view.
+    const viewsOf = new Map<string, number>();
+    for (const view of views.values()) viewsOf.set(view.docName, (viewsOf.get(view.docName) ?? 0) + 1);
     for (const op of ops) {
       const parts = splitPath(op.path);
       if (parts.length < 2) continue;
@@ -385,23 +418,10 @@ export async function createDocListener<I = unknown>(
         if (!def.matches) continue; // recompute defs handled above
         if (!def.watch.includes(coll)) continue;
 
-        // Memoize membership per distinct criteria for this op.
-        const decisionByCriteria = new Map<unknown, boolean>();
-
-        for (const [docName, subs] of customSubs) {
-          if (!docName.startsWith(prefix)) continue;
-          if (subs.size === 0) continue;
-          const criteria = customCriteria.get(docName);
-          if (criteria === undefined) continue;
-          const cached = customCache.get(docName);
-          if (!cached) continue;
-
-          let shouldBeIn = decisionByCriteria.get(criteria);
-          if (shouldBeIn === undefined) {
-            shouldBeIn = row == null ? false : def.matches!(coll, row, criteria);
-            decisionByCriteria.set(criteria, shouldBeIn);
-          }
-
+        for (const view of views.values()) {
+          if (!view.docName.startsWith(prefix) || view.subs.size === 0) continue;
+          const cached = view.doc;
+          const shouldBeIn = row == null ? false : def.matches!(coll, row, view.criteria, view.identity);
           const wasIn = cached[coll]?.[id] != null;
           const emitted: DeltaOp[] = [];
 
@@ -416,8 +436,16 @@ export async function createDocListener<I = unknown>(
             delete cached[coll]![id];
             emitted.push({ op: "remove", path: joinPath(coll, id) });
           }
+          if (!emitted.length) continue;
 
-          if (emitted.length) ws.publish(docName, { doc: docName, ops: emitted });
+          // The only view of its name: its subscribers are the channel's. Else
+          // each view's own subscribers, so one identity's rows reach only it.
+          const change = { doc: view.docName, ops: emitted };
+          if (viewsOf.get(view.docName) === 1) ws.publish(view.docName, change);
+          else {
+            const raw = JSON.stringify(change);
+            for (const c of view.subs) if (c.readyState === undefined || c.readyState === 1) c.send(raw);
+          }
         }
       }
     }
@@ -448,9 +476,11 @@ export async function createDocListener<I = unknown>(
       if (!subs.delete(client)) continue;
       if (subs.size === 0) {
         customSubs.delete(docName);
-        customCache.delete(docName);
         customCriteria.delete(docName);
       }
+    }
+    for (const [key, view] of views) {
+      if (view.subs.delete(client) && view.subs.size === 0) views.delete(key);
     }
   }
 
@@ -528,26 +558,36 @@ export async function createDocListener<I = unknown>(
 
       const { def, docId } = match;
       try {
-        const criteria = customCriteria.get(docName) ?? def.parse(docId);
-        customCriteria.set(docName, criteria);
+        // As withDoc asks a type's owns: a name this identity does not own is not there for it.
+        if (auth && def.owns && !(await def.owns(identity as I, docName))) {
+          return respond({ error: { code: 404, message: "Not found" } });
+        }
         let doc: any;
         if (def.recompute) {
+          const criteria = customCriteria.get(docName) ?? def.parse(docId);
           // Whole-doc, identity-aware: re-evaluate under THIS client's identity (RLS).
           doc = await def.recompute(pool, criteria, identity);
           if (doc == null) return respond({ error: { code: 404, message: "Not found" } });
-          // No customCache — each open/fan-out re-evals per identity (don't share across clients).
+          // Not cached: each open and fan-out re-evaluates per identity.
+          customCriteria.set(docName, criteria);
+          if (!customSubs.has(docName)) customSubs.set(docName, new Set());
+          customSubs.get(docName)!.add(client);
         } else {
-          doc = customCache.get(docName);
-          if (!doc) {
-            const rowsByColl = await def.query!(pool, criteria);
-            doc = {};
-            for (const coll of def.watch) doc[coll] = toMap(rowsByColl[coll] ?? []);
-            customCache.set(docName, doc);
+          // Membership: this identity's view of the name, queried as it.
+          const key = viewKey(docName, identity);
+          let view = views.get(key);
+          if (!view) {
+            const criteria = def.parse(docId);
+            const rowsByColl = await def.query!(pool, criteria, identity);
+            const loaded: Record<string, Record<string, any>> = {};
+            for (const coll of def.watch) loaded[coll] = toMap(rowsByColl[coll] ?? []);
+            view = views.get(key);   // an open of the same view may have landed meanwhile
+            if (!view) views.set(key, (view = { docName, criteria, identity, doc: loaded, subs: new Set() }));
           }
+          view.subs.add(client);
+          doc = view.doc;
         }
 
-        if (!customSubs.has(docName)) customSubs.set(docName, new Set());
-        customSubs.get(docName)!.add(client);
         trackSubscribe(client, docName);
         onClientDrop(client, releaseClient);
 
@@ -577,9 +617,11 @@ export async function createDocListener<I = unknown>(
         subs.delete(client);
         if (subs.size === 0) {
           customSubs.delete(docName);
-          customCache.delete(docName);
           customCriteria.delete(docName);
         }
+      }
+      for (const [key, view] of views) {
+        if (view.docName === docName && view.subs.delete(client) && view.subs.size === 0) views.delete(key);
       }
       respond({ result: { ack: true } });
       log.debug(`closed ${docName} (custom)`);
@@ -700,6 +742,7 @@ export async function createDocListener<I = unknown>(
     },
     async destroy() {
       destroyed = true;
+      releaseAuth();
       try {
         await listener.query("UNLISTEN *");
       } catch {}

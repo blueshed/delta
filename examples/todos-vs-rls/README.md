@@ -1,16 +1,19 @@
 # examples/todos-vs-rls
 
 A side-by-side model of two ways to build the same feature — a per-user +
-per-team todo list — hitting the same Postgres, the same RLS policy.
+per-team todo list — hitting the same Postgres, the same RLS policy, as the
+same NOSUPERUSER role (so the policy really holds).
 
 - **`raw-rls.ts`** — plain Pool + explicit queries. RLS is the whole auth story.
-- **`delta.ts`** — one custom `DocType` layered on top of the same RLS.
+- **`delta.ts`** — delta's own parts on the same table: two `defineDoc` lenses
+  through `docTypeFromDef` with `owns`, and one custom read doc. Nothing on the
+  delta side touches the table by hand.
 
-The point is not "RLS is bad". The RLS policy in [schema.sql](schema.sql) is the
+The point is not "RLS is bad". The RLS policy in [rls.sql](rls.sql) is the
 authoritative gate in both approaches, and you want it there. The point is
 that **RLS handles visibility and only visibility** — everything else (shape,
-write-time injection, dispatch on a logical doc-name) lives outside the
-policy. The delta `DocType` is that "everything else" layer.
+write-time injection, dispatch on a doc name, who may hear a name) lives
+outside the policy. Delta is that "everything else" layer.
 
 ## Run
 
@@ -20,8 +23,10 @@ bun run examples/todos-vs-rls/run.ts
 bun run db:down
 ```
 
-The run drops and re-seeds its tables (`example_*`) each invocation, so it
-doesn't leak into other work on the dev DB.
+The run drops and re-seeds its tables (`example_*`) each invocation, and
+makes the `example_app` role the first time, so it doesn't leak into other
+work on the dev DB. Delta runs in the process (`createLocal()`), so the run
+calls `open` and `delta` as each person, `local.as(ALICE)`, with no socket.
 
 ## What the three sections show
 
@@ -29,130 +34,79 @@ doesn't leak into other work on the dev DB.
 
 Task: *"list my todos, with open/done counts for a header badge."*
 
-**raw-rls** — two queries, client merges:
+**raw-rls** — two queries, the client merges them. Counts don't come from
+RLS — RLS just filters.
 
-```json
-{
-  "todos":  [ { "id": "1", "text": "wire up the bench", "done": true }, … ],
-  "counts": { "open": 1, "done": 2 }
-}
-```
-
-Counts don't come from RLS — RLS just filters. The second aggregate query is
-your app's job. Every view with a computed field is another round-trip.
-
-**delta** — `openTodos("todos:me", Alice)`:
-
-```json
-{
-  "scope":  "me",
-  "todos":  { "1": { …full row… }, "2": { … }, "3": { … } },
-  "counts": { "done": 2, "open": 1 }
-}
-```
-
-One call, one composed object. The DocType's `open()` is free SQL — we
-`WITH scoped AS (…)` then aggregate twice in the same statement.
+**delta** — `todos-summary:1`, a custom read doc (`defineCustomDoc` with
+`recompute`) that reads `{ todos, counts }` in one statement, as Alice
+(`withAppAuth`), so the policy scopes it. One open, one composed object, and it
+is recomputed when a watched collection is written.
 
 ### 2. Inject
 
 Task: *"add a todo."*
 
-**raw-rls** — client supplies `owner_id` and `team_id`:
+**raw-rls** — the client supplies `owner_id` and `team_id`. RLS `WITH CHECK`
+rejects a row whose `owner_id` isn't the caller, but the client still has to
+*know* to send its own id. And the INSERT goes behind delta's back: nothing is
+versioned or broadcast, so the run's listener hears nothing.
+
+**delta** — the client sends `{ text, team_id }` through `todos-mine:1`:
 
 ```ts
-await raw.addTodo(pool, Alice, {
-  owner_id: Alice.id,   // client must send
-  team_id:  1,
-  text:     "…",
-});
+await local.as(ALICE).call("delta", { doc: "todos-mine:1", ops: [
+  { op: "add", path: "/todos/-", value: { text: "…", team_id: 1 } },
+] });
 ```
 
-RLS `WITH CHECK` rejects rows whose `owner_id` isn't the caller — but the
-client still has to *know* to send its own id. Miss it and you get an error,
-not a corrected row. Pass someone else's id and you get rejected after the
-round-trip.
-
-**delta** — client sends only `text`:
-
-```ts
-await applyTodos(dt, "todos:team:1", [
-  { op: "add", path: "/todos/-", value: { text: "…" } },
-], Alice);
-```
-
-The DocType's `apply()` stamps `owner_id` from `identity`, `team_id` from
-the doc-name, and lets Postgres stamp `created_at`. A client that tries to
-forge `owner_id: BOB.id` in the value gets it silently overwritten:
-
-```json
-// row after the forgery attempt:
-[{ "id": "9", "text": "delta: forged", "owner_id": 1 }]
-//                                                  ↑ still Alice
-```
-
-RLS would have rejected the forgery too — but with delta the forgery never
-reaches the DB. The authoritative policy is still in Postgres; the DocType
-is a cheaper first line that keeps the DB honest to a known-good shape.
+`todos-mine:` is scoped by `owner_id: ":id"`, so an add through it takes
+`owner_id` from the name, never the value, and `owns` says `todos-mine:1` is
+Alice's alone. A value that forges `owner_id: BOB.id` is overwritten. The
+write goes through `delta_apply_as`: it is versioned, logged and heard on
+`todos-mine:1`'s channel.
 
 ### 3. Dispatch
 
-Task: *"show me team-1's todos"* vs *"show me my todos"* — same
-underlying endpoint.
+Task: *"show me team 1's todos"* vs *"show me my todos"*.
 
-**raw-rls** needs two different call sites (`listMyTodos` vs
-`listTeamTodos`, each with its own WHERE clause, its own set of parameters).
-Each new lens is another function.
+**raw-rls** needs a function per lens, each with its own WHERE clause.
 
-**delta** uses one doc prefix:
+**delta** gives each lens a name and a `defineDoc` line, each with who owns it:
 
 ```
-todos:me           → owner_id = identity.id
-todos:team:1       → team_id  = 1
-todos:team:2       → team_id  = 2  (RLS returns empty set if not a member)
+todos-mine:<id>   scope owner_id = <id>   owns: the name is the identity's own
+todos-team:<id>   scope team_id  = <id>   owns: the identity is on the team
 ```
 
-`todosDocType.parse(name)` disambiguates; the same `open()` routes either
-way. Adding a new lens (say `todos:mentions:<user>`) is a new `parse` branch
-and a new `WHERE`, not a new function exported to the network.
+A name is the channel its writes are broadcast on, and RLS filters what an
+open reads, not what the channel carries. So `owns` answers first: Carol
+opening `todos-team:1`, or Bob opening `todos-mine:1`, is a 404 before
+anything is read. Delta refuses to start with `auth` until every document
+says who owns it (or `shared: true`).
 
----
-
-## Sample output
+## Sample output (abridged)
 
 ```
-── 1. RESHAPE: list my todos + counts ──────────────────────────────────────
-    raw-rls needs two queries, client merges the result:
-  raw.listMyTodosWithCounts(Alice) →
-    { "todos": [ { "id": "1", "text": "wire up the bench", "done": true }, … ],
-      "counts": { "open": 1, "done": 2 } }
+── 2. INJECT: add a todo (client sends no owner) ───────────────────────────
+  raw.addTodo(Alice, {owner_id, team_id, text}) →  { "id": "7" }
+    ...and no one is told: delta heard 0 changes.
+  heard on todos-mine:1 (versioned, logged, NOTIFY'd) →
+    { "doc": "todos-mine:1", "ops": [ { "op": "add", "path": "/todos/8",
+        "value": { "id": 8, "done": false, "text": "delta: write the blog post",
+                   "team_id": 1, "owner_id": 1 } } ] }
+  rows named 'delta: forged' →  [ { "id": "9", "text": "delta: forged", "owner_id": "1" } ]
 
-    delta open() returns one composed object:
-  openTodos('todos:me', Alice) →
-    { "scope": "me",
-      "todos":  { "1": { …full row… }, "2": { … }, "3": { … } },
-      "counts": { "done": 2, "open": 1 } }
-
-── 2. INJECT: add a todo (client sends only text) ──────────────────────────
-    …
-    forged owner_id is silently overwritten by the DocType — not trusted:
-    [{ "id": "9", "text": "delta: forged", "owner_id": 1 }]
-
-── 3. DISPATCH: one DocType, two lenses ────────────────────────────────────
-    todos:me       → { "done": 2, "open": 4 }
-    todos:team:1   → { "done": 2, "open": 6 }
+── 3. DISPATCH: two lenses, and who may open each ──────────────────────────
+  Alice todos-mine:1  →  "6 todos"
+  Alice todos-team:1  →  "8 todos"
+  Bob   todos-team:1  →  "8 todos"
+  Carol todos-team:1  →  "404 Not found"
+  Bob   todos-mine:1  →  "404 Not found"
 ```
 
 ## What this doesn't cover
 
-- The WebSocket transport — both approaches are called directly against the
-  pool here. In a real server you'd register `todosDocType(pool)` via
-  `registerDocType` (see `reference.md` § Custom DocType) and the wire
-  protocol from `src/server/server.ts` takes over.
-- The 1-RTT hot path (`delta_apply_as`) from 0.3.0 — this example uses
-  direct SQL inside a `withIdentity` transaction for clarity. The bench
-  (`bench/results-0.3.0.md`) covers the RTT story separately.
-- Delta's framework path (`delta_open` / `delta_apply` through
-  `_delta_collections`). The ops-log + temporal + NOTIFY machinery is what
-  you get if you also call `defineSchema` + `generateSql` for these tables;
-  omitted here so the reader can see the DocType contract in isolation.
+- The WebSocket transport. In a server, the same registrations go on
+  `createWs()` in place of `createLocal()`, with an auth module that reads a
+  token (`jwtAuth`, see the skill's *Authentication*).
+- The ledger (`ledger: true` on the listener) and undo.

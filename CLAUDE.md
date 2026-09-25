@@ -51,7 +51,10 @@ on push, `publish.yml` on a published release) runs the same steps.
   SQLSTATEs the listener maps (`CODE_OF_SQLSTATE` in `listener.ts`).
 - **With `auth`, a document says who owns it** (`owns`, or `shared: true`): its name is its
   broadcast channel, and RLS does not filter the channel. `docTypeFromDef` throws without
-  one; `tests/postgres-rls.test.ts` pins it as a `NOSUPERUSER` role.
+  one; so does `createDocListener` with `auth` for a registered `DocType` or a custom doc
+  with neither, and `registerDocType` while such a listener runs. A membership custom doc
+  is queried, cached and fanned out per identity. `tests/postgres-rls.test.ts` pins it as a
+  `NOSUPERUSER` role.
 - **The framework SQL `src/sql/001a–001g-*.sql` is a contract.** Consumers vendor it with
   `bunx @blueshed/delta init`; `applyFramework` applies every `001*` file in order. Change it
   only idempotently (`CREATE OR REPLACE`, `IF NOT EXISTS`) and say so in the changelog.

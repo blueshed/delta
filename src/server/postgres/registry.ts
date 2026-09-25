@@ -70,10 +70,17 @@ export interface DocType<C = any, I = unknown> {
    * them read -- so this is the check that keeps one identity's writes off
    * another's socket. The listener asks it before open, delta, open_at,
    * history, and an undo or redo of an entry written through the document;
-   * false answers 404. `docTypeFromDef` requires it (or
-   * `shared: true`) whenever it is given `auth`.
+   * false answers 404. With auth, a type needs it or `shared: true`:
+   * `registerDocType` and `createDocListener` refuse one with neither.
    */
   owns?(identity: I, docName: string): boolean | Promise<boolean>;
+
+  /**
+   * With an `auth` module: every identity that passes the gate may open every
+   * document of this prefix and hear every write to it -- the author's word
+   * for a type with no `owns`.
+   */
+  shared?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -82,9 +89,35 @@ export interface DocType<C = any, I = unknown> {
 
 const types: DocType[] = [];
 
+/** The listeners with an `auth` module now running: while there is one, every type must say who owns it. */
+const authed = new Set<object>();
+
+/** Default-deny, as `docTypeFromDef` is: with auth, a document says who owns it. */
+export function ownerless(prefix: string, what = "registerDocType"): Error {
+  return new Error(
+    `${what}("${prefix}"): with auth, say who may open it -- ` +
+    `owns: (identity, docName) => boolean, or shared: true if every signed-in identity may hear every write to it. ` +
+    `A document's name is its broadcast channel: RLS filters what open reads, not what the channel carries.`,
+  );
+}
+
 export function registerDocType(t: DocType): void {
+  if (authed.size > 0 && !t.owns && !t.shared) throw ownerless(t.prefix);
   types.push(t);
   types.sort((a, b) => b.prefix.length - a.prefix.length);
+}
+
+/**
+ * For `createDocListener` with `auth`: refuse if a registered type says neither
+ * `owns` nor `shared`, and from now until the returned release, refuse to
+ * register one.
+ */
+export function holdAuth(): () => void {
+  const unowned = types.find((t) => !t.owns && !t.shared);
+  if (unowned) throw ownerless(unowned.prefix);   // named where it was registered: that is where it says
+  const token = {};
+  authed.add(token);
+  return () => void authed.delete(token);
 }
 
 export function resolveDoc(docName: string): { type: DocType; ctx: any } | null {
@@ -98,6 +131,7 @@ export function resolveDoc(docName: string): { type: DocType; ctx: any } | null 
 /** For tests — reset between cases. */
 export function clearRegistry(): void {
   types.length = 0;
+  authed.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -140,17 +174,12 @@ export function docTypeFromDef<I = unknown>(
   // Default-deny: RLS filters what `open` reads, not what the document's
   // channel carries, so a name several identities may open would hand each of
   // them every row written through it. Say who owns it, or that it is shared.
-  if (auth && !opts?.owns && !opts?.shared) {
-    throw new Error(
-      `docTypeFromDef("${def.prefix}"): with auth, say who may open it -- ` +
-      `owns: (identity, docName) => boolean, or shared: true if every signed-in identity may hear every write to it. ` +
-      `A document's name is its broadcast channel: RLS filters what open reads, not what the channel carries.`,
-    );
-  }
+  if (auth && !opts?.owns && !opts?.shared) throw ownerless(def.prefix, "docTypeFromDef");
 
   return {
     prefix: def.prefix,
     ...(opts?.owns ? { owns: opts.owns } : {}),
+    ...(opts?.shared ? { shared: true } : {}),
 
     parse(docName) {
       return docName.startsWith(def.prefix) ? {} : null;

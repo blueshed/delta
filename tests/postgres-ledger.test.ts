@@ -28,7 +28,8 @@ afterAll(async () => {
 beforeEach(async () => {
   clearRegistry();
   await resetState(pool);
-  registerDocType(docTypeFromDef(defineDoc("items:", { root: "items", include: [] }), pool));
+  // one list everybody writes to: the tests with an auth module say so (shared), as auth requires
+  registerDocType(docTypeFromDef(defineDoc("items:", { root: "items", include: [] }), pool, { shared: true }));
 });
 
 afterEach(async () => {

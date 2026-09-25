@@ -214,6 +214,9 @@ interface DocType<C = any, I = unknown> {
     Promise<any | null>;
   // With auth: may this identity open, write through and hear docName? False → 404.
   owns?(identity: I, docName: string): boolean | Promise<boolean>;
+  // With auth: every identity past the gate may have every name of the prefix.
+  // With auth, a type says one or the other: registerDocType / createDocListener refuse it otherwise.
+  shared?: boolean;
 }
 
 // Writer — given to apply() when the listener keeps a ledger (`ledger: true`).
@@ -349,7 +352,7 @@ defineDoc("venue:", {
 
 **Per-user list isolation** — each user sees only their own rows. The most common multi-tenant shape.
 
-Two parts: (1) scope the generic doc by a user-id carried in the doc name, (2) tell `docTypeFromDef` who owns each name. A document's name is the channel its writes are broadcast on — whoever has it open hears every write made through it, **whatever RLS lets them read** — so the name, not RLS, is what keeps one user's rows off another user's socket. `owns` is that check: the listener asks it before `open`, `delta`, `open_at` and `history`, and before an `undo` or `redo` writes to the entry's document, and answers 404 when it says no. With `auth`, `docTypeFromDef` throws unless it is given `owns` or `shared: true`.
+Two parts: (1) scope the generic doc by a user-id carried in the doc name, (2) tell `docTypeFromDef` who owns each name. A document's name is the channel its writes are broadcast on — whoever has it open hears every write made through it, **whatever RLS lets them read** — so the name, not RLS, is what keeps one user's rows off another user's socket. `owns` is that check: the listener asks it before `open`, `delta`, `open_at` and `history`, and before an `undo` or `redo` writes to the entry's document, and answers 404 when it says no. With `auth`, `docTypeFromDef` throws unless it is given `owns` or `shared: true`, and the listener holds every other document to the same: see *Every document says who owns it*, below.
 
 ```ts
 // types.ts
@@ -388,7 +391,15 @@ const myTodos = openDoc<{ todos: Record<string, Todo> }>(`todos:${me}`);
 
 An `add /todos/-` on this list-mode doc takes `owner_id` from the scope (the doc name), not from the value, so a user cannot forge a row for someone else. RLS (`WITH CHECK`, below) is the second layer: even a buggy server cannot write across users, because the database refuses.
 
-**`shared: true`** says every identity that passes the gate may open every document of the prefix and hear every write to it — a team board, a public room. Never put `shared` on a table whose rows RLS hides from some of its readers: they would see those rows arrive on the channel. A custom `DocType` gets the same check by defining `owns`; one that leaves it out is trusted to refuse in its own `open`.
+**`shared: true`** says every identity that passes the gate may open every document of the prefix and hear every write to it — a team board, a public room. Never put `shared` on a table whose rows RLS hides from some of its readers: they would see those rows arrive on the channel.
+
+**Every document says who owns it.** With `auth` on the listener it is default-deny, whoever made the document:
+
+- **`docTypeFromDef`** — `owns` or `shared: true` in its options; with `auth` it throws without one. Given no `auth` it makes a type with neither, which the listener then refuses.
+- **A `DocType` written by hand** — an `owns(identity, docName)` method, or `shared: true` on it. `createDocListener(ws, pool, { auth })` refuses to start while a registered type has neither, and while such a listener runs, `registerDocType` refuses one.
+- **A custom doc** — `owns` or `shared: true` in `defineCustomDoc`; `createDocListener` refuses one with neither. `owns` is asked on open (a 404, and no subscription, when it says no).
+
+The error names the prefix and says what to add. Without `auth` nothing is asked.
 
 ### Custom read docs — `defineCustomDoc`
 
@@ -407,11 +418,13 @@ const sitesInBbox = defineCustomDoc<BBox>("sites-in-bbox:", {
   }),
   matches: (_coll, row, c) =>                      // does this changed row still belong?
     row.lng >= c.minLng && row.lng <= c.maxLng && row.lat >= c.minLat && row.lat <= c.maxLat,
+  shared: true,                                    // with auth: every signed-in identity may open every bbox
 });
 ```
 
 - Doc shape is `{ [collection]: { [id]: row } }` — the framework keys rows by `id`. On a watched write it diffs membership: a row that now matches is `add`/`replace`d into the map, one that no longer matches is `remove`d — single ops, never a whole-doc resend.
-- **The `query` result is cached per doc name and shared across all subscribers**, so a membership doc must be *criteria-scoped, not identity-scoped* (`query` isn't even passed an identity). If two clients opening the same name must see different rows, use recompute — not membership.
+- **The `query` result is cached per doc name and identity** (Postgres; without `auth`, per name) and shared only by the subscribers who are that identity. `query(pool, criteria, identity)` runs once for each: bind the identity yourself (`withAppAuth(pool, id, …)`) so RLS scopes what it reads, as recompute does. `matches(collection, row, criteria, identity)` decides live membership per identity too; the row comes from the change log, which RLS does not filter, so check it against the identity there when the name is `shared` or several identities `own` it. SQLite has no auth: its membership docs are cached per name.
+- **With auth, say who owns it** — `owns: (identity, docName) => …` or `shared: true` (*Every document says who owns it*, above).
 - **The callback shape differs by backend.** Postgres: `query: async (pool, criteria) => …` — a `Pool`, awaited (the shape above). SQLite: `query: (db, criteria) => …` — a synchronous `bun:sqlite` handle, no `await`. `matches` is identical on both.
 
 **Recompute — `recompute` (Postgres only).** A *whole-doc* view for shapes a per-row predicate can't express — nested, joined, aggregated, or identity-dependent. No `matches`; instead, on open and on **any** write to a watched collection, the framework re-evaluates the entire doc and republishes it.
@@ -419,11 +432,12 @@ const sitesInBbox = defineCustomDoc<BBox>("sites-in-bbox:", {
 ```ts
 import { withAppAuth } from "@blueshed/delta/postgres";
 
-const dashboard = defineCustomDoc<{ userId: string }>("dashboard:", {
+const dashboard = defineCustomDoc<{ userId: string }, { id: number }>("dashboard:", {
   watch: ["orders", "invoices"],
   parse: (id) => ({ userId: id }),
+  owns: (me, docName) => docName === `dashboard:${me.id}`,   // with auth: whose name it is (anyone else: 404)
   recompute: async (pool, c, identity) => {         // re-evaluated PER SUBSCRIBER, under their identity
-    const me = (identity as { id: number } | undefined)?.id;
+    const me = identity?.id;
     if (me == null || String(me) !== c.userId) return null;  // doc-name id is untrusted — verify it → 404 / skip
     return withAppAuth(pool, me, async (db) => {             // bind app.user_id, so RLS scopes every read below
       const orders   = (await db.query("SELECT * FROM orders   WHERE user_id = $1", [me])).rows;
@@ -436,7 +450,7 @@ const dashboard = defineCustomDoc<{ userId: string }>("dashboard:", {
 
 - Returns the **whole doc** (any JSON shape, object or array). Return `null` for "doesn't exist": a 404 on open, a silent skip on fan-out.
 - **Re-evaluated once per subscriber, under that client's gated identity** (the third arg). Bind it yourself — `withAppAuth(pool, id, …)` or a `*_as` stored function (see *Composing doc operations from SQL*) — so RLS scopes each subscriber's view. `identity` is `undefined` on an unauthenticated connection; **guard it** (the example returns `null` rather than dereferencing it — a recompute that throws is caught, logged, and silently drops that subscriber's update).
-- **The doc-name id is untrusted.** `parse` reads whatever name the client asked to open, so a raw `WHERE … = c.userId` is a confused-deputy: verify the parsed id against the identity (return `null` → 404) and/or treat RLS as the authoritative tenant guard. Delta is persistence + broadcast, not authorization.
+- **The doc-name id is untrusted.** `parse` reads whatever name the client asked to open, so a raw `WHERE … = c.userId` is a confused-deputy: say whose name it is with `owns` (asked before `recompute`), verify the parsed id against the identity (return `null` → 404), and/or treat RLS as the authoritative tenant guard. Delta is persistence + broadcast, not authorization.
 - **No relevance gate.** Unlike membership's `matches`, recompute re-evaluates on *any* write to *any* watched collection, for *every* subscriber of *every* doc under the prefix — there's no per-doc filter. Cost ≈ (subscribers under the prefix) × (writes to any watched collection); it is **not** cached. Keep `watch` tight and `recompute` cheap.
 - The recomputed doc reaches each client as a single **root-replace** op — see below.
 
@@ -474,6 +488,7 @@ const venueAt: DocType<{ venueId: number; at: string }> = {
     );
     return rows[0].r;
   },
+  shared: true,   // with auth: say who owns it -- owns(identity, docName), or shared
 };
 registerDocType(venueAt);
 ```

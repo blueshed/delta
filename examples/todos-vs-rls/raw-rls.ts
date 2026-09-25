@@ -10,6 +10,10 @@
  * RLS catches forgeries server-side via `WITH CHECK`, but the client still
  * has to *know* what to send. The shape of the response is whatever the SQL
  * returned — no reshape layer, no injection, no dispatch on doc-name.
+ *
+ * `addTodo` is the raw INSERT delta's side never makes: it changes the table
+ * behind delta's back, so nothing is versioned, logged or broadcast, and a
+ * page holding the todos open is not told (run.ts shows it).
  */
 import type { Pool, PoolClient } from "pg";
 import type { Identity } from "./setup";
@@ -38,7 +42,7 @@ async function withIdentity<T>(
 export async function listVisibleTodos(pool: Pool, identity: Identity) {
   return withIdentity(pool, identity, async (c) => {
     const { rows } = await c.query(
-      "SELECT id, owner_id, team_id, text, done, created_at FROM example_todos ORDER BY id",
+      "SELECT id, owner_id, team_id, text, done FROM example_todos ORDER BY id",
     );
     return rows;
   });

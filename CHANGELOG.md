@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **Postgres: with `auth`, every document says who owns it, not only `docTypeFromDef`'s.** A
+  custom doc (`defineCustomDoc`) had no `owns`, and a `DocType` written by hand without one was
+  never asked, so any identity past the gate could open any name of theirs and hear every row
+  it matched: a membership doc's `query` ran on the bare pool with no identity, its cache was
+  shared by every identity that opened the name, and its fan-out went out on the name's channel
+  (todo #18). Now, with `auth` on the listener it is default-deny, as `docTypeFromDef` already
+  was: `createDocListener` refuses to start while a registered `DocType` or a custom doc says
+  neither `owns` nor `shared: true`, and while such a listener runs, `registerDocType` refuses
+  one; a custom doc's `owns` is asked on open (404 when it says no). A membership doc is queried,
+  cached and fanned out per identity: `query(pool, criteria, identity)` and
+  `matches(collection, row, criteria, identity)` are given it (bind it for RLS with
+  `withAppAuth`, as recompute does), and one identity's view of a name is never served to
+  another. `DocType` gains `shared?: boolean`; `CustomDocDef` gains `owns` and `shared` and an
+  identity type parameter (`defineCustomDoc<Criteria, Identity>`). To move across, with `auth`:
+  give each custom doc `owns: (identity, docName) => boolean` (or `shared: true` where every
+  signed-in identity may open every name), give a hand-written `DocType` an `owns` method (or
+  `shared: true`), and pass `owns` / `shared` to a `docTypeFromDef` you gave no `auth`. Without
+  `auth` nothing changes.
 - **`createWs` and `upgradeWithAuth` refuse a browser from another origin (403).** A WebSocket
   is not bound by the same-origin policy, so any page a signed-in person visited could open a
   socket to the deployment and speak the protocol as them, their cookie riding along. The
@@ -20,7 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `createWs({ origins: ["https://app.example.com"] })`; `origins: "*"` lets every origin in, as
   before. `refuseOrigin(req, origins)` from `@blueshed/delta/server` is the check for an
   upgrade handler of your own.
-
 - **SQLite: an included collection with no `parent` is loaded in full**, in every document of
   the prefix, as Postgres loads it. `loadCollection` filtered it by the root's scope columns
   (with the default scope, `WHERE id = <doc id>`: at most one row, the one that happened to
@@ -30,6 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unparented collection met only on the way up from an included grandchild is not in the
   document, as before. To move across: a collection that belongs to one document needs a
   `parent` (its key to the root, or to an included collection).
+
+### Changed
+
+- **`examples/todos-vs-rls` is built from delta's own parts**: the todos table is made by
+  `generateSql`, read and written through `docTypeFromDef` with `owns` (`todos-mine:<id>`,
+  `todos-team:<id>`) and summarised by a recompute custom doc with `owns`, in process with
+  `createLocal()`, as a NOSUPERUSER role so the policy really holds. The hand-written
+  `DocType` that wrote with raw `INSERT` / `UPDATE` / `DELETE` (which the skill forbids, and
+  which nobody heard) is gone; the raw side keeps its INSERT to show that no one is told.
 
 ## [0.7.0] - 2026-09-25
 
