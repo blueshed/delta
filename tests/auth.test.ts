@@ -180,6 +180,26 @@ describe("upgradeWithAuth", () => {
     expect(server.upgraded[0].opts.data.clientId).toBeDefined();
   });
 
+  test("a browser on another origin is refused before onUpgrade reads its credentials (todo #31)", async () => {
+    let asked = 0;
+    const auth: DeltaAuth<{ id: number }> = {
+      onUpgrade: () => { asked++; return { id: 7 }; },
+      gate: (c) => c.data.identity ?? { error: "nope" },
+    };
+    const server = mockServer();
+    const handler = upgradeWithAuth(createWs(), auth);
+    const res = await handler(new Request("http://localhost/ws", { headers: { origin: "https://evil.example", cookie: "sid=abc" } }), server);
+    expect(res?.status).toBe(403);
+    expect(server.upgraded).toHaveLength(0);
+    expect(asked).toBe(0);
+    // the same origin, no Origin at all, and one the WsServer's `origins` lists are let in
+    await handler(new Request("http://localhost/ws", { headers: { origin: "http://localhost" } }), server);
+    await handler(new Request("http://localhost/ws"), server);
+    await upgradeWithAuth(createWs({ origins: ["https://evil.example"] }), auth)(
+      new Request("http://localhost/ws", { headers: { origin: "https://evil.example" } }), server);
+    expect(server.upgraded).toHaveLength(3);
+  });
+
   test("onUpgrade throwing treated as null identity", async () => {
     const ws = createWs();
     const auth: DeltaAuth = {

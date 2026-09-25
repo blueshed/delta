@@ -530,7 +530,7 @@ const sessionAuth: DeltaAuth<{ id: number }> = {
 
 ```ts
 wireAuth(ws, auth);                            // auth.actions → WS "call" handlers
-ws.upgrade = upgradeWithAuth(ws, auth);        // auth.onUpgrade → HTTP handshake
+ws.upgrade = upgradeWithAuth(ws, auth);        // auth.onUpgrade → HTTP handshake (after the Origin check: *Origins*)
 docTypeFromDef(def, pool, { auth, owns });     // queries → *_as (RLS session); owns → who may have the doc
 createDocListener(ws, pool, { auth });         // gate every open / delta
 ```
@@ -634,6 +634,18 @@ ws.setServer(server);               // let ws.publish() reach the server
 ```
 
 Order doesn't matter — the WebSocket upgrade is a distinct HTTP request (`Upgrade: websocket` header), so it doesn't conflict with the HTML route at `/`.
+
+### Origins
+
+A WebSocket is not bound by the same-origin policy: without a check, any page a signed-in person visits could open a socket to your server and speak the protocol as them, with their cookies. So `ws.upgrade` (and `upgradeWithAuth`, before `onUpgrade` runs) answers **403** to a browser whose `Origin` is not the server's own. Its own is the host and port the request came to (`Host`), whatever scheme a proxy in front terminates. A request with no `Origin` is not a browser's (the CLI, a test, another server) and is let in.
+
+```ts
+createWs();                                                      // its own origin only
+createWs({ origins: ["https://admin.example.com", "http://localhost:5173"] });   // and these
+createWs({ origins: "*" });                                      // every origin: the explicit opt-out
+```
+
+List a page served from another origin (a dev server on another port, an admin app on another host), and the public origin when a proxy in front rewrites `Host`. An entry is `scheme://host[:port]`; one that is not a URL throws at `createWs`. `refuseOrigin(req, origins)` (from `@blueshed/delta/server`) is the same check for an upgrade handler of your own: a `Response` to return, or `undefined` to go on.
 
 ## Rendering collections with op-level precision
 

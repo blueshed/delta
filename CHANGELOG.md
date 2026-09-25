@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **`createWs` and `upgradeWithAuth` refuse a browser from another origin (403).** A WebSocket
+  is not bound by the same-origin policy, so any page a signed-in person visited could open a
+  socket to the deployment and speak the protocol as them, their cookie riding along. The
+  upgrade now checks `Origin`: the server's own (the host and port of the request's `Host`) is
+  let in, as is a request with no `Origin` (the CLI, tests, another server); anything else,
+  `null` included, is answered 403 before the upgrade, and before `onUpgrade` reads a
+  credential (todo #31). To move across: a page served from another origin (a dev server on
+  another port, a separate admin app, a proxy that rewrites `Host`) is listed in
+  `createWs({ origins: ["https://app.example.com"] })`; `origins: "*"` lets every origin in, as
+  before. `refuseOrigin(req, origins)` from `@blueshed/delta/server` is the check for an
+  upgrade handler of your own.
+
 - **SQLite: an included collection with no `parent` is loaded in full**, in every document of
   the prefix, as Postgres loads it. `loadCollection` filtered it by the root's scope columns
   (with the default scope, `WHERE id = <doc id>`: at most one row, the one that happened to

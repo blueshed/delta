@@ -60,6 +60,54 @@ describe("createWs", () => {
     expect(ws.websocket.sendPings).toBe(false);
   });
 
+  // A WebSocket is not bound by the same-origin policy: without a check, any
+  // page a signed-in person visits could open a socket as them (todo #31).
+  describe("the Origin check on upgrade", () => {
+    function mockServer() {
+      const upgraded: Request[] = [];
+      return { upgraded, upgrade(req: Request) { upgraded.push(req); return true; } };
+    }
+    const upgrade = async (ws: ReturnType<typeof createWs>, headers: Record<string, string>) => {
+      const server = mockServer();
+      const res = await ws.upgrade(new Request("http://app.example.com:3000/ws", { headers }), server);
+      return { res, upgraded: server.upgraded.length === 1 };
+    };
+
+    test("a request with no Origin (the CLI, a test, a server) is upgraded", async () => {
+      expect(await upgrade(createWs(), {})).toEqual({ res: undefined, upgraded: true });
+    });
+
+    test("a browser on the server's own origin is upgraded", async () => {
+      expect((await upgrade(createWs(), { origin: "http://app.example.com:3000" })).upgraded).toBe(true);
+      // the Host the request came to is the server's origin, whatever scheme a proxy in front terminates
+      expect((await upgrade(createWs(), { origin: "https://app.example.com:3000" })).upgraded).toBe(true);
+    });
+
+    test("a browser on another origin is refused with 403, before the upgrade", async () => {
+      for (const origin of ["https://evil.example", "http://app.example.com:4000", "null", "not a url"]) {
+        const { res, upgraded } = await upgrade(createWs(), { origin });
+        expect(upgraded).toBe(false);
+        expect(res?.status).toBe(403);
+      }
+    });
+
+    test("origins lets the origins it lists in, and only those", async () => {
+      const ws = createWs({ origins: ["https://admin.example.com", "http://localhost:5173/"] });
+      expect((await upgrade(ws, { origin: "https://admin.example.com" })).upgraded).toBe(true);
+      expect((await upgrade(ws, { origin: "http://localhost:5173" })).upgraded).toBe(true);
+      expect((await upgrade(ws, { origin: "http://app.example.com:3000" })).upgraded).toBe(true);   // its own, still
+      expect((await upgrade(ws, { origin: "https://evil.example" })).res?.status).toBe(403);
+    });
+
+    test('origins: "*" is the explicit opt-out: every origin is let in', async () => {
+      expect((await upgrade(createWs({ origins: "*" }), { origin: "https://evil.example" })).upgraded).toBe(true);
+    });
+
+    test("an origin in the list that is not a URL is refused when createWs is called", () => {
+      expect(() => createWs({ origins: ["admin.example.com"] })).toThrow(/origins/);
+    });
+  });
+
   test("open tracks client, close removes it", () => {
     const ws = createWs();
     const sock = mockSocket("c1");

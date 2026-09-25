@@ -174,7 +174,7 @@ Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/fi
 | `@blueshed/delta/core` | anywhere | `applyOps`, `DeltaOp`, `splitPath`, `joinPath`, `escapeSegment` |
 | `@blueshed/delta/client` | browser, Bun | `connectWs(url, { clientId?, onConnect? })` (with `close()`), `openDoc`, `call`, `WS`, `DeltaError` |
 | `@blueshed/delta/dom-ops` | browser | `applyOpsToCollection` — keyed-DOM op routing |
-| `@blueshed/delta/server` | Bun | `createWs`, `registerDoc` (JSON-file backend), `registerMethod` |
+| `@blueshed/delta/server` | Bun | `createWs({ path?, origins? })`, `registerDoc` (JSON-file backend), `registerMethod`, `refuseOrigin` |
 | `@blueshed/delta/local` | Bun | `createLocal` — delta in-process, no socket |
 | `@blueshed/delta/kinds` | Bun | `registerMemory`, `registerStatic`, `registerSource` |
 | `@blueshed/delta/sqlite` | Bun | `defineSchema`, `defineDoc`, `defineCustomDoc`, `createTables`, `migrateSchema`, `registerDocs(..., customDocs?, { ledger?, who? })` → `{ evict }`, `validateOps`, `inverseOf`, `loadDocAt`, snapshots |
@@ -198,6 +198,7 @@ Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/fi
 - **On Postgres, a write is heard only on the document it was written through.** There is no cross-document fan-out: another open doc over the same rows sees the change on its next open or reconnect. SQLite fans out to every open doc that holds the row. → `reference.md` → *Fan-out*.
 - **Memory docs are written by the server, not the browser** (`delta` over a socket is refused unless `writable: "any"`); source and static docs refuse every write. The browser opens them like any doc.
 - **`createLocal()` calls are async** — `await local.call(...)`, for every backend.
+- **A browser on another origin is refused (403) at the upgrade.** `createWs` and `upgradeWithAuth` let in the server's own origin (the request's `Host`) and a request with no `Origin` (the CLI, a test, a server); a page served from elsewhere needs `createWs({ origins: ["https://app.example.com"] })`, or `origins: "*"` to let every origin in. → `reference.md` → *Origins*.
 - **Never put tokens in WS URLs**: use `onUpgrade` (cookies / Authorization) or `call("authenticate", ...)`. → `reference.md` → *Authentication*.
 - **Sign in with `connectWs(url, { onConnect: (ws) => call("authenticate", { token }, ws) })`**, not a one-off `await call("authenticate")`: the hook runs on every connect, before any doc opens or re-opens, so a reconnect's re-opens go out signed in. An unauthenticated `open` 401s, and after a reconnect the doc would stop updating. → `reference.md` → *Quick start (Postgres backend)*.
 - **With auth, every document says who owns it**: `docTypeFromDef(def, pool, { auth, owns: (identity, docName) => … })`, or `shared: true`; without either it throws. A document's name is the channel its writes are broadcast on, and RLS filters what `open` reads, **not what the channel carries** — so one name per owner, checked by `owns` (a no is a 404). → `reference.md` → *Per-user list isolation*, *RLS*.

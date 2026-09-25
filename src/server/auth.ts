@@ -20,7 +20,7 @@
  *   wireAuth(ws, auth);
  *   await createDocListener(ws, pool, { auth });
  */
-import type { WsServer } from "./server";
+import { refuseOrigin, type WsServer } from "./server";
 
 // ---------------------------------------------------------------------------
 // Contract
@@ -115,7 +115,9 @@ export function wireAuth<I>(ws: WsServer, auth: DeltaAuth<I>): void {
 /**
  * Wrap the WsServer upgrade handler with an `onUpgrade` auth check. Returns a
  * new upgrade function that calls `auth.onUpgrade` (if defined) and stashes
- * the resulting identity on `client.data.identity`.
+ * the resulting identity on `client.data.identity`. A browser on another
+ * origin than the server's, and not in `createWs({ origins })`, is refused
+ * with 403 first, before `onUpgrade` reads a cookie it sent.
  *
  *   server = Bun.serve({
  *     routes: { [ws.path]: upgradeWithAuth(ws, auth), ...otherRoutes },
@@ -127,6 +129,8 @@ export function upgradeWithAuth<I>(
   auth: DeltaAuth<I>,
 ): (req: Request, server: any) => Response | undefined | Promise<Response | undefined> {
   return async (req, server) => {
+    const refused = refuseOrigin(req, ws.origins);
+    if (refused) return refused;
     let identity: I | null = null;
     if (auth.onUpgrade) {
       try {

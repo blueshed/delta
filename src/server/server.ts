@@ -40,6 +40,8 @@ export interface WsServer {
   sendTo(clientId: string, data: any): void;
   setServer(s: any): void;
   upgrade: (req: Request, server: any) => Response | undefined;
+  /** The origins a browser may open the socket from besides the server's own, or "*" for any (`createWs({ origins })`). */
+  origins?: readonly string[] | "*";
   websocket: {
     idleTimeout: number;
     sendPings: boolean;
@@ -135,6 +137,44 @@ export interface WsOptions {
   path?: string;
   idleTimeout?: number;
   sendPings?: boolean;
+  /**
+   * The origins a browser may open the socket from, besides the server's own
+   * (`["https://admin.example.com"]`), or `"*"` for any. A browser upgrade
+   * from any other origin is refused with 403; a request with no `Origin`
+   * (not a browser) is let in.
+   */
+  origins?: readonly string[] | "*";
+}
+
+/**
+ * The Origin check a WebSocket upgrade needs: a socket is not bound by the
+ * same-origin policy, so without it any page a signed-in person visits could
+ * open one as them, cookies and all. A 403 for a browser (it sends `Origin`)
+ * on another origin than the Host it asked, unless `origins` lets it in;
+ * undefined to go on. A request with no `Origin` is not a browser's, and goes on.
+ * `createWs` and `upgradeWithAuth` ask it before anything else.
+ */
+export function refuseOrigin(req: Request, origins?: readonly string[] | "*"): Response | undefined {
+  const origin = req.headers.get("origin");
+  if (origin === null || origins === "*") return undefined;
+  let from: URL | undefined;
+  try { from = new URL(origin); } catch { /* "null" (a sandboxed frame, a file) or junk: not an origin we know */ }
+  if (from) {
+    const host = (req.headers.get("host") ?? new URL(req.url).host).toLowerCase();
+    if (from.host.toLowerCase() === host) return undefined;   // its own: the scheme is whatever a proxy in front terminates
+    if (origins?.includes(from.origin)) return undefined;
+  }
+  return new Response("Origin not allowed", { status: 403 });
+}
+
+/** `origins` as `URL.origin` spells them, so the check compares like with like; a list entry that is not a URL throws. */
+function allowedOrigins(origins: WsOptions["origins"]): readonly string[] | "*" | undefined {
+  if (origins === undefined || origins === "*") return origins;
+  return origins.map((o) => {
+    let url: URL;
+    try { url = new URL(o); } catch { throw new Error(`createWs: origins: ${JSON.stringify(o)} is not an origin (scheme://host[:port], e.g. "https://app.example.com")`); }
+    return url.origin;
+  });
 }
 
 /** Create a shared WebSocket server with action routing and Bun pub/sub. */
@@ -145,8 +185,11 @@ export function createWs(opts?: WsOptions): WsServer {
   let serverRef: any;
 
   const path = opts?.path ?? "/ws";
+  const origins = allowedOrigins(opts?.origins);
 
   function upgrade(req: Request, server: any) {
+    const refused = refuseOrigin(req, origins);
+    if (refused) return refused;
     const clientId = new URL(req.url).searchParams.get("clientId") ?? crypto.randomUUID();
     if (server.upgrade(req, { data: { clientId } })) return undefined;
     return new Response("WebSocket upgrade failed", { status: 400 });
@@ -174,6 +217,7 @@ export function createWs(opts?: WsOptions): WsServer {
     },
 
     upgrade,
+    origins,
 
     websocket: {
       idleTimeout: opts?.idleTimeout ?? 60,
