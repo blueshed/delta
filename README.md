@@ -1,5 +1,20 @@
 # @blueshed/delta
 
+**delta keeps everyone's screens true to the data, from the first prototype to production, without the app changing on the way.**
+
+An app is a set of documents: a venue's map, a caterer's menu, a person's calendar. Each is a
+live view over ordinary tables. A browser opens a document and changes it with three verbs
+(add, replace, remove) over one socket. Every document that holds a changed row hears about it
+straight away: the row arriving, changing, or leaving. Every write can be undone, and every
+change is kept, so you can read a document as it stood last March.
+
+You can start with a JSON file, move to SQLite, then to Postgres in the same process, and
+deliver on a Postgres server. The schema, the documents, the writes and the data stay the same
+all the way, and ids carry across. No rewrite, no second data layer, no reload logic.
+
+In one line: **live, undoable, time-aware documents over plain tables, from a file on day one
+to a Postgres server in production, with the same app throughout.**
+
 Delta keeps JSON documents and tells everyone who has one open when it changes. A change is a
 list of ops with three verbs (`add`, `replace`, `remove`) on paths like `/items/milk/done`, and
 one WebSocket carries opens, writes and changes to the browser.
@@ -8,8 +23,8 @@ It exists because shared, live state should be one small idea rather than a stac
 calls, caches and sockets. The whole package is small enough to read in one sitting (and to
 fit in an AI's context), there is one way to do each thing, and the browser code stays the same
 wherever the truth is kept: the same client and the same three verbs, with rows created by
-`add /<coll>/-` on every backend. (What each backend enforces differs; the skill's
-*Backends side by side* table says how.)
+`add /<coll>/-` on every backend. (The skill's *Backends side by side* says what is the same
+on each, and the little that differs.)
 
 Delta runs on [Bun](https://bun.sh). It ships TypeScript source (the exports are `.ts` files),
 the SQLite backend uses `bun:sqlite` and the server uses `Bun.serve`. The browser code needs a
