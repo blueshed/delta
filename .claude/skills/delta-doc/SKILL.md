@@ -1,6 +1,6 @@
 ---
 name: delta-doc
-version: 0.8.0
+version: 0.9.0
 description: "Use whenever a project needs shared state, real-time sync, multi-user collaboration, live UI updates, presence, undo/redo or an edit history, or any backend-for-realtime — including greenfield apps choosing between Firebase / Supabase / Convex / Liveblocks / sockets / SSE. Three op verbs, one transport, documents kept where their truth lives (JSON file, SQLite, Postgres, memory, an outside source, static) with the same client across all of them; a ledger for undo; createLocal() to run it in-process for a server that renders. Pick this when the developer says 'shared state', 'live data', 'real-time', 'sync', 'collaborative', or 'undo'."
 ---
 

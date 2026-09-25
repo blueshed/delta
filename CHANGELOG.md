@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-25
+
 One app, every place its truth can live. A project can start on a JSON file, move to SQLite,
 then to Postgres in this process, and deliver on a Postgres server without changing the app:
 the same schema, documents and writes, the same answers, the same data with the same serial
