@@ -34,19 +34,34 @@ CREATE INDEX IF NOT EXISTS idx_delta_ledger_undoes ON _delta_ledger (undoes);
 -- _delta_inverse: what applied ops walked back, read from the document as it
 -- was. Applied ops are whole rows (/coll/id) or the root (/coll): an add is
 -- removed, a remove added back, a replace replaced by its old self. Reverse
--- order, except that a run of removes (a row and the children its removal
--- cascaded to) comes back in its own order, parent first.
+-- order, except that a remove and the rows its removal cascaded to (a run) come
+-- back in their own order, parent first -- the rule of inverseOf in
+-- src/server/sqlite.ts. p_asked, the ops as the caller sent them, says where
+-- each run starts: at a remove the caller asked for. An undo's removes come
+-- children first, each asked for, so each is its own run, and the runs come back
+-- in reverse: parent first again. Without it (the two-argument form), removes
+-- one after another are taken for one run, right only for a single remove and
+-- its cascade.
 -- ---------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION _delta_inverse(p_before JSONB, p_ops JSONB)
+CREATE OR REPLACE FUNCTION _delta_inverse(p_before JSONB, p_ops JSONB, p_asked JSONB)
 RETURNS JSONB AS $$
 DECLARE
   v_inverse JSONB := '[]'::jsonb;
   v_run     JSONB := '[]'::jsonb;
+  v_heads   TEXT[] := '{}';   -- the removes asked for, at the path the write tells each (/t/007 at /t/7)
   v_op      JSONB;
   v_parts   TEXT[];
   v_prior   JSONB;
 BEGIN
+  FOR v_op IN SELECT * FROM jsonb_array_elements(COALESCE(p_asked, '[]'::jsonb)) LOOP
+    CONTINUE WHEN v_op->>'op' IS DISTINCT FROM 'remove';
+    v_parts := _delta_split_path(v_op->>'path');
+    v_heads := v_heads || CASE WHEN array_length(v_parts, 1) = 2
+      THEN _delta_build_path(v_parts[1], _delta_row_id(v_parts[1], v_parts[2])::text)
+      ELSE v_op->>'path' END;
+  END LOOP;
+
   FOR v_op IN SELECT * FROM jsonb_array_elements(COALESCE(p_ops, '[]'::jsonb)) LOOP
     v_parts := _delta_split_path(v_op->>'path');
     IF array_length(v_parts, 1) = 1 THEN
@@ -59,6 +74,10 @@ BEGIN
     END IF;
 
     IF v_op->>'op' = 'remove' THEN
+      IF (v_op->>'path') = ANY(v_heads) THEN   -- a remove asked for starts its own run; one it cascaded to joins it
+        v_inverse := v_run || v_inverse;
+        v_run := '[]'::jsonb;
+      END IF;
       v_run := v_run || jsonb_build_array(jsonb_build_object('op', 'add', 'path', v_op->>'path', 'value', v_prior));
     ELSE
       v_inverse := v_run || v_inverse;
@@ -73,6 +92,9 @@ BEGIN
   RETURN v_run || v_inverse;
 END;
 $$ LANGUAGE plpgsql IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION _delta_inverse(p_before JSONB, p_ops JSONB)
+RETURNS JSONB LANGUAGE sql IMMUTABLE AS $$ SELECT _delta_inverse(p_before, p_ops, NULL); $$;
 
 -- ---------------------------------------------------------------------------
 -- delta_apply_logged: delta_apply, with its ledger entry, in one transaction.
@@ -98,7 +120,7 @@ BEGIN
   PERFORM pg_advisory_xact_lock(hashtext('delta:' || p_doc_name));
   v_before  := COALESCE(delta_open(p_doc_name), '{}'::jsonb);
   v_result  := delta_apply(p_doc_name, p_ops);
-  v_inverse := _delta_inverse(v_before, v_result->'ops');
+  v_inverse := _delta_inverse(v_before, v_result->'ops', p_ops);
   IF jsonb_array_length(v_result->'ops') > 0 THEN
     INSERT INTO _delta_ledger (doc_name, version, ops, inverse, who, cursor, undoes, undoable)
       VALUES (p_doc_name, (v_result->>'version')::BIGINT, v_result->'ops', v_inverse, p_who, p_cursor, p_undoes, p_undoable)

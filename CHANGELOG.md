@@ -71,6 +71,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row's id was told as `9007199254740992`. Such a path is now refused on every backend, by
   `validateOps` on SQLite and by `_delta_row_id` on Postgres (`001a`, replaced in place), which
   also takes any number of digits (a leading zero no longer counts against 18).
+- **A write that made a row and its children can be undone and redone** (SQLite and Postgres,
+  todo #51). The inverse kept a run of removes in its own order, taking it for one remove and
+  its cascade, parent first. But an undo's removes come children first, each asked for, so
+  undoing `[add /courses/10, add /drinks/10, add /drinks/11]` recorded an inverse that added the
+  drinks before their course, and the redo was refused (on SQLite, `Row not found: courses/10`) and
+  recorded as a conflict. A course removed with its drink met the same on its second undo.
+  A run now starts at each remove the caller asked for, and only a remove it cascaded to joins
+  it, so each comes back with its cascade, parent first, and the removes in reverse: a redo is
+  the write again, op for op. `inverseOf(before, applied, asked?)` takes the ops as sent to
+  tell them apart, and so does `_delta_inverse(before, ops, asked)` (`001g`, a new
+  three-argument form beside the two-argument one, which keeps the old reading;
+  `delta_apply_logged` is replaced in place to pass it). An entry already in the ledger keeps
+  the inverse it was recorded with: an undo made before this release, of a row added with its
+  children, still can't be redone after it.
 
 ## [0.9.0] - 2026-09-25
 

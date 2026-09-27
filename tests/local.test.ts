@@ -142,6 +142,20 @@ describe("inverse", () => {
       { op: "replace", path: "/r", value: { id: "r", x: 1 } },
     ]);
   });
+
+  test("told what was asked, each remove asked for starts its own run: an undo's removes, children first, come back parent first", async () => {
+    const before = { p: { 1: { id: 1 } }, c: { 2: { id: 2, p_id: 1 }, 3: { id: 3, p_id: 1 } } };
+    const back = [
+      { op: "add", path: "/p/1", value: { id: 1 } },
+      { op: "add", path: "/c/2", value: { id: 2, p_id: 1 } },
+      { op: "add", path: "/c/3", value: { id: 3, p_id: 1 } },
+    ] as const;
+    const undo = [{ op: "remove", path: "/c/3" }, { op: "remove", path: "/c/2" }, { op: "remove", path: "/p/1" }] as const;
+    expect(inverseOf(before, [...undo], [...undo])).toEqual([...back]);
+    // the parent asked for (as /p/01, told at /p/1), its children cascaded: one run
+    const cascade = [{ op: "remove", path: "/p/1" }, { op: "remove", path: "/c/2" }, { op: "remove", path: "/c/3" }] as const;
+    expect(inverseOf(before, [...cascade], [{ op: "remove", path: "/p/01" }])).toEqual([...back]);
+  });
 });
 
 describe("fan-out onto a document whose root is the row", () => {

@@ -566,6 +566,42 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
+    test("a course and its drinks added in one write, undone, are redone course first -- and undone again", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1"]);
+      const made = await write(b.process, "fo-board:1", [
+        { op: "add", path: "/courses/10", value: { name: "Fish" } },
+        { op: "add", path: "/drinks/10", value: { courses_id: 10, name: "Chablis" } },
+        { op: "add", path: "/drinks/11", value: { courses_id: 10, name: "Muscadet" } },
+      ], { cursor: "s1" });
+      const taken = [{ op: "remove", path: "/drinks/11" }, { op: "remove", path: "/drinks/10" }, { op: "remove", path: "/courses/10" }];
+      const walked = async (way: string) => {
+        const { result } = await b.process.call(way, { cursor: "s1" });
+        return { ops: result.ops, conflict: result.conflict };
+      };
+      expect(await walked("undo")).toEqual({ ops: taken, conflict: undefined });
+      expect(await walked("redo")).toEqual({ ops: made.ops, conflict: undefined });
+      expect(await walked("undo")).toEqual({ ops: taken, conflict: undefined });
+      await expectTold(b, "fo-menu:1", [made.ops, taken, made.ops, taken]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a course removed with its drink, undone and redone, is undone again course first", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1"]);
+      const removed = await write(b.process, "fo-board:1", [{ op: "remove", path: "/courses/1" }], { cursor: "s1" });
+      const back = [{ op: "add", path: "/courses/1", value: course(1, "Soup") }, { op: "add", path: "/drinks/1", value: drink(1, 1, "Sherry") }];
+      const walked = async (way: string) => {
+        const { result } = await b.process.call(way, { cursor: "s1" });
+        return { ops: result.ops, conflict: result.conflict };
+      };
+      expect(await walked("undo")).toEqual({ ops: back, conflict: undefined });
+      expect(await walked("redo")).toEqual({ ops: [{ op: "remove", path: "/drinks/1" }, { op: "remove", path: "/courses/1" }], conflict: undefined });
+      expect(await walked("undo")).toEqual({ ops: back, conflict: undefined });
+      await expectTold(b, "fo-menu:1", [removed.ops, back, [{ op: "remove", path: "/drinks/1" }, { op: "remove", path: "/courses/1" }], back]);
+      await assertCopiesHold(b, copies);
+    });
+
     test("a value kept as its column's type is told and undone as kept: a scope's \"10\" in a text column stays \"10\"", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-tags-labelled:10", "fo-board:1"]);

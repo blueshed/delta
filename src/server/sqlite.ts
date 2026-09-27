@@ -768,7 +768,7 @@ export function registerDocs(
         if (implied.has(docName)) ensureImpliedRoot(def, doc);
         const done = applyOps(docName, def, doc, ops);
         touched = done.touched;
-        const inverse = inverseOf(snapshot, done.applied);
+        const inverse = inverseOf(snapshot, done.applied, ops);
         const recorded = ledger?.record({ doc: docName, ops: done.applied, inverse, ...by });
         return { ops: done.applied, inverse, version: recorded?.version, entry: recorded?.entry };
       })();
@@ -1001,15 +1001,6 @@ export function registerDocs(
 // Inverse
 // ---------------------------------------------------------------------------
 
-/**
- * The inverse of a write, from the document as it was before and the ops the
- * backend applied. Applied ops are whole rows (`/coll/id`) or the root
- * (`/root`), so the inverse of each is the row as it was: an add is removed,
- * a remove is added back, a replace is replaced by its old self. Written in
- * reverse order, except that a run of removes (a row and the children its
- * removal cascaded to) is added back in its own order, parent first, so each
- * child finds its parent in scope.
- */
 /** A row as a write may carry it: its temporal columns are storage, not data. */
 function withoutStorage(row: any): any {
   if (!row || typeof row !== "object" || !("valid_from" in row || "valid_to" in row)) return row;
@@ -1017,7 +1008,29 @@ function withoutStorage(row: any): any {
   return data;
 }
 
-export function inverseOf(before: any, applied: DeltaOp[]): DeltaOp[] {
+/** A row's path as a write tells it: its id as kept (`/courses/007` is told at /courses/7). */
+function toldAt(path: string): string {
+  const parts = splitPath(path);
+  return parts.length === 2 ? joinPath(parts[0]!, String(rowId(parts[1]!))) : path;
+}
+
+/**
+ * The inverse of a write, from the document as it was before and the ops the
+ * backend applied. Applied ops are whole rows (`/coll/id`) or the root
+ * (`/root`), so the inverse of each is the row as it was: an add is removed,
+ * a remove is added back, a replace is replaced by its old self. Written in
+ * reverse order, except that a remove and the rows its removal cascaded to (a
+ * run) are added back in their own order, parent first, so each child finds
+ * its parent in scope.
+ *
+ * `asked`, the ops as the caller sent them, says where each run starts: at a
+ * remove the caller asked for. An undo's removes come children first, each
+ * asked for, so each is its own run, and the runs come back in reverse: parent
+ * first again. Without `asked`, removes one after another are taken for one
+ * run, which is right only for a single remove and its cascade.
+ */
+export function inverseOf(before: any, applied: DeltaOp[], asked?: DeltaOp[]): DeltaOp[] {
+  const heads = asked && new Set(asked.filter((op) => op.op === "remove").map((op) => toldAt(op.path)));
   const inverse: DeltaOp[] = [];
   let run: DeltaOp[] = [];
   const flush = () => {
@@ -1028,6 +1041,7 @@ export function inverseOf(before: any, applied: DeltaOp[]): DeltaOp[] {
     const [coll, id] = splitPath(op.path);
     const prior = withoutStorage(id === undefined ? before[coll!] : before[coll!]?.[id]);
     if (op.op === "remove") {
+      if (heads?.has(op.path)) flush();   // a remove asked for starts its own run; one it cascaded to joins it
       run.push({ op: "add", path: op.path, value: prior });
       continue;
     }
