@@ -13,7 +13,7 @@ import { openPglite } from "../src/server/pglite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
 import {
-  assertCopiesHold, expectTold, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresInbox, write, type PathBackend,
+  assertCopiesHold, expectTold, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresInbox, told, write, type PathBackend,
 } from "./helpers/path";
 
 setLogLevel("silent");
@@ -153,6 +153,33 @@ describe("pglite: validateOps answers as delta_apply does", () => {
     }
     expect(answers.filter((a) => a.database === 500)).toEqual([]);
     expect(answers.filter((a) => (a.ahead.length > 0) !== (a.database === 400))).toEqual([]);
+  });
+});
+
+/**
+ * The log keeps a write's applied ops once, and only where the writer was told
+ * otherwise: where they agree, the writer's entry carries none (null), and is
+ * heard as told; each other told document's entry carries [] (todo #44).
+ * tests/helpers/path.ts asks that a custom document hears each write once
+ * either way.
+ */
+describe("pglite: the log keeps the write as applied only where the writer was told otherwise", () => {
+  const entries = async () =>
+    (await pool.query("SELECT doc_name, ops, applied FROM _delta_ops_log ORDER BY id")).rows.map((r: any) => [r.doc_name, r.applied]);
+
+  test("told as applied: the writer's entry carries none; the other told document's, []", async () => {
+    await openAll(backend.process, ["fo-household:1", "fo-board:1", "fo-inbox:new@x"]);
+    await write(backend.process, "fo-household:1", [{ op: "replace", path: "/households/email", value: "new@x" }]);
+    await expectTold(backend, "fo-inbox:new@x", [[{ op: "add", path: "/households/1", value: household(1, "new@x") }]]);
+    expect(await entries()).toEqual([["fo-household:1", null], ["fo-board:1", []]]);
+  });
+
+  test("told otherwise -- the row left the writer -- its entry carries the write as applied", async () => {
+    await openAll(backend.process, ["fo-board:1", "fo-inbox:a@x"]);
+    const { ops } = await write(backend.process, "fo-board:1", [{ op: "replace", path: "/households/1/weddings_id", value: 2 }]);
+    await expectTold(backend, "fo-inbox:a@x", [[{ op: "replace", path: "/households/1", value: household(1, "a@x", 2) }]]);
+    expect(await entries()).toEqual([["fo-board:1", ops]]);
+    expect(told(backend.process, "fo-board:1")).toEqual([[{ op: "remove", path: "/households/1" }]]);
   });
 });
 

@@ -153,8 +153,11 @@ $$ LANGUAGE plpgsql STABLE;
 -- writer's document is always told, and told first; each other document is
 -- told only what concerns it, with a version of its own, one per write.
 -- `p_applied`, the write as applied, is logged once, on the writer's entry,
--- for the custom documents that watch the rows (001a's `applied`), and '[]' on
--- every other document's; the two-argument form logs none.
+-- for the custom documents that watch the rows (001a's `applied`) -- only where
+-- it differs from what the writer is told (a row that left the writer's
+-- document, or was never in it); where they agree the entry carries none, and
+-- is heard as told. Every other document's entry carries '[]'. The
+-- two-argument form logs none.
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION _delta_tell(p_writer TEXT, p_touched JSONB, p_applied JSONB)
@@ -209,7 +212,7 @@ BEGIN
       END IF;
     END LOOP;
     IF v_target = p_writer THEN
-      v_version := _delta_bump_and_notify(p_writer, v_told, p_applied);
+      v_version := _delta_bump_and_notify(p_writer, v_told, CASE WHEN p_applied IS DISTINCT FROM v_told THEN p_applied END);
     ELSIF jsonb_array_length(v_told) > 0 THEN
       PERFORM _delta_bump_and_notify(v_target, v_told, CASE WHEN p_applied IS NOT NULL THEN '[]'::jsonb END);
     END IF;

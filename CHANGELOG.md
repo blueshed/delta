@@ -17,9 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   heard as removed: moving household 1 to the other wedding through `household:1`, both boards
   open, told `inbox:a@x` replace, replace, remove, and the inbox ended empty while the row
   still had `a@x`; moved through the board with no other document open over it, it was simply
-  taken out. The writer's entry in `_delta_ops_log` now carries the write as applied (a new
-  `applied` column: each changed row as it now is, or its remove; `[]` on the other told
-  documents' entries), and the listener tests each row once, from it: it matches, an `add` or
+  taken out. The writer's entry in `_delta_ops_log` now carries the write as applied where it
+  differs from what the writer was told (a new `applied` column: each changed row as it now is,
+  or its remove; null where they agree, heard as told, so the log grows only by such writes;
+  `[]` on the other told documents' entries), and the listener tests each row once, from it
+  (or from the writer's told ops, where it carries none): it matches, an `add` or
   `replace`; it no longer does, or is gone, a `remove`. A `recompute` doc is re-evaluated once
   per write too. The framework SQL changes in place: `001a` adds the column
   (`ADD COLUMN IF NOT EXISTS`); `001c` and `001d` add three-argument `_delta_bump_and_notify`

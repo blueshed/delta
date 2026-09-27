@@ -41,9 +41,11 @@ CREATE INDEX IF NOT EXISTS idx_delta_ops_log_fetch
 -- #44): on the writer's entry, the ops as delta_apply applied them -- each row
 -- it changed as it now is, or its remove -- so a custom document hears a write
 -- once, as on SQLite, and not once for each document it was told to (where a
--- row that left a document is a remove, which is not a delete). '[]' on the
--- other documents' entries of the same write; NULL on an entry logged some
--- other way (a direct _delta_bump_and_notify), which is heard as told.
+-- row that left a document is a remove, which is not a delete). Kept only where
+-- they differ from what the writer was told: NULL is heard as told, so an
+-- entry whose ops are the write, and one logged some other way (a direct
+-- _delta_bump_and_notify), carry none. '[]' on the other documents' entries of
+-- the same write.
 ALTER TABLE _delta_ops_log ADD COLUMN IF NOT EXISTS applied JSONB;
 
 -- =========================================================================

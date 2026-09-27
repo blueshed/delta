@@ -355,11 +355,12 @@ export async function createDocListener<I = unknown>(
           }
           state.version = row.version;
           // A custom document hears each write once, as it was applied: the
-          // writer's entry carries it (`applied`), each other told document's
-          // entry of the write carries none ([]). Told, a row that left a
-          // document is a remove, which is not a delete, and a row told to two
-          // documents would be heard twice (todo #44). An entry logged some
-          // other way carries null, and is heard as told.
+          // writer's entry carries it (`applied`) where the writer was told
+          // otherwise, and null where it was told the write as applied; each
+          // other told document's entry of the write carries none ([]). Told,
+          // a row that left a document is a remove, which is not a delete, and
+          // a row told to two documents would be heard twice (todo #44). An
+          // entry logged some other way carries null too: heard as told.
           customFanOut((row.applied ?? row.ops) as DeltaOp[]);
         }
       }
