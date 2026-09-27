@@ -244,10 +244,75 @@ describe("validateOps", () => {
       },
     });
     const errs = validateOps(customSchema, def, [
-      { op: "replace", path: "/items/t~11/c~1d", value: "ok" },
-      { op: "replace", path: "/items/t~11/e~0f", value: "ok" },
+      { op: "replace", path: "/items/1/c~1d", value: "ok" },
+      { op: "replace", path: "/items/1/e~0f", value: "ok" },
     ]);
     expect(errs).toEqual([]);
+  });
+
+  // What delta_apply takes, validateOps takes; what it refuses as a mistake,
+  // validateOps refuses (todo #47). tests/path-pglite.test.ts holds the two
+  // against each other over the path's documents.
+  describe("answers as delta_apply does", () => {
+    const wedding = defineSchema({
+      weddings: { columns: { name: "text" }, temporal: false },
+      households: { columns: { email: "text" }, parent: "weddings", temporal: false },
+      tags: { columns: { label: "text" }, temporal: false },
+    });
+    const household = defineDoc("household:", { root: "households", include: [] });
+    const board = defineDoc("board:", { root: "weddings", include: ["households"] });
+    const labelled = defineDoc("labelled:", { root: "tags", include: [], scope: { label: ":label" } });
+    const messages = (errs: { message: string }[]) => errs.map((e) => e.message);
+
+    test("a single document writes its root's parent key as a field, and its row's parent key as a field (#37)", () => {
+      expect(validateOps(wedding, household, [{ op: "replace", path: "/households/weddings_id", value: 2 }])).toEqual([]);
+      expect(validateOps(wedding, household, [{ op: "replace", path: "/households", value: { weddings_id: 2 } }])).toEqual([]);
+      expect(validateOps(wedding, board, [{ op: "replace", path: "/households/1/weddings_id", value: 2 }])).toEqual([]);
+      expect(validateOps(wedding, board, [{ op: "replace", path: "/households/1/weddings_id", value: "2" }])).toEqual([]);
+    });
+
+    test("a root field that is not a column is refused, as a field and in the whole-root merge", () => {
+      expect(messages(validateOps(wedding, household, [{ op: "replace", path: "/households/nope", value: 1 }]))).toEqual(["Unknown field: nope"]);
+      expect(messages(validateOps(wedding, household, [{ op: "replace", path: "/households", value: { nope: 1 } }]))).toEqual(["Unknown field: nope"]);
+    });
+
+    test("a parent key is never null, nor anything but an id, in every form of replace", () => {
+      for (const value of [null, 1.5, true, "x"]) {
+        expect(validateOps(wedding, board, [{ op: "replace", path: "/households/1/weddings_id", value }]).length).toBe(1);
+        expect(validateOps(wedding, board, [{ op: "replace", path: "/households/1", value: { weddings_id: value } }]).length).toBe(1);
+        expect(validateOps(wedding, household, [{ op: "replace", path: "/households/weddings_id", value }]).length).toBe(1);
+        expect(validateOps(wedding, household, [{ op: "replace", path: "/households", value: { weddings_id: value } }]).length).toBe(1);
+      }
+    });
+
+    test("a row added to a list-mode document is given its scope's values: they count as given (#39)", () => {
+      const add = [{ op: "add", path: "/tags/-", value: {} }] as const;
+      expect(validateOps(wedding, labelled, [...add], { list: true, values: { label: "blue" } })).toEqual([]);
+      expect(messages(validateOps(wedding, labelled, [...add], { list: true })).map((m) => m.split(" (")[0])).toEqual(["Required field missing: label"]);
+    });
+
+    test("a row's id in a path is a number up to 2^53 - 1, as Postgres keeps its ids; a list's root has no fields", () => {
+      expect(validateOps(wedding, board, [{ op: "replace", path: "/households/abc/email", value: "x" }]).length).toBe(1);
+      expect(validateOps(wedding, board, [{ op: "remove", path: "/households/9007199254740993" }]).length).toBe(1);
+      expect(validateOps(wedding, board, [{ op: "remove", path: "/households/9007199254740991" }])).toEqual([]);
+      expect(validateOps(wedding, labelled, [{ op: "replace", path: "/tags/label", value: "red" }], { list: true }).length).toBe(1);
+    });
+
+    test("an op delta_apply has no form for is refused", () => {
+      for (const op of [
+        { op: "remove", path: "/households" },
+        { op: "add", path: "/households/email", value: "x" },
+        { op: "remove", path: "/households/1/email" },
+        { op: "replace", path: "/households/1/email/x", value: "x" },
+        { op: "move", path: "/households/1", from: "/households/2" },
+      ]) expect({ op, n: validateOps(wedding, board, [op as any]).length }).toEqual({ op, n: 1 });
+      expect(validateOps(wedding, board, [{ op: "replace", path: "/households/1", value: 5 }]).length).toBe(1);
+    });
+
+    test("a column that is not nullable is not written null", () => {
+      expect(messages(validateOps(wedding, board, [{ op: "replace", path: "/households/1/email", value: null }]))).toEqual(["email cannot be null"]);
+      expect(messages(validateOps(wedding, board, [{ op: "add", path: "/households/-", value: { email: null } }]))).toEqual(["email cannot be null"]);
+    });
   });
 });
 

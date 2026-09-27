@@ -38,6 +38,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   place): a `json` column's is the JSON its text is (`5` is 5, `"5"` the string, text that is no
   JSON a 400, as the condition already made the name's open), every other column's the text its
   column casts, as before.
+- **Postgres: the exported `validateOps` answers as `delta_apply` does** (todo #47). A caller
+  validating ahead was told writes were invalid that the server takes: a row's parent key
+  written as a field (`replace /households/1/weddings_id`: the row moves, as #37 made the root's
+  on SQLite), and a list-mode add that leaves its scope's values to the name (`add /tags/-` on
+  `tags-labelled:blue`, as #39 fixed on SQLite). And it took writes the server refuses: a single
+  document's root field that is no column, a parent key or a column that is not nullable
+  written null, a parent key that is no id, a path's id that is no number (or past 2^53 - 1),
+  an op `delta_apply` has no form for. It now reads a write as `delta_apply` does, and takes
+  SQLite's options, `validateOps(schema, def, ops, { list, values })`: the document's mode, and
+  its scope's equality values, which count as given. Without `list` a document is read as
+  single, and every write the old one took that the database takes, it still takes. A row not
+  there (404), one already there (409) and a value its column cannot cast stay the database's.
+  `tests/path-pglite.test.ts` holds its answers against `delta_apply`'s for 71 writes through
+  the path's documents.
 - **`bun.lock` matches `package.json`** (todo #49): it lacked the optional `@electric-sql/pglite`
   peer, so every `bun install` in a fresh checkout changed it.
 - **`bun run test` runs every file that needs no Postgres server** (todo #48): it named 8 of the

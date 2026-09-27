@@ -8,7 +8,7 @@
  * (time-travel, snapshots, ops-log pruning, op validation).
  */
 import type { Pool } from "pg";
-import { type DeltaOp, splitPath } from "../../core";
+import { type DeltaOp, joinPath, splitPath } from "../../core";
 import {
   type Schema,
   type DocDef,
@@ -56,56 +56,101 @@ export async function pruneOpsLog(pool: Pool, keepInterval = "1 hour"): Promise<
 }
 
 // ---------------------------------------------------------------------------
-// validateOps — pre-flight check that ops reference known collections and
-// fields, and that an add gives every required column (not nullable, no default).
+// validateOps — what delta_apply refuses as a mistake (400), said ahead.
 // ---------------------------------------------------------------------------
 
-export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[]): ValidationError[] {
+/** 2^53 - 1: a path's id past it is refused, as `_delta_row_id` refuses it. */
+const MAX_ID = 9007199254740991;
+
+/**
+ * Validate delta ops against the schema, as `delta_apply` (001d) reads them,
+ * before they reach the database: it refuses each write this does (a 400), and
+ * takes each this takes -- but for what only the rows can say (a row not there,
+ * 404; already there, 409) and a value its column cannot cast (text into an
+ * integer), which are the database's. Returns an array of errors (empty = valid).
+ *
+ * `list`: the document is in list mode (its name has no id); `values`: its
+ * scope's equality bindings, which a list-mode add of a root row is given, so
+ * they count as given -- the options SQLite's validateOps takes. Without
+ * `list`, a document is read as single: `replace /<root>` and
+ * `replace /<root>/<field>` write its root row.
+ */
+export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: { list?: boolean; values?: Record<string, string> } = {}): ValidationError[] {
   const errors: ValidationError[] = [];
   for (const op of ops) {
+    const fail = (message: string, path = op.path) => errors.push({ path: String(path), message });
     let parts: string[];
     try { parts = splitPath(op.path); }
-    catch (err: any) { errors.push({ path: String(op.path), message: err.message }); continue; }
+    catch (err: any) { fail(err.message); continue; }
     const collKey = parts[0];
-    if (!collKey) { errors.push({ path: op.path, message: "Empty path" }); continue; }
-    if (collKey !== def.root && !def.include.includes(collKey)) {
-      errors.push({ path: op.path, message: `Unknown collection: ${collKey}` }); continue;
-    }
+    if (!collKey) { fail("Empty path"); continue; }
+    if (collKey !== def.root && !def.include.includes(collKey)) { fail(`Unknown collection: ${collKey}`); continue; }
     const table = schema.tables[collKey];
-    if (!table) { errors.push({ path: op.path, message: `No table for collection: ${collKey}` }); continue; }
-    // Whole-row writes: `add` to /coll/- or /coll/<id>, and `replace` of an
-    // entire row at /coll/<id>. Both carry an object VALUE whose keys must all
-    // be declared columns, the implicit "id", or the parent FK column.
-    if ((op.op === "add" || op.op === "replace") && parts.length === 2) {
-      const value = (op as any).value as Record<string, unknown> | undefined;
-      if (!value || typeof value !== "object") {
-        if (op.op === "add") {
-          errors.push({ path: op.path, message: "Add value must be an object" });
-        }
-        continue;
+    if (!table) { fail(`No table for collection: ${collKey}`); continue; }
+
+    const fk = table.parent?.fkColumn;
+    const value = (op as any).value;
+    const isObject = value !== null && typeof value === "object" && !Array.isArray(value);
+    // A value's keys (_delta_assert_fields): its columns, the row's id and parent key, a temporal row's validity.
+    const known = (k: string) => Object.hasOwn(table.columns, k) || k === "id" || k === fk || k === "valid_from" || k === "valid_to";
+    // What a written field may hold, beyond its column's cast: a column that is
+    // not nullable is never null (the table's NOT NULL); a parent key is an id.
+    const fieldErr = (field: string, v: unknown): string | null => {
+      if (field === fk) {
+        if (v === null || v === undefined) return `${field} cannot be null`;
+        return Number.isInteger(v) || (typeof v === "string" && /^\s*[+-]?\d+\s*$/.test(v)) ? null : `${field} must be an id: an integer`;
       }
-      const fkColumn = table.parent?.fkColumn;
-      for (const key of Object.keys(value)) {
-        if (
-          !Object.hasOwn(table.columns, key) &&
-          key !== "id" &&
-          (fkColumn === undefined || key !== fkColumn)
-        ) {
-          errors.push({ path: op.path, message: `Unknown field: ${key}` });
-        }
+      const col = Object.hasOwn(table.columns, field) ? table.columns[field]! : undefined;
+      return col && !col.nullable && v === null ? `${field} cannot be null` : null;
+    };
+    // A whole-row value: an object of known keys, each field as it may be written.
+    const rowErrs = (row: Record<string, unknown>, verb: "add" | "replace") => {
+      for (const k of Object.keys(row)) if (!known(k)) fail(`Unknown field: ${k}`);
+      for (const [k, v] of Object.entries(row)) {
+        const err = verb === "add" && k === fk ? null : fieldErr(k, v);   // an add's parent key is its document's, or found in scope
+        if (err) fail(err);
       }
-      if (op.op === "add") {
-        for (const [col, colDef] of Object.entries(table.columns)) {
-          if (!colDef.nullable && colDef.default === undefined && value[col] === undefined) {
-            errors.push({ path: op.path, message: `Required field missing: ${col} (give it a value, or declare a default or make it nullable in the schema)` });
-          }
-        }
-      }
+    };
+    // A row's id, as the path names it: the number its digits name, up to 2^53 - 1 (_delta_row_id).
+    const idErr = (seg: string): string | null =>
+      !/^[0-9]+$/.test(seg) ? `Row id "${seg}" in ${op.path} is not a number: Postgres mints row ids -- add to ${joinPath(collKey, "-")} and read the id from the echo`
+      : Number(seg) > MAX_ID ? `Row id ${seg} in ${op.path} is past 2^53 - 1, which no number holds exactly -- add to ${joinPath(collKey, "-")} and read the id from the echo`
+      : null;
+
+    // A single document's root: `replace /<root>` merges into it, and
+    // `replace /<root>/<field>` (a segment that is not an id) writes one field
+    // -- a column, or the parent key: the row moves (#37).
+    if (collKey === def.root && !opts.list && op.op === "replace" && (parts.length === 1 || (parts.length === 2 && !/^\d+$/.test(parts[1]!)))) {
+      if (parts.length === 2) rowErrs({ [parts[1]!]: value }, "replace");
+      else if (!isObject) fail("Replace value must be an object");
+      else rowErrs(value, "replace");
+      continue;
     }
-    if (op.op === "replace" && parts.length === 3) {
+
+    // A row: add /<coll>/<id or ->, remove /<coll>/<id>, replace /<coll>/<id>[/<field>].
+    const rowOp = (op.op === "add" || op.op === "remove") ? parts.length === 2 : op.op === "replace" && (parts.length === 2 || parts.length === 3);
+    if (!rowOp) { fail(`Invalid op: ${op.op} ${op.path}`); continue; }
+    const idError = op.op === "add" && parts[1] === "-" ? null : idErr(parts[1]!);
+    if (idError) { fail(idError); continue; }
+    if (op.op === "remove") continue;
+    if (parts.length === 3) {
       const field = parts[2]!;
-      if (!Object.hasOwn(table.columns, field)) {
-        errors.push({ path: op.path, message: `Unknown field: ${field}` }); continue;
+      if (!known(field)) { fail(`Unknown field: ${field}`); continue; }
+      const err = fieldErr(field, value);
+      if (err) fail(err);
+      continue;
+    }
+    if (!isObject) { fail(`${op.op === "add" ? "Add" : "Replace"} value must be an object`); continue; }
+    rowErrs(value, op.op as "add" | "replace");
+    // A column that is neither nullable nor has a default must be given -- by
+    // the value, or, for a list-mode root row, by the scope, as delta_apply
+    // checks after it stamps them (#39).
+    if (op.op === "add") {
+      const given = opts.list && collKey === def.root ? (opts.values ?? {}) : {};
+      for (const [col, colDef] of Object.entries(table.columns)) {
+        if (!colDef.nullable && colDef.default === undefined && !Object.hasOwn(value, col) && !Object.hasOwn(given, col)) {
+          fail(`Required field missing: ${col} (give it a value, or declare a default or make it nullable in the schema)`);
+        }
       }
     }
   }

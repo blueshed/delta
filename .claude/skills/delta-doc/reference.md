@@ -275,7 +275,9 @@ const schema = defineSchema({
 const itemsDoc = defineDoc("items:", { root: "items", include: [] });
 
 // Pre-flight op validation (unknown collections/fields, missing required, etc.).
-// SQLite's takes { list, values } for a list-mode document: its scope's values count as given.
+// Each backend's takes { list, values } for a list-mode document: its scope's values count as given.
+// Postgres's refuses what delta_apply refuses as a mistake (400), and takes what it takes; a row
+// not there (404), one already there (409) and a value its column cannot cast are the database's.
 const errors = validateOps(schema, itemsDoc, [
   { op: "add", path: "/items/-", value: { name: "a", value: 1, meta: {} } },
 ]);
