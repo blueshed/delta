@@ -269,7 +269,8 @@ const schema = defineSchema({
 // leaves it out is a 400 "Required field missing" (SQLite and Postgres). Give it
 // a default ({ type: "boolean", default: false }) or make it nullable. A root row
 // added to a list-mode document is given its scope's equality values from the
-// name, so those it need not repeat.
+// name, so those it need not repeat -- each as the document's condition reads it
+// (a json column's as the JSON the name's text is: "seats-wished:5" gives 5).
 
 const itemsDoc = defineDoc("items:", { root: "items", include: [] });
 

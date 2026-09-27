@@ -209,6 +209,24 @@ END;
 $$ LANGUAGE plpgsql STABLE;
 
 -- ---------------------------------------------------------------------------
+-- _delta_scope_row: the scope's equality values (_delta_resolve_scope's
+-- `values`, the name's text), as a list-mode add of a root row is given them:
+-- as the scope's condition reads each (todo #46). The condition casts its text
+-- to the column's type; jsonb_populate_record does the same with a JSON string
+-- for every type but json, where it keeps the string whole -- a name's 5 stored
+-- as "5", which `wishes = '5'` does not match. So a json column's value is the
+-- JSON its text is (5 is 5, "5" the string); every other column's stays text,
+-- for the column to cast. The SQLite backend's scopeValue reads it the same way.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION _delta_scope_row(p_columns JSONB, p_values JSONB)
+RETURNS JSONB LANGUAGE sql IMMUTABLE AS $$
+  SELECT COALESCE(jsonb_object_agg(
+           k, CASE WHEN p_columns->k->>'type' = 'json' THEN (v #>> '{}')::jsonb ELSE v END), '{}'::jsonb)
+    FROM jsonb_each(COALESCE(p_values, '{}'::jsonb)) AS x(k, v);
+$$;
+
+-- ---------------------------------------------------------------------------
 -- _delta_row_in_scope: may this doc address this row?
 --
 -- Mirrors the READ filtering in _delta_load_collection / delta_open exactly,

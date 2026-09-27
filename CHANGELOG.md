@@ -29,6 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bunx @blueshed/delta init`) before running this release's listener. The every-backend copy
   check now reopens each document afresh (closed first), since a custom document's own open
   answered from the copy it kept of what it told.
+- **Postgres: a row added to a list-mode document scoped by a `json` column is given the
+  name's value as the document's condition reads it** (todo #46). `add /seats/-` through
+  `seats-wished:5` (scope `{ wishes: ":wishes" }`) stored the JSON string `"5"`, which the
+  condition (`wishes = '5'`, the jsonb 5) does not match: the writer was told nothing, a reopen
+  lacked the row, and its undo was a conflict. SQLite stores 5. `delta_apply` now stamps the
+  scope's values through `_delta_scope_row` (`001b`, new; `delta_apply` in `001d` replaced in
+  place): a `json` column's is the JSON its text is (`5` is 5, `"5"` the string, text that is no
+  JSON a 400, as the condition already made the name's open), every other column's the text its
+  column casts, as before.
 - **`bun.lock` matches `package.json`** (todo #49): it lacked the optional `@electric-sql/pglite`
   peer, so every `bun install` in a fresh checkout changed it.
 - **`bun run test` runs every file that needs no Postgres server** (todo #48): it named 8 of the

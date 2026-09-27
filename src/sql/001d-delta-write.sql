@@ -400,12 +400,13 @@ BEGIN
       -- The path names the row, whatever the value says.
       v_new_row := (v_op->'value') || jsonb_build_object('id', v_id);
 
-      -- Set FK: for list-mode root adds, apply scope equality values;
+      -- Set FK: for list-mode root adds, apply scope equality values, each as
+      -- the scope's condition reads it (_delta_scope_row);
       -- for child collections in single-mode, set FK to root id. In list-mode
       -- child adds (e.g. a product-catalog doc adding a `parts` row) there is
       -- no doc-id to inject, so we trust the parent_fk supplied in the op value.
       IF v_is_list AND v_coll_key = v_def.root_collection THEN
-        v_new_row := v_new_row || (v_scope->'values');
+        v_new_row := v_new_row || _delta_scope_row(v_coll.columns_def, v_scope->'values');
       ELSIF v_coll.parent_collection = v_def.root_collection AND v_coll.parent_fk IS NOT NULL
             AND v_doc_id IS NOT NULL THEN
         v_new_row := v_new_row || jsonb_build_object(v_coll.parent_fk, v_doc_id);

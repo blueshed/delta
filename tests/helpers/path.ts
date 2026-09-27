@@ -67,6 +67,8 @@ export const pathDocs = [
   defineDoc("fo-seating:", { root: "weddings", include: ["seats"] }),
   // list mode by a boolean: the seats kept (1) or not (0), which a seat added through it is given
   defineDoc("fo-seats-kept:", { root: "seats", include: [], scope: { kept: ":kept" } }),
+  // list mode by a json column: the seats whose wishes are the name read as JSON, which a seat added through it is given
+  defineDoc("fo-seats-wished:", { root: "seats", include: [], scope: { wishes: ":wishes" } }),
 ];
 
 /**
@@ -657,6 +659,17 @@ export function fanOutCases(backend: () => PathBackend): void {
       expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "remove", path: "/seats/2" }], conflict: undefined });
       await expectTold(b, "fo-seats-kept:0", [result.ops, [{ op: "remove", path: "/seats/2" }]]);
       await expectSilent(b, "fo-seats-kept:1");
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a value kept as its column's type is told and undone as kept: a json scope's \"5\" is the number 5, as the document's condition reads it", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-seats-wished:5", "fo-seating:1"]);
+      const result = await write(b.process, "fo-seats-wished:5", [{ op: "add", path: "/seats/-", value: { weddings_id: 1, table_no: 4, kept: false } }], { cursor: "s1" });
+      expect(result.ops).toEqual([{ op: "add", path: "/seats/2", value: seat(2, 4, false, 5) }]);
+      const undone = await b.process.call("undo", { cursor: "s1" });
+      expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "remove", path: "/seats/2" }], conflict: undefined });
+      await expectTold(b, "fo-seats-wished:5", [result.ops, [{ op: "remove", path: "/seats/2" }]]);
       await assertCopiesHold(b, copies);
     });
 
