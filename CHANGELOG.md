@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tarball again keeps the old contents, as `bun install --force` does, since `bun.lock` pins it
   by its integrity hash; *Local development across repos* now says `bun remove` the package,
   then `bun add` the tarball.
+- **The reference's `DocDef.scope` reads the doc name by the one rule.** Its comment still gave
+  `":docId"` for SQLite and a plain value as a literal; since 0.9.0 every backend reads a scope
+  the same way (`src/server/scope.ts` is `_delta_resolve_scope`'s twin), and a plain value
+  names a param, as *`scope` syntax* says.
 
 ## [0.9.0] - 2026-09-25
 

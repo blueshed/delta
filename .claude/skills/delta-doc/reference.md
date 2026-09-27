@@ -228,7 +228,8 @@ interface DocDef {
   prefix: string;
   root: string;                      // main collection key
   include: string[];                 // additional collections in the lens
-  scope: Record<string, string>;     // root column → ":id" / the DSL (Postgres), ":docId" (SQLite), or a literal
+  scope: Record<string, string>;     // root column → a binding read from the doc name, one rule on every
+                                     // backend (`scope` syntax): ":id", "<=:end", "like:prefix"; a plain "name" is ":name", not a literal
   implied?: boolean;                 // SQLite: opens empty until its first write makes the root row
 }
 
