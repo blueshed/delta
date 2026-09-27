@@ -79,12 +79,20 @@ $$;
 
 -- A row id from a path segment. This backend keeps BIGINT ids it mints from
 -- seq_<table>, so anything else is a client error (SQLSTATE 22P02 → 400) that
--- names the fix.
+-- names the fix. So is a number past 2^53 - 1: a row is read out as JSON, and
+-- no JavaScript number holds such an id exactly, so the row would be told under
+-- another (the SQLite backend refuses it too). Digits name their number, however
+-- many there are ("007" is 7).
 CREATE OR REPLACE FUNCTION _delta_row_id(p_collection TEXT, p_segment TEXT)
 RETURNS bigint LANGUAGE plpgsql IMMUTABLE AS $$
 BEGIN
-  IF p_segment IS NULL OR p_segment !~ '^[0-9]{1,18}$' THEN
+  IF p_segment IS NULL OR p_segment !~ '^[0-9]+$' THEN
     RAISE EXCEPTION 'row id "%" in /%/% is not a number: Postgres mints row ids -- add to /%/- and read the id from the echo',
+      p_segment, p_collection, p_segment, p_collection
+      USING ERRCODE = '22P02';
+  END IF;
+  IF p_segment::numeric > 9007199254740991 THEN
+    RAISE EXCEPTION 'row id % in /%/% is past 2^53 - 1, which no number holds exactly -- add to /%/- and read the id from the echo',
       p_segment, p_collection, p_segment, p_collection
       USING ERRCODE = '22P02';
   END IF;

@@ -97,7 +97,7 @@ What is different from Postgres (the full list is SKILL.md → *Backends side by
 - **A document is single or list, as on Postgres** (*`scope` syntax* → *Single or list*). `defineDoc("list:", { root: "lists", … })` opened as `list:groceries` is the `lists` row `groceries`, its `todos`, and their children; `defineDoc("todos:", { root: "todos", include: [] })` opened as `todos:` is every todo.
 - **A single document's root row** must exist before the document opens — seed it with SQL, or declare the document `implied: true` and its first write makes it (*Implied documents*, below).
 - **`createTables(db, schema)` before the first open.** A missing table's error says so. `migrateSchema(db, schema)` adds columns a later schema declares.
-- **Ids are serial numbers, as on Postgres.** `add /todos/-` takes the next serial, and the echo carries it (`/todos/1`). A client-chosen id (`/todos/<id>`) works too, and may be text, as `groceries` is; on Postgres it must be a number. `add` of an id that exists is a 409.
+- **Ids are serial numbers, as on Postgres.** `add /todos/-` takes the next serial, and the echo carries it (`/todos/1`). A client-chosen id (`/todos/<id>`) works too, and may be text, as `groceries` is; on Postgres it must be a number. Digits name their number (`/todos/007` is `/todos/7`), up to 2^53 - 1; a path with an id past that is a 400 on every backend, since no JavaScript number holds it exactly (a client minting ids from `Date.now() * 1000` stays under it until the year 2255). `add` of an id that exists is a 409.
 - **No auth.** `registerDocs` has no gate: every socket may open every document of a prefix. Keep per-user data out of a shared SQLite backend, or put it behind Postgres.
 - **One process per file**: the backend caches documents in memory, and a second process would not hear the first's writes.
 - **Fan-out**: a write reaches every open document that holds the row (*Fan-out*, below).
@@ -144,7 +144,7 @@ await listener.destroy();
 await pool.end();
 ```
 
-`bun add pg` and, to type-check, `bun add -d @types/pg` — delta ships TypeScript source, so `skipLibCheck` does not cover its `pg` imports. Ids on Postgres are BIGINTs from `seq_<table>`: create rows with `add /<coll>/-` (a client-chosen id that is not a number is a 400 that says so), and expect ids back as numbers.
+`bun add pg` and, to type-check, `bun add -d @types/pg` — delta ships TypeScript source, so `skipLibCheck` does not cover its `pg` imports. Ids on Postgres are BIGINTs from `seq_<table>`: create rows with `add /<coll>/-` (a client-chosen id that is not a number, or is past 2^53 - 1, is a 400 that says so), and expect ids back as numbers.
 
 ```tsx
 // client.tsx
@@ -1106,7 +1106,7 @@ Every message is JSON. Clients use `doc.send(ops)` internally; the protocol is o
 
 | code | means | e.g. |
 |---|---|---|
-| 400 | the op is malformed | a path without a leading `/`, an unknown field, a required field left out, a non-numeric id on Postgres |
+| 400 | the op is malformed | a path without a leading `/`, an unknown field, a required field left out, a non-numeric id on Postgres, an id past 2^53 - 1 |
 | 401 | not signed in | an `auth` gate said no |
 | 403 | the document is read-only | custom, static and source docs; memory docs over a socket |
 | 404 | not there | the document, a row, a path; a document the identity does not `own` |

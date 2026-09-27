@@ -299,6 +299,34 @@ export function documentCases(backend: () => PathBackend): void {
       expect(await code([{ op: "remove", path: "/courses/2" }])).toBe(404); // the other wedding's: not in this document
     });
 
+    test("a path's id is the number its digits name, however many there are: /courses/0001000000000000 is /courses/1000000000000, as /courses/007 is /courses/7", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1"]);
+      const { ops } = await write(b.process, "fo-board:1", [
+        { op: "add", path: "/courses/007", value: { name: "Fish" } },
+        { op: "add", path: "/courses/0001000000000000", value: { name: "Cheese" } },
+      ]);
+      expect(ops).toEqual([
+        { op: "add", path: "/courses/7", value: course(7, "Fish") },
+        { op: "add", path: "/courses/1000000000000", value: course(1000000000000, "Cheese") },
+      ]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("an id past 2^53 - 1 is refused as a mistake (400), in every op: a number would not hold it; 2^53 - 1 is kept", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1"]);
+      const code = async (ops: unknown[]) => (await b.process.call("delta", { doc: "fo-board:1", ops })).error?.code;
+      expect(await code([{ op: "add", path: "/courses/9007199254740993", value: { name: "Fish" } }])).toBe(400);
+      expect(await code([{ op: "add", path: "/courses/12345678901234567890", value: { name: "Fish" } }])).toBe(400); // past a bigint, too
+      expect(await code([{ op: "replace", path: "/courses/9007199254740993/name", value: "Cod" }])).toBe(400);
+      expect(await code([{ op: "replace", path: "/courses/9007199254740993", value: { name: "Cod" } }])).toBe(400);
+      expect(await code([{ op: "remove", path: "/courses/9007199254740993" }])).toBe(400);
+      const { ops } = await write(b.process, "fo-board:1", [{ op: "add", path: "/courses/9007199254740991", value: { name: "Fish" } }]);
+      expect(ops).toEqual([{ op: "add", path: "/courses/9007199254740991", value: course(9007199254740991, "Fish") }]);
+      await assertCopiesHold(b, copies);
+    });
+
     test("a parent key is never null, nor anything but an id: refused as a mistake (400) in every form of replace", async () => {
       const b = backend();
       await openAll(b.process, ["fo-board:1", "fo-household:1"]);
@@ -508,6 +536,20 @@ export function fanOutCases(backend: () => PathBackend): void {
         [{ op: "remove", path: "/courses/10" }],
         [{ op: "add", path: "/courses/10", value: course(10, "Fish") }],
       ]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a course named by an id of 16 digits (a client minting Date.now() * 1000) is told, undone and redone as the number it names", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1"]);
+      const id = 1000000000000000;
+      const made = await write(b.process, "fo-board:1", [{ op: "add", path: `/courses/${id}`, value: { name: "Fish" } }], { cursor: "s1" });
+      expect(made.ops).toEqual([{ op: "add", path: `/courses/${id}`, value: course(id, "Fish") }]);
+      const undone = await b.process.call("undo", { cursor: "s1" });
+      expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "remove", path: `/courses/${id}` }], conflict: undefined });
+      const redone = await b.process.call("redo", { cursor: "s1" });
+      expect({ ops: redone.result.ops, conflict: redone.result.conflict }).toEqual({ ops: made.ops, conflict: undefined });
+      await expectTold(b, "fo-menu:1", [made.ops, undone.result.ops, made.ops]);
       await assertCopiesHold(b, copies);
     });
 

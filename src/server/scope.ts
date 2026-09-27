@@ -111,5 +111,13 @@ export function meets(scope: Scope, row: Record<string, unknown>): boolean {
 /** Two ids the same, whichever is text and whichever a number. */
 export const sameId = (a: unknown, b: unknown): boolean => a != null && b != null && String(a) === String(b);
 
-/** An id as it is kept: a serial as a number, anything else as it was given. */
-export const rowId = (id: string | number): string | number => (typeof id === "string" && /^[0-9]{1,15}$/.test(id) ? Number(id) : id);
+/**
+ * An id as it is kept: digits as the number they name (a serial, "007" as 7), up
+ * to 2^53 - 1; anything else as it was given (a session's token). Digits past
+ * that stay as given, since no number holds them exactly; a path naming one is
+ * refused (`pastSafeId`), as Postgres's `_delta_row_id` refuses it.
+ */
+export const rowId = (id: string | number): string | number => (typeof id === "string" && /^[0-9]+$/.test(id) && Number.isSafeInteger(Number(id)) ? Number(id) : id);
+
+/** Digits naming a number past 2^53 - 1: kept as a number, the id would be another row's. */
+export const pastSafeId = (id: string): boolean => /^[0-9]+$/.test(id) && !Number.isSafeInteger(Number(id));

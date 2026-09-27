@@ -59,6 +59,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tested at whatever path it was told, the root's id being its own. On Postgres it was heard
   only when another document that holds the row had been opened; it still hears a change once
   for each document told of it (the reference's *Fan-out* says what that means).
+- **A path's id is the number its digits name, up to 2^53 - 1, on every backend; past that it
+  is a 400** (todo #50). SQLite and the JSON file read a path's digits as a number only up to
+  15 of them, so `add /events/1000000000000000` (a client minting ids from `Date.now() * 1000`)
+  was recorded with its id as text while the `INT` column read back a number, and its undo was
+  a conflict. #36's read-back already ended that; the id is now also told as its number, as
+  Postgres tells it (`/courses/0001000000000000` is `/courses/1000000000000`). Past 2^53 - 1 no
+  JavaScript number holds an id exactly, and each backend lost it quietly: SQLite kept
+  `/courses/9007199254740993` as a row a fresh open keyed `9007199254740992`, and undo
+  conflicted; Postgres keeps the `BIGINT` exactly, but its rows reach the app as JSON, so the
+  row's id was told as `9007199254740992`. Such a path is now refused on every backend, by
+  `validateOps` on SQLite and by `_delta_row_id` on Postgres (`001a`, replaced in place), which
+  also takes any number of digits (a leading zero no longer counts against 18).
 
 ## [0.9.0] - 2026-09-25
 

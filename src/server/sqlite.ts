@@ -21,7 +21,7 @@ import { trackSubscribe, trackUnsubscribe, onClientDrop } from "./server";
 import { applyOps as deltaApplyOps, type DeltaOp, splitPath, joinPath } from "../core";
 import { createLogger } from "./logger";
 import { createLedger, planWalk, socketCursor } from "./ledger";
-import { meets, resolveScope, rowId, sameId, whereOf, type Scope } from "./scope";
+import { meets, pastSafeId, resolveScope, rowId, sameId, whereOf, type Scope } from "./scope";
 import {
   type ColumnDef,
   type Schema,
@@ -1298,6 +1298,14 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
       }
       const typeErr = fieldErr(field, (op as any).value);
       if (typeErr) errors.push({ path: op.path, message: typeErr });
+      continue;
+    }
+
+    // A row's id, as the path names it: digits past 2^53 - 1 are refused, as on
+    // Postgres (_delta_row_id). No number holds them exactly, so the row would be
+    // kept, read and told under another id.
+    if (pastSafeId(parts[1]!)) {
+      errors.push({ path: op.path, message: `Row id ${parts[1]} is past 2^53 - 1, which no number holds exactly -- add to ${joinPath(collKey, "-")} and read the id from the echo` });
       continue;
     }
 
