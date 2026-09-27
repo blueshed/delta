@@ -16,6 +16,8 @@
  * The values come from the document's id, split on ":", in order: a param
  * named "id" first, the rest alphabetically. An empty value sets no condition.
  * With no scope, the id is the root row's id -- or, empty, every root row.
+ * A condition compares its value as the column takes it (`Keep`), as Postgres
+ * casts the text: a boolean's "yes" is true; one the column cannot take is a 400.
  */
 import type { DocDef } from "../schema";
 
@@ -73,37 +75,55 @@ export function resolveScope(def: DocDef, docId: string): Scope {
   return scope;
 }
 
-/** The conditions as SQL, for a query on the root's table. */
-export function whereOf(scope: Scope): { sql: string; params: unknown[] } {
+/**
+ * How the root's columns keep a value, which the conditions compare: a
+ * condition's text from the name, cast as its column takes it -- the value an
+ * add through the document is given, so the document reads what is added
+ * through it; a value its column cannot take is refused (400), as Postgres
+ * refuses the cast -- and a row's value, as its column stores it. The backend
+ * gives it (SQLite: a boolean's "yes" and true are both 1).
+ */
+export interface Keep {
+  /** A condition's text, as the column keeps it. */
+  text(col: string, text: string): unknown;
+  /** A row's value, as the column keeps it. */
+  value(col: string, value: unknown): unknown;
+}
+
+/** The conditions as SQL, for a query on the root's table: each value as its column keeps it (`like` a pattern of the text). */
+export function whereOf(scope: Scope, keep: Keep): { sql: string; params: unknown[] } {
   if (scope.conds.length === 0) return { sql: "1 = 1", params: [] };
   return {
     sql: scope.conds.map(({ col, op }) => (op === "like" ? `${col} LIKE ?` : `${col} ${op} ?`)).join(" AND "),
-    params: scope.conds.map(({ op, value }) => (op === "like" ? `${value}%` : value)),
+    params: scope.conds.map(({ col, op, value }) => (op === "like" ? `${value}%` : keep.text(col, value))),
   };
 }
 
-/** Numbers compared as numbers, the rest as text -- as a column holding either does. */
-function compare(a: unknown, b: string): number {
-  const na = Number(a);
-  const nb = Number(b);
-  if (a !== null && a !== "" && b !== "" && Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
-  const sa = String(a ?? "");
-  return sa < b ? -1 : sa > b ? 1 : 0;
+/** Two values as a column keeps them, in SQLite's order: numbers by value, text as text, a number before any text. */
+function compare(a: unknown, b: unknown): number {
+  const na = typeof a === "number";
+  const nb = typeof b === "number";
+  if (na && nb) return (a as number) - (b as number);
+  if (na !== nb) return na ? -1 : 1;
+  const sa = String(a);
+  const sb = String(b);
+  return sa < sb ? -1 : sa > sb ? 1 : 0;
 }
 
-/** Does a root row meet the scope's conditions? Judged on its values, as the SQL would. */
-export function meets(scope: Scope, row: Record<string, unknown>): boolean {
+/** Does a root row meet the scope's conditions? Judged on its values as its columns keep them, as the SQL would. */
+export function meets(scope: Scope, row: Record<string, unknown>, keep: Keep): boolean {
   return scope.conds.every(({ col, op, value }) => {
-    const v = row[col];
-    if (v === null || v === undefined) return false;
+    if (row[col] === null || row[col] === undefined) return false;
+    const v = keep.value(col, row[col]);
+    if (op === "like") return String(v).toLowerCase().startsWith(value.toLowerCase());
+    const c = compare(v, keep.text(col, value));
     switch (op) {
-      case "like": return String(v).toLowerCase().startsWith(value.toLowerCase());
-      case "=": return compare(v, value) === 0;
-      case "!=": return compare(v, value) !== 0;
-      case "<": return compare(v, value) < 0;
-      case ">": return compare(v, value) > 0;
-      case "<=": return compare(v, value) <= 0;
-      case ">=": return compare(v, value) >= 0;
+      case "=": return c === 0;
+      case "!=": return c !== 0;
+      case "<": return c < 0;
+      case ">": return c > 0;
+      case "<=": return c <= 0;
+      case ">=": return c >= 0;
     }
   });
 }

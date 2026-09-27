@@ -13,7 +13,7 @@ import { openPglite } from "../src/server/pglite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
 import {
-  assertCopiesHold, expectTold, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresInbox, told, write, type PathBackend,
+  assertCopiesHold, expectTold, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresInbox, postgresOpenSeats, told, write, type PathBackend,
 } from "./helpers/path";
 
 setLogLevel("silent");
@@ -41,7 +41,7 @@ beforeEach(async () => {
   const local = createLocal();
   const heard: { channel: string; data: any }[] = [];
   local.onPublish((channel, data) => heard.push({ channel, data }));
-  listeners.push(await createDocListener(local.server, pool, { ledger: true, custom: [postgresInbox] }));
+  listeners.push(await createDocListener(local.server, pool, { ledger: true, custom: [postgresInbox, postgresOpenSeats] }));
   backend = {
     process: { call: (action, msg) => local.call(action, msg), heard },
     // NOTIFY is heard after the write's commit, and fetched then: a beat.
@@ -208,7 +208,7 @@ describe("pglite: a listener on framework SQL older than it", () => {
       const heard: { channel: string; data: any }[] = [];
       local.onPublish((channel, data) => heard.push({ channel, data }));
       setLogLevel("warn");
-      listeners.push(await createDocListener(local.server, behind, { ledger: true, custom: [postgresInbox] }));
+      listeners.push(await createDocListener(local.server, behind, { ledger: true, custom: [postgresInbox, postgresOpenSeats] }));
       setLogLevel("silent");
       const b: PathBackend = {
         process: { call: (action, msg) => local.call(action, msg), heard },

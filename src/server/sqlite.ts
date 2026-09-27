@@ -21,7 +21,7 @@ import { trackSubscribe, trackUnsubscribe, onClientDrop } from "./server";
 import { applyOps as deltaApplyOps, type DeltaOp, splitPath, joinPath } from "../core";
 import { createLogger } from "./logger";
 import { createLedger, planWalk, socketCursor } from "./ledger";
-import { meets, pastSafeId, resolveScope, rowId, sameId, whereOf, type Scope } from "./scope";
+import { meets, pastSafeId, resolveScope, rowId, sameId, whereOf, type Keep, type Scope } from "./scope";
 import {
   type ColumnDef,
   type Schema,
@@ -288,7 +288,7 @@ export function registerDocs(
     if (!rootTable) return null;
 
     const viewName = rootTable.temporal ? `current_${rootTable.name}` : rootTable.name;
-    const where = whereOf(scope);
+    const where = whereOf(scope, keeping(rootTable));
     const rows = db.query(`SELECT * FROM ${viewName} WHERE ${where.sql}`).all(...(where.params as any[]));
 
     if (scope.mode === "list") {
@@ -406,7 +406,12 @@ export function registerDocs(
   function holds(def: DocDef, scope: Scope, coll: string, row: any): boolean {
     if (!row) return false;
     if (coll !== def.root && !def.include.includes(coll)) return false;
-    if (coll === def.root) return (scope.mode === "list" || sameId(row.id, scope.id)) && meets(scope, row);
+    if (coll === def.root) {
+      if (scope.mode !== "list" && !sameId(row.id, scope.id)) return false;
+      // a name its columns cannot take holds nothing: it is refused (400) when opened or written through
+      try { return meets(scope, row, keeping(schema.tables[coll]!)); }
+      catch (err: any) { if (typeof err.code === "number") return false; throw err; }
+    }
     if (scope.mode === "list" || !schema.tables[coll]?.parent) return true;   // in full
     return sameId(chainRoot(coll, row, def.root), scope.id);
   }
@@ -417,6 +422,7 @@ export function registerDocs(
     const names = new Set([...subscriptions.keys(), writer]);
     const out: string[] = [];
     for (const name of names) {
+      if (findCustom(name)) continue;   // a custom document's name is its own, as open finds it first -- never a list's read by it
       const m = findDoc(name);
       if (m && holds(m.def, resolveScope(m.def, m.docId), coll, row)) out.push(name);
     }
@@ -677,7 +683,7 @@ export function registerDocs(
 
     let doc: any;
     try { doc = load(docName, match.def, match.docId); }
-    catch (err: any) { return respond({ error: { code: 500, message: named(err).message } }); }
+    catch (err: any) { return respond({ error: { code: typeof err.code === "number" ? err.code : 500, message: named(err).message } }); }
     if (!doc) {
       respond({ error: { code: 404, message: `Not found: no ${match.def.root} row ${match.docId}. Make the row first, or declare the document implied: true` } });
       return;
@@ -834,6 +840,9 @@ export function registerDocs(
     reloadEvicted();
     const doc = cache.get(docName);
     if (!doc) {
+      // a name its root's columns cannot take is the writer's mistake (400), as on Postgres, before it is a document not open
+      try { whereOf(resolveScope(match.def, match.docId), keeping(schema.tables[match.def.root]!)); }
+      catch (err: any) { if (typeof err.code === "number") return respond({ error: { code: err.code, message: err.message } }); }
       respond({ error: { code: 404, message: `Doc not loaded: open ${docName} before writing to it` } });
       return;
     }
@@ -897,7 +906,9 @@ export function registerDocs(
     const match = findDoc(msg.doc as string);
     if (!match) return;
     if (!msg.at) return respond({ error: { code: 400, message: "at is required" } });
-    const doc = loadDocAt(db, schema, match.def, match.docId, String(msg.at));
+    let doc: any;
+    try { doc = loadDocAt(db, schema, match.def, match.docId, String(msg.at)); }
+    catch (err: any) { return respond({ error: { code: typeof err.code === "number" ? err.code : 500, message: named(err).message } }); }
     respond(doc ? { result: doc } : { error: { code: 404, message: "Not found" } });
   });
 
@@ -1062,7 +1073,7 @@ export function loadDocAt(db: any, schema: Schema, def: DocDef, docId: string, a
   if (!rootTable) return null;
   const when = sqliteTime(at);
   const scope = resolveScope(def, docId);
-  const where = whereOf(scope);
+  const where = whereOf(scope, keeping(rootTable));
 
   const rootRows = temporalQuery(db, rootTable, where.sql, where.params as any[], when);
   if (scope.mode === "list") {
@@ -1720,24 +1731,46 @@ function encodeValue(table: ResolvedTable, col: string, value: unknown): any {
 
 /**
  * A scope's value, text from the document's name, as its column takes it -- as
- * Postgres casts the text: a boolean as Postgres reads one (true/false, yes/no,
- * on/off and their unambiguous prefixes, 1/0, any case; anything else a 400); a
- * json column's as JSON, as the scope's condition reads it; a text or a time as
- * the text; a number, an id or a parent key as an id is kept.
+ * Postgres casts the text, for an add's stamping and a condition alike: a
+ * boolean as Postgres reads one (true/false, yes/no, on/off and their
+ * unambiguous prefixes, 1/0, any case); an integer's digits, signed; a real's
+ * number; a json column's text as the JSON it is; a text or a time as the text;
+ * an id or a parent key as an id is kept. Text the column cannot take is a 400.
  */
 function scopeValue(table: ResolvedTable, col: string, text: string): unknown {
+  const t = text.trim();
   switch (Object.hasOwn(table.columns, col) ? table.columns[col]!.type : undefined) {
     case "boolean": {
-      const t = text.trim().toLowerCase();
-      const prefix = (word: string, least = 1) => t.length >= least && word.startsWith(t);   // "o" is on or off: two letters at least
-      if (t === "1" || prefix("true") || prefix("yes") || prefix("on", 2)) return true;
-      if (t === "0" || prefix("false") || prefix("no") || prefix("off", 2)) return false;
+      const l = t.toLowerCase();
+      const prefix = (word: string, least = 1) => l.length >= least && word.startsWith(l);   // "o" is on or off: two letters at least
+      if (l === "1" || prefix("true") || prefix("yes") || prefix("on", 2)) return true;
+      if (l === "0" || prefix("false") || prefix("no") || prefix("off", 2)) return false;
       return refuse(400, `${col} must be a boolean (true/false, yes/no, on/off, 1/0, or a prefix), not "${text}"`);
     }
-    case "json": try { return JSON.parse(text); } catch { return text; }
+    case "integer":
+      if (/^[+-]?\d+$/.test(t) && Number.isSafeInteger(Number(t))) return Number(t);
+      return refuse(400, `${col} must be an integer, not "${text}"`);
+    case "real":
+      if (/^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i.test(t)) return Number(t);
+      return refuse(400, `${col} must be a number, not "${text}"`);
+    case "json": try { return JSON.parse(text); } catch { return refuse(400, `${col} must be JSON, not "${text}"`); }
     case "text": case "timestamptz": return text;
     default: return rowId(text);
   }
+}
+
+/**
+ * How a table's columns keep a value (./scope `Keep`): a scope's text as an add
+ * is given it (`scopeValue`), then as the column stores it -- a boolean 1 or 0,
+ * json as its text -- and a row's value as the column stores it. So a
+ * condition reads by one rule what the add stamps: `fo-seats:yes` reads the
+ * rows an add through `fo-seats:true` made.
+ */
+function keeping(table: ResolvedTable): Keep {
+  return {
+    text: (col, text) => encodeValue(table, col, scopeValue(table, col, text)),
+    value: (col, value) => encodeValue(table, col, value),
+  };
 }
 
 function decodeRow(table: ResolvedTable, row: any) {

@@ -67,6 +67,9 @@ export const pathDocs = [
   defineDoc("fo-seating:", { root: "weddings", include: ["seats"] }),
   // list mode by a boolean: the seats kept (1) or not (0), which a seat added through it is given
   defineDoc("fo-seats-kept:", { root: "seats", include: [], scope: { kept: ":kept" } }),
+  // list mode by the other column types: a boolean's range, and an integer
+  defineDoc("fo-seats-upto:", { root: "seats", include: [], scope: { kept: "<=:kept" } }),
+  defineDoc("fo-seats-at:", { root: "seats", include: [], scope: { table_no: ":table" } }),
   // list mode by a json column: the seats whose wishes are the name read as JSON, which a seat added through it is given
   defineDoc("fo-seats-wished:", { root: "seats", include: [], scope: { wishes: ":wishes" } }),
 ];
@@ -88,6 +91,22 @@ const householdsTable = pathSchema.tables.households!.name;
 export const sqliteInbox = inboxDoc((db: any, email: string) => ({ households: db.query(`SELECT * FROM ${householdsTable} WHERE email = ?`).all(email) }));
 // each row as JSON, as a document reads it: pg gives a bare BIGINT column as text
 export const postgresInbox = inboxDoc(async (pool: any, email: string) => ({ households: (await pool.query(`SELECT to_jsonb(h) AS row FROM ${householdsTable} h WHERE email = $1`, [email])).rows.map((r: any) => r.row) }));
+
+/**
+ * A custom document whose prefix starts with a list's: the seats not kept,
+ * named fo-seats-at:open:<anything>. Its name is its own, never the list
+ * fo-seats-at: read with "open" for a table number.
+ */
+const openSeatsDoc = <Q>(query: Q) => ({
+  prefix: "fo-seats-at:open:",
+  watch: ["seats"],
+  parse: (name: string) => name,
+  query,
+  matches: (_coll: string, row: any) => row.kept === false,
+});
+const seatsTable = pathSchema.tables.seats!.name;
+export const sqliteOpenSeats = openSeatsDoc((db: any) => ({ seats: db.query(`SELECT * FROM ${seatsTable} WHERE kept = 0`).all() }));
+export const postgresOpenSeats = openSeatsDoc(async (pool: any) => ({ seats: (await pool.query(`SELECT to_jsonb(s) AS row FROM ${seatsTable} s WHERE NOT kept`)).rows.map((r: any) => r.row) }));
 
 /** Rows as every backend is seeded with them: through `importTables`, which sets each sequence past its rows. */
 export interface Snapshot {
@@ -259,6 +278,33 @@ export function documentCases(backend: () => PathBackend): void {
       expect(content((await b.process.call("open", { doc: "fo-all-courses:" })).result)).toEqual({ courses: { "1": course(1, "Soup"), "2": course(2, "Salad", 2) } });
       expect(content((await b.process.call("open", { doc: "fo-courses-like:So" })).result)).toEqual({ courses: { "1": course(1, "Soup") } });
       expect(content((await b.process.call("open", { doc: "fo-courses-like:X" })).result)).toEqual({ courses: {} });
+    });
+
+    test("a condition reads the name as its column takes it, as an add through the name is given it: a boolean's true, yes and 1 are the seats kept, false, off and 0 the rest; an integer's 05 is 5; a json value is the JSON it names", async () => {
+      const b = backend();
+      await b.process.call("open", { doc: "fo-seating:1" });
+      await write(b.process, "fo-seating:1", [{ op: "add", path: "/seats/-", value: { table_no: 5, kept: false, wishes: [1, 2] } }]);
+      const seats = async (doc: string) => {
+        const res = await b.process.call("open", { doc });
+        return { doc, seats: res.error ?? Object.keys(res.result.seats).map(Number) };
+      };
+      for (const name of ["true", "yes", "1", "t", "on", "Y"]) expect(await seats(`fo-seats-kept:${name}`)).toEqual({ doc: `fo-seats-kept:${name}`, seats: [1] });
+      for (const name of ["false", "off", "0", "f", "no", "N"]) expect(await seats(`fo-seats-kept:${name}`)).toEqual({ doc: `fo-seats-kept:${name}`, seats: [2] });
+      expect(await seats("fo-seats-upto:off")).toEqual({ doc: "fo-seats-upto:off", seats: [2] }); // false <= false; true is not
+      expect(await seats("fo-seats-upto:yes")).toEqual({ doc: "fo-seats-upto:yes", seats: [1, 2] });
+      expect(await seats("fo-seats-at:05")).toEqual({ doc: "fo-seats-at:05", seats: [2] });
+      expect(await seats("fo-seats-at:3")).toEqual({ doc: "fo-seats-at:3", seats: [1] });
+      expect(await seats("fo-seats-wished:[1, 2]")).toEqual({ doc: "fo-seats-wished:[1, 2]", seats: [2] });
+    });
+
+    test("a name its column cannot take is refused as a mistake (400), opened or written through: a boolean's maybe, an integer's abc or 3.5, a json value that is not JSON", async () => {
+      const b = backend();
+      const add = [{ op: "add", path: "/seats/-", value: { weddings_id: 1, table_no: 4, kept: true } }];
+      for (const doc of ["fo-seats-kept:maybe", "fo-seats-upto:maybe", "fo-seats-at:abc", "fo-seats-at:3.5", "fo-seats-wished:abc"]) {
+        const open = (await b.process.call("open", { doc })).error?.code;
+        const written = (await b.process.call("delta", { doc, ops: add })).error?.code;
+        expect({ doc, open, written }).toEqual({ doc, open: 400, written: 400 });
+      }
     });
 
     test("a row added at /- is named by the store: the next serial after the rows it holds", async () => {
@@ -648,7 +694,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       const add = [{ op: "add", path: "/seats/-", value: { weddings_id: 1, table_no: 4 } }];
       const told: unknown[][] = [];
       let id = 1;
-      // what a list reads by such a name is not asked here: only what the add stores, as the seating plan reads it
+      // what the add stores, as the seating plan reads it (what a list reads by such a name has its own cases)
       for (const [name, kept] of [["fa", false], ["of", false], ["n", false], ["tr", true], ["on", true], ["YES", true]] as const) {
         await b.process.call("open", { doc: `fo-seats-kept:${name}` });
         const { ops } = await write(b.process, `fo-seats-kept:${name}`, add);
@@ -657,7 +703,7 @@ export function fanOutCases(backend: () => PathBackend): void {
         told.push(ops);
       }
       for (const name of ["maybe", "o", "onx"]) {
-        await b.process.call("open", { doc: `fo-seats-kept:${name}` }); // Postgres refuses the name here already
+        await b.process.call("open", { doc: `fo-seats-kept:${name}` }); // refused here already (400): the write is asked on its own
         expect({ name, code: (await b.process.call("delta", { doc: `fo-seats-kept:${name}`, ops: add })).error?.code }).toEqual({ name, code: 400 });
       }
       await expectTold(b, "fo-seating:1", told);
@@ -684,6 +730,25 @@ export function fanOutCases(backend: () => PathBackend): void {
       const undone = await b.process.call("undo", { cursor: "s1" });
       expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "remove", path: "/seats/2" }], conflict: undefined });
       await expectTold(b, "fo-seats-wished:5", [result.ops, [{ op: "remove", path: "/seats/2" }]]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a seat added through a boolean list named off is read back by it, told to every list its value meets -- off, no, 0, false and up to off -- and not to yes; undone and redone without a conflict", async () => {
+      const b = backend();
+      const lists = ["fo-seats-kept:off", "fo-seats-kept:no", "fo-seats-kept:0", "fo-seats-kept:false", "fo-seats-upto:off"];
+      const copies = await openAll(b.process, [...lists, "fo-seats-kept:yes", "fo-seating:1"]);
+      const made = await write(b.process, "fo-seats-kept:off", [{ op: "add", path: "/seats/-", value: { weddings_id: 1, table_no: 4 } }], { cursor: "s1" });
+      expect(made.ops).toEqual([{ op: "add", path: "/seats/2", value: seat(2, 4, false) }]);
+      expect(Object.keys((await b.process.call("open", { doc: "fo-seats-kept:off" })).result.seats)).toEqual(["2"]);
+      const walked = async (way: string) => {
+        const { result } = await b.process.call(way, { cursor: "s1" });
+        return { ops: result.ops, conflict: result.conflict };
+      };
+      const taken = [{ op: "remove", path: "/seats/2" }];
+      expect(await walked("undo")).toEqual({ ops: taken, conflict: undefined });
+      expect(await walked("redo")).toEqual({ ops: made.ops, conflict: undefined });
+      for (const doc of lists) await expectTold(b, doc, [made.ops, taken, made.ops]);
+      await expectSilent(b, "fo-seats-kept:yes");
       await assertCopiesHold(b, copies);
     });
 
@@ -771,6 +836,22 @@ export function fanOutCases(backend: () => PathBackend): void {
       await write(b.process, "fo-board:1", [{ op: "remove", path: "/households/1" }]);
       await expectTold(b, "fo-household:1", [[{ op: "replace", path: "/households", value: null }]]);
       await expectTold(b, "fo-inbox:a@x", [[{ op: "remove", path: "/households/1" }]]);
+      await assertCopiesHold(b, copies);
+    });
+  });
+
+  describe("a custom document whose name starts as a list's", () => {
+    test("fo-seats-at:open:all is not taken for the list fo-seats-at: named \"open\": seats written beside it are told as ever, and it hears the one that is not kept", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-seats-at:open:all", "fo-seating:1", "fo-seats-at:3", "fo-seats-at:5"]);
+      copies.delete("fo-seats-at:open:all"); // its first read is the backend's own query, not a document's
+      const moved = await write(b.process, "fo-seating:1", [{ op: "replace", path: "/seats/1/table_no", value: 5 }]);
+      const added = await write(b.process, "fo-seats-at:5", [{ op: "add", path: "/seats/-", value: { weddings_id: 1, kept: false } }]);
+      expect(added.ops).toEqual([{ op: "add", path: "/seats/2", value: seat(2, 5, false) }]);
+      await expectTold(b, "fo-seating:1", [moved.ops, added.ops]);
+      await expectTold(b, "fo-seats-at:3", [[{ op: "remove", path: "/seats/1" }]]);
+      await expectTold(b, "fo-seats-at:5", [[{ op: "add", path: "/seats/1", value: seat(1, 5, true, { veg: true }) }], added.ops]);
+      await expectTold(b, "fo-seats-at:open:all", [added.ops]);
       await assertCopiesHold(b, copies);
     });
   });

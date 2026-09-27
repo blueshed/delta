@@ -68,6 +68,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`bun run test` runs every file that needs no Postgres server** (todo #48): it named 8 of the
   33, leaving out 12 that pass without one (the undo ledger, custom documents, `local`, the schema
   and codegen among them), so they ran only under `bun run ci`.
+- **SQLite: a list document reads its name as its column takes it, as Postgres casts it**
+  (todo #45). A document scoped by a boolean (`scope: { kept: ":kept" }`) opened as
+  `seats-kept:true`, `yes`, `off` or `false` read no rows, since its condition bound the name's
+  text against a column that holds 1 or 0 (only `1` and `0` read), so a seat added through
+  `seats-kept:off`, stored false, was not in its own document: not told there, not read back, and
+  its undo a conflict; a write elsewhere was told to `:false` and `:0` but not to `:off` or `:no`.
+  Each condition's value (`=` and the ranges) is now cast by its column's type by the one rule the
+  add's stamping uses (`scopeValue`), then compared as the column stores it, in the SQL and in the
+  fan-out (`meets`) alike: a boolean's `yes` is 1, a `json` value the JSON it names (`[1, 2]` read
+  `[1,2]`), an `integer`'s `05` is 5. A name its column cannot take is a 400, opened or written
+  through, as on Postgres: a boolean's `maybe` opened as an empty list, an integer's `abc` or
+  `3.5` too (and an add through `abc` stored the text in the integer column), a json value that
+  is not JSON likewise; a name a column cannot take holds nothing in the fan-out. A custom
+  document's name is its own there too, as `open` finds it first: `todos:open:alice` beside
+  `todos:` (scope `{ owner_id: ":id" }`) is never read as the list named `open`. `whereOf` and
+  `meets` in `src/server/scope.ts` take the backend's `Keep`.
 
 ## [0.9.1] - 2026-09-27
 
