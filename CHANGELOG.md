@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`bun.lock` matches `package.json`** (todo #49): it lacked the optional `@electric-sql/pglite`
+  peer, so every `bun install` in a fresh checkout changed it.
+
 ## [0.9.1] - 2026-09-27
 
 ### Fixed

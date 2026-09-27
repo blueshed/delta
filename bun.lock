@@ -16,11 +16,13 @@
       },
       "peerDependencies": {
         "@blueshed/railroad": "^0.11.0 || ^0.12.0 || ^0.13.0 || ^0.14.0",
+        "@electric-sql/pglite": "^0.5.4",
         "jose": "^6.0.0",
         "pg": "^8.20.0",
       },
       "optionalPeers": [
         "@blueshed/railroad",
+        "@electric-sql/pglite",
         "jose",
         "pg",
       ],
