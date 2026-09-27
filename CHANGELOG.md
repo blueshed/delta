@@ -25,8 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`ADD COLUMN IF NOT EXISTS`); `001c` and `001d` add three-argument `_delta_bump_and_notify`
   and `_delta_tell` beside the two-argument forms, which log no `applied` (an entry without it
   is heard as told, as before); `delta_apply` is replaced to pass it; `001e` adds
-  `_delta_fetch_log`, which the listener now reads, so re-apply the framework (or
-  `bunx @blueshed/delta init`) before running this release's listener. The every-backend copy
+  `_delta_fetch_log`, which the listener now reads. Re-apply the framework (or
+  `bunx @blueshed/delta init`) with this release: on SQL older than it (no `_delta_fetch_log`)
+  the listener reads `delta_fetch_ops`, every entry heard as told, as before, and warns once
+  that the SQL is behind. The every-backend copy
   check now reopens each document afresh (closed first), since a custom document's own open
   answered from the copy it kept of what it told.
 - **Postgres: a row added to a list-mode document scoped by a `json` column is given the

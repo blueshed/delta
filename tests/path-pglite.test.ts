@@ -3,7 +3,7 @@
  * functions as a Postgres server, the same listener, the same cases
  * (tests/helpers/path.ts) -- no database to run.
  */
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { Pool } from "pg";
 import {
   applyFramework, applySql, clearRegistry, createDocListener, docTypeFromDef, exportTables, generateSql, importTables, registerDocType, validateOps,
@@ -12,7 +12,9 @@ import { resolveScope } from "../src/server/scope";
 import { openPglite } from "../src/server/pglite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
-import { pathCases, pathDocs, pathSchema, pathSeed, postgresInbox, type PathBackend } from "./helpers/path";
+import {
+  assertCopiesHold, expectTold, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresInbox, write, type PathBackend,
+} from "./helpers/path";
 
 setLogLevel("silent");
 
@@ -151,5 +153,53 @@ describe("pglite: validateOps answers as delta_apply does", () => {
     }
     expect(answers.filter((a) => a.database === 500)).toEqual([]);
     expect(answers.filter((a) => (a.ahead.length > 0) !== (a.database === 400))).toEqual([]);
+  });
+});
+
+/**
+ * A listener newer than the framework SQL it runs on -- vendored with `delta
+ * init` and not re-applied -- has no `_delta_fetch_log` to read. It reads
+ * `delta_fetch_ops` instead, each entry heard as told, and says once that the
+ * SQL is behind: every broadcast still arrives (todo #44's review).
+ */
+describe("pglite: a listener on framework SQL older than it", () => {
+  test("still tells every document, and says once that the SQL is behind", async () => {
+    const behind = await openPglite();
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await applyFramework(behind);
+      await behind.query("DROP FUNCTION _delta_fetch_log(text, bigint)");
+      await applySql(behind, generateSql(pathSchema, pathDocs));
+      await importTables(behind, pathSchema, pathSeed);
+      clearRegistry();
+      for (const def of pathDocs) registerDocType(docTypeFromDef(def, behind));
+      const local = createLocal();
+      const heard: { channel: string; data: any }[] = [];
+      local.onPublish((channel, data) => heard.push({ channel, data }));
+      setLogLevel("warn");
+      listeners.push(await createDocListener(local.server, behind, { ledger: true, custom: [postgresInbox] }));
+      setLogLevel("silent");
+      const b: PathBackend = {
+        process: { call: (action, msg) => local.call(action, msg), heard },
+        quiet: () => new Promise((r) => setTimeout(r, 100)),
+        exportTables: () => exportTables(behind, pathSchema),
+      };
+      const copies = await openAll(b.process, ["fo-household:1", "fo-board:1", "fo-inbox:a@x", "fo-inbox:new@x"]);
+      await write(b.process, "fo-household:1", [{ op: "replace", path: "/households/email", value: "new@x" }]);
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/2/email", value: "new@x" }]);
+      await expectTold(b, "fo-household:1", [[{ op: "replace", path: "/households", value: household(1, "new@x") }]]);
+      await expectTold(b, "fo-board:1", [
+        [{ op: "replace", path: "/households/1", value: household(1, "new@x") }],
+        [{ op: "replace", path: "/households/2", value: household(2, "new@x") }],
+      ]);
+      await expectTold(b, "fo-inbox:a@x", [[{ op: "remove", path: "/households/1" }]]);
+      await assertCopiesHold(b, copies);
+      expect(warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("older than this listener"))).toHaveLength(1);
+    } finally {
+      setLogLevel("silent");
+      warn.mockRestore();
+      for (const l of listeners.splice(0)) await l.destroy();
+      await behind.end();
+    }
   });
 });

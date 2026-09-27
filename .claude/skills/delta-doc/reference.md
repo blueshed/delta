@@ -939,7 +939,7 @@ Apply `src/sql/001a-001g-*.sql` alphabetically to every database — idempotent.
 | `delta_open_at(doc_name, timestamptz)` | same, at a historical instant (temporal docs only) |
 | `delta_apply(doc_name, ops jsonb)` | applies ops, writes `_delta_ops_log`, NOTIFYs `delta_changes` |
 | `delta_fetch_ops(doc_name, since_version)` | returns (version, ops) rows after a base version |
-| `_delta_fetch_log(doc_name, since_version)` | the listener's: the same rows with `applied`, the write as applied on the writer's entry (`[]` on the others), for custom docs |
+| `_delta_fetch_log(doc_name, since_version)` | the listener's: the same rows with `applied`, the write as applied on the writer's entry (`[]` on the others), for custom docs. On SQL without it the listener reads `delta_fetch_ops`, each entry heard as told, and warns once |
 | `delta_snapshot(name, at)` | pins a timestamp to a label |
 | `delta_resolve_snapshot(name)` | looks up a pinned timestamp |
 | `delta_prune_ops(keep_interval interval)` | trims `_delta_ops_log` older than interval |

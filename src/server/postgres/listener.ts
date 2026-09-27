@@ -110,6 +110,27 @@ interface DocState {
 /** _delta_fetch_log (delta_fetch_ops' rows) caps each call at this many; a full page means there may be more. */
 const FETCH_PAGE = 1000;
 
+/**
+ * How the listener reads a document's log. `_delta_fetch_log` (001e) gives each
+ * entry with the write as applied, for custom documents (todo #44). Framework
+ * SQL older than this listener -- vendored with `delta init` into an initdb
+ * directory and not re-applied -- has no such function, and every fetch would
+ * fail, so no broadcast would reach anyone: there the listener reads
+ * `delta_fetch_ops`, each entry heard as told, as before, and says so once.
+ */
+const FETCH_LOG = "SELECT version, ops, applied FROM _delta_fetch_log($1, $2)";
+const FETCH_TOLD = "SELECT version, ops, NULL::jsonb AS applied FROM delta_fetch_ops($1, $2)";
+async function fetchQuery(pool: Pool): Promise<string> {
+  const { rows } = await pool.query("SELECT to_regprocedure('_delta_fetch_log(text, bigint)') IS NOT NULL AS ok");
+  if (rows[0]?.ok) return FETCH_LOG;
+  log.warn(
+    "the framework SQL is older than this listener (no _delta_fetch_log, 001e): changes are read with delta_fetch_ops, " +
+    "and a custom document hears a write once for each document told of it. Re-apply it (applyFramework, or " +
+    "bunx @blueshed/delta init) and restart.",
+  );
+  return FETCH_TOLD;
+}
+
 export async function createDocListener<I = unknown>(
   ws: WsServer,
   pool: Pool,
@@ -190,7 +211,11 @@ export async function createDocListener<I = unknown>(
 
   // Single LISTEN connection with auto-reconnect
   let listener: PoolClient;
-  try { listener = await pool.connect(); }
+  let fetchSql: string;
+  try {
+    fetchSql = await fetchQuery(pool);
+    listener = await pool.connect();
+  }
   catch (err) { releaseAuth(); throw err; }
   let destroyed = false;
   let reconnecting = false;
@@ -317,10 +342,7 @@ export async function createDocListener<I = unknown>(
       state.pending = false;
       let pageRows = FETCH_PAGE;
       while (pageRows >= FETCH_PAGE) {
-        const { rows } = await pool.query(
-          "SELECT version, ops, applied FROM _delta_fetch_log($1, $2)",
-          [docName, state.version],
-        );
+        const { rows } = await pool.query(fetchSql, [docName, state.version]);
         pageRows = rows.length;
         for (const row of rows) {
           if (state.subscribers.size > 0) {
