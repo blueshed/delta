@@ -1698,13 +1698,20 @@ function encodeValue(table: ResolvedTable, col: string, value: unknown): any {
 
 /**
  * A scope's value, text from the document's name, as its column takes it -- as
- * Postgres casts the text: a boolean from 1/0, t/f, true/false, y/n, yes/no,
- * on/off; a json column's as JSON, as the scope's condition reads it; a text or
- * a time as the text; a number, an id or a parent key as an id is kept.
+ * Postgres casts the text: a boolean as Postgres reads one (true/false, yes/no,
+ * on/off and their unambiguous prefixes, 1/0, any case; anything else a 400); a
+ * json column's as JSON, as the scope's condition reads it; a text or a time as
+ * the text; a number, an id or a parent key as an id is kept.
  */
 function scopeValue(table: ResolvedTable, col: string, text: string): unknown {
   switch (Object.hasOwn(table.columns, col) ? table.columns[col]!.type : undefined) {
-    case "boolean": return /^(1|t|true|y|yes|on)$/i.test(text) ? true : /^(0|f|false|n|no|off)$/i.test(text) ? false : text;
+    case "boolean": {
+      const t = text.trim().toLowerCase();
+      const prefix = (word: string, least = 1) => t.length >= least && word.startsWith(t);   // "o" is on or off: two letters at least
+      if (t === "1" || prefix("true") || prefix("yes") || prefix("on", 2)) return true;
+      if (t === "0" || prefix("false") || prefix("no") || prefix("off", 2)) return false;
+      return refuse(400, `${col} must be a boolean (true/false, yes/no, on/off, 1/0, or a prefix), not "${text}"`);
+    }
     case "json": try { return JSON.parse(text); } catch { return text; }
     case "text": case "timestamptz": return text;
     default: return rowId(text);

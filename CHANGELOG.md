@@ -45,8 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   they say `5`; undo's guard then found a conflict where nothing had changed (todo #36). Each
   written row is now read back, as Postgres's `RETURNING` reads it, so the echo, the ledger's
   entry and a later `open` agree. A list-mode add is given each scope value as its column takes
-  the name's text, as Postgres casts it: a `boolean`'s `"0"` or `"false"` is false (any text was
-  stored as true), a `text` column's `"10"` is `"10"`, a `json` column's `"5"` is 5.
+  the name's text, as Postgres casts it. 0.9.0 stamped the text through `rowId`, which makes
+  digits a number: a `boolean` stored `"0"` as false and `"1"` as true, but any other text
+  (`"false"`, `"no"`, `"off"`) as true; a `text` column told `"10"` as 10 and kept `"007"` as
+  `"7"`. Now a `boolean` reads the text as Postgres reads one -- true/false, yes/no, on/off, their
+  unambiguous prefixes and 1/0, in any case -- and anything else is a 400, as on Postgres; a
+  `text` column's `"007"` is `"007"`; a `json` column's `"5"` is 5, as before.
 - **A custom document hears a write to a single document's root row** (SQLite and Postgres).
   The membership fan-out took only `/<coll>/<id>` ops, and a root write is told as
   `replace /<root>`, so `defineCustomDoc("unclaimed:", { watch: ["trips"], matches })` kept a

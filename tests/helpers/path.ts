@@ -544,6 +544,28 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
+    test("a boolean scope takes the name as Postgres takes a boolean: an unambiguous prefix of true/false, yes/no, on/off, any case; anything else is a 400", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-seating:1"]);
+      const add = [{ op: "add", path: "/seats/-", value: { weddings_id: 1, table_no: 4 } }];
+      const told: unknown[][] = [];
+      let id = 1;
+      // what a list reads by such a name is not asked here: only what the add stores, as the seating plan reads it
+      for (const [name, kept] of [["fa", false], ["of", false], ["n", false], ["tr", true], ["on", true], ["YES", true]] as const) {
+        await b.process.call("open", { doc: `fo-seats-kept:${name}` });
+        const { ops } = await write(b.process, `fo-seats-kept:${name}`, add);
+        id += 1;
+        expect({ name, ops }).toEqual({ name, ops: [{ op: "add", path: `/seats/${id}`, value: seat(id, 4, kept) }] });
+        told.push(ops);
+      }
+      for (const name of ["maybe", "o", "onx"]) {
+        await b.process.call("open", { doc: `fo-seats-kept:${name}` }); // Postgres refuses the name here already
+        expect({ name, code: (await b.process.call("delta", { doc: `fo-seats-kept:${name}`, ops: add })).error?.code }).toEqual({ name, code: 400 });
+      }
+      await expectTold(b, "fo-seating:1", told);
+      await assertCopiesHold(b, copies);
+    });
+
     test("a value kept as its column's type is told and undone as kept: a boolean scope's \"0\" is false", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-seats-kept:0", "fo-seats-kept:1", "fo-seating:1"]);
