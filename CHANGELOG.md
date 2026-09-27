@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`bun.lock` matches `package.json`** (todo #49): it lacked the optional `@electric-sql/pglite`
   peer, so every `bun install` in a fresh checkout changed it.
+- **`bun run test` runs every file that needs no Postgres server** (todo #48): it named 8 of the
+  33, leaving out 12 that pass without one (the undo ledger, custom documents, `local`, the schema
+  and codegen among them), so they ran only under `bun run ci`.
 
 ## [0.9.1] - 2026-09-27
 

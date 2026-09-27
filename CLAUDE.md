@@ -21,8 +21,8 @@ Bun only: never `npm`, `npx` or `node`.
 |---|---|
 | Install | `bun install` |
 | Typecheck | `bun run check` |
-| Fast tests, no database | `bun run test` (core, server, sqlite, auth, railroad-client) |
-| One file | `bun test tests/local.test.ts` (Postgres needed by `postgres*`, `auth-jwt`, `review-findings`, `write-scope`, `create-row` and `error-codes`) |
+| Fast tests, no database | `bun run test`: every file that needs no Postgres server (PGlite runs in process) |
+| One file | `bun test tests/local.test.ts` (Postgres needed by `postgres*`, `auth-jwt`, `review-findings`, `write-scope`, `create-row` and `error-codes`; a new file that needs no Postgres goes into `test` too) |
 | Start / stop Postgres | `bun run db:up` / `bun run db:down` (Docker, `compose.yml`) |
 | Postgres tests | `bun run db:up`, then `bun run test:pg` or `bun test tests/postgres-ledger.test.ts` |
 | Everything | `bun run test:all` (Postgres must be up) |
