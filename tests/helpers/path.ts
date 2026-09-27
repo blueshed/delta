@@ -534,6 +534,26 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
+    test("a value kept as its column's type is told and undone as kept: a json string that reads as a number stays a string", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-seating:1"]);
+      const result = await write(b.process, "fo-seating:1", [{ op: "add", path: "/seats/-", value: { table_no: 5, kept: true, wishes: "123" } }], { cursor: "s1" });
+      expect(result.ops).toEqual([{ op: "add", path: "/seats/2", value: seat(2, 5, true, "123") }]);
+      const undone = await b.process.call("undo", { cursor: "s1" });
+      expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "remove", path: "/seats/2" }], conflict: undefined });
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a value kept as its column's type is told and undone as kept: a single document's parent key written as \"2\" is the number 2", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-household:1", "fo-board:1", "fo-board:2"]);
+      const result = await write(b.process, "fo-household:1", [{ op: "replace", path: "/households/weddings_id", value: "2" }], { cursor: "s1" });
+      expect(result.ops).toEqual([{ op: "replace", path: "/households", value: household(1, "a@x", 2) }]);
+      const undone = await b.process.call("undo", { cursor: "s1" });
+      expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "replace", path: "/households", value: household(1, "a@x") }], conflict: undefined });
+      await assertCopiesHold(b, copies);
+    });
+
     test("a value kept as its column's type is told and undone as kept: a parent key written as \"10\" is the number 10", async () => {
       const b = backend();
       await b.process.call("open", { doc: "fo-board:1" });
