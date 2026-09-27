@@ -212,7 +212,7 @@ Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/fi
 ## Where to look next — `reference.md` sections
 
 - *First-time bootstrap* — `applyFramework` / `bunx @blueshed/delta init` / `docker-entrypoint-initdb.d`
-- *Quick start (SQLite backend)* — `createTables`, one root row per document, `implied`, the id rule
+- *Quick start (SQLite backend)* — `createTables`, single or list, `implied`, the id rule
 - *Quick start (Postgres backend)* — server + client with `jwtAuth`, `owns`, `onConnect`, session restore, shutdown
 - *Contracts* — `DocType`, `DocDef`, `DeltaAuth` interfaces
 - *Schema generation* — `defineSchema`, column shorthands, `validateOps`

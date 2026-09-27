@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The reference's SQLite quick start says what 0.9.0 made true (todo #42).** A SQLite
+  document is single or list, as on Postgres, and `add /<coll>/-` takes the next serial. It
+  said there was no list mode, that the id was a uuid, and that a scope binding such as `":id"`
+  threw at `registerDocs`.
+
 ## [0.9.0] - 2026-09-25
 
 One app, every place its truth can live. A project can start on a JSON file, move to SQLite,

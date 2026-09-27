@@ -89,16 +89,15 @@ ws.setServer(server);
 // client — the same client as every backend
 const doc = openDoc<{ lists: List; todos: Record<string, Todo> }>("list:groceries");
 // open → { lists: { id: "groceries", title: null }, todos: {} }
-await doc.send([{ op: "add", path: "/todos/-", value: { text: "milk" } }]);   // echo: add /todos/<uuid>
+await doc.send([{ op: "add", path: "/todos/-", value: { text: "milk" } }]);   // echo: add /todos/1
 ```
 
 What is different from Postgres (the full list is SKILL.md → *Backends side by side*):
 
-- **A SQLite document is one root row and its children.** `defineDoc("list:", { root: "lists", … })` opened as `list:groceries` is the `lists` row `groceries`, its `todos`, and their children. There is **no list mode**: `defineDoc("todos:", { root: "todos" })` opened as `todos:` looks for the row `id = ""` and answers 404, saying so. Put the rows under a root row.
-- **The root row** must exist before the document opens — seed it with SQL, or declare the document `implied: true` and its first write makes it (*Implied documents*, below).
+- **A document is single or list, as on Postgres** (*`scope` syntax* → *Single or list*). `defineDoc("list:", { root: "lists", … })` opened as `list:groceries` is the `lists` row `groceries`, its `todos`, and their children; `defineDoc("todos:", { root: "todos", include: [] })` opened as `todos:` is every todo.
+- **A single document's root row** must exist before the document opens — seed it with SQL, or declare the document `implied: true` and its first write makes it (*Implied documents*, below).
 - **`createTables(db, schema)` before the first open.** A missing table's error says so. `migrateSchema(db, schema)` adds columns a later schema declares.
-- **Ids are strings.** `add /todos/-` mints a uuid; a client-chosen id (`/todos/<id>`) works too. `add` of an id that exists is a 409.
-- **Scope** reads the doc name with `":docId"` only (see *`scope` syntax*); a Postgres binding such as `":id"` throws at `registerDocs`.
+- **Ids are serial numbers, as on Postgres.** `add /todos/-` takes the next serial, and the echo carries it (`/todos/1`). A client-chosen id (`/todos/<id>`) works too, and may be text, as `groceries` is; on Postgres it must be a number. `add` of an id that exists is a 409.
 - **No auth.** `registerDocs` has no gate: every socket may open every document of a prefix. Keep per-user data out of a shared SQLite backend, or put it behind Postgres.
 - **One process per file**: the backend caches documents in memory, and a second process would not hear the first's writes.
 - **Fan-out**: a write reaches every open document that holds the row (*Fan-out*, below).
