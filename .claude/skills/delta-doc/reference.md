@@ -267,11 +267,14 @@ const schema = defineSchema({
 // Append "?" for nullable: "text?", "integer?"
 // A column that is neither nullable nor has a default is REQUIRED: an add that
 // leaves it out is a 400 "Required field missing" (SQLite and Postgres). Give it
-// a default ({ type: "boolean", default: false }) or make it nullable.
+// a default ({ type: "boolean", default: false }) or make it nullable. A root row
+// added to a list-mode document is given its scope's equality values from the
+// name, so those it need not repeat.
 
 const itemsDoc = defineDoc("items:", { root: "items", include: [] });
 
-// Pre-flight op validation (unknown collections/fields, missing required, etc.)
+// Pre-flight op validation (unknown collections/fields, missing required, etc.).
+// SQLite's takes { list, values } for a list-mode document: its scope's values count as given.
 const errors = validateOps(schema, itemsDoc, [
   { op: "add", path: "/items/-", value: { name: "a", value: 1, meta: {} } },
 ]);

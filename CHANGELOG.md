@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`replace /households/weddings_id` on `household:1`): the row moves, as on Postgres, and as
   the whole-root merge (`replace /households { weddings_id }`) already moved it. It was refused
   as an unknown field (todo #37).
+- **SQLite: a row added to a list-mode document need not repeat its scope's values**
+  (`add /todos/-` on `todos:10`, scope `{ owner_id: ":id" }`): the add is given them from the
+  name, as the reference says and as Postgres checks after it stamps them. `validateOps` ran
+  before the stamping and refused a required one as missing (todo #39); it now counts the
+  scope's equality bindings as given (`validateOps(schema, def, ops, { list, values })`).
 
 ## [0.9.0] - 2026-09-25
 

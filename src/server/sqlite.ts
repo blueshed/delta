@@ -746,8 +746,8 @@ export function registerDocs(
     // Pre-flight validation — reject unknown collections/fields and bad types
     // up front instead of silently acking an op that diverges cache/broadcast
     // from what the DB can persist.
-    const list = resolveScope(def, docName.slice(def.prefix.length)).mode === "list";
-    const validationErrors = validateOps(schema, def, ops, { list });
+    const scope = resolveScope(def, docName.slice(def.prefix.length));
+    const validationErrors = validateOps(schema, def, ops, { list: scope.mode === "list", values: scope.values });
     if (validationErrors.length) {
       return { error: { code: 400, message: validationErrors.map((e) => `${e.path}: ${e.message}`).join("; ") } };
     }
@@ -1212,8 +1212,12 @@ export function migrateSchema(db: any, schema: Schema): string[] {
 // Validation
 // ---------------------------------------------------------------------------
 
-/** Validate delta ops against the schema. Returns an array of errors (empty = valid). */
-export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: { list?: boolean } = {}): ValidationError[] {
+/**
+ * Validate delta ops against the schema. Returns an array of errors (empty = valid).
+ * `list`: the document is in list mode; `values`: its scope's equality bindings,
+ * which a list-mode add of a root row is given (`applyOps`), so they count as given.
+ */
+export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: { list?: boolean; values?: Record<string, string> } = {}): ValidationError[] {
   const errors: ValidationError[] = [];
   // A list-mode document's root is a map of rows, like an included collection.
   const single = (collKey: string) => collKey === def.root && !opts.list;
@@ -1316,10 +1320,12 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
 
       // Required-field check applies to adds only: a column that is neither
       // nullable nor has a default must be given (it used to be stored as "",
-      // 0 or false, acked and broadcast).
+      // 0 or false, acked and broadcast) -- by the value, or, for a list-mode
+      // root row, by the scope, as Postgres checks after it stamps them.
       if (op.op === "add") {
+        const given = opts.list && collKey === def.root ? (opts.values ?? {}) : {};
         for (const [col, colDef] of Object.entries(table.columns)) {
-          if (!colDef.nullable && colDef.default === undefined && value[col] === undefined) {
+          if (!colDef.nullable && colDef.default === undefined && value[col] === undefined && given[col] === undefined) {
             errors.push({ path: op.path, message: `Required field missing: ${col} (give it a value, or declare a default or make it nullable in the schema)` });
           }
         }

@@ -59,6 +59,8 @@ export const pathDocs = [
   // list mode: every course; and the courses whose name starts with the doc's id
   defineDoc("fo-all-courses:", { root: "courses", include: [] }),
   defineDoc("fo-courses-like:", { root: "courses", include: [], scope: { name: "like:start" } }),
+  // list mode by an equality: the tags of one label, which a tag added through it is given
+  defineDoc("fo-tags-labelled:", { root: "tags", include: [], scope: { label: ":label" } }),
 ];
 
 /** Rows as every backend is seeded with them: through `importTables`, which sets each sequence past its rows. */
@@ -240,6 +242,15 @@ export function documentCases(backend: () => PathBackend): void {
         { op: "add", path: "/tags/2", value: { id: 2, label: "blue" } },
       ]);
       await expectTold(b, "fo-board:1", [result.ops]);
+    });
+
+    test("a row added to a list-mode document is given its scope's values from the name: the value need not repeat them", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-tags-labelled:blue", "fo-board:1"]);
+      const result = await write(b.process, "fo-tags-labelled:blue", [{ op: "add", path: "/tags/-", value: {} }]);
+      expect(result.ops).toEqual([{ op: "add", path: "/tags/2", value: { id: 2, label: "blue" } }]);
+      await expectTold(b, "fo-board:1", [result.ops]);
+      await assertCopiesHold(b, copies);
     });
 
     test("a row told of an add is, key for key, the row a fresh open reads -- as JSON, the same text", async () => {
