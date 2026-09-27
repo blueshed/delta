@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `":docId"` for SQLite and a plain value as a literal; since 0.9.0 every backend reads a scope
   the same way (`src/server/scope.ts` is `_delta_resolve_scope`'s twin), and a plain value
   names a param, as *`scope` syntax* says.
+- **SQLite: a single document can write its root row's parent key as a field**
+  (`replace /households/weddings_id` on `household:1`): the row moves, as on Postgres, and as
+  the whole-root merge (`replace /households { weddings_id }`) already moved it. It was refused
+  as an unknown field (todo #37).
 
 ## [0.9.0] - 2026-09-25
 

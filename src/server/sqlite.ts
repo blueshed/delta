@@ -1275,13 +1275,15 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
     }
 
     // A single-mode root: /<root>/<field> is a FIELD replace
-    // (not /<root>/<id> row), so validate parts[1] as a column name.
+    // (not /<root>/<id> row), so validate parts[1] as a column name -- or the
+    // parent key (the root row moves, as the whole-root merge moves it, and as on Postgres).
     if (single(collKey) && parts.length === 2) {
       if (op.op !== "replace") {
         errors.push({ path: op.path, message: "Root fields only support replace" });
         continue;
       }
       const field = parts[1]!;
+      if (field === fkCol) continue;
       const colDef = columnOf(field);
       if (!colDef) {
         errors.push({ path: op.path, message: `Unknown field: ${field}` });

@@ -529,6 +529,16 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
+    test("a household moved through its own document, its parent key written as a root field, leaves this board and arrives on that one", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-household:1", "fo-board:1", "fo-board:2"]);
+      await write(b.process, "fo-household:1", [{ op: "replace", path: "/households/weddings_id", value: 2 }]);
+      await expectTold(b, "fo-household:1", [[{ op: "replace", path: "/households", value: household(1, "a@x", 2) }]]);
+      await expectTold(b, "fo-board:1", [[{ op: "remove", path: "/households/1" }]]);
+      await expectTold(b, "fo-board:2", [[{ op: "add", path: "/households/1", value: household(1, "a@x", 2) }]]);
+      await assertCopiesHold(b, copies);
+    });
+
     test("a drink moved to another course leaves the one course's document and arrives in the other's", async () => {
       const b = backend();
       await b.process.call("open", { doc: "fo-board:1" });
