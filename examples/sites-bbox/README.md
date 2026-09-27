@@ -88,9 +88,10 @@ The signatures match what `server.ts` / `server-pg.ts` use:
 - `matches(collection, row, criteria)` is **3-arg** — the live per-row
   membership predicate, identical on both backends.
 
-The Postgres version piggybacks on the existing `NOTIFY delta_changes` +
-`delta_fetch_ops` path: after fetching the ops for a source doc, the listener
-runs the custom fan-out loop against every open predicate doc on this process.
+The Postgres version piggybacks on the existing `NOTIFY delta_changes` path:
+the writer's entry in `_delta_ops_log` carries the write as applied, and the
+listener runs the custom fan-out loop on it, once per write, against every
+open predicate doc on this process.
 
 (Postgres additionally supports a whole-doc `recompute` mode in place of
 `query`+`matches`; this example uses the membership mode on both backends.)

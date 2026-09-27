@@ -65,8 +65,8 @@ The runner:
    - bumps `_delta_versions`, appends to `_delta_ops_log`,
    - fires `pg_notify('delta_changes', {doc, v})`.
 6. **Broadcast** — `createDocListener` is already `LISTEN`ing on
-   `delta_changes`. It sees the notify, calls `delta_fetch_ops` for the
-   new version, and `ws.publish(docName, {doc, ops})` to every subscriber
+   `delta_changes`. It sees the notify, fetches the new version's ops
+   (`_delta_fetch_log`, the rows `delta_fetch_ops` gives), and `ws.publish(docName, {doc, ops})` to every subscriber
    of `board:1`. Bob's `on("message")` fires; the script prints the ops
    he received.
 7. **Late-joiner** — a third client, charlie, connects *after* the write.

@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Postgres: a custom document hears each write once, as it was applied, as on SQLite and the
+  JSON file** (todo #44). The listener ran a membership doc's `matches` on the ops told to each
+  document the write reached, one document after another. A write told to two documents was
+  heard twice (a household's email written through `household:1` with the board open: the
+  inbox it joined was told an `add`, then a `replace`), and a row that left one of them was
+  heard as removed: moving household 1 to the other wedding through `household:1`, both boards
+  open, told `inbox:a@x` replace, replace, remove, and the inbox ended empty while the row
+  still had `a@x`; moved through the board with no other document open over it, it was simply
+  taken out. The writer's entry in `_delta_ops_log` now carries the write as applied (a new
+  `applied` column: each changed row as it now is, or its remove; `[]` on the other told
+  documents' entries), and the listener tests each row once, from it: it matches, an `add` or
+  `replace`; it no longer does, or is gone, a `remove`. A `recompute` doc is re-evaluated once
+  per write too. The framework SQL changes in place: `001a` adds the column
+  (`ADD COLUMN IF NOT EXISTS`); `001c` and `001d` add three-argument `_delta_bump_and_notify`
+  and `_delta_tell` beside the two-argument forms, which log no `applied` (an entry without it
+  is heard as told, as before); `delta_apply` is replaced to pass it; `001e` adds
+  `_delta_fetch_log`, which the listener now reads, so re-apply the framework (or
+  `bunx @blueshed/delta init`) before running this release's listener. The every-backend copy
+  check now reopens each document afresh (closed first), since a custom document's own open
+  answered from the copy it kept of what it told.
 - **`bun.lock` matches `package.json`** (todo #49): it lacked the optional `@electric-sql/pglite`
   peer, so every `bun install` in a fresh checkout changed it.
 - **`bun run test` runs every file that needs no Postgres server** (todo #48): it named 8 of the
@@ -67,8 +87,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trip claimed through `trip:2` (`replace /trips/owner_id`), and its undo did not bring it
   back, until reopened; the same write through a list was heard (todo #30). The row is now
   tested at whatever path it was told, the root's id being its own. On Postgres it was heard
-  only when another document that holds the row had been opened; it still hears a change once
-  for each document told of it (the reference's *Fan-out* says what that means).
+  only when another document that holds the row had been opened; it still heard a change once
+  for each document told of it, until todo #44 (Unreleased).
 - **A path's id is the number its digits name, up to 2^53 - 1, on every backend; past that it
   is a 400** (todo #50). SQLite and the JSON file read a path's digits as a number only up to
   15 of them, so `add /events/1000000000000000` (a client minting ids from `Date.now() * 1000`)

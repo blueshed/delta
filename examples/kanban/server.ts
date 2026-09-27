@@ -8,7 +8,7 @@
  *
  * No hand-written SQL in the write path. `docTypeFromDef` uses `delta_open`
  * + `delta_apply` under the hood. The listener is the framework's own —
- * it LISTENs on `delta_changes`, calls `delta_fetch_ops` on bump, and
+ * it LISTENs on `delta_changes`, fetches the logged ops on bump, and
  * `ws.publish(docName, {doc, ops})` reaches every subscriber of that doc.
  */
 import type { Pool } from "pg";

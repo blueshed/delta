@@ -3,10 +3,12 @@
 -- =========================================================================
 
 -- ---------------------------------------------------------------------------
--- _delta_bump_and_notify: bump version, log ops, fire NOTIFY — one place
+-- _delta_bump_and_notify: bump version, log ops, fire NOTIFY — one place.
+-- `p_applied` is the write as applied, for custom documents (the log's
+-- `applied`, 001a); the two-argument form logs none, and is heard as told.
 -- ---------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION _delta_bump_and_notify(p_doc TEXT, p_ops JSONB)
+CREATE OR REPLACE FUNCTION _delta_bump_and_notify(p_doc TEXT, p_ops JSONB, p_applied JSONB)
 RETURNS BIGINT AS $$
 DECLARE v_version BIGINT;
 BEGIN
@@ -14,8 +16,8 @@ BEGIN
     ON CONFLICT (doc_name) DO UPDATE SET version = _delta_versions.version + 1
     RETURNING version INTO v_version;
 
-  INSERT INTO _delta_ops_log (doc_name, version, ops)
-    VALUES (p_doc, v_version, p_ops);
+  INSERT INTO _delta_ops_log (doc_name, version, ops, applied)
+    VALUES (p_doc, v_version, p_ops, p_applied);
 
   PERFORM pg_notify('delta_changes',
     json_build_object('doc', p_doc, 'v', v_version)::text
@@ -24,6 +26,9 @@ BEGIN
   RETURN v_version;
 END;
 $$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION _delta_bump_and_notify(p_doc TEXT, p_ops JSONB)
+RETURNS BIGINT LANGUAGE sql AS $$ SELECT _delta_bump_and_notify(p_doc, p_ops, NULL); $$;
 
 -- ---------------------------------------------------------------------------
 -- _delta_load_collection: recursively load a collection's rows as a JSONB map.

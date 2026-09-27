@@ -107,7 +107,7 @@ interface DocState {
   pending: boolean;
 }
 
-/** delta_fetch_ops caps each call at this many rows; a full page means there may be more. */
+/** _delta_fetch_log (delta_fetch_ops' rows) caps each call at this many; a full page means there may be more. */
 const FETCH_PAGE = 1000;
 
 export async function createDocListener<I = unknown>(
@@ -309,7 +309,7 @@ export async function createDocListener<I = unknown>(
   }
 
   // Drain a doc's ops to its subscribers. Loops while a full page comes back
-  // (a backlog larger than delta_fetch_ops' LIMIT) and re-runs if another
+  // (a backlog larger than the fetch's LIMIT) and re-runs if another
   // notification arrived mid-drain (the coalesced `pending` flag). Caller owns
   // the `notifying` guard.
   async function drainDoc(docName: string, state: DocState) {
@@ -318,7 +318,7 @@ export async function createDocListener<I = unknown>(
       let pageRows = FETCH_PAGE;
       while (pageRows >= FETCH_PAGE) {
         const { rows } = await pool.query(
-          "SELECT version, ops FROM delta_fetch_ops($1, $2)",
+          "SELECT version, ops, applied FROM _delta_fetch_log($1, $2)",
           [docName, state.version],
         );
         pageRows = rows.length;
@@ -332,7 +332,13 @@ export async function createDocListener<I = unknown>(
             ws.publish(docName, { doc: docName, ops: row.ops, v: Number(row.version) });
           }
           state.version = row.version;
-          customFanOut(row.ops as DeltaOp[]);
+          // A custom document hears each write once, as it was applied: the
+          // writer's entry carries it (`applied`), each other told document's
+          // entry of the write carries none ([]). Told, a row that left a
+          // document is a remove, which is not a delete, and a row told to two
+          // documents would be heard twice (todo #44). An entry logged some
+          // other way carries null, and is heard as told.
+          customFanOut((row.applied ?? row.ops) as DeltaOp[]);
         }
       }
     } while (state.pending);

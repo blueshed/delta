@@ -3,9 +3,10 @@
  *
  * Same two doc types, same client code. Server-side swap:
  *   createDocListener(ws, pool, { custom: [sitesInBbox] })
- *     └─ LISTENs on delta_changes, fetches ops via delta_fetch_ops,
- *        fans the ops out to direct subscribers AND runs the custom
- *        doc predicate for every open bbox view on this Bun process.
+ *     └─ LISTENs on delta_changes, fetches the logged ops,
+ *        fans them out to direct subscribers AND runs the custom
+ *        doc predicate, once per write, for every open bbox view on
+ *        this Bun process.
  *
  * Run (assumes compose.yml is up and `sites.sql` fixture is applied):
  *

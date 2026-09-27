@@ -15,6 +15,17 @@ RETURNS TABLE(version BIGINT, ops JSONB) AS $$
    LIMIT 1000;
 $$ LANGUAGE sql STABLE;
 
+-- _delta_fetch_log: the listener's catch-up -- delta_fetch_ops' rows, each with
+-- the write it carries for the custom documents (`applied`, 001a).
+CREATE OR REPLACE FUNCTION _delta_fetch_log(p_doc_name TEXT, p_since BIGINT)
+RETURNS TABLE(version BIGINT, ops JSONB, applied JSONB) AS $$
+  SELECT l.version, l.ops, l.applied
+    FROM _delta_ops_log l
+   WHERE l.doc_name = p_doc_name AND l.version > p_since
+   ORDER BY l.version
+   LIMIT 1000;
+$$ LANGUAGE sql STABLE;
+
 -- ---------------------------------------------------------------------------
 -- delta_open_at: time-travel — load a doc as it existed at a point in time
 -- ---------------------------------------------------------------------------

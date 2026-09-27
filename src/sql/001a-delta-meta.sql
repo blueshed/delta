@@ -37,6 +37,15 @@ CREATE TABLE IF NOT EXISTS _delta_ops_log (
 CREATE INDEX IF NOT EXISTS idx_delta_ops_log_fetch
   ON _delta_ops_log (doc_name, version);
 
+-- The write itself, once, for the custom documents that watch its rows (todo
+-- #44): on the writer's entry, the ops as delta_apply applied them -- each row
+-- it changed as it now is, or its remove -- so a custom document hears a write
+-- once, as on SQLite, and not once for each document it was told to (where a
+-- row that left a document is a remove, which is not a delete). '[]' on the
+-- other documents' entries of the same write; NULL on an entry logged some
+-- other way (a direct _delta_bump_and_notify), which is heard as told.
+ALTER TABLE _delta_ops_log ADD COLUMN IF NOT EXISTS applied JSONB;
+
 -- =========================================================================
 -- Pure helpers — composed by every read/write/ops function below
 -- =========================================================================

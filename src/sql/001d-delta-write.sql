@@ -152,9 +152,12 @@ $$ LANGUAGE plpgsql STABLE;
 -- the document's root, a replace of the root (null when it leaves). The
 -- writer's document is always told, and told first; each other document is
 -- told only what concerns it, with a version of its own, one per write.
+-- `p_applied`, the write as applied, is logged once, on the writer's entry,
+-- for the custom documents that watch the rows (001a's `applied`), and '[]' on
+-- every other document's; the two-argument form logs none.
 -- ---------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION _delta_tell(p_writer TEXT, p_touched JSONB)
+CREATE OR REPLACE FUNCTION _delta_tell(p_writer TEXT, p_touched JSONB, p_applied JSONB)
 RETURNS BIGINT AS $$
 DECLARE
   v_rows    JSONB := '[]'::jsonb;
@@ -206,14 +209,17 @@ BEGIN
       END IF;
     END LOOP;
     IF v_target = p_writer THEN
-      v_version := _delta_bump_and_notify(p_writer, v_told);
+      v_version := _delta_bump_and_notify(p_writer, v_told, p_applied);
     ELSIF jsonb_array_length(v_told) > 0 THEN
-      PERFORM _delta_bump_and_notify(v_target, v_told);
+      PERFORM _delta_bump_and_notify(v_target, v_told, CASE WHEN p_applied IS NOT NULL THEN '[]'::jsonb END);
     END IF;
   END LOOP;
   RETURN v_version;
 END;
 $$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION _delta_tell(p_writer TEXT, p_touched JSONB)
+RETURNS BIGINT LANGUAGE sql AS $$ SELECT _delta_tell(p_writer, p_touched, NULL); $$;
 
 -- ---------------------------------------------------------------------------
 -- delta_apply: apply delta ops to relational tables, bump version, NOTIFY
@@ -581,8 +587,9 @@ BEGIN
 
   -- Told: the writer's document and every other that holds a row changed,
   -- each what changed for it. The answer (and the ledger) keep the ops as
-  -- written, so an undo walks back exactly what was done.
-  v_version := _delta_tell(p_doc_name, v_touched);
+  -- written, so an undo walks back exactly what was done -- and so does the
+  -- writer's entry in the log, once, for the custom documents (todo #44).
+  v_version := _delta_tell(p_doc_name, v_touched, v_broadcast_ops);
   RETURN jsonb_build_object('version', v_version, 'ops', v_broadcast_ops);
 END;
 $$ LANGUAGE plpgsql;

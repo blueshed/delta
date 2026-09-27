@@ -84,7 +84,8 @@ const inboxDoc = <Q>(query: Q) => ({
 });
 const householdsTable = pathSchema.tables.households!.name;
 export const sqliteInbox = inboxDoc((db: any, email: string) => ({ households: db.query(`SELECT * FROM ${householdsTable} WHERE email = ?`).all(email) }));
-export const postgresInbox = inboxDoc(async (pool: any, email: string) => ({ households: (await pool.query(`SELECT * FROM ${householdsTable} WHERE email = $1`, [email])).rows }));
+// each row as JSON, as a document reads it: pg gives a bare BIGINT column as text
+export const postgresInbox = inboxDoc(async (pool: any, email: string) => ({ households: (await pool.query(`SELECT to_jsonb(h) AS row FROM ${householdsTable} h WHERE email = $1`, [email])).rows.map((r: any) => r.row) }));
 
 /** Rows as every backend is seeded with them: through `importTables`, which sets each sequence past its rows. */
 export interface Snapshot {
@@ -169,13 +170,16 @@ export async function openAll(p: PathProcess, docs: string[]): Promise<Map<strin
 /**
  * Each copy, with what its channel was told since `openAll` applied in order,
  * equals a fresh open. A document whose root row is gone opens as 404; its
- * copy must then have been told its root is null.
+ * copy must then have been told its root is null. The fresh open is a real
+ * one: the document is closed first, so no backend answers from a copy of its
+ * own -- a custom document's is the one it keeps from what it told (todo #44).
  */
 export async function assertCopiesHold(b: PathBackend, copies: Map<string, any>): Promise<void> {
   await b.quiet();
   for (const [doc, opened] of copies) {
     const copy = structuredClone(opened);
     for (const h of b.process.heard.filter((m) => m.channel === doc)) applyOps(copy, h.data.ops);
+    await b.process.call("close", { doc });
     const fresh = await b.process.call("open", { doc });
     if (fresh.error?.code === 404) {
       const root = Object.keys(opened).find((k) => opened[k] && typeof opened[k] === "object" && "id" in opened[k]);
@@ -704,6 +708,42 @@ export function fanOutCases(backend: () => PathBackend): void {
         [{ op: "add", path: "/households/1", value: household(1, "new@x") }],
         [{ op: "remove", path: "/households/1" }],
       ]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("told through two documents, a write is heard once: the household's own and the board's, one add to the inbox it joins", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-household:1", "fo-board:1", "fo-inbox:a@x", "fo-inbox:new@x"]);
+      await write(b.process, "fo-household:1", [{ op: "replace", path: "/households/email", value: "new@x" }]);
+      await expectTold(b, "fo-inbox:a@x", [[{ op: "remove", path: "/households/1" }]]);
+      await expectTold(b, "fo-inbox:new@x", [[{ op: "add", path: "/households/1", value: household(1, "new@x") }]]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a household moved to the other wedding through its own document, both boards open, still matches: the inbox is told one replace and keeps it", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-household:1", "fo-board:1", "fo-board:2", "fo-inbox:a@x"]);
+      await write(b.process, "fo-household:1", [{ op: "replace", path: "/households/weddings_id", value: 2 }]);
+      await expectTold(b, "fo-board:1", [[{ op: "remove", path: "/households/1" }]]);
+      await expectTold(b, "fo-inbox:a@x", [[{ op: "replace", path: "/households/1", value: household(1, "a@x", 2) }]]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a household that leaves the only document open over it, still matching, is not taken for removed: the inbox is told a replace and keeps it", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-inbox:a@x"]);
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/weddings_id", value: 2 }]);
+      await expectTold(b, "fo-board:1", [[{ op: "remove", path: "/households/1" }]]);
+      await expectTold(b, "fo-inbox:a@x", [[{ op: "replace", path: "/households/1", value: household(1, "a@x", 2) }]]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a household removed through the board, its own document open too, leaves the inbox once", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-household:1", "fo-inbox:a@x"]);
+      await write(b.process, "fo-board:1", [{ op: "remove", path: "/households/1" }]);
+      await expectTold(b, "fo-household:1", [[{ op: "replace", path: "/households", value: null }]]);
+      await expectTold(b, "fo-inbox:a@x", [[{ op: "remove", path: "/households/1" }]]);
       await assertCopiesHold(b, copies);
     });
   });

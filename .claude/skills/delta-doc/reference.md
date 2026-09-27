@@ -519,7 +519,7 @@ A parent and a child added in one write arrive parent first; a removal's cascade
 
 **Where it is worked out.** On Postgres, in the database: `delta_apply` asks `_delta_holders` for each changed row before and after, and `_delta_tell` logs each document's ops and NOTIFYs its name -- so every process's listener, and a reader catching up from `delta_fetch_ops`, hears it. The documents considered are those ever opened (a name in `_delta_versions`) and the writer's. On SQLite and the JSON file, in the process, over the documents open there; each told document's copy is then read again from the tables.
 
-**Custom read docs** hear writes to the collections they `watch`, on both backends (membership), or recompute on them (Postgres). On SQLite and the JSON file a membership doc hears each write once, as the writer applied it: a row whichever document it was written through, a single document's root (`replace /<root>`) included, and its undo. On Postgres it hears each document the write was told to, one after another, so it can hear one change more than once (an `add`, then a `replace` of the same row), and a row that leaves one of those documents -- its parent key rewritten -- is taken out as if removed, though it still matches, and by the order the documents are told in can stay out; reopen it where that matters. `tests/helpers/path.ts` asks every backend a write through a single document's root, with no other holder open, and its undo.
+**Custom read docs** hear writes to the collections they `watch`, on every backend (membership), or recompute on them (Postgres). A membership doc hears each write once, as the writer applied it, however many documents it was told to: a row whichever document it was written through, a single document's root (`replace /<root>`) included, and its undo. Each row the write changed is tested as it now is -- it matches: an `add`, or a `replace` if the doc holds it; it no longer matches, or is gone: a `remove` -- so a row that leaves a document (its parent key rewritten) is not taken for removed while it still matches. On Postgres the writer's entry in `_delta_ops_log` carries the write as applied (`applied`; each other told document's entry, `[]`), so every process's listener tests it once. `tests/helpers/path.ts` asks every backend, a custom doc's copy held against one opened afresh.
 
 ## Authentication
 
@@ -936,6 +936,7 @@ Apply `src/sql/001a-001g-*.sql` alphabetically to every database — idempotent.
 | `delta_open_at(doc_name, timestamptz)` | same, at a historical instant (temporal docs only) |
 | `delta_apply(doc_name, ops jsonb)` | applies ops, writes `_delta_ops_log`, NOTIFYs `delta_changes` |
 | `delta_fetch_ops(doc_name, since_version)` | returns (version, ops) rows after a base version |
+| `_delta_fetch_log(doc_name, since_version)` | the listener's: the same rows with `applied`, the write as applied on the writer's entry (`[]` on the others), for custom docs |
 | `delta_snapshot(name, at)` | pins a timestamp to a label |
 | `delta_resolve_snapshot(name)` | looks up a pinned timestamp |
 | `delta_prune_ops(keep_interval interval)` | trims `_delta_ops_log` older than interval |
