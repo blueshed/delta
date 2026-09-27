@@ -520,8 +520,8 @@ export function registerDocs(
           // Add row
           const row = { ...((op as any).value as Record<string, unknown>) };
           // A list-mode document's root row is given its scope's equality bindings, as on Postgres:
-          // as the name gives them, each column keeping it as its type (the row is read back).
-          if (list && collKey === def.root) Object.assign(row, scope.values);
+          // each as its column takes the name's text (a boolean's "0" is false), and the row is read back.
+          if (list && collKey === def.root) for (const [col, text] of Object.entries(scope.values)) row[col] = scopeValue(table, col, text);
           // A DIRECT child's FK is forced to `rootId` by insertCollectionRow, but a
           // grandchild's comes verbatim from the client. Unchecked, that grafts the
           // new row onto another doc's parent — a cross-doc write. Require the named
@@ -1686,6 +1686,21 @@ function encodeValue(table: ResolvedTable, col: string, value: unknown): any {
     return value == null ? null : (value ? 1 : 0);
   }
   return value ?? null;
+}
+
+/**
+ * A scope's value, text from the document's name, as its column takes it -- as
+ * Postgres casts the text: a boolean from 1/0, t/f, true/false, y/n, yes/no,
+ * on/off; a json column's as JSON, as the scope's condition reads it; a text or
+ * a time as the text; a number, an id or a parent key as an id is kept.
+ */
+function scopeValue(table: ResolvedTable, col: string, text: string): unknown {
+  switch (Object.hasOwn(table.columns, col) ? table.columns[col]!.type : undefined) {
+    case "boolean": return /^(1|t|true|y|yes|on)$/i.test(text) ? true : /^(0|f|false|n|no|off)$/i.test(text) ? false : text;
+    case "json": try { return JSON.parse(text); } catch { return text; }
+    case "text": case "timestamptz": return text;
+    default: return rowId(text);
+  }
 }
 
 function decodeRow(table: ResolvedTable, row: any) {

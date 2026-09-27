@@ -41,8 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `"10"`, and a parent key written as text (`replace /events/63/leg_id "5"`) with `"5"` where
   they say `5`; undo's guard then found a conflict where nothing had changed (todo #36). Each
   written row is now read back, as Postgres's `RETURNING` reads it, so the echo, the ledger's
-  entry and a later `open` agree. A list-mode add's scope values go in as the name gives them,
-  and each column keeps its own as its type.
+  entry and a later `open` agree. A list-mode add is given each scope value as its column takes
+  the name's text, as Postgres casts it: a `boolean`'s `"0"` or `"false"` is false (any text was
+  stored as true), a `text` column's `"10"` is `"10"`, a `json` column's `"5"` is 5.
 - **A custom document hears a write to a single document's root row** (SQLite and Postgres).
   The membership fan-out took only `/<coll>/<id>` ops, and a root write is told as
   `replace /<root>`, so `defineCustomDoc("unclaimed:", { watch: ["trips"], matches })` kept a

@@ -29,7 +29,8 @@ import { waitFor } from "../setup";
  * A wedding and what hangs off it. households, courses and notes are children
  * of the wedding; drinks are grandchildren (children of a course); tags have
  * no parent, so every document that includes them holds all of them; notes are
- * temporal (a remove closes the row; its history stays).
+ * temporal (a remove closes the row; its history stays); seats carry the other
+ * column types: an integer, a boolean and a json column.
  */
 export const pathSchema = defineSchema({
   weddings: { table: "fo_weddings", columns: { name: "text" }, temporal: false },
@@ -38,6 +39,7 @@ export const pathSchema = defineSchema({
   drinks: { table: "fo_drinks", parent: "courses", columns: { name: "text" }, temporal: false },
   tags: { table: "fo_tags", columns: { label: "text" }, temporal: false },
   notes: { table: "fo_notes", parent: "weddings", columns: { text: "text" }, temporal: true },
+  seats: { table: "fo_seats", parent: "weddings", columns: { table_no: "integer", kept: "boolean", wishes: "json?" }, temporal: false },
 });
 
 /** Several documents over the same rows, cut different ways. */
@@ -61,6 +63,10 @@ export const pathDocs = [
   defineDoc("fo-courses-like:", { root: "courses", include: [], scope: { name: "like:start" } }),
   // list mode by an equality: the tags of one label, which a tag added through it is given
   defineDoc("fo-tags-labelled:", { root: "tags", include: [], scope: { label: ":label" } }),
+  // the seating plan: the wedding and its seats
+  defineDoc("fo-seating:", { root: "weddings", include: ["seats"] }),
+  // list mode by a boolean: the seats kept (1) or not (0), which a seat added through it is given
+  defineDoc("fo-seats-kept:", { root: "seats", include: [], scope: { kept: ":kept" } }),
 ];
 
 /**
@@ -97,6 +103,7 @@ export const pathSeed: Snapshot = {
     drinks: [{ id: 1, courses_id: 1, name: "Sherry" }, { id: 2, courses_id: 2, name: "Water" }],
     tags: [{ id: 1, label: "red" }],
     notes: [{ id: 1, weddings_id: 1, text: "bring chairs", valid_from: "2020-01-01T00:00:00.000Z", valid_to: null }],
+    seats: [{ id: 1, weddings_id: 1, table_no: 3, kept: true, wishes: { veg: true } }],
   },
 };
 
@@ -104,6 +111,7 @@ export const pathSeed: Snapshot = {
 export const course = (id: number, name: string, wedding = 1) => ({ id, weddings_id: wedding, name });
 export const drink = (id: number, courseId: number, name: string) => ({ id, courses_id: courseId, name });
 export const household = (id: number, email: string, wedding = 1) => ({ id, weddings_id: wedding, email });
+export const seat = (id: number, tableNo: number, kept: boolean, wishes: unknown = null, wedding = 1) => ({ id, weddings_id: wedding, table_no: tableNo, kept, wishes });
 
 // ---------------------------------------------------------------------------
 // The adapter a backend supplies
@@ -511,6 +519,18 @@ export function fanOutCases(backend: () => PathBackend): void {
       expect(result.ops).toEqual([{ op: "add", path: "/tags/2", value: { id: 2, label: "10" } }]);
       const undone = await b.process.call("undo", { cursor: "s1" });
       expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "remove", path: "/tags/2" }], conflict: undefined });
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a value kept as its column's type is told and undone as kept: a boolean scope's \"0\" is false", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-seats-kept:0", "fo-seats-kept:1", "fo-seating:1"]);
+      const result = await write(b.process, "fo-seats-kept:0", [{ op: "add", path: "/seats/-", value: { weddings_id: 1, table_no: 4 } }], { cursor: "s1" });
+      expect(result.ops).toEqual([{ op: "add", path: "/seats/2", value: seat(2, 4, false) }]);
+      const undone = await b.process.call("undo", { cursor: "s1" });
+      expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "remove", path: "/seats/2" }], conflict: undefined });
+      await expectTold(b, "fo-seats-kept:0", [result.ops, [{ op: "remove", path: "/seats/2" }]]);
+      await expectSilent(b, "fo-seats-kept:1");
       await assertCopiesHold(b, copies);
     });
 
