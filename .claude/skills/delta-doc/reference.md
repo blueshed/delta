@@ -1069,8 +1069,12 @@ signal the app's railroad does not know, and the page sits on "connecting…" wi
 cd ../delta && bun pm pack && cd ../app && bun add ../delta/blueshed-delta-<version>.tgz
 ```
 
-After an edit, pack again and `bun add` the tarball again: a plain `bun install` keeps the old
-tarball's contents. railroad's skill has the same recipe under *Local development across repos*.
+After an edit, pack again, then remove the package and add the tarball:
+`bun remove @blueshed/delta && bun add ../delta/blueshed-delta-<version>.tgz`. `bun.lock` pins
+the first tarball by its integrity hash, so `bun add` of it again, `bun install --force` and
+deleting `node_modules/@blueshed/delta` all keep the old contents (Bun 1.4.2); deleting
+`bun.lock` works too. railroad's skill has the same recipe under *Local development across
+repos*.
 
 ## Wire-level protocol
 

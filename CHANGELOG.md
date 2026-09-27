@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collections the document includes: removed through a list that does not include them, a
   row's children stay. It says how to take them too, and that a single document's root is not
   removed through it on the JSON file and SQLite (400), where Postgres removes it.
+- **The repacked-tarball recipe refreshes the app's copy (todo #41).** `bun add` of the same
+  tarball again keeps the old contents, as `bun install --force` does, since `bun.lock` pins it
+  by its integrity hash; *Local development across repos* now says `bun remove` the package,
+  then `bun add` the tarball.
 
 ## [0.9.0] - 2026-09-25
 
