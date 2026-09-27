@@ -299,6 +299,18 @@ export function documentCases(backend: () => PathBackend): void {
       expect(await code([{ op: "remove", path: "/courses/2" }])).toBe(404); // the other wedding's: not in this document
     });
 
+    test("a parent key is never null, nor anything but an id: refused as a mistake (400) in every form of replace", async () => {
+      const b = backend();
+      await openAll(b.process, ["fo-board:1", "fo-household:1"]);
+      const code = async (doc: string, ops: unknown[]) => (await b.process.call("delta", { doc, ops })).error?.code;
+      expect(await code("fo-board:1", [{ op: "replace", path: "/drinks/1/courses_id", value: null }])).toBe(400);
+      expect(await code("fo-board:1", [{ op: "replace", path: "/households/1", value: { weddings_id: null } }])).toBe(400);
+      expect(await code("fo-household:1", [{ op: "replace", path: "/households/weddings_id", value: null }])).toBe(400);
+      expect(await code("fo-household:1", [{ op: "replace", path: "/households", value: { weddings_id: null } }])).toBe(400);
+      expect(await code("fo-board:1", [{ op: "replace", path: "/drinks/1/courses_id", value: 1.5 }])).toBe(400);
+      expect(await code("fo-household:1", [{ op: "replace", path: "/households/weddings_id", value: true }])).toBe(400);
+    });
+
     test("every change a document is told carries its next version, and an open reads the version it is at", async () => {
       const b = backend();
       const before = (await b.process.call("open", { doc: "fo-menu:1" })).result._v as number;

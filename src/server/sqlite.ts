@@ -1249,6 +1249,12 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
     // Own columns only: `table.columns.toString` is Object.prototype's, not a column.
     const columnOf = (k: string): ColumnDef | undefined => (Object.hasOwn(table.columns, k) ? table.columns[k] : undefined);
     const isKnownKey = (k: string) => k === "id" || k === fkCol || columnOf(k) !== undefined;
+    // A field's value: a column's by its type; the parent key's as a key (the row moves).
+    const fieldErr = (field: string, value: unknown): string | null => {
+      if (field === fkCol) return validateParentKey(field, value);
+      const colDef = columnOf(field);
+      return colDef ? validateFieldType(colDef, field, value) : null;
+    };
 
     // One-segment paths: /<root> is a whole-root partial merge (replace only);
     // /<coll> on an included collection has no meaning for a client op — reject
@@ -1271,9 +1277,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
         if (!isKnownKey(key)) errors.push({ path: op.path, message: `Unknown field: ${key}` });
       }
       for (const [field, fieldValue] of Object.entries(value)) {
-        const colDef = columnOf(field);
-        if (!colDef) continue;
-        const typeErr = validateFieldType(colDef, field, fieldValue);
+        const typeErr = fieldErr(field, fieldValue);
         if (typeErr) errors.push({ path: `${op.path}/${field}`, message: typeErr });
       }
       continue;
@@ -1288,13 +1292,11 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
         continue;
       }
       const field = parts[1]!;
-      if (field === fkCol) continue;
-      const colDef = columnOf(field);
-      if (!colDef) {
+      if (field !== fkCol && !columnOf(field)) {
         errors.push({ path: op.path, message: `Unknown field: ${field}` });
         continue;
       }
-      const typeErr = validateFieldType(colDef, field, (op as any).value);
+      const typeErr = fieldErr(field, (op as any).value);
       if (typeErr) errors.push({ path: op.path, message: typeErr });
       continue;
     }
@@ -1332,11 +1334,10 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
         }
       }
 
-      // Type-check the fields that map to declared columns.
+      // Type-check the fields that map to declared columns, and a replace's
+      // parent key (an add's is its document's root, or found in scope).
       for (const [field, fieldValue] of Object.entries(value)) {
-        const colDef = columnOf(field);
-        if (!colDef) continue; // id / FK — not schema-typed
-        const typeErr = validateFieldType(colDef, field, fieldValue);
+        const typeErr = op.op === "add" && field === fkCol ? null : fieldErr(field, fieldValue);
         if (typeErr) errors.push({ path: `${op.path}/${field}`, message: typeErr });
       }
     }
@@ -1344,18 +1345,25 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
     // Field-level replace: /<coll>/<id>/field -- a column, or the parent key (the row moves, as on Postgres)
     if (op.op === "replace" && parts.length === 3) {
       const field = parts[2]!;
-      if (field === fkCol) continue;
-      const colDef = columnOf(field);
-      if (!colDef) {
+      if (field !== fkCol && !columnOf(field)) {
         errors.push({ path: op.path, message: `Unknown field: ${field}` });
         continue;
       }
-      const typeErr = validateFieldType(colDef, field, (op as any).value);
+      const typeErr = fieldErr(field, (op as any).value);
       if (typeErr) errors.push({ path: op.path, message: typeErr });
     }
   }
 
   return errors;
+}
+
+/**
+ * A parent key written: never null (its column is NOT NULL, as on Postgres),
+ * and an id -- an integer, or text, as SQLite keeps a text id (a session's token).
+ */
+function validateParentKey(field: string, value: unknown): string | null {
+  if (value === null || value === undefined) return `${field} cannot be null`;
+  return typeof value === "string" || Number.isInteger(value) ? null : `${field} must be an id: an integer, or text`;
 }
 
 function validateFieldType(def: ColumnDef, field: string, value: unknown): string | null {

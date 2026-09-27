@@ -28,7 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SQLite: a single document can write its root row's parent key as a field**
   (`replace /households/weddings_id` on `household:1`): the row moves, as on Postgres, and as
   the whole-root merge (`replace /households { weddings_id }`) already moved it. It was refused
-  as an unknown field (todo #37).
+  as an unknown field (todo #37). A parent key written as null, or as anything but an id (an
+  integer, or text as SQLite keeps a text id), is now a 400 in every form of replace -- the
+  field, the row, the root's field, the root -- as on Postgres; null was a 500 at the table's
+  `NOT NULL`, and a number like 1.5 was stored.
 - **SQLite: a row added to a list-mode document need not repeat its scope's values**
   (`add /todos/-` on `todos:10`, scope `{ owner_id: ":id" }`): the add is given them from the
   name, as the reference says and as Postgres checks after it stamps them. `validateOps` ran
