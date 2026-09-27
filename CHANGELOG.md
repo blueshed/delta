@@ -54,8 +54,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its scope's equality values, which count as given. Without `list` a document is read as
   single, and every write the old one took that the database takes, it still takes. A row not
   there (404), one already there (409) and a value its column cannot cast stay the database's.
-  `tests/path-pglite.test.ts` holds its answers against `delta_apply`'s for 71 writes through
+  `tests/path-pglite.test.ts` holds its answers against `delta_apply`'s for 75 writes through
   the path's documents.
+- **Postgres: a row keeps its id** (todo #47's review). A replace whose value carried an `id`
+  renumbered the row: `replace /households/1 { id: 9, email }` through the board, or the root's
+  merge `replace /households { id: 9 }` through `household:1`, deleted row 1 and inserted row
+  9, told as `/households/1`; `replace /households/1/id 9` did the same. On SQLite and the JSON
+  file the row keeps its id, and `id` is not a field (400). `delta_apply` (`001d`, replaced in
+  place) now keeps the id its path names in a merge, as an add does, and refuses `id` as a field
+  (400), and `validateOps` says so ahead.
 - **`bun.lock` matches `package.json`** (todo #49): it lacked the optional `@electric-sql/pglite`
   peer, so every `bun install` in a fresh checkout changed it.
 - **`bun run test` runs every file that needs no Postgres server** (todo #48): it named 8 of the

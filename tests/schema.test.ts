@@ -309,6 +309,13 @@ describe("validateOps", () => {
       expect(validateOps(wedding, board, [{ op: "replace", path: "/households/1", value: 5 }]).length).toBe(1);
     });
 
+    test("a row keeps its id: one in a replace's value is taken (the path's wins), and id is not a field", () => {
+      expect(validateOps(wedding, board, [{ op: "replace", path: "/households/1", value: { id: 9, email: "q@x" } }])).toEqual([]);
+      expect(validateOps(wedding, household, [{ op: "replace", path: "/households", value: { id: 9 } }])).toEqual([]);
+      expect(messages(validateOps(wedding, board, [{ op: "replace", path: "/households/1/id", value: 9 }]))).toEqual(["Unknown field: id"]);
+      expect(messages(validateOps(wedding, household, [{ op: "replace", path: "/households/id", value: 9 }])).map((m) => m.split(" (")[0])).toEqual(["Unknown field: id"]);
+    });
+
     test("a column that is not nullable is not written null", () => {
       expect(messages(validateOps(wedding, board, [{ op: "replace", path: "/households/1/email", value: null }]))).toEqual(["email cannot be null"]);
       expect(messages(validateOps(wedding, board, [{ op: "add", path: "/households/-", value: { email: null } }]))).toEqual(["email cannot be null"]);

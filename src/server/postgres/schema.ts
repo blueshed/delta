@@ -91,7 +91,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
     const fk = table.parent?.fkColumn;
     const value = (op as any).value;
     const isObject = value !== null && typeof value === "object" && !Array.isArray(value);
-    // A value's keys (_delta_assert_fields): its columns, the row's id and parent key, a temporal row's validity.
+    // A value's keys (_delta_assert_fields): its columns, the row's id (the path's wins) and parent key, a temporal row's validity.
     const known = (k: string) => Object.hasOwn(table.columns, k) || k === "id" || k === fk || k === "valid_from" || k === "valid_to";
     // What a written field may hold, beyond its column's cast: a column that is
     // not nullable is never null (the table's NOT NULL); a parent key is an id.
@@ -121,7 +121,8 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
     // `replace /<root>/<field>` (a segment that is not an id) writes one field
     // -- a column, or the parent key: the row moves (#37).
     if (collKey === def.root && !opts.list && op.op === "replace" && (parts.length === 1 || (parts.length === 2 && !/^\d+$/.test(parts[1]!)))) {
-      if (parts.length === 2) rowErrs({ [parts[1]!]: value }, "replace");
+      if (parts[1] === "id") fail("Unknown field: id (a row keeps the id its path names)");
+      else if (parts.length === 2) rowErrs({ [parts[1]!]: value }, "replace");
       else if (!isObject) fail("Replace value must be an object");
       else rowErrs(value, "replace");
       continue;
@@ -135,7 +136,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
     if (op.op === "remove") continue;
     if (parts.length === 3) {
       const field = parts[2]!;
-      if (!known(field)) { fail(`Unknown field: ${field}`); continue; }
+      if (!known(field) || field === "id") { fail(`Unknown field: ${field}`); continue; }   // a row keeps the id its path names
       const err = fieldErr(field, value);
       if (err) fail(err);
       continue;

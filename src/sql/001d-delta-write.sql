@@ -322,8 +322,12 @@ BEGIN
        AND (array_length(v_parts, 1) = 1
             OR (array_length(v_parts, 1) = 2 AND v_parts[2] ~ '^\d+$' IS FALSE)) THEN
 
-      -- 2-segment /root/field: wrap into partial row
+      -- 2-segment /root/field: wrap into partial row. A row's id is not a
+      -- field: its path (here, the document's name) says it.
       IF array_length(v_parts, 1) = 2 THEN
+        IF v_parts[2] = 'id' THEN
+          RAISE EXCEPTION 'Unknown field: id (a row keeps the id its path names)' USING ERRCODE = '22023';
+        END IF;
         v_op := jsonb_set(v_op, '{value}', jsonb_build_object(v_parts[2], v_op->'value'));
       END IF;
       PERFORM _delta_assert_fields(v_coll_key, v_coll.columns_def, v_coll.parent_fk, v_op->'value');
@@ -346,8 +350,9 @@ BEGIN
       END IF;
       v_before := _delta_holders(v_coll_key, _delta_strip_temporal(v_row), p_doc_name);
 
-      -- Merge partial value
-      v_new_row := v_row || (v_op->'value');
+      -- Merge partial value. The row keeps its id: one in the value is the
+      -- document's, as an add's is the path's (it renumbered the row).
+      v_new_row := v_row || (v_op->'value') || jsonb_build_object('id', v_doc_id);
 
       IF v_coll.temporal THEN
         EXECUTE format(
@@ -516,8 +521,12 @@ BEGIN
           USING ERRCODE = 'P0002';
       END IF;
 
-      -- 3-segment: wrap single field into partial row value
+      -- 3-segment: wrap single field into partial row value. A row's id is
+      -- not a field: its path says it.
       IF array_length(v_parts, 1) = 3 THEN
+        IF v_parts[3] = 'id' THEN
+          RAISE EXCEPTION 'Unknown field: id (a row keeps the id its path names)' USING ERRCODE = '22023';
+        END IF;
         v_op := jsonb_set(v_op, '{value}', jsonb_build_object(v_parts[3], v_op->'value'));
       END IF;
       PERFORM _delta_assert_fields(v_coll_key, v_coll.columns_def, v_coll.parent_fk, v_op->'value');
@@ -539,8 +548,9 @@ BEGIN
       END IF;
       v_before := _delta_holders(v_coll_key, _delta_strip_temporal(v_row), p_doc_name);
 
-      -- Merge partial value into current row
-      v_new_row := v_row || (v_op->'value');
+      -- Merge partial value into current row. The row keeps its id: one in
+      -- the value is the path's, as an add's is (it renumbered the row).
+      v_new_row := v_row || (v_op->'value') || jsonb_build_object('id', v_id);
 
       IF v_coll.temporal THEN
         EXECUTE format(

@@ -345,6 +345,20 @@ export function documentCases(backend: () => PathBackend): void {
       expect(await code("fo-household:1", [{ op: "replace", path: "/households/weddings_id", value: true }])).toBe(400);
     });
 
+    test("a row keeps its id: one in a replace's value is the path's, as in an add's, and id is not a field (400)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-household:1"]);
+      const code = async (doc: string, ops: unknown[]) => (await b.process.call("delta", { doc, ops })).error?.code;
+      expect(await code("fo-board:1", [{ op: "replace", path: "/households/1/id", value: 9 }])).toBe(400);
+      expect(await code("fo-household:1", [{ op: "replace", path: "/households/id", value: 9 }])).toBe(400);
+      const row = await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1", value: { id: 9, email: "q@x" } }]);
+      expect(row.ops).toEqual([{ op: "replace", path: "/households/1", value: household(1, "q@x") }]);
+      const root = await write(b.process, "fo-household:1", [{ op: "replace", path: "/households", value: { id: 9, email: "r@x" } }]);
+      expect(root.ops).toEqual([{ op: "replace", path: "/households", value: household(1, "r@x") }]);
+      expect((await b.process.call("open", { doc: "fo-household:9" })).error?.code).toBe(404);
+      await assertCopiesHold(b, copies);
+    });
+
     test("every change a document is told carries its next version, and an open reads the version it is at", async () => {
       const b = backend();
       const before = (await b.process.call("open", { doc: "fo-menu:1" })).result._v as number;
