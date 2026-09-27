@@ -486,6 +486,28 @@ export function fanOutCases(backend: () => PathBackend): void {
       ]);
       await assertCopiesHold(b, copies);
     });
+
+    test("a value kept as its column's type is told and undone as kept: a scope's \"10\" in a text column stays \"10\"", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-tags-labelled:10", "fo-board:1"]);
+      const result = await write(b.process, "fo-tags-labelled:10", [{ op: "add", path: "/tags/-", value: {} }], { cursor: "s1" });
+      expect(result.ops).toEqual([{ op: "add", path: "/tags/2", value: { id: 2, label: "10" } }]);
+      const undone = await b.process.call("undo", { cursor: "s1" });
+      expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "remove", path: "/tags/2" }], conflict: undefined });
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a value kept as its column's type is told and undone as kept: a parent key written as \"10\" is the number 10", async () => {
+      const b = backend();
+      await b.process.call("open", { doc: "fo-board:1" });
+      await write(b.process, "fo-board:1", [{ op: "add", path: "/courses/10", value: { name: "Fish" } }]);
+      const copies = await openAll(b.process, ["fo-board:1", "fo-course:1", "fo-course:10"]);
+      const result = await write(b.process, "fo-board:1", [{ op: "replace", path: "/drinks/1/courses_id", value: "10" }], { cursor: "s1" });
+      expect(result.ops).toEqual([{ op: "replace", path: "/drinks/1", value: drink(1, 10, "Sherry") }]);
+      const undone = await b.process.call("undo", { cursor: "s1" });
+      expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "replace", path: "/drinks/1", value: drink(1, 1, "Sherry") }], conflict: undefined });
+      await assertCopiesHold(b, copies);
+    });
   });
 
   describe("who is not told", () => {

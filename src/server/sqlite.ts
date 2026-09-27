@@ -519,8 +519,9 @@ export function registerDocs(
         if (op.op === "add") {
           // Add row
           const row = { ...((op as any).value as Record<string, unknown>) };
-          // A list-mode document's root row is given its scope's equality bindings, as on Postgres.
-          if (list && collKey === def.root) Object.assign(row, Object.fromEntries(Object.entries(scope.values).map(([k, v]) => [k, rowId(v)])));
+          // A list-mode document's root row is given its scope's equality bindings, as on Postgres:
+          // as the name gives them, each column keeping it as its type (the row is read back).
+          if (list && collKey === def.root) Object.assign(row, scope.values);
           // A DIRECT child's FK is forced to `rootId` by insertCollectionRow, but a
           // grandchild's comes verbatim from the client. Unchecked, that grafts the
           // new row onto another doc's parent — a cross-doc write. Require the named
@@ -588,9 +589,10 @@ export function registerDocs(
       for (const [field, value] of rootFieldUpdates) updated[field] = value;
       if (rootTable.temporal) insertRow(db, rootTable, updated, ts);
       else updateRow(db, rootTable, rootId!, updated);
-      doc[def.root] = updated;
-      broadcastOps.push({ op: "replace", path: joinPath(def.root), value: updated });
-      touched.push({ coll: def.root, id: rootId!, before, after: updated });
+      const stored = readRow(rootTable, rootId!);   // as it is kept (a parent key's "5" is 5), as Postgres's RETURNING gives it
+      doc[def.root] = stored;
+      broadcastOps.push({ op: "replace", path: joinPath(def.root), value: stored });
+      touched.push({ coll: def.root, id: rootId!, before, after: stored });
     }
 
     // Apply batched field updates
@@ -609,9 +611,10 @@ export function registerDocs(
       }
       if (batch.table.temporal) insertRow(db, batch.table, updated, ts);
       else updateRow(db, batch.table, batch.id, updated);
-      doc[collKey][batch.id] = updated;
-      broadcastOps.push({ op: "replace", path: joinPath(collKey, String(batch.id)), value: updated });
-      touched.push({ coll: collKey, id: batch.id, before, after: updated });
+      const stored = readRow(batch.table, batch.id);   // as it is kept, as the root's above
+      doc[collKey][batch.id] = stored;
+      broadcastOps.push({ op: "replace", path: joinPath(collKey, String(batch.id)), value: stored });
+      touched.push({ coll: collKey, id: batch.id, before, after: stored });
     }
 
     return { applied: broadcastOps, touched };
@@ -1548,12 +1551,12 @@ function insertCollectionRow(
 
   insertRow(db, table, fullRow, ts);
 
-  // The row as a fresh read gives it -- its columns in the table's order -- so a
-  // row told of an add, and the same row read back (by an undo's inverse, a
-  // redo, a reopen), are the same row, keys and all.
-  const read: any = { id: fullRow.id };
-  if (table.parent) read[table.parent.fkColumn] = fullRow[table.parent.fkColumn];
-  for (const col of Object.keys(table.columns)) read[col] = fullRow[col];
+  // The row read back, as Postgres's RETURNING gives it: as it is kept (a
+  // scope's "10" in a text column is "10"), its columns in the table's order --
+  // so a row told of an add, the ledger's entry, and the same row read again
+  // (by an undo's guard and inverse, a redo, a reopen) are the same row, keys,
+  // values and all.
+  const read = db.query(`SELECT * FROM ${live} WHERE id = ?`).get(id);
   decodeRow(table, read);
   return read;
 }

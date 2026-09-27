@@ -34,6 +34,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name, as the reference says and as Postgres checks after it stamps them. `validateOps` ran
   before the stamping and refused a required one as missing (todo #39); it now counts the
   scope's equality bindings as given (`validateOps(schema, def, ops, { list, values })`).
+- **SQLite: a write's echo is the row as stored, not as sent**, as on Postgres. An added or
+  changed row was told as the object built for it, so a value its column keeps as another type
+  was told as sent: a list-mode add on `trips:10` (scope `{ owner_id: ":id" }`, a `text` column)
+  was echoed, broadcast and recorded with `owner_id: 10` where the table and the next `open` say
+  `"10"`, and a parent key written as text (`replace /events/63/leg_id "5"`) with `"5"` where
+  they say `5`; undo's guard then found a conflict where nothing had changed (todo #36). Each
+  written row is now read back, as Postgres's `RETURNING` reads it, so the echo, the ledger's
+  entry and a later `open` agree. A list-mode add's scope values go in as the name gives them,
+  and each column keeps its own as its type.
 
 ## [0.9.0] - 2026-09-25
 
