@@ -534,6 +534,16 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
+    test("a value kept as its column's type is told and undone as kept: a text scope's \"007\" stays \"007\"", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-tags-labelled:007", "fo-board:1"]);
+      const result = await write(b.process, "fo-tags-labelled:007", [{ op: "add", path: "/tags/-", value: {} }], { cursor: "s1" });
+      expect(result.ops).toEqual([{ op: "add", path: "/tags/2", value: { id: 2, label: "007" } }]);
+      const undone = await b.process.call("undo", { cursor: "s1" });
+      expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "remove", path: "/tags/2" }], conflict: undefined });
+      await assertCopiesHold(b, copies);
+    });
+
     test("a value kept as its column's type is told and undone as kept: a boolean scope's \"0\" is false", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-seats-kept:0", "fo-seats-kept:1", "fo-seating:1"]);
