@@ -11,7 +11,7 @@ import {
 import { openPglite } from "../src/server/pglite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
-import { pathCases, pathDocs, pathSchema, pathSeed, type PathBackend } from "./helpers/path";
+import { pathCases, pathDocs, pathSchema, pathSeed, postgresInbox, type PathBackend } from "./helpers/path";
 
 setLogLevel("silent");
 
@@ -38,7 +38,7 @@ beforeEach(async () => {
   const local = createLocal();
   const heard: { channel: string; data: any }[] = [];
   local.onPublish((channel, data) => heard.push({ channel, data }));
-  listeners.push(await createDocListener(local.server, pool, { ledger: true }));
+  listeners.push(await createDocListener(local.server, pool, { ledger: true, custom: [postgresInbox] }));
   backend = {
     process: { call: (action, msg) => local.call(action, msg), heard },
     // NOTIFY is heard after the write's commit, and fetched then: a beat.

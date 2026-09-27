@@ -407,12 +407,12 @@ export async function createDocListener<I = unknown>(
     for (const view of views.values()) viewsOf.set(view.docName, (viewsOf.get(view.docName) ?? 0) + 1);
     for (const op of ops) {
       const parts = splitPath(op.path);
-      if (parts.length < 2) continue;
+      // A row at whatever path the document was told it: /<coll>/<id>, or a
+      // single document's root, /<coll>, whose id is its own (as on SQLite).
       const coll = parts[0]!;
-      const id = parts[1]!;
-      if (!watchedCollections.has(coll)) continue;
-
       const row = (op as any).value as any | undefined;
+      const id = parts[1] ?? (row?.id != null ? String(row.id) : undefined);
+      if (id === undefined || !watchedCollections.has(coll)) continue;
 
       for (const [prefix, def] of customByPrefix) {
         if (!def.matches) continue; // recompute defs handled above

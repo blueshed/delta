@@ -43,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   written row is now read back, as Postgres's `RETURNING` reads it, so the echo, the ledger's
   entry and a later `open` agree. A list-mode add's scope values go in as the name gives them,
   and each column keeps its own as its type.
+- **A custom document hears a write to a single document's root row** (SQLite and Postgres).
+  The membership fan-out took only `/<coll>/<id>` ops, and a root write is told as
+  `replace /<root>`, so `defineCustomDoc("unclaimed:", { watch: ["trips"], matches })` kept a
+  trip claimed through `trip:2` (`replace /trips/owner_id`), and its undo did not bring it
+  back, until reopened; the same write through a list was heard (todo #30). The row is now
+  tested at whatever path it was told, the root's id being its own. On Postgres it was heard
+  only when another document that holds the row had been opened.
 
 ## [0.9.0] - 2026-09-25
 

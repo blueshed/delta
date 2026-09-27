@@ -519,7 +519,7 @@ A parent and a child added in one write arrive parent first; a removal's cascade
 
 **Where it is worked out.** On Postgres, in the database: `delta_apply` asks `_delta_holders` for each changed row before and after, and `_delta_tell` logs each document's ops and NOTIFYs its name -- so every process's listener, and a reader catching up from `delta_fetch_ops`, hears it. The documents considered are those ever opened (a name in `_delta_versions`) and the writer's. On SQLite and the JSON file, in the process, over the documents open there; each told document's copy is then read again from the tables.
 
-**Custom read docs** hear writes to the collections they `watch`, on both backends (membership), or recompute on them (Postgres). `tests/helpers/path.ts` asks every case of every backend.
+**Custom read docs** hear writes to the collections they `watch`, on both backends (membership), or recompute on them (Postgres): a row whichever document it was written through, a single document's root (`replace /<root>`) included, and its undo. `tests/helpers/path.ts` asks every case of every backend.
 
 ## Authentication
 

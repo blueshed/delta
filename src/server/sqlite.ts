@@ -934,15 +934,13 @@ export function registerDocs(
 
     for (const op of ops) {
       const parts = splitPath(op.path);
-      // We only handle /<coll>/<id> with a full row value (or a plain remove).
-      // Root-level or field-level paths are ignored — the writer's broadcastOps
-      // always carry full row values for add/replace.
-      if (parts.length < 2) continue;
+      // A row at whatever path the write told it: /<coll>/<id>, or a single
+      // document's root, /<coll>, whose id is its own. The writer's broadcastOps
+      // always carry full row values for add/replace (or a plain remove).
       const coll = parts[0]!;
-      const id = parts[1]!;
-      if (!watchedCollections.has(coll)) continue;
-
       const row = (op as any).value as any | undefined;
+      const id = parts[1] ?? (row?.id != null ? String(row.id) : undefined);
+      if (id === undefined || !watchedCollections.has(coll)) continue;
 
       // Bucket open docs by custom type.
       for (const [prefix, def] of customByPrefix) {

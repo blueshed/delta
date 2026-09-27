@@ -63,6 +63,23 @@ export const pathDocs = [
   defineDoc("fo-tags-labelled:", { root: "tags", include: [], scope: { label: ":label" } }),
 ];
 
+/**
+ * A custom document (`defineCustomDoc`, membership) beside them: the
+ * households of one email, told of a write to a household row whichever
+ * document it came through. Only the first read differs by backend (SQLite and
+ * the JSON file read their database, Postgres its pool); the rest is the same.
+ */
+const inboxDoc = <Q>(query: Q) => ({
+  prefix: "fo-inbox:",
+  watch: ["households"],
+  parse: (email: string) => email,
+  query,
+  matches: (_coll: string, row: any, email: string) => row.email === email,
+});
+const householdsTable = pathSchema.tables.households!.name;
+export const sqliteInbox = inboxDoc((db: any, email: string) => ({ households: db.query(`SELECT * FROM ${householdsTable} WHERE email = ?`).all(email) }));
+export const postgresInbox = inboxDoc(async (pool: any, email: string) => ({ households: (await pool.query(`SELECT * FROM ${householdsTable} WHERE email = $1`, [email])).rows }));
+
 /** Rows as every backend is seeded with them: through `importTables`, which sets each sequence past its rows. */
 export interface Snapshot {
   /** Rows by collection key, each with its id (a number) and its parent key. */
@@ -506,6 +523,25 @@ export function fanOutCases(backend: () => PathBackend): void {
       expect(result.ops).toEqual([{ op: "replace", path: "/drinks/1", value: drink(1, 10, "Sherry") }]);
       const undone = await b.process.call("undo", { cursor: "s1" });
       expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "replace", path: "/drinks/1", value: drink(1, 1, "Sherry") }], conflict: undefined });
+      await assertCopiesHold(b, copies);
+    });
+  });
+
+  describe("a custom document that watches the rows", () => {
+    test("a household's email written through its own document, as its root, leaves the one inbox and joins the other; undone, it goes back", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-household:1", "fo-inbox:a@x", "fo-inbox:new@x"]);
+      await write(b.process, "fo-household:1", [{ op: "replace", path: "/households/email", value: "new@x" }], { cursor: "s1" });
+      const undone = await b.process.call("undo", { cursor: "s1" });
+      expect(undone.result.conflict).toBeUndefined();
+      await expectTold(b, "fo-inbox:a@x", [
+        [{ op: "remove", path: "/households/1" }],
+        [{ op: "add", path: "/households/1", value: household(1, "a@x") }],
+      ]);
+      await expectTold(b, "fo-inbox:new@x", [
+        [{ op: "add", path: "/households/1", value: household(1, "new@x") }],
+        [{ op: "remove", path: "/households/1" }],
+      ]);
       await assertCopiesHold(b, copies);
     });
   });
