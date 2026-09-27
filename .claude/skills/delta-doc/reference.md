@@ -343,6 +343,10 @@ defineDoc("venue:", {
 // `WHERE id = <doc-id>` which is the same thing.
 ```
 
+**Removing a row** takes the row and, through `parent` and `cascadeOn`, the rows under it in the collections the document includes, and theirs in turn. A document writes what it may read, so it removes only rows it holds: through `venues:` (`root: "venues", include: []`), `remove /venues/42` takes the venue and leaves its areas and sites, their `venues_id` naming a row that is gone. The same on every backend. To take them with it, remove the venue through a document that holds them (a list with `include: ["areas", "sites"]` holds every area and site), or remove them first through `venue:42`, in one batch, then the venue through `venues:`.
+
+A single document does not remove its own root on the JSON file and SQLite: `remove /venues/42` through `venue:42` answers 400 `Root fields only support replace`. Postgres removes it, with the rows the document holds under it; here the backends differ.
+
 **Per-user list isolation** — each user sees only their own rows. The most common multi-tenant shape.
 
 Two parts: (1) scope the generic doc by a user-id carried in the doc name, (2) tell `docTypeFromDef` who owns each name. A document's name is the channel its writes are broadcast on — whoever has it open hears every write made through it, **whatever RLS lets them read** — so the name, not RLS, is what keeps one user's rows off another user's socket. `owns` is that check: the listener asks it before `open`, `delta`, `open_at` and `history`, and before an `undo` or `redo` writes to the entry's document, and answers 404 when it says no. With `auth`, `docTypeFromDef` throws unless it is given `owns` or `shared: true`, and the listener holds every other document to the same: see *Every document says who owns it*, below.

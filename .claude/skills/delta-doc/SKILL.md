@@ -217,7 +217,7 @@ Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/fi
 - *Contracts* — `DocType`, `DocDef`, `DeltaAuth` interfaces
 - *Schema generation* — `defineSchema`, column shorthands, `validateOps`
 - *`scope` syntax* — the colon DSL, operators, footguns
-- *Doc patterns* — list, catalog (list-mode `include`), scoped-single, per-user isolation, custom DocType
+- *Doc patterns* — list, catalog (list-mode `include`), scoped-single, what a remove takes, per-user isolation, custom DocType
 - *Custom read docs* — `defineCustomDoc` membership (`query`+`matches`) vs recompute (whole-doc, Postgres); root-replace primitive
 - *Implied documents* — `implied: true`: open empty, the first write makes the root row (SQLite)
 - *Fan-out* — which other open docs hear a write, and what each is told

@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   document is single or list, as on Postgres, and `add /<coll>/-` takes the next serial. It
   said there was no list mode, that the id was a uuid, and that a scope binding such as `":id"`
   threw at `registerDocs`.
+- **The reference says what a remove takes (todo #40).** The row, and the rows under it in the
+  collections the document includes: removed through a list that does not include them, a
+  row's children stay. It says how to take them too, and that a single document's root is not
+  removed through it on the JSON file and SQLite (400), where Postgres removes it.
 
 ## [0.9.0] - 2026-09-25
 
