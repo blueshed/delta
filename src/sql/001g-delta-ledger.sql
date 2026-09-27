@@ -31,8 +31,26 @@ CREATE INDEX IF NOT EXISTS idx_delta_ledger_cursor ON _delta_ledger (cursor);
 CREATE INDEX IF NOT EXISTS idx_delta_ledger_undoes ON _delta_ledger (undoes);
 
 -- ---------------------------------------------------------------------------
+-- _delta_row_at: the row a document holds at a row's path, split -- the twin
+-- of rowAt in src/server/ledger.ts: /<coll>/<id> in a map, /<coll> its root,
+-- and, in a single document, /<root>/<id>, the root named by its id, as a
+-- write that adds or removes the root tells it. NULL when it holds none.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION _delta_row_at(p_doc JSONB, p_parts TEXT[])
+RETURNS JSONB LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE
+    WHEN array_length(p_parts, 1) = 1 THEN p_doc->p_parts[1]
+    WHEN COALESCE(p_doc->p_parts[1]->p_parts[2], 'null'::jsonb) <> 'null'::jsonb THEN p_doc->p_parts[1]->p_parts[2]
+    WHEN jsonb_typeof(p_doc->p_parts[1]->'id') IN ('number', 'string')
+         AND p_doc->p_parts[1]->>'id' = p_parts[2] THEN p_doc->p_parts[1]
+  END;
+$$;
+
+-- ---------------------------------------------------------------------------
 -- _delta_inverse: what applied ops walked back, read from the document as it
--- was. Applied ops are whole rows (/coll/id) or the root (/coll): an add is
+-- was. Applied ops are whole rows (/coll/id) or the root (/coll; added or
+-- removed, /coll/id, read where the document holds it: _delta_row_at): an add is
 -- removed, a remove added back, a replace replaced by its old self. Reverse
 -- order, except that a remove and the rows its removal cascaded to (a run) come
 -- back in their own order, parent first -- the rule of inverseOf in
@@ -64,11 +82,7 @@ BEGIN
 
   FOR v_op IN SELECT * FROM jsonb_array_elements(COALESCE(p_ops, '[]'::jsonb)) LOOP
     v_parts := _delta_split_path(v_op->>'path');
-    IF array_length(v_parts, 1) = 1 THEN
-      v_prior := p_before->v_parts[1];
-    ELSE
-      v_prior := p_before->v_parts[1]->v_parts[2];
-    END IF;
+    v_prior := _delta_row_at(p_before, v_parts);
     IF v_prior IS NOT NULL AND jsonb_typeof(v_prior) = 'object' THEN
       v_prior := _delta_strip_temporal(v_prior);
     END IF;
@@ -206,7 +220,7 @@ BEGIN
   END LOOP;
   FOREACH v_path IN ARRAY v_paths LOOP
     v_parts := _delta_split_path(v_path);
-    v_here := CASE WHEN array_length(v_parts, 1) = 1 THEN v_doc->v_parts[1] ELSE v_doc->v_parts[1]->v_parts[2] END;
+    v_here := _delta_row_at(v_doc, v_parts);
     IF v_here = 'null'::jsonb THEN v_here := NULL; END IF;
     v_wrote := NULLIF(v_left->v_path, 'null'::jsonb);
     v_was := NULLIF(v_before->v_path, 'null'::jsonb);

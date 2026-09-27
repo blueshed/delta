@@ -84,6 +84,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   document's name is its own there too, as `open` finds it first: `todos:open:alice` beside
   `todos:` (scope `{ owner_id: ":id" }`) is never read as the list named `open`. `whereOf` and
   `meets` in `src/server/scope.ts` take the backend's `Keep`.
+- **A single document removes the root it is named for, on every backend, and undo puts it back**
+  (todo #43). `remove /venues/42` through `venue:42` answered 400 `Root fields only support
+  replace` on the JSON file and SQLite; Postgres removed the venue with the rows the document holds
+  under it. Every backend now does, as Postgres did: the answer is the venue's remove and theirs,
+  the copy on `venue:42` is told its root is null and those rows removed, every other document
+  that held them is told they left, and `venue:42` is then not found (404) -- an implied document
+  (SQLite) opens empty again, and its copy is told that empty root, not null. `/venues/<id>` names the document's own root: another id is a 404 to
+  remove (a 400 to add, on SQLite). A root field written in the same write lands first. The undo
+  was wrong on Postgres too: its inverse read the root at `before.venues["42"]`, where a single
+  document holds it at `before.venues`, so it recorded `add /venues/42` with a null value and the
+  undo put back only the areas and sites, under a venue that was gone; the redo of an undo then
+  met a conflict, since the walk's guard looked for the root there as well. The inverse and the
+  guard now read `/<root>/<id>` where the document holds it (`rowAt` in `src/server/ledger.ts`,
+  `_delta_row_at` in `001g`): undo adds the venue, then its rows, parent first; redo takes them,
+  children first; and the walk of a document whose root is gone starts from its root absent, as
+  Postgres reads it. `001g` adds `_delta_row_at` and replaces `_delta_inverse` and
+  `_delta_walk_plan` (`CREATE OR REPLACE`: a database that has them takes the change in place).
+  A removal recorded on Postgres before this release keeps the inverse it was recorded with, and
+  undoes as it did on 0.9.1: the root does not come back. A document with nothing under it (a
+  household's) undoes as no ops and no conflict, nobody told; one with rows under it puts back only
+  those, under a root that is gone.
 
 ## [0.9.1] - 2026-09-27
 

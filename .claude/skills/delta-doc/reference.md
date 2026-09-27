@@ -352,9 +352,9 @@ defineDoc("venue:", {
 // `WHERE id = <doc-id>` which is the same thing.
 ```
 
-**Removing a row** takes the row and, through `parent` and `cascadeOn`, the rows under it in the collections the document includes, and theirs in turn. A document writes what it may read, so it removes only rows it holds: through `venues:` (`root: "venues", include: []`), `remove /venues/42` takes the venue and leaves its areas and sites, their `venues_id` naming a row that is gone. The same on every backend. To take them with it, remove the venue through a document that holds them (a list with `include: ["areas", "sites"]` holds every area and site), or remove them first through `venue:42`, in one batch, then the venue through `venues:`.
+**Removing a row** takes the row and, through `parent` and `cascadeOn`, the rows under it in the collections the document includes, and theirs in turn. A document writes what it may read, so it removes only rows it holds: through `venues:` (`root: "venues", include: []`), `remove /venues/42` takes the venue and leaves its areas and sites, their `venues_id` naming a row that is gone. The same on every backend. To take them with it, remove the venue through a document that holds them: `venue:42` itself (below), or a list with `include: ["areas", "sites"]`, which holds every area and site.
 
-A single document does not remove its own root on the JSON file and SQLite: `remove /venues/42` through `venue:42` answers 400 `Root fields only support replace`. Postgres removes it, with the rows the document holds under it; here the backends differ.
+A single document may remove the root it is named for, on every backend: `remove /venues/42` through `venue:42` takes the venue and the rows the document holds under it (its areas and sites), and answers their removes, the venue's first. The copy open on `venue:42` is told its root is null (`replace /venues` null, as when the root is removed through another document) and each of those rows removed; every other document that held them is told they left. The document is then not found (404, as for any missing root row) -- an implied one (SQLite) opens empty again, as before its first write. Undo puts the venue back, then its rows, parent first; redo takes them again, children first. `/venues/<id>` names the document's own root: another id is a 404 to remove on every backend; to add, a 400 on the JSON file and SQLite, where Postgres adds that row, which the document then does not hold. (`replace /venues/<field>` is still a field of the root.)
 
 **Per-user list isolation** — each user sees only their own rows. The most common multi-tenant shape.
 
@@ -501,7 +501,7 @@ registerDocType(venueAt);
 
 ## Implied documents (SQLite)
 
-`defineDoc(prefix, { root, include, implied: true })` declares a document that is there before its root row is. Opening a name whose root row does not exist answers an empty document — the root `{ id: <doc id>, ...column defaults }` and an empty map per included collection — and makes no row. The first write makes the root row, in the same transaction as the write; a failed first write makes none. A chat room, a user's settings, a board keyed by a slug: anything a name can mean before anyone has written to it.
+`defineDoc(prefix, { root, include, implied: true })` declares a document that is there before its root row is. Opening a name whose root row does not exist answers an empty document — the root `{ id: <doc id>, ...column defaults }` and an empty map per included collection — and makes no row. The first write makes the root row, in the same transaction as the write; a failed first write makes none. Its root removed through it (`remove /rooms/attic`), the row and the rows under it go and it opens empty again -- an open copy is told that empty root (`replace /rooms`), not null; an undo makes them again. A chat room, a user's settings, a board keyed by a slug: anything a name can mean before anyone has written to it.
 
 ```ts
 const room = defineDoc("room:", { root: "rooms", include: ["messages"], implied: true });
@@ -518,7 +518,7 @@ An implied document is keyed by its root id, so it cannot also declare a `scope`
 - a row that **arrives** (added, or moved into the document's scope) is an `add /<coll>/<id>`;
 - a row that **stays** is a `replace /<coll>/<id>` with the row whole;
 - a row that **leaves** (removed, or moved out: a parent key rewritten, a list's condition no longer met) is a `remove /<coll>/<id>`;
-- where the row is the document's **root** (`household:1` over a `households` row), a `replace /<root>` with the row -- or `null` when it leaves. Code rendering such a document should allow its root to be `null`.
+- where the row is the document's **root** (`household:1` over a `households` row), a `replace /<root>` with the row -- or `null` when it leaves (an implied document, the empty root it then opens with). Code rendering such a document should allow its root to be `null`.
 
 A parent and a child added in one write arrive parent first; a removal's cascade arrives with it. The writer's own document is told first, once; its answer (and its ledger entry) keep the ops as written, so an undo walks back exactly what was done. With a version (`v`, below), each told document advances its own.
 

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { applyOps } from "../src/core";
 import { createLocal } from "../src/server/local";
 import type { ActionHandler, WsServer } from "../src/server/server";
 import { createTables, defineDoc, defineSchema, registerDocs } from "../src/server/sqlite";
@@ -91,6 +92,30 @@ describe("the ledger", () => {
     await local.call("close", { doc: "room:a" });
     await local.call("undo", { cursor: "s1" });
     expect(await texts()).toEqual([]);
+  });
+
+  test("an implied room removed through its own document opens empty again, as before its first write, and its copy is told so; undone, the room and its messages come back", async () => {
+    const { db, local, heard, say, texts } = setup();
+    await say(local, "s1", "m1", "hi");
+    const { _v: _opened, ...opened } = (await local.call("open", { doc: "room:a" })).result;
+    heard.length = 0;
+    const removed = await local.call("delta", { doc: "room:a", ops: [{ op: "remove", path: "/rooms/a" }], cursor: "s1" });
+    expect(removed.result.ops).toEqual([{ op: "remove", path: "/rooms/a" }, { op: "remove", path: "/messages/m1" }]);
+    expect(db.query("SELECT COUNT(*) AS n FROM rooms").get()).toEqual({ n: 0 });
+    // told the root as it opens now -- the empty room, not null -- so the copy is what a fresh open reads
+    expect(heard.map((h) => h.ops)).toEqual([[{ op: "replace", path: "/rooms", value: { id: "a" } }, { op: "remove", path: "/messages/m1" }]]);
+    const copy = structuredClone(opened);
+    for (const h of heard) applyOps(copy, h.ops);
+    const { _v: _fresh, ...fresh } = (await local.call("open", { doc: "room:a" })).result;
+    expect(copy).toEqual(fresh);
+    expect(fresh).toEqual({ rooms: { id: "a" }, messages: {} });
+    const undone = await local.call("undo", { cursor: "s1" });
+    expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({
+      ops: [{ op: "add", path: "/rooms/a", value: { id: "a" } }, { op: "add", path: "/messages/m1", value: { id: "m1", rooms_id: "a", text: "hi" } }],
+      conflict: undefined,
+    });
+    expect(await texts()).toEqual(["hi"]);
+    expect(db.query("SELECT id FROM rooms").all()).toEqual([{ id: "a" }]);
   });
 
   test("a temporal row comes back through undo: its storage columns are not written back", async () => {

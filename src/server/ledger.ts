@@ -70,6 +70,21 @@ function same(a: unknown, b: unknown): boolean {
 }
 
 /**
+ * The row a document holds at a row's path: `/<coll>/<id>` in a map, `/<coll>`
+ * its root -- and, in a single document, `/<root>/<id>`, the root named by its
+ * id, as a write that adds or removes the root tells it. Postgres's
+ * `_delta_row_at` (001g).
+ */
+export function rowAt(doc: any, path: string): any {
+  const [coll, id] = splitPath(path);
+  const held = doc?.[coll!];
+  if (id === undefined) return held;
+  if (held?.[id] != null) return held[id];
+  const own = held?.id;
+  return (typeof own === "number" || typeof own === "string") && String(own) === id ? held : undefined;
+}
+
+/**
  * What walking `entry` does to the document as it is now (`current`): only the
  * fields the entry changed, each guarded by what the entry left there.
  *
@@ -93,10 +108,7 @@ export function planWalk(entry: { ops: DeltaOp[]; inverse: DeltaOp[] }, current:
     const was = inv.op === "remove" ? undefined : inv.value;
     if (!before.has(inv.path) || was != null) before.set(inv.path, was);
   }
-  const now = (path: string) => {
-    const [coll, id] = splitPath(path);
-    return id === undefined ? current?.[coll!] : current?.[coll!]?.[id];
-  };
+  const now = (path: string) => rowAt(current, path);
   const data = (row: any) => Object.keys(row ?? {}).filter((f) => !STORAGE.has(f));
   const ops: DeltaOp[] = [];
   const conflict: string[] = [];

@@ -20,7 +20,7 @@ import type { WsServer } from "./server";
 import { trackSubscribe, trackUnsubscribe, onClientDrop } from "./server";
 import { applyOps as deltaApplyOps, type DeltaOp, splitPath, joinPath } from "../core";
 import { createLogger } from "./logger";
-import { createLedger, planWalk, socketCursor } from "./ledger";
+import { createLedger, planWalk, rowAt, socketCursor } from "./ledger";
 import { meets, pastSafeId, resolveScope, rowId, sameId, whereOf, type Keep, type Scope } from "./scope";
 import {
   type ColumnDef,
@@ -219,6 +219,13 @@ export function registerDocs(
       root[col] = colDef.default ?? (colDef.nullable ? null : defaultForType(colDef.type));
     }
     const doc: any = { [def.root]: root };
+    for (const coll of def.include) doc[coll] = {};
+    return doc;
+  }
+
+  /** A single document whose root row is not there: the root absent, each included collection empty. */
+  function rootless(def: DocDef): any {
+    const doc: any = { [def.root]: null };
     for (const coll of def.include) doc[coll] = {};
     return doc;
   }
@@ -489,14 +496,38 @@ export function registerDocs(
     // close+insert for the whole delta.
     const rootFieldUpdates = new Map<string, unknown>();
 
+    // Apply batched root-field updates as a single close + reinsert (temporal)
+    // or one in-place UPDATE (non-temporal — `id` is the whole PK there, so a
+    // reinsert would collide): after the ops, and before a remove of the root,
+    // so a field written first lands first, as on Postgres.
+    const flushRoot = () => {
+      if (rootFieldUpdates.size === 0) return;
+      if (!doc[def.root]) refuse(404, `Row not found: ${def.root}/${rootId}`);   // removed earlier in this write
+      const rootTable = schema.tables[def.root]!;
+      const before = holders(def.root, doc[def.root], docName);
+      const ts = now();
+      if (rootTable.temporal) closeRow(db, rootTable, rootId!, ts);
+      const updated = { ...doc[def.root] };
+      for (const [field, value] of rootFieldUpdates) updated[field] = value;
+      if (rootTable.temporal) insertRow(db, rootTable, updated, ts);
+      else updateRow(db, rootTable, rootId!, updated);
+      const stored = readRow(rootTable, rootId!);   // as it is kept (a parent key's "5" is 5), as Postgres's RETURNING gives it
+      doc[def.root] = stored;
+      broadcastOps.push({ op: "replace", path: joinPath(def.root), value: stored });
+      touched.push({ coll: def.root, id: rootId!, before, after: stored });
+      rootFieldUpdates.clear();
+    };
+
     for (const op of ops) {
       const parts = splitPath(op.path);
       const collKey = parts[0]!;
       const table = schema.tables[collKey];
+      // A single-mode document's root is one row, held at /<root>.
+      const isRoot = !list && collKey === def.root;
 
-      // A single-mode document's root is one row: /<root>/fieldName is a field of it...
-      if (!list && collKey === def.root && parts.length === 2) {
-        if (op.op !== "replace") throw new Error(`Root fields only support replace`);
+      // /<root>/fieldName is a field of it (an add or a remove of /<root>/<id> is the row itself, below)...
+      if (isRoot && parts.length === 2 && op.op !== "add" && op.op !== "remove") {
+        if (op.op !== "replace") throw new Error(`Root fields support replace only`);
         rootFieldUpdates.set(parts[1]!, (op as any).value);
         continue;
       }
@@ -513,12 +544,20 @@ export function registerDocs(
         continue;
       }
 
-      // Everything else is a row of a map: an included collection, or a list-mode document's root.
+      // Everything else is a row of a map (an included collection, or a list-mode document's root), or the root row itself.
       if (!table || (collKey !== def.root && !def.include.includes(collKey))) {
         throw new Error(`Unknown collection: ${collKey}`);
       }
 
       if (parts.length === 2) {
+        // A single document removes the root it is named for, as on Postgres,
+        // with the rows it holds under it, and an undo adds it back, then them.
+        // It holds no other root row, so another is not its to remove (404) or
+        // add (400; Postgres adds it, and the document does not hold it).
+        if (isRoot && (parts[1] === "-" || !sameId(rowId(parts[1]!), rootId))) {
+          if (op.op === "remove") refuse(404, `Row not found: ${collKey}/${parts[1]}`);
+          refuse(400, `${docName} holds ${collKey} ${rootId} alone: add another ${collKey} row through a document that lists them`);
+        }
         // `add /<coll>/-` is a new row the store names: the next serial, as
         // Postgres takes nextval -- carried by the broadcast path and the row.
         const id = op.op === "add" && parts[1] === "-" ? nextId(table) : rowId(parts[1]!);
@@ -531,11 +570,13 @@ export function registerDocs(
           // A DIRECT child's FK is forced to `rootId` by insertCollectionRow, but a
           // grandchild's comes verbatim from the client. Unchecked, that grafts the
           // new row onto another doc's parent — a cross-doc write. Require the named
-          // parent to be in THIS doc's scope.
-          assertParentInScope(doc, def, table, row, list);
+          // parent to be in THIS doc's scope. (The root's own parent is not in the
+          // document: its value names it, as a list's root row's does.)
+          if (!isRoot) assertParentInScope(doc, def, table, row, list);
           const ts = now();
           const fullRow = insertCollectionRow(db, schema, table, id, rootId, def, row, ts, list);
-          doc[collKey][id] = fullRow;
+          if (isRoot) doc[collKey] = fullRow;
+          else doc[collKey][id] = fullRow;
           broadcastOps.push({ op: "add", path: joinPath(collKey, String(id)), value: fullRow });
           touched.push({ coll: collKey, id, before: [], after: fullRow });
         } else if (op.op === "remove") {
@@ -543,10 +584,13 @@ export function registerDocs(
           // without this gate a client could name any id and delete a sibling
           // doc's row (the field-replace path below has always made the
           // equivalent check via `doc[collKey]?.[id]`).
-          assertRowInScope(doc, collKey, id);
+          if (!isRoot) assertRowInScope(doc, collKey, id);
+          else if (!doc[collKey]) refuse(404, `Row not found: ${collKey}/${id}`);   // removed earlier in this write
+          else flushRoot();
           // who holds the row and every row the cascade takes, asked before any is gone
           const befores = new Map(cascadeRows(table, id, def).map(({ table: t, row }) => [`${t.docKey}/${row.id}`, holders(t.docKey, row, docName)]));
           const cascadeOps = removeRow(db, schema, table, collKey, id, doc, def);
+          if (isRoot) doc[collKey] = null;
           broadcastOps.push(...cascadeOps);
           for (const removed of cascadeOps) {
             const [coll, rid] = splitPath(removed.path) as [string, string];
@@ -583,23 +627,7 @@ export function registerDocs(
       }
     }
 
-    // Apply batched root-field updates as a single close + reinsert (temporal)
-    // or one in-place UPDATE (non-temporal — `id` is the whole PK there, so a
-    // reinsert would collide).
-    if (rootFieldUpdates.size > 0) {
-      const rootTable = schema.tables[def.root]!;
-      const before = holders(def.root, doc[def.root], docName);
-      const ts = now();
-      if (rootTable.temporal) closeRow(db, rootTable, rootId!, ts);
-      const updated = { ...doc[def.root] };
-      for (const [field, value] of rootFieldUpdates) updated[field] = value;
-      if (rootTable.temporal) insertRow(db, rootTable, updated, ts);
-      else updateRow(db, rootTable, rootId!, updated);
-      const stored = readRow(rootTable, rootId!);   // as it is kept (a parent key's "5" is 5), as Postgres's RETURNING gives it
-      doc[def.root] = stored;
-      broadcastOps.push({ op: "replace", path: joinPath(def.root), value: stored });
-      touched.push({ coll: def.root, id: rootId!, before, after: stored });
-    }
+    flushRoot();
 
     // Apply batched field updates
     for (const [, batch] of rowFieldBatches) {
@@ -630,7 +658,8 @@ export function registerDocs(
    * What each document that held or holds a row the write changed is told, the
    * writer's first -- Postgres's `_delta_tell`: a row that arrives is an add,
    * one that stays a replace, one that leaves a remove; where the row is the
-   * document's root, a replace of the root (null when it leaves).
+   * document's root, a replace of the root (null when it leaves -- or, for an
+   * implied document, the empty root it then opens with).
    */
   function tell(writer: string, touched: Touched[]): Map<string, DeltaOp[]> {
     const rows = touched.map((t) => ({ ...t, now: holders(t.coll, t.after, writer) }));
@@ -649,7 +678,7 @@ export function registerDocs(
         const root = single && t.coll === m.def.root;
         const path = root ? joinPath(t.coll) : joinPath(t.coll, String(t.id));
         if (is) ops.push({ op: was || root ? "replace" : "add", path, value: t.after });
-        else ops.push(root ? { op: "replace", path, value: null } : { op: "remove", path });
+        else ops.push(root ? { op: "replace", path, value: m.def.implied ? emptyDoc(m.def, m.docId)[m.def.root] : null } : { op: "remove", path });
       }
       told.set(target, ops);
     }
@@ -770,8 +799,10 @@ export function registerDocs(
       // test that rolls every case back) it becomes a savepoint, and still
       // rolls back alone. Rollback owns only this region: a failure in the
       // post-commit block below must not look like a failed write.
+      // an implied document's first write makes its root row -- unless it adds the root itself (an undo of its removal)
+      const addsRoot = scope.mode === "single" && ops.some((op) => op.op === "add" && splitPath(op.path).length === 2 && splitPath(op.path)[0] === def.root);
       written = db.transaction(() => {
-        if (implied.has(docName)) ensureImpliedRoot(def, doc);
+        if (implied.has(docName) && !addsRoot) ensureImpliedRoot(def, doc);
         const done = applyOps(docName, def, doc, ops);
         touched = done.touched;
         const inverse = inverseOf(snapshot, done.applied, ops);
@@ -780,7 +811,7 @@ export function registerDocs(
       })();
       implied.delete(docName);
     } catch (err: any) {
-      cache.set(docName, snapshot); // restore in-memory cache
+      if (cache.has(docName)) cache.set(docName, snapshot); // restore in-memory cache (a rootless walk's copy was never in it)
       named(err);
       log.error(`delta failed: ${err.message}`);
       // A refusal carries its wire code (`refuse`); anything else is the server's.
@@ -874,10 +905,13 @@ export function registerDocs(
       }
       reloadEvicted();   // a walk is a write: its fan-out needs every open doc's copy, as delta's does
       const match = findDoc(entry.doc);
-      const doc = match && load(entry.doc, match.def, match.docId);
+      // a single document whose root is gone (removed through it) is walked from
+      // its root absent, as Postgres reads it: an undo of the removal puts it back
+      const doc = match && (load(entry.doc, match.def, match.docId) ?? rootless(match.def));
       if (!match || !doc) return respond({ error: { code: 404, message: `Not found: ${entry.doc}` } });
       try {
-        const plan = planWalk(entry, doc);
+        // an implied document whose root row is not written yet holds no root to guard
+        const plan = planWalk(entry, implied.has(entry.doc) ? { ...doc, [match.def.root]: null } : doc);
         if (msg.dry) return respond({ result: { doc: entry.doc, entry: entry.id, ops: plan.ops, ...(plan.conflict.length ? { conflict: plan.conflict } : {}) } });
         const by = { who: whoOf(client), cursor };
         const out = plan.conflict.length || !plan.ops.length ? null : write(entry.doc, match.def, doc, plan.ops, { ...by, undoes: entry.id });
@@ -1028,7 +1062,8 @@ function toldAt(path: string): string {
 /**
  * The inverse of a write, from the document as it was before and the ops the
  * backend applied. Applied ops are whole rows (`/coll/id`) or the root
- * (`/root`), so the inverse of each is the row as it was: an add is removed,
+ * (`/root`; added or removed, `/root/id`, read where the document holds it:
+ * `rowAt`), so the inverse of each is the row as it was: an add is removed,
  * a remove is added back, a replace is replaced by its old self. Written in
  * reverse order, except that a remove and the rows its removal cascaded to (a
  * run) are added back in their own order, parent first, so each child finds
@@ -1049,8 +1084,7 @@ export function inverseOf(before: any, applied: DeltaOp[], asked?: DeltaOp[]): D
     run = [];
   };
   for (const op of applied) {
-    const [coll, id] = splitPath(op.path);
-    const prior = withoutStorage(id === undefined ? before[coll!] : before[coll!]?.[id]);
+    const prior = withoutStorage(rowAt(before, op.path));
     if (op.op === "remove") {
       if (heads?.has(op.path)) flush();   // a remove asked for starts its own run; one it cascaded to joins it
       run.push({ op: "add", path: op.path, value: prior });
@@ -1311,9 +1345,11 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
     // A single-mode root: /<root>/<field> is a FIELD replace
     // (not /<root>/<id> row), so validate parts[1] as a column name -- or the
     // parent key (the root row moves, as the whole-root merge moves it, and as on Postgres).
-    if (single(collKey) && parts.length === 2) {
+    // An add or a remove of /<root>/<id> is the root row itself, checked as a
+    // row below; applyOps holds it to the one the document is named for.
+    if (single(collKey) && parts.length === 2 && op.op !== "add" && op.op !== "remove") {
       if (op.op !== "replace") {
-        errors.push({ path: op.path, message: "Root fields only support replace" });
+        errors.push({ path: (op as DeltaOp).path, message: `Root fields support replace only (add and remove take /${collKey}/<id>, the root row)` });
         continue;
       }
       const field = parts[1]!;
