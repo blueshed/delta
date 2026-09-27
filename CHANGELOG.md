@@ -53,7 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trip claimed through `trip:2` (`replace /trips/owner_id`), and its undo did not bring it
   back, until reopened; the same write through a list was heard (todo #30). The row is now
   tested at whatever path it was told, the root's id being its own. On Postgres it was heard
-  only when another document that holds the row had been opened.
+  only when another document that holds the row had been opened; it still hears a change once
+  for each document told of it (the reference's *Fan-out* says what that means).
 
 ## [0.9.0] - 2026-09-25
 
