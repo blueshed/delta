@@ -150,7 +150,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backend asks `PRAGMA data_version`, which moves when another connection commits, and reads
   every copy again from the tables when it has. A document open in one process is still not
   told live of another's write: it reads it when it is next opened or written through
-  (`tests/sqlite-processes.test.ts` drives a second `bun` process on the file).
+  (`tests/sqlite-processes.test.ts` drives a second `bun` process on the file). Two costs, in the
+  reference: another process's write drops every copy this one keeps (50 open: a write pair from
+  about 0.3 ms to about 7 ms), and a wait for its lock blocks the event loop up to 5s.
 - **SQLite and Postgres: an included collection whose parent the document does not include
   reads the same on both** (todo #32). A document holds an included collection by its chain of
   parents to the root, walked whether or not it includes the parents on the way. A wedding's
