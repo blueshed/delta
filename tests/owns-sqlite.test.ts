@@ -71,7 +71,7 @@ describe("sqlite: two identities on one membership name, over sockets", () => {
     const ws = createWs();
     const sockets: any[] = [];
     ws.setServer({ publish: (channel: string, raw: string) => { for (const s of sockets) if (s.subs.has(channel)) s.send(raw); } });
-    registerDocs(ws, db, pathSchema, pathDocs, custom("owned"), { ledger: true, auth, owns: (me: Me, name: string) => name.endsWith(`:${me.id}`) || (me.id === 2 && name === "fo-household:3") });
+    registerDocs(ws, db, pathSchema, pathDocs, custom("owned"), { ledger: true, auth, owns: (me: Me, name: string) => name.endsWith(`:${me.id}`) || (me.id === 2 && name === "fo-all-households:") });
     const socket = (identity: Me) => {
       const s = { data: { identity, clientId: `c${identity.id}` }, readyState: 1, subs: new Set<string>(), heard: [] as any[],
         subscribe(ch: string) { this.subs.add(ch); }, unsubscribe(ch: string) { this.subs.delete(ch); }, send(raw: string) { this.heard.push(JSON.parse(raw)); } };
@@ -83,8 +83,8 @@ describe("sqlite: two identities on one membership name, over sockets", () => {
     const bobSock = socket({ id: 2 });
     expect(Object.keys((await ask(adaSock, { action: "open", doc: "fo-mine:x" })).result.households)).toEqual(["1", "2"]);
     expect(Object.keys((await ask(bobSock, { action: "open", doc: "fo-mine:x" })).result.households)).toEqual(["3"]);
-    expect((await ask(bobSock, { action: "open", doc: "fo-household:3" })).error).toBeUndefined();
-    expect((await ask(bobSock, { action: "delta", doc: "fo-household:3", ops: [{ op: "replace", path: "/households/weddings_id", value: 1 }] })).error).toBeUndefined();
+    expect((await ask(bobSock, { action: "open", doc: "fo-all-households:" })).error).toBeUndefined();
+    expect((await ask(bobSock, { action: "delta", doc: "fo-all-households:", ops: [{ op: "replace", path: "/households/3/weddings_id", value: 1 }] })).error).toBeUndefined();
     const mine = (s: any) => s.heard.filter((m: any) => m.doc === "fo-mine:x").map((m: any) => m.ops);
     expect(mine(adaSock)).toEqual([[{ op: "add", path: "/households/3", value: household(3, "c@x") }]]);
     expect(mine(bobSock)).toEqual([[{ op: "remove", path: "/households/3" }]]);

@@ -233,6 +233,29 @@ CREATE OR REPLACE FUNCTION _delta_tell(p_writer TEXT, p_touched JSONB)
 RETURNS BIGINT LANGUAGE sql AS $$ SELECT _delta_tell(p_writer, p_touched, NULL); $$;
 
 -- ---------------------------------------------------------------------------
+-- _delta_assert_parent_held: a parent key written (in `p_value`, over the row
+-- as it is, `p_row`) moves the row, and only under a parent the document holds,
+-- as an add names one: through it, a row is never moved into another
+-- document (you may write what you may read), RLS or none. A single
+-- document's own root too: it holds no parent of it, so the root moves
+-- through a list that holds both (0.10.0 review). A key written as it is, is
+-- no move. P0002 (404) when refused.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION _delta_assert_parent_held(p_def _delta_docs, p_doc_name TEXT, p_parent_fk TEXT, p_parent TEXT, p_row JSONB, p_value JSONB)
+RETURNS void AS $$
+BEGIN
+  IF p_parent_fk IS NOT NULL
+     AND jsonb_typeof(p_value->p_parent_fk) IN ('number', 'string')
+     AND (p_value->>p_parent_fk)::BIGINT IS DISTINCT FROM (p_row->>p_parent_fk)::BIGINT
+     AND NOT _delta_row_in_scope(p_def, p_doc_name, p_parent, (p_value->>p_parent_fk)::BIGINT) THEN
+    RAISE EXCEPTION 'row not found: %/%', p_parent, p_value->>p_parent_fk
+      USING ERRCODE = 'P0002';
+  END IF;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+-- ---------------------------------------------------------------------------
 -- delta_apply: apply delta ops to relational tables, bump version, NOTIFY
 --
 -- Handles:
@@ -266,6 +289,7 @@ DECLARE
   v_root_view     TEXT;
   v_opened        BOOLEAN;   -- a single document's root was there as the write began
   v_back          BOOLEAN;   -- this op adds that root back, taken out earlier in the write
+  v_root_was      JSONB;     -- that root as this write took it out: added back, it goes under the same parent
   v_id            BIGINT;
   v_id_text       TEXT;
   v_field         TEXT;
@@ -399,6 +423,7 @@ BEGIN
       IF v_row IS NULL THEN
         RAISE EXCEPTION 'root row not found: %', v_def.root_collection USING ERRCODE = 'P0002';
       END IF;
+      PERFORM _delta_assert_parent_held(v_def, p_doc_name, v_coll.parent_fk, v_coll.parent_collection, v_row, v_op->'value');
       v_before := _delta_holders(v_coll_key, _delta_strip_temporal(v_row), p_doc_name);
 
       -- Merge partial value. The row keeps its id: one in the value is the
@@ -532,6 +557,17 @@ BEGIN
           USING ERRCODE = 'P0002';
       END IF;
 
+      -- ... and a single document's own root, added back in the write that took
+      -- it out, goes back under the parent it had: another would be a move, and
+      -- the document holds no parent of its root (0.10.0 review).
+      IF NOT v_is_list AND v_coll_key = v_def.root_collection AND v_coll.parent_fk IS NOT NULL
+         AND v_root_was IS NOT NULL
+         AND (v_new_row->>v_coll.parent_fk)::BIGINT IS DISTINCT FROM (v_root_was->>v_coll.parent_fk)::BIGINT THEN
+        RAISE EXCEPTION 'row not found: %/%',
+          v_coll.parent_collection, COALESCE(v_new_row->>v_coll.parent_fk, '')
+          USING ERRCODE = 'P0002';
+      END IF;
+
       -- A required column (not nullable, no declared default) the value leaves
       -- out is the writer's mistake: refuse it (SQLSTATE 23502, 400 on the
       -- wire) rather than store '' / 0 / false for it.
@@ -614,6 +650,7 @@ BEGIN
       FOR v_r IN SELECT jsonb_array_elements(_delta_cascade_rows(v_coll_key, v_id, v_def.include)) LOOP
         v_befores := v_befores || jsonb_build_object(
           (v_r->>'coll') || '/' || (v_r->>'id'), to_jsonb(_delta_holders(v_r->>'coll', v_r->'row', p_doc_name)));
+        IF NOT v_is_list AND v_r->>'coll' = v_def.root_collection THEN v_root_was := v_r->'row'; END IF;
       END LOOP;
       v_removed := _delta_cascade_remove(v_coll_key, v_id, v_def.include);
       -- A remove of a row that is not there is a 404, as on SQLite and the
@@ -659,19 +696,6 @@ BEGIN
       END IF;
       PERFORM _delta_assert_fields(v_coll_key, v_coll.columns_def, v_coll.parent_fk, v_op->'value');
 
-      -- A parent key written moves the row, and only under a parent this
-      -- document holds, as an add names one: through it, a row is never moved
-      -- into another document (you may write what you may read), RLS or none.
-      -- A single document's own root is not under its parent: its value names it.
-      IF v_coll.parent_fk IS NOT NULL
-         AND jsonb_typeof(v_op->'value'->v_coll.parent_fk) IN ('number', 'string')
-         AND (v_is_list OR v_coll_key IS DISTINCT FROM v_def.root_collection)
-         AND NOT _delta_row_in_scope(v_def, p_doc_name, v_coll.parent_collection,
-               (v_op->'value'->>v_coll.parent_fk)::BIGINT) THEN
-        RAISE EXCEPTION 'row not found: %/%', v_coll.parent_collection, v_op->'value'->>v_coll.parent_fk
-          USING ERRCODE = 'P0002';
-      END IF;
-
       IF v_coll.temporal THEN
         EXECUTE format(
           'SELECT to_jsonb(t.*) FROM %I t WHERE t.id = $1 AND valid_to IS NULL FOR UPDATE',
@@ -687,6 +711,7 @@ BEGIN
       IF v_row IS NULL THEN
         RAISE EXCEPTION 'row not found: %/%', v_coll_key, v_id USING ERRCODE = 'P0002';
       END IF;
+      PERFORM _delta_assert_parent_held(v_def, p_doc_name, v_coll.parent_fk, v_coll.parent_collection, v_row, v_op->'value');
       v_before := _delta_holders(v_coll_key, _delta_strip_temporal(v_row), p_doc_name);
 
       -- Merge partial value into current row. The row keeps its id: one in

@@ -772,6 +772,7 @@ export function registerDocs<I = unknown>(
     const rootId = list ? undefined : rowId(scope.id ?? doc[def.root]?.id);
     const rootTable = schema.tables[def.root]!;
     let opened: boolean | undefined;   // a single document's root was there as the write began (or it is implied)
+    let rootWas: any;   // that root as this write took it out: added back, it goes under the same parent
     const broadcastOps: DeltaOp[] = [];
     const touched: Touched[] = [];
     // A write is one moment, as a Postgres transaction's NOW() is: every version
@@ -860,11 +861,14 @@ export function registerDocs<I = unknown>(
       // A parent key written moves the row, and only under a parent this
       // document holds, as an add names one: through it, a row is never moved
       // into another document (you may write what you may read). A single
-      // document's own root is not under its parent: its value names it; a
-      // list's included collection is whole.
+      // document's own root too: it holds no parent of it, so the root moves
+      // through a list that holds both (0.10.0 review). A list's included
+      // collection is whole; a key written as it is, is no move.
       const parent = table.parent;
       const to = parent ? fields[parent.fkColumn] : undefined;
-      if (parent && to != null && !root && !(list && parent.collection !== def.root) && !parentHeld(parent.collection, to)) {
+      const from = parent ? run.row[parent.fkColumn] : undefined;   // as this write has it so far
+      if (parent && to != null && !(from != null && sameId(rowId(to as string | number), rowId(from as string | number)))
+          && !(list && parent.collection !== def.root) && !parentHeld(parent.collection, to)) {
         refuse(404, `Row not found: ${parent.collection}/${to}`);
       }
       for (const [field, value] of Object.entries(fields)) {
@@ -972,6 +976,12 @@ export function registerDocs<I = unknown>(
           if (((list && collKey === def.root) || isRoot) && !holds(def, scope, collKey, fullRow)) {
             refuse(404, `Row not found: ${collKey}/${id} -- the add is not one ${docName} holds`);
           }
+          // ... and a single document's own root, added back in the write that took
+          // it out, goes back under the parent it had: another would be a move, and
+          // the document holds no parent of its root (0.10.0 review).
+          if (isRoot && rootWas && parent && !sameId(fullRow[parent.fkColumn], rootWas[parent.fkColumn])) {
+            refuse(404, `Row not found: ${parent.collection}/${fullRow[parent.fkColumn] ?? ""}`);
+          }
           if (table.temporal) made.add(`${collKey}/${id}`);
           if (isRoot) doc[collKey] = fullRow;
           else doc[collKey][id] = fullRow;
@@ -982,6 +992,7 @@ export function registerDocs<I = unknown>(
           // without this gate a client could name any id and delete a sibling
           // doc's row -- or one that has left this document earlier in the write.
           if (!held(table, id)) refuse(404, `Row not found: ${collKey}/${id}`);
+          if (isRoot) rootWas = readRow(table, id);
           // who holds the row and every row the cascade takes, asked before any is gone
           const befores = new Map(cascadeRows(table, id, def).map(({ table: t, row }) => [`${t.docKey}/${row.id}`, holders(t.docKey, row, docName)]));
           const cascadeOps = removeRow(db, schema, table, collKey, id, doc, def, ts);

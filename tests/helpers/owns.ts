@@ -166,7 +166,7 @@ export function ownsCases(backend: () => OwnsBackend): void {
     });
 
     test("a membership document is queried, held and told as each identity: two on one name each hold and hear their own rows", async () => {
-      const p = await backend().start({ owns: (me, name) => ownsByName(me, name) || (me.id === 2 && name === "fo-household:3"), custom: "owned" });
+      const p = await backend().start({ owns: (me, name) => ownsByName(me, name) || (me.id === 2 && name === "fo-all-households:"), custom: "owned" });
       const rows = async (who: Me) => (await p.as(who).call("open", { doc: "fo-mine:x" })).result.households;
       expect(await rows(ada)).toEqual({ "1": household(1, "a@x"), "2": household(2, "b@x") });
       expect(await rows(bob)).toEqual({ "3": household(3, "c@x", 2) });
@@ -175,8 +175,8 @@ export function ownsCases(backend: () => OwnsBackend): void {
       await p.as(bob).call("open", { doc: "fo-board:2" });
       expect((await p.as(ada).call("delta", { doc: "fo-board:1", ops: [{ op: "replace", path: "/households/1/email", value: "z@x" }] })).error).toBeUndefined();
       await expectTold(p.backend, "fo-mine:x", [[{ op: "replace", path: "/households/1", value: household(1, "z@x") }]]);
-      await p.as(bob).call("open", { doc: "fo-household:3" });
-      expect((await p.as(bob).call("delta", { doc: "fo-household:3", ops: [{ op: "replace", path: "/households/weddings_id", value: 1 }] })).error).toBeUndefined();
+      await p.as(bob).call("open", { doc: "fo-all-households:" });
+      expect((await p.as(bob).call("delta", { doc: "fo-all-households:", ops: [{ op: "replace", path: "/households/3/weddings_id", value: 1 }] })).error).toBeUndefined();   // moved through a list: it holds both weddings' households
       await expectTold(p.backend, "fo-mine:x", [
         [{ op: "replace", path: "/households/1", value: household(1, "z@x") }],
         [{ op: "add", path: "/households/3", value: household(3, "c@x") }],   // ada's

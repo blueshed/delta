@@ -370,16 +370,15 @@ describe("pglite: an implied document named by text", () => {
 });
 
 /**
- * A single document's own root is not under its parent: its value names it.
- * Postgres also takes the root by its id (`replace /households/1` through
- * `fo-household:1`), and a parent key written there moves the root, as
- * `replace /households/weddings_id` does -- the move check of todo #6's review
- * is for the rows a document holds under its root.
+ * A single document's own root is not moved through it to a parent it does
+ * not hold, however the write names the root: Postgres takes it by its id
+ * (`replace /households/1` through `fo-household:1`) as by its fields, and
+ * the move check (todo #6's review) asks it of either (0.10.0 review).
  */
 describe("pglite: a single document's root, addressed by its id", () => {
-  test("moves to the parent its value names", async () => {
+  test("is not moved to a parent the document does not hold (404)", async () => {
     await openAll(backend.process, ["fo-household:1"]);
-    await write(backend.process, "fo-household:1", [{ op: "replace", path: "/households/1", value: { weddings_id: 2 } }]);
-    expect((await backend.process.call("open", { doc: "fo-household:1" })).result.households).toEqual(household(1, "a@x", 2));
+    expect((await backend.process.call("delta", { doc: "fo-household:1", ops: [{ op: "replace", path: "/households/1", value: { weddings_id: 2 } }] })).error?.code).toBe(404);
+    expect((await backend.process.call("open", { doc: "fo-household:1" })).result.households).toEqual(household(1, "a@x"));
   });
 });

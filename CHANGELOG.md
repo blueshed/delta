@@ -21,9 +21,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - a list's root row replaced so that it leaves the list's scope (404; under Security);
   - on SQLite and the JSON file, a single document's op after its root is removed in the same
     write, other than adding that root back (404, as on Postgres; todo #59, under Security).
+  - on Postgres, anything through a single document whose root does not meet the whole of its
+    name's scope (`guest:1:m@x` over `a@x`'s household: 404, as on SQLite; under Security);
+  - a single document's root replaced so that it leaves its name's scope, and an add of a root
+    row the document would not hold -- a list's outside its `like` or range conditions (404;
+    under Security);
+  - a single document's root moved to another parent through it (404; below).
 
   How to move across: write through a document that holds both ends (a list that includes
   them), create with `add`, and take a 404 on a remove as someone else's work done.
+- **A single document's root is not moved to another parent through it** (0.10.0 review; it
+  undoes 0.9.1's #37 on SQLite and the JSON file). Through `household:1`,
+  `replace /households/weddings_id 2` -- a field, the root merged, `/households/1/weddings_id`,
+  or the root taken out and added back under wedding 2 in one write -- moved the household into
+  wedding 2, and `board:2` was told it arrived; #37 let SQLite and
+  the JSON file write it as a field, as Postgres and the root's merge already did. It is now a
+  404 on every backend, the batch undone and nobody told: the root is held to the rule every
+  other row is (a parent key written goes only under a parent the document holds, under
+  Security), and a single document holds no parent of its root. Written as it is, the key is no
+  move, and is taken. `delta_apply` (`001d`, replaced in place) asks it through
+  `_delta_assert_parent_held`, new, of the root and of every other row. **How to move across:**
+  move the row through a document that holds both parents -- a list over its collection,
+  `defineDoc("all-households:", { root: "households", include: [] })`, with an `owns` that says
+  who may -- and keep the single document for the rest.
 - **Registrations 0.9.1 took that 0.10.0 refuses:** `owns` or `shared` without `auth` (below);
   on SQLite and the JSON file, a second `registerDocs` of a prefix another registration on the
   server already holds (under Fixed), and, now that they take `auth`, `registerDocs` with `auth`
@@ -100,7 +120,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   policy). A parent key written, in a field or a row's merge, is now held to the rule an add's
   is: under the document's root, or a parent in it (through the tables for one it does not
   include), else a 404 that tells nobody. A list holds every row of its collections, so moves
-  one; a single document's own root is not under its parent and still moves. `delta_apply`
+  one; a single document holds no parent of its own root, so does not move it (a 404 too, under
+  Breaking). `delta_apply`
   (`001d`) is replaced in place. The shared cases that moved a household through the board now
   move a course through a list, or pin the refusal.
 - **Postgres: a single document writes only what it holds, as on SQLite and the JSON file**
