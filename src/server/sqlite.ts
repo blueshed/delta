@@ -18,6 +18,7 @@
  */
 import type { WsServer } from "./server";
 import { trackSubscribe, trackUnsubscribe, onClientDrop } from "./server";
+import { authless, isAuthError, ownerless, type DeltaAuth } from "./auth";
 import { applyOps as deltaApplyOps, type DeltaOp, splitPath, joinPath } from "../core";
 import { createLogger } from "./logger";
 import { createLedger, planWalk, rowAt, socketCursor } from "./ledger";
@@ -53,23 +54,48 @@ export const defineDoc = defineDocShared;
 // Custom doc definition — predicate-based membership over watched collections.
 // ---------------------------------------------------------------------------
 
-export interface CustomDocDef<C = unknown> {
+export interface CustomDocDef<C = unknown, I = any> {
   /** Doc name prefix (e.g. "sites-in-bbox:"). */
   prefix: string;
-  /** Collections the doc watches for cross-pollination. */
+  /** Collections whose writes reach it (per row for a membership def, the whole doc for a recompute def). */
   watch: string[];
   /** Parse the portion of docName after prefix into criteria. */
   parse: (docId: string) => C;
-  /** Initial load. Return the rows this doc should expose, keyed by collection. */
-  query: (db: any, criteria: C) => Record<string, any[]>;
-  /** True when `row` belongs in a doc opened under `criteria`. */
-  matches: (collection: string, row: any, criteria: C) => boolean;
+  /**
+   * MEMBERSHIP def (flat, per-row fan-out) -- `query` + `matches`. Initial
+   * load: the rows this doc exposes, keyed by collection. It runs once per doc
+   * name and identity (the gate's, with `auth`; undefined without), and its
+   * result is kept for the subscribers of that name who are that identity --
+   * never another's, as on Postgres. SQLite has no RLS: check the rows
+   * against the identity here.
+   */
+  query?: (db: any, criteria: C, identity?: I) => Record<string, any[]>;
+  /** True when `row` belongs in a doc opened under `criteria` (membership def), for the subscribers who are `identity`. */
+  matches?: (collection: string, row: any, criteria: C, identity?: I) => boolean;
+  /**
+   * RECOMPUTE def (whole-doc) -- `recompute` INSTEAD of query/matches, as on
+   * Postgres. On open, and on any write to a watched collection, the WHOLE doc
+   * is read again and sent to each subscriber as a root-replace op -- for
+   * nested, joined or aggregated reads a per-row `matches` can't express.
+   * Read again per subscriber, under that client's identity (undefined
+   * without auth), never cached. Null: not found (404 on open; skipped after a
+   * write). Synchronous, as `query` is: the `bun:sqlite` handle, no await.
+   */
+  recompute?: (db: any, criteria: C, identity?: I) => any;
+  /**
+   * With an `auth` module: may `identity` open `docName`? False answers 404,
+   * as on Postgres. With auth, a custom doc needs this or `shared: true`:
+   * `registerDocs` refuses one with neither.
+   */
+  owns?: (identity: I, docName: string) => boolean | Promise<boolean>;
+  /** With an `auth` module: every identity that passes the gate may open every doc of this prefix. */
+  shared?: boolean;
 }
 
-export function defineCustomDoc<C>(
+export function defineCustomDoc<C, I = any>(
   prefix: string,
-  opts: Omit<CustomDocDef<C>, "prefix">,
-): CustomDocDef<C> {
+  opts: Omit<CustomDocDef<C, I>, "prefix">,
+): CustomDocDef<C, I> {
   return { prefix, ...opts };
 }
 
@@ -79,6 +105,7 @@ export function defineCustomDoc<C>(
 
 /** Generate CREATE TABLE statements from the schema and execute them. */
 export function createTables(db: any, schema: Schema) {
+  waitForLocks(db);
   db.run("PRAGMA journal_mode = WAL");
   createSequences(db);
 
@@ -155,7 +182,7 @@ function sqlDefault(value: unknown): string {
 const log = createLogger("[delta-sqlite]");
 
 /** Register all doc definitions with the WebSocket server. */
-export interface RegisterOptions {
+export interface RegisterOptions<I = unknown> {
   /**
    * Keep a ledger (`./ledger`): every write recorded with its inverse, its
    * version, who made it and the cursor undo walks; and `undo`, `redo` and
@@ -163,22 +190,65 @@ export interface RegisterOptions {
    */
   ledger?: boolean;
   /** How an identity is written in the ledger. Default: a string or number as it is, anything else as JSON. */
-  who?: (identity: unknown) => string;
+  who?: (identity: I) => string;
   /** Called after every change that committed -- a write, an undo or redo, a walk recorded as skipped: the JSON file saves itself from it. */
   committed?: () => void;
+  /**
+   * An auth module (`DeltaAuth`), as the Postgres listener takes it: every
+   * open, delta, open_at, history, undo, redo and close of these documents
+   * passes `auth.gate(client)` first (401 without an identity), and the
+   * identity it gives is who writes (the ledger's `who`, the cursor) and who a
+   * custom document is read as. SQLite has no RLS: `owns` is the check.
+   */
+  auth?: DeltaAuth<I>;
+  /**
+   * With `auth`: may `identity` open `docName`, write through it and hear what
+   * is written to it? False answers 404 -- asked before open, delta, open_at,
+   * history, and an undo or redo of an entry written through the document, as
+   * `docTypeFromDef`'s `owns`. With auth, this or `shared` is required.
+   */
+  owns?: (identity: I, docName: string) => boolean | Promise<boolean>;
+  /** With `auth`: every identity that passes the gate may open every document registered here, and hear every write to it. */
+  shared?: boolean;
 }
 
-export function registerDocs(
+export function registerDocs<I = unknown>(
   ws: WsServer,
   db: any,
   schema: Schema,
   docs: DocDef[],
-  customDocs: CustomDocDef<any>[] = [],
-  options: RegisterOptions = {},
+  customDocs: CustomDocDef<any, I>[] = [],
+  options: RegisterOptions<I> = {},
 ) {
+  // Default-deny, as docTypeFromDef and createDocListener are: with auth, every
+  // document says who owns it, or that it is shared. A name is the channel its
+  // writes are told on, so whoever has it open hears them.
+  const auth = options.auth;
+  if (auth) {
+    if (docs.length && !options.owns && !options.shared) throw ownerless(docs.map((d) => d.prefix).join(", "), "registerDocs");
+    const unowned = customDocs.find((d) => !d.owns && !d.shared);
+    if (unowned) throw ownerless(unowned.prefix, "defineCustomDoc");
+  } else {
+    // and owns or shared with no auth module would guard nothing: every socket opens every document
+    if (options.owns || options.shared) throw authless(docs.map((d) => d.prefix).join(", "), "registerDocs");
+    const said = customDocs.find((d) => d.owns || d.shared);
+    if (said) throw authless(said.prefix, "defineCustomDoc");
+  }
+  /** The gate's identity (with `auth`), or its refusal. */
+  const gated = (client: any): { identity: I } | { error: { code: number; message: string } } => {
+    const g = auth!.gate(client);
+    return isAuthError(g) ? { error: { code: 401, message: g.error } } : { identity: g };
+  };
+  /** Who is writing: with `auth` the gate's identity, else the one the client carries -- as the Postgres listener's writerOf. */
+  const writerOf = (client: any): I | undefined => {
+    if (!auth) return client?.data?.identity as I | undefined;
+    const g = gated(client);
+    return "identity" in g ? g.identity : undefined;
+  };
+  waitForLocks(db);
   const ledger = options.ledger ? createLedger(db) : undefined;
   const whoOf = (client: any): string | null => {
-    const identity = client?.data?.identity;
+    const identity = writerOf(client);
     if (identity === undefined || identity === null) return null;
     if (options.who) return options.who(identity);
     return typeof identity === "string" || typeof identity === "number" ? String(identity) : JSON.stringify(identity);
@@ -195,7 +265,7 @@ export function registerDocs(
   for (const doc of docs) docByPrefix.set(doc.prefix, doc);
 
   // Custom doc lookup: prefix → CustomDocDef
-  const customByPrefix = new Map<string, CustomDocDef<any>>();
+  const customByPrefix = new Map<string, CustomDocDef<any, I>>();
   for (const cd of customDocs) {
     customByPrefix.set(cd.prefix, cd);
   }
@@ -208,6 +278,68 @@ export function registerDocs(
 
   // In-memory doc cache: docName → loaded doc object
   const cache = new Map<string, any>();
+
+  // Several processes on one file (todo #1): a copy read before another
+  // connection committed is stale, and a write merged over one would put back
+  // what the other wrote. `PRAGMA data_version` moves when another connection
+  // commits (never for this one's own writes), so before a copy is served or
+  // written from, every copy is dropped when it has moved, and read again from
+  // the tables. A document open here is not told of another process's write:
+  // it reads it when it is next opened, or written through.
+  const dataVersion = db.query("PRAGMA data_version");
+  let seenVersion = (dataVersion.get() as { data_version: number }).data_version;
+  function heardElsewhere(): boolean {
+    const now = (dataVersion.get() as { data_version: number }).data_version;
+    if (now === seenVersion) return false;
+    seenVersion = now;
+    cache.clear();
+    implied.clear();
+    for (const view of views.values()) view.doc = null;
+    return true;
+  }
+
+  /**
+   * A handler run under the write lock (BEGIN IMMEDIATE), so what it reads is
+   * what it writes over: no other process commits between (an undo's plan and
+   * its walk). Inside a caller's own transaction, it runs in that.
+   */
+  const underLock = (handler: (msg: any, client: any, respond: (r: any) => void) => void) =>
+    (msg: any, client: any, respond: (r: any) => void) => {
+      if (db.inTransaction) return handler(msg, client, respond);
+      db.run("BEGIN IMMEDIATE");
+      try { handler(msg, client, respond); db.run("COMMIT"); }
+      catch (err) { if (db.inTransaction) db.run("ROLLBACK"); throw err; }
+    };
+
+  /** Who a client is, to a custom document: the gate's identity with `auth`, else undefined -- as on Postgres. */
+  const identityOf = (client: any): I | undefined => (auth ? writerOf(client) : undefined);
+
+  /** An answer that may come later: `go` once `ok` says yes (awaited when it is a promise), else 404 -- not there for this identity. */
+  const whenOwned = (ok: boolean | Promise<boolean>, respond: (r: any) => void, go: () => void): void | Promise<void> => {
+    const no = () => respond({ error: { code: 404, message: "Not found" } });
+    if (typeof (ok as any)?.then !== "function") return ok ? go() : no();
+    return (ok as Promise<boolean>).then((yes) => (yes ? go() : no()), (err: any) => respond({ error: { code: 500, message: String(err?.message ?? err) } }));
+  };
+
+  /**
+   * With `auth`, a handler for one of these documents asks the gate first
+   * (401 without an identity) and then the document's `owns` (404 when it says
+   * no; a shared one has none) -- the Postgres listener's withDoc. `owned:
+   * false` for close: letting go never needs the owner's say. `custom: false`
+   * where a custom document answers without the gate (a write: 403; a close).
+   */
+  const guarded = (handler: (msg: any, client: any, respond: (r: any) => void) => any, { owned = true, custom = true } = {}) =>
+    (msg: any, client: any, respond: (r: any) => void) => {
+      if (!auth) return handler(msg, client, respond);
+      const docName = msg.doc as string;
+      const mine = findCustom(docName);
+      if (mine ? !custom : !findDoc(docName)) return handler(msg, client, respond);   // not gated here, or another backend's
+      const g = gated(client);
+      if ("error" in g) return respond(g);
+      const owns = mine ? mine.def.owns : options.owns;
+      if (!owned || !owns) return handler(msg, client, respond);
+      return whenOwned(owns(g.identity, docName), respond, () => handler(msg, client, respond));
+    };
 
   // Open implied docs whose root row has not been written yet.
   const implied = new Set<string>();
@@ -243,6 +375,31 @@ export function registerDocs(
   // Parsed criteria per open custom doc name (shared across clients of the same name).
   const customCriteria = new Map<string, unknown>();
 
+  // Membership docs: one view per doc name and identity (without auth, per
+  // name) -- its query's rows, and the subscribers who are that identity -- so
+  // one identity's rows are never served to another, as on Postgres. A view
+  // whose rows were dropped (`evict`, another process's write) is queried again.
+  type View = { docName: string; criteria: unknown; identity: I | undefined; doc: Record<string, Record<string, any>> | null; subs: Set<any> };
+  const views = new Map<string, View>();
+  const viewKey = (docName: string, identity: I | undefined): string =>
+    auth ? `${docName}\u0000${auth.asSqlArg && identity !== undefined ? String(auth.asSqlArg(identity)) : JSON.stringify(identity)}` : docName;
+  /** A view's rows, queried as its identity when it has none. */
+  function viewRows(view: View, def: CustomDocDef<any, I>): Record<string, Record<string, any>> {
+    if (!view.doc) {
+      const rowsByColl = def.query!(db, view.criteria, view.identity);
+      const doc: Record<string, Record<string, any>> = {};
+      for (const coll of def.watch) doc[coll] = toMap(rowsByColl[coll] ?? []);
+      view.doc = doc;
+    }
+    return view.doc;
+  }
+  /** Take `client` out of the views of `docName` (every name, when none), dropping a view nobody holds. */
+  function leaveViews(client: any, docName?: string): void {
+    for (const [key, view] of views) {
+      if ((docName === undefined || view.docName === docName) && view.subs.delete(client) && view.subs.size === 0) views.delete(key);
+    }
+  }
+
   // Track which doc names are subscribed (for scoped fan-out)
   const subscriptions = new Map<string, Set<any>>(); // docName → Set<ws clients>
 
@@ -255,7 +412,7 @@ export function registerDocs(
     return found ? { def: found, docId: docName.slice(found.prefix.length) } : null;
   }
 
-  function findCustom(docName: string): { def: CustomDocDef<any>; docId: string } | null {
+  function findCustom(docName: string): { def: CustomDocDef<any, I>; docId: string } | null {
     for (const [prefix, def] of customByPrefix) {
       if (docName.startsWith(prefix)) {
         return { def, docId: docName.slice(prefix.length) };
@@ -270,6 +427,7 @@ export function registerDocs(
   // `subscriptions`, growing the fan-out set monotonically (v0.5.0 review #7).
   // Mirrors the `close`-action eviction below.
   function releaseClient(client: any): void {
+    leaveViews(client);
     for (const [docName, subs] of subscriptions) {
       if (!subs.delete(client)) continue;
       if (subs.size === 0) {
@@ -346,10 +504,8 @@ export function registerDocs(
     if (!table.parent) {
       // No parent: no key ties a row of it to one document. Included, it is
       // loaded in full, as the Postgres backend loads it: every document of
-      // the prefix holds every row, and the fan-out (rowInScope) and loadDocAt
-      // say the same. Met only on the way up from an included grandchild, it
-      // is not in the document, and so neither is anything under it.
-      if (!def.include.includes(table.docKey)) return [];
+      // the prefix holds every row, and the fan-out (holds) and loadDocAt say
+      // the same.
       const viewName = table.temporal ? `current_${table.name}` : table.name;
       return db.query(`SELECT * FROM ${viewName}`).all();
     }
@@ -362,9 +518,13 @@ export function registerDocs(
       return db.query(`SELECT * FROM ${viewName} WHERE ${table.parent.fkColumn} = ?`).all(rootRow.id);
     }
 
-    // Grandchild — load parent rows first, then filter by their IDs
+    // Grandchild — load parent rows first, then filter by their IDs. A parent
+    // the document need not include: its rows are walked all the same. One
+    // with no parent of its own ends the chain short of the root, so nothing
+    // under it is in the document, as the fan-out's chainRoot (and Postgres's
+    // _delta_load_collection) judge it (todo #32).
     const parentTable = schema.tables[parentCollection];
-    if (!parentTable) return [];
+    if (!parentTable?.parent) return [];
     const parentRows = loadCollection(parentTable, def, rootRow);
     const parentIds = parentRows.map((r: any) => r.id);
     if (parentIds.length === 0) return [];
@@ -486,7 +646,7 @@ export function registerDocs(
     const list = scope.mode === "list";
     const rootId = list ? undefined : rowId(scope.id ?? doc[def.root]?.id);
     const rootTable = schema.tables[def.root]!;
-    let opened: boolean | undefined;   // a single document's root was there as the write began
+    let opened: boolean | undefined;   // a single document's root was there as the write began (or it is implied)
     const broadcastOps: DeltaOp[] = [];
     const touched: Touched[] = [];
     // A write is one moment, as a Postgres transaction's NOW() is: every version
@@ -542,6 +702,20 @@ export function registerDocs(
       touched.push({ coll: collKey, id, before, after: stored });
     };
 
+    // Does a parent the document does not include hang from its root? Asked of the tables (todo #32).
+    const reaches = (coll: string, id: unknown): boolean => {
+      const parent = readRow(schema.tables[coll]!, rowId(id as string | number));
+      return !!parent && sameId(chainRoot(coll, parent, def.root), rootId);
+    };
+
+    /**
+     * Does the document hold `id` of `coll`, the parent a row is added or moved
+     * under, as the tables stand now? One of a collection it does not include
+     * is asked of `reaches` (single mode; a list holds none such).
+     */
+    const parentHeld = (coll: string, id: unknown): boolean =>
+      id != null && (coll === def.root || def.include.includes(coll) ? held(schema.tables[coll]!, rowId(id as string | number)) != null : !list && reaches(coll, id));
+
     /**
      * Replace fields of a row the document holds -- the root (`root`), or a row
      * of a map -- as the op says, into the run of that row. The path names the
@@ -557,6 +731,16 @@ export function registerDocs(
         run = { table, id, root, key, before: holders(collKey, present, docName), row: { ...present } };
       } else if (!holds(def, scope, collKey, run.row)) {
         refuse(404, `Row not found: ${collKey}/${id}`);   // the run moved it out of the document: as held() would read it
+      }
+      // A parent key written moves the row, and only under a parent this
+      // document holds, as an add names one: through it, a row is never moved
+      // into another document (you may write what you may read). A single
+      // document's own root is not under its parent: its value names it; a
+      // list's included collection is whole.
+      const parent = table.parent;
+      const to = parent ? fields[parent.fkColumn] : undefined;
+      if (parent && to != null && !root && !(list && parent.collection !== def.root) && !parentHeld(parent.collection, to)) {
+        refuse(404, `Row not found: ${parent.collection}/${to}`);
       }
       for (const [field, value] of Object.entries(fields)) {
         if (field === "id" || field === "valid_from" || field === "valid_to") continue;
@@ -583,7 +767,7 @@ export function registerDocs(
       // removal), guarded by its plan.
       if (!list && !walk) {
         const there = readRow(rootTable, rootId!) != null;
-        opened ??= there;
+        opened ??= there || !!def.implied;   // an implied document always opens
         const back = opened && op.op === "add" && isRoot && parts.length === 2 && parts[1] !== "-" && sameId(rowId(parts[1]!), rootId);
         if (!there && !back) refuse(404, `Document not found: ${docName} (its root, ${joinPath(def.root, String(rootId))}, is not there)`);
       }
@@ -644,7 +828,7 @@ export function registerDocs(
           const parent = table.parent;
           if (!isRoot && parent && (list ? parent.collection === def.root : parent.collection !== def.root)) {
             const fk = row[parent.fkColumn];
-            if (fk == null || !held(schema.tables[parent.collection]!, rowId(fk as string | number))) refuse(404, `Row not found: ${parent.collection}/${fk ?? ""}`);
+            if (!parentHeld(parent.collection, fk)) refuse(404, `Row not found: ${parent.collection}/${fk ?? ""}`);
           }
           const fullRow = insertCollectionRow(db, schema, table, id, rootId, def, row, ts, list);
           if (table.temporal) made.add(`${collKey}/${id}`);
@@ -727,13 +911,34 @@ export function registerDocs(
   // WebSocket handlers
   // ---------------------------------------------------------------------------
 
-  ws.on("open", (msg, client, respond) => {
+  ws.on("open", guarded((msg, client, respond) => {
     const docName = msg.doc as string;
+    if (findCustom(docName) || findDoc(docName)) heardElsewhere();
 
     // Custom doc path first (independent prefix space).
     const customMatch = findCustom(docName);
     if (customMatch) {
-      const doc = loadCustom(docName, customMatch.def, customMatch.docId);
+      let doc: any;
+      if (customMatch.def.recompute) {
+        // Whole-doc: read as this client, never cached, as on Postgres.
+        const criteria = customCriteria.get(docName) ?? customMatch.def.parse(customMatch.docId);
+        try { doc = customMatch.def.recompute(db, criteria, identityOf(client)); }
+        catch (err: any) { log.error(`open custom ${docName} failed: ${err.message}`); return respond({ error: { code: 500, message: err.message } }); }
+        if (doc == null) return respond({ error: { code: 404, message: "Not found" } });
+        customCriteria.set(docName, criteria);
+      } else {
+        // Membership: this identity's view of the name, queried as it.
+        const identity = identityOf(client);
+        const key = viewKey(docName, identity);
+        let view = views.get(key);
+        if (!view) {
+          const fresh: View = { docName, criteria: customMatch.def.parse(customMatch.docId), identity, doc: null, subs: new Set() };
+          viewRows(fresh, customMatch.def);
+          views.set(key, (view = fresh));
+        }
+        doc = viewRows(view, customMatch.def);
+        view.subs.add(client);
+      }
 
       trackSubscribe(client, docName);
       if (!subscriptions.has(docName)) subscriptions.set(docName, new Set());
@@ -741,7 +946,7 @@ export function registerDocs(
       onClientDrop(client, releaseClient);
 
       respond({ result: doc });
-      log.info(`opened ${docName} (custom)`);
+      log.info(`opened ${docName} (custom${customMatch.def.recompute ? ", recompute" : ""})`);
       return;
     }
 
@@ -765,21 +970,7 @@ export function registerDocs(
     // so a copy kept from the stream of changes knows where it starts
     respond({ result: ledger ? { ...doc, _v: ledger.version(docName) } : doc });
     log.info(`opened ${docName}`);
-  });
-
-  /** A custom document from the cache, or queried into it. */
-  function loadCustom(docName: string, def: CustomDocDef<any>, docId: string): any {
-    let doc = cache.get(docName);
-    if (!doc) {
-      const criteria = def.parse(docId);
-      const rowsByColl = def.query(db, criteria);
-      doc = {};
-      for (const coll of def.watch) doc[coll] = toMap(rowsByColl[coll] ?? []);
-      cache.set(docName, doc);
-      customCriteria.set(docName, criteria);
-    }
-    return doc;
-  }
+  }));
 
   /** A document from the cache, or loaded into it: an implied one opens empty, and its first write makes its row. */
   function load(docName: string, def: DocDef, docId: string): any | null {
@@ -810,11 +1001,13 @@ export function registerDocs(
    */
   function reloadEvicted(): void {
     for (const [name, subs] of subscriptions) {
-      if (!subs.size || cache.has(name)) continue;
-      const custom = findCustom(name);
-      const match = custom ? null : findDoc(name);
-      if (custom) loadCustom(name, custom.def, custom.docId);
-      else if (match) load(name, match.def, match.docId);
+      if (!subs.size || cache.has(name) || findCustom(name)) continue;   // a custom doc's: its views, below (a recompute doc is never kept)
+      const match = findDoc(name);
+      if (match) load(name, match.def, match.docId);
+    }
+    for (const view of views.values()) {
+      const custom = view.subs.size && !view.doc ? findCustom(view.docName) : null;
+      if (custom) viewRows(view, custom.def);
     }
   }
 
@@ -828,7 +1021,7 @@ export function registerDocs(
       return { error: { code: 400, message: validationErrors.map((e) => `${e.path}: ${e.message}`).join("; ") } };
     }
 
-    const snapshot = structuredClone(doc); // for rollback, and for the inverse
+    let snapshot = structuredClone(doc); // for rollback, and for the inverse
     let written: Written;
     let touched: Touched[] = [];
     try {
@@ -839,14 +1032,22 @@ export function registerDocs(
       // post-commit block below must not look like a failed write.
       // an implied document's first write makes its root row -- unless it adds the root itself (an undo of its removal)
       const addsRoot = scope.mode === "single" && ops.some((op) => op.op === "add" && splitPath(op.path).length === 2 && splitPath(op.path)[0] === def.root);
+      // Immediate: the write lock first, waiting for another process's (busy_timeout),
+      // then the reads -- a deferred transaction that read before another committed
+      // could not then write (SQLITE_BUSY). Under it, a copy another wrote past is read again.
       written = db.transaction(() => {
+        if (heardElsewhere()) {
+          reloadEvicted();
+          doc = load(docName, def, docName.slice(def.prefix.length)) ?? rootless(def);
+          snapshot = structuredClone(doc);
+        }
         if (implied.has(docName) && !addsRoot) ensureImpliedRoot(def, doc);
         const done = applyOps(docName, def, doc, ops, by.undoes !== undefined);
         touched = done.touched;
         const inverse = inverseOf(snapshot, done.applied, ops);
         const recorded = ledger?.record({ doc: docName, ops: done.applied, inverse, ...by });
         return { ops: done.applied, inverse, version: recorded?.version, entry: recorded?.entry };
-      })();
+      }).immediate();
       implied.delete(docName);
     } catch (err: any) {
       if (cache.has(docName)) cache.set(docName, snapshot); // restore in-memory cache (a rootless walk's copy was never in it)
@@ -895,7 +1096,7 @@ export function registerDocs(
     else cache.delete(docName);
   }
 
-  ws.on("delta", (msg, client, respond) => {
+  ws.on("delta", guarded((msg, client, respond) => {
     const docName = msg.doc as string;
 
     if (findCustom(docName)) {
@@ -906,6 +1107,7 @@ export function registerDocs(
     const match = findDoc(docName);
     if (!match) return;
 
+    heardElsewhere();
     reloadEvicted();
     const doc = cache.get(docName);
     if (!doc) {
@@ -922,7 +1124,7 @@ export function registerDocs(
     // ledger): what delta applied, walked back, read from the document as it
     // was. Opt-in, so a browser writer is not sent rows it never asked for.
     respond({ result: msg.inverse || ledger ? { ack: true, ...out } : { ack: true } });
-  });
+  }, { custom: false }));
 
   if (ledger) {
     /**
@@ -941,8 +1143,10 @@ export function registerDocs(
       if (msg.entry != null && msg.entry !== entry.id) {
         return respond({ error: { code: 409, message: `The cursor's next entry to ${way} is ${entry.id}, not ${msg.entry}` } });
       }
-      reloadEvicted();   // a walk is a write: its fan-out needs every open doc's copy, as delta's does
       const match = findDoc(entry.doc);
+      if (!match) return;   // written through another registration's document (one ledger, one database): its walk answers
+      heardElsewhere();
+      reloadEvicted();   // a walk is a write: its fan-out needs every open doc's copy, as delta's does
       // a single document whose root is gone (removed through it) is walked from
       // its root absent, as Postgres reads it: an undo of the removal puts it back
       const doc = match && (load(entry.doc, match.def, match.docId) ?? rootless(match.def));
@@ -964,17 +1168,40 @@ export function registerDocs(
         if (!subscriptions.has(entry.doc)) cache.delete(entry.doc); // loaded for this walk only
       }
     };
-    ws.on("undo", walk("undo"));
-    ws.on("redo", walk("redo"));
-    // A document's recent history: each entry says `mine`, never who wrote it.
-    ws.on("history", (msg, client, respond) => {
-      if (!findDoc(msg.doc)) return;
+    /**
+     * With `auth`, a walk passes the gate (401) and writes to its entry's
+     * document only for one who owns it (404), as on Postgres: asked of the
+     * cursor's next entry, which the walk then takes alone (409 if it has
+     * moved on meanwhile).
+     */
+    const walkAs = (way: "undo" | "redo") => {
+      const walked = underLock(walk(way));
+      return (msg: any, client: any, respond: (r: any) => void) => {
+        if (!auth) return walked(msg, client, respond);
+        const g = gated(client);
+        if ("error" in g) return respond(g);
+        const cursor = cursorOf(msg, client);
+        const entry = cursor === null ? undefined : way === "undo" ? ledger.nextUndo(cursor) : ledger.nextRedo(cursor);
+        if (!entry || !options.owns || !findDoc(entry.doc)) return walked(msg, client, respond);   // another registration's: it asks its own owns
+        return whenOwned(options.owns(g.identity, entry.doc), respond, () => walked(msg.entry == null ? { ...msg, entry: entry.id } : msg, client, respond));
+      };
+    };
+    ws.on("undo", walkAs("undo"));
+    ws.on("redo", walkAs("redo"));
+    // A document's recent history, to whoever may open it: each entry says `mine`, never who wrote it.
+    ws.on("history", guarded((msg, client, respond) => {
+      const match = findDoc(msg.doc);
+      if (!match) return;
+      let there: unknown;
+      try { there = match.def.implied || loadDocFromSql(match.def, resolveScope(match.def, match.docId)); }
+      catch (err: any) { return respond({ error: { code: typeof err.code === "number" ? err.code : 500, message: named(err).message } }); }
+      if (!there) return respond({ error: { code: 404, message: "Not found" } });
       respond({ result: ledger.history(msg.doc, cursorOf(msg, client), msg.limit) });
-    });
+    }));
   }
 
   // A document as it stood at a time (`at`, ISO-8601): its temporal rows as they were then, as on Postgres.
-  ws.on("open_at", (msg, _client, respond) => {
+  ws.on("open_at", guarded((msg, _client, respond) => {
     const match = findDoc(msg.doc as string);
     if (!match) return;
     if (!msg.at) return respond({ error: { code: 400, message: "at is required" } });
@@ -982,9 +1209,9 @@ export function registerDocs(
     try { doc = loadDocAt(db, schema, match.def, match.docId, String(msg.at)); }
     catch (err: any) { return respond({ error: { code: typeof err.code === "number" ? err.code : 500, message: named(err).message } }); }
     respond(doc ? { result: doc } : { error: { code: 404, message: "Not found" } });
-  });
+  }));
 
-  ws.on("close", (msg, client, respond) => {
+  ws.on("close", guarded((msg, client, respond) => {
     const docName = msg.doc as string;
     const isCustom = findCustom(docName) != null;
     const isStandard = findDoc(docName) != null;
@@ -992,6 +1219,7 @@ export function registerDocs(
 
     trackUnsubscribe(client, docName);
     subscriptions.get(docName)?.delete(client);
+    if (isCustom) leaveViews(client, docName);
     if (subscriptions.get(docName)?.size === 0) {
       subscriptions.delete(docName);
       cache.delete(docName); // evict when no subscribers
@@ -1001,7 +1229,7 @@ export function registerDocs(
 
     respond({ result: { ack: true } });
     log.debug(`closed ${docName}`);
-  });
+  }, { owned: false, custom: false }));
 
   // ---------------------------------------------------------------------------
   // Custom-doc cross-pollination
@@ -1015,6 +1243,39 @@ export function registerDocs(
   function customFanOut(ops: DeltaOp[]) {
     if (customByPrefix.size === 0) return;
 
+    // Recompute defs: the whole doc, read again once per write that touched a
+    // watched collection, for each subscriber as it is, and sent it alone as
+    // a root replace -- as the Postgres listener's recomputeAndPush.
+    const touchedColls = new Set(ops.map((op) => splitPath(op.path)[0]));
+    for (const [prefix, def] of customByPrefix) {
+      if (!def.recompute || !def.watch.some((c) => touchedColls.has(c))) continue;
+      for (const [docName, subs] of subscriptions) {
+        if (!docName.startsWith(prefix) || findCustom(docName)?.def !== def) continue;
+        const criteria = customCriteria.get(docName);
+        if (criteria === undefined) continue;
+        const read = new Map<string, any>();   // once per identity in this write, however many subscribers are it
+        for (const client of subs) {
+          if (auth && "error" in gated(client)) continue;   // signed out since it opened: never read it as nobody
+          try {
+            const identity = identityOf(client);
+            const key = viewKey(docName, identity);
+            if (!read.has(key)) read.set(key, def.recompute(db, criteria, identity));
+            const doc = read.get(key);
+            if (doc == null) continue;
+            if (client.readyState === undefined || client.readyState === 1) {
+              client.send(JSON.stringify({ doc: docName, ops: [{ op: "replace", path: "", value: doc }] }));
+            }
+          } catch (err: any) {
+            log.error(`recompute ${docName}: ${err.message}`);
+          }
+        }
+      }
+    }
+
+
+    // Membership defs: per row, per view.
+    const viewsOf = new Map<string, number>();
+    for (const view of views.values()) if (view.subs.size) viewsOf.set(view.docName, (viewsOf.get(view.docName) ?? 0) + 1);
     for (const op of ops) {
       const parts = splitPath(op.path);
       // A row at whatever path the write told it: /<coll>/<id>, or a single
@@ -1025,25 +1286,16 @@ export function registerDocs(
       const id = parts[1] ?? (row?.id != null ? String(row.id) : undefined);
       if (id === undefined || !watchedCollections.has(coll)) continue;
 
-      // Bucket open docs by custom type.
+      // Each open view of a membership type, as its identity.
       for (const [prefix, def] of customByPrefix) {
-        if (!def.watch.includes(coll)) continue;
+        if (!def.matches || !def.watch.includes(coll)) continue;   // recompute defs: above
 
-        // Memoize the membership decision per distinct criteria for this op.
-        const decisionByCriteria = new Map<unknown, boolean>();
-
-        for (const [docName] of subscriptions) {
-          if (!docName.startsWith(prefix)) continue;
-          const criteria = customCriteria.get(docName);
-          if (criteria === undefined) continue;
-          const cached = cache.get(docName);
+        for (const view of views.values()) {
+          if (!view.docName.startsWith(prefix) || !view.subs.size) continue;
+          const cached = view.doc;
           if (!cached) continue;
-
-          let shouldBeIn = decisionByCriteria.get(criteria);
-          if (shouldBeIn === undefined) {
-            shouldBeIn = row == null ? false : def.matches(coll, row, criteria);
-            decisionByCriteria.set(criteria, shouldBeIn);
-          }
+          const docName = view.docName;
+          const shouldBeIn = row == null ? false : def.matches!(coll, row, view.criteria, view.identity);
 
           const wasIn = cached[coll]?.[id] != null;
           const emitted: DeltaOp[] = [];
@@ -1059,8 +1311,16 @@ export function registerDocs(
             emitted.push({ op: "remove", path: joinPath(coll, id) });
           }
           // else: neither in nor becoming in — ignore.
+          if (!emitted.length) continue;
 
-          if (emitted.length) ws.publish(docName, { doc: docName, ops: emitted });
+          // The only view of its name: its subscribers are the channel's. Else
+          // each view's own subscribers, so one identity's rows reach only it.
+          const change = { doc: docName, ops: emitted };
+          if (viewsOf.get(docName) === 1) ws.publish(docName, change);
+          else {
+            const raw = JSON.stringify(change);
+            for (const c of view.subs) if (c.readyState === undefined || c.readyState === 1) c.send(raw);
+          }
         }
       }
     }
@@ -1075,7 +1335,7 @@ export function registerDocs(
     evict(docName: string) {
       cache.delete(docName);
       implied.delete(docName);
-      customCriteria.delete(docName);
+      for (const view of views.values()) if (view.docName === docName) view.doc = null;
     },
   };
 }
@@ -1199,15 +1459,16 @@ function temporalQuery(db: any, table: ResolvedTable, where: string, params: any
 }
 
 function loadCollectionAt(db: any, schema: Schema, table: ResolvedTable, def: DocDef, rootRow: any, at: string): any[] {
-  // No parent: in full when included, as open loads it; else not in the document.
-  if (!table.parent) return def.include.includes(table.docKey) ? temporalQuery(db, table, "TRUE", [], at) : [];
+  // No parent: included, in full, as open loads it.
+  if (!table.parent) return temporalQuery(db, table, "TRUE", [], at);
 
   if (table.parent.collection === def.root) {
     return temporalQuery(db, table, `${table.parent.fkColumn} = ?`, [rootRow.id], at);
   }
 
+  // a parent with no parent of its own ends the chain short of the root: nothing under it is in the document, as open reads it
   const parentTable = schema.tables[table.parent.collection];
-  if (!parentTable) return [];
+  if (!parentTable?.parent) return [];
   const parentRows = loadCollectionAt(db, schema, parentTable, def, rootRow, at);
   const parentIds = parentRows.map((r: any) => r.id);
   if (parentIds.length === 0) return [];
@@ -1635,6 +1896,16 @@ function insertRow(db: any, table: ResolvedTable, row: any, ts: string) {
   db.run(`INSERT INTO ${table.name} (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`, vals);
 }
 
+/**
+ * Wait for another connection's lock (up to 5s) rather than fail at once with
+ * SQLITE_BUSY: several processes may share the file (todo #1). A timeout the
+ * app set is kept.
+ */
+function waitForLocks(db: any): void {
+  const set = db.query("PRAGMA busy_timeout").get() as { timeout?: number } | null;
+  if (!set?.timeout) db.run("PRAGMA busy_timeout = 5000");
+}
+
 /** An error the writer is answered with: `code` is its wire code. */
 function refuse(code: number, message: string): never {
   throw Object.assign(new Error(message), { code });
@@ -1734,9 +2005,11 @@ function updateRow(db: any, table: ResolvedTable, id: string | number, row: any)
 // applyOps): the row as the tables stand at that point in the write, judged by
 // the rule a document is read by (`holds`), as Postgres asks
 // `_delta_row_in_scope` -- so a row that left the document earlier in the same
-// write is not its to write. The error message deliberately matches the "not
-// there" case: a distinct "forbidden" would confirm the row exists to someone
-// probing ids.
+// write is not its to write. A row added, or moved by a parent key written, goes
+// only under a parent the document holds (`parentHeld`; one of a collection it
+// does not include, through the tables: `reaches`). The error message
+// deliberately matches the "not there" case: a distinct "forbidden" would
+// confirm the row exists to someone probing ids.
 
 function removeRow(
   db: any,

@@ -212,8 +212,9 @@ BEGIN
       IF v_is THEN
         v_told := v_told || jsonb_build_array(jsonb_build_object(
           'op', CASE WHEN v_was OR v_root THEN 'replace' ELSE 'add' END, 'path', v_path, 'value', v_t->'after'));
-      ELSIF v_root THEN
-        v_told := v_told || jsonb_build_array(jsonb_build_object('op', 'replace', 'path', v_path, 'value', 'null'::jsonb));
+      ELSIF v_root THEN   -- gone: null, or the empty root an implied document then opens with
+        v_told := v_told || jsonb_build_array(jsonb_build_object('op', 'replace', 'path', v_path, 'value',
+          CASE WHEN COALESCE(v_def.implied, FALSE) THEN _delta_implied_root(v_def, (v_t->>'id')::BIGINT) ELSE 'null'::jsonb END));
       ELSE
         v_told := v_told || jsonb_build_array(jsonb_build_object('op', 'remove', 'path', v_path));
       END IF;
@@ -304,6 +305,9 @@ BEGIN
    WHERE collection_key = v_def.root_collection;
   v_root_view := _delta_source_view(v_root_coll.table_name, v_root_coll.temporal);
 
+  -- an implied document's first write makes its root row (todo #34)
+  IF NOT v_is_list THEN PERFORM _delta_make_implied(v_def, v_doc_id, p_ops, v_ts); END IF;
+
   FOR v_op IN SELECT jsonb_array_elements(p_ops)
   LOOP
     -- A single document is its root row and what hangs from it. One whose
@@ -311,7 +315,8 @@ BEGIN
     -- opens as not found, and takes no writes (todo #59): asked before each
     -- op, so an add under a root that is gone makes no orphan. But a write
     -- through a document that opened (its root there as the write began, the
-    -- first op's answer) may add that root back after taking it out, and
+    -- first op's answer; an implied one always opens, todo #34) may add that
+    -- root back after taking it out, and
     -- write on through it: a remove and an add of the root in one write is
     -- one row, walked as one (_delta_walk_key). A walk is not asked: an undo
     -- of the root's removal puts it back (todo #43), and a walk of such a
@@ -319,7 +324,7 @@ BEGIN
     -- (_delta_walk_plan), as SQLite's and the JSON file's are.
     IF NOT v_is_list AND NOT COALESCE(p_walk, FALSE) THEN   -- a walk not said (null) is none
       EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I WHERE id = $1)', v_root_view) INTO v_exists USING v_doc_id;
-      v_opened := COALESCE(v_opened, v_exists);
+      v_opened := COALESCE(v_opened, v_exists OR COALESCE(v_def.implied, FALSE));
       v_back := FALSE;
       IF NOT v_exists AND v_opened AND v_op->>'op' = 'add' THEN
         v_parts := _delta_split_path(v_op->>'path');
@@ -503,9 +508,11 @@ BEGIN
 
       -- A direct child's FK was just injected above, so it is in scope by
       -- construction. A grandchild's arrives verbatim from the client — without
-      -- this check it grafts the new row onto ANOTHER doc's parent.
+      -- this check it grafts the new row onto ANOTHER doc's parent. A single
+      -- document's root row is not under its parent: its value names it.
       IF v_coll.parent_collection IS NOT NULL
          AND v_coll.parent_collection IS DISTINCT FROM v_def.root_collection
+         AND (v_is_list OR v_coll_key IS DISTINCT FROM v_def.root_collection)
          AND NOT _delta_row_in_scope(
                v_def, p_doc_name, v_coll.parent_collection,
                (v_new_row->>v_coll.parent_fk)::BIGINT) THEN
@@ -619,6 +626,19 @@ BEGIN
         v_op := jsonb_set(v_op, '{value}', jsonb_build_object(v_parts[3], v_op->'value'));
       END IF;
       PERFORM _delta_assert_fields(v_coll_key, v_coll.columns_def, v_coll.parent_fk, v_op->'value');
+
+      -- A parent key written moves the row, and only under a parent this
+      -- document holds, as an add names one: through it, a row is never moved
+      -- into another document (you may write what you may read), RLS or none.
+      -- A single document's own root is not under its parent: its value names it.
+      IF v_coll.parent_fk IS NOT NULL
+         AND jsonb_typeof(v_op->'value'->v_coll.parent_fk) IN ('number', 'string')
+         AND (v_is_list OR v_coll_key IS DISTINCT FROM v_def.root_collection)
+         AND NOT _delta_row_in_scope(v_def, p_doc_name, v_coll.parent_collection,
+               (v_op->'value'->>v_coll.parent_fk)::BIGINT) THEN
+        RAISE EXCEPTION 'row not found: %/%', v_coll.parent_collection, v_op->'value'->>v_coll.parent_fk
+          USING ERRCODE = 'P0002';
+      END IF;
 
       IF v_coll.temporal THEN
         EXECUTE format(

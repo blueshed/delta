@@ -22,7 +22,7 @@ import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
 import { applyFramework, newPool } from "./setup";
 import {
-  assertCopiesHold, course, expectTold, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresInbox, postgresOpenSeats, readAll, told, write,
+  assertCopiesHold, course, expectTold, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresInbox, postgresMenuCard, postgresOpenSeats, readAll, told, write,
   type PathBackend, type PathProcess,
 } from "./helpers/path";
 
@@ -52,7 +52,7 @@ async function processOn(): Promise<PathProcess> {
   const local = createLocal();
   const heard: { channel: string; data: any }[] = [];
   local.onPublish((channel, data) => heard.push({ channel, data }));
-  listeners.push(await createDocListener(local.server, pool, { ledger: true, custom: [postgresInbox, postgresOpenSeats] }));
+  listeners.push(await createDocListener(local.server, pool, { ledger: true, custom: [postgresInbox, postgresOpenSeats, postgresMenuCard] }));
   return { call: (action, msg) => local.call(action, msg), heard };
 }
 

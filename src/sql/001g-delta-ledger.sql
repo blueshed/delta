@@ -225,7 +225,7 @@ $$;
 CREATE OR REPLACE FUNCTION _delta_walk_plan(p_entry _delta_ledger)
 RETURNS JSONB AS $$
 DECLARE
-  v_doc      JSONB := COALESCE(delta_open(p_entry.doc_name), '{}'::jsonb);
+  v_doc      JSONB := _delta_open_held(p_entry.doc_name);   -- an implied document's absent root: null
   v_left     JSONB := '{}'::jsonb;   -- row key -> what the entry left there (JSON null: it removed it)
   v_before   JSONB := '{}'::jsonb;   -- row key -> what it held before the entry (JSON null: nothing)
   v_shown    JSONB := '{}'::jsonb;   -- row key -> its path as the inverse first says it: where a conflict is reported

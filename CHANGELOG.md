@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **SQLite and the JSON file: auth, a gate and `owns`, as on Postgres** (todo #6). Every socket
+  could open every document of a prefix. `registerDocs(ws, db, schema, docs, customDocs, { auth,
+  owns | shared })` takes the same `DeltaAuth`: every open, delta, open_at, history, undo, redo and
+  close passes `auth.gate` (401 without an identity); `owns(identity, docName)` is asked before
+  open, delta, open_at, history and a walk into the entry's document (404 when it says no, and no
+  subscription); with `auth`, `registerDocs` throws without `owns` or `shared`, and for a custom
+  doc (`defineCustomDoc(prefix, { owns | shared })`) with neither -- `docTypeFromDef`'s and
+  `createDocListener`'s words (`ownerless` now lives in `./auth`). The gate's identity is the
+  ledger's `who` and the cursor's person, and who a custom doc is read as: `recompute(db,
+  criteria, identity)`, and `query(db, criteria, identity)` / `matches(…, identity)`, whose rows
+  are now kept per name and identity, each identity told its own view's changes. `history` also
+  answers 404 for a document that does not open, as on Postgres. There is no RLS on SQLite:
+  `owns` is the whole check (the reference says what that means). One `owns` answers for the
+  documents of a `registerDocs` call, where Postgres takes one per `docTypeFromDef`.
+- **Postgres: implied documents, as on SQLite and the JSON file** (todo #34). A document
+  declared `implied: true` opens before its root row is -- the root as its first write will
+  make it (its id, each column's default) and each included collection empty -- where Postgres
+  answered 404; the first write makes the row in its own transaction (a failed one makes
+  none); its root removed through it, an open copy is told that empty root, not null, and it
+  opens empty again; an undo makes the rows again, root first. Ids on Postgres are serials, so
+  an implied document there is named by number (`room:7`): a name-keyed one (`room:attic`) is
+  a 400, as any text id, and stays the JSON file's and SQLite's -- the idiom for documents that
+  never move (a session). The framework SQL changes in place: `001a` adds
+  `_delta_docs.implied` (`ADD COLUMN IF NOT EXISTS`, false); `001c` adds
+  `_delta_implied_root`, `_delta_make_implied` and `_delta_open_held` and replaces `delta_open`;
+  `001d` replaces `delta_apply` (it makes the row) and `_delta_tell` (it tells the empty
+  root); `001g` replaces `_delta_walk_plan` (an absent implied root is null to the walk).
+  `generateSql` writes `implied` for each document when any is implied, so SQL for an app with
+  none still runs on framework SQL older than this; an app with one re-applies the framework
+  (`applyFramework`, or `bunx @blueshed/delta init --upgrade`).
+- **SQLite and the JSON file: a `recompute` custom document, as on Postgres** (todo #35).
+  `defineCustomDoc(prefix, { watch, parse, recompute })` from `@blueshed/delta/sqlite` (or
+  passed to `./json`) is read whole on open (null: a 404) and read again on every write to a
+  collection it watches, once per write, for each subscriber, and sent to that subscriber alone
+  as a root replace (`replace ""`), never cached -- the Postgres listener's contract, with
+  `recompute(db, criteria, identity)` synchronous over the `bun:sqlite` handle, as `query` is. An
+  app with one can start on the JSON file or SQLite and move on. `query` and `matches` are now
+  optional in SQLite's `CustomDocDef`, as in Postgres's. `createLocal()`'s callers take a message
+  sent to them alone (`send`), which `onPublish` hears on its document's channel with `to`, who
+  it went to (`{ identity }`; a broadcast has none), each listener its own copy and its own
+  mistake, as a broadcast is: a membership or recompute document's view, on Postgres too, where
+  in process it was lost (the listener's `client.send` threw on a caller with none).
+
 ### Fixed
 
 - **An `onConnect` that calls through DI connects** (todo #19). Only the client `onConnect` is
@@ -74,6 +119,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refuse)` (with `refuse` false a value refused answers the scope that holds nothing, with
   `refused` its message) and replaces the two-argument one, which calls it, and
   `_delta_doc_holds` (`CREATE OR REPLACE`: re-apply the framework, or `delta init`).
+- **Every backend: a recompute document is read once per identity after a write** (todo #6's
+  review). It was read once per subscriber, so fifty subscribers of one name, all one identity,
+  cost fifty reads of the same view per write. A write now reads it once for each identity among
+  a name's subscribers (keyed as a membership view is: `auth.asSqlArg`, or the identity; without
+  `auth`, once) and sends each subscriber its identity's.
+- **SQLite: two registrations on one database walk each other's undo** (todo #6's review). With
+  one `owns` per `registerDocs` call, an app with public and private documents registers twice
+  on one database, and both share the ledger; the first registration answered every undo and
+  redo, and one written through the second's document was a 404 ("Not found"). A walk now lets
+  an entry whose document is not its own by, and the registration that holds it walks it (with
+  `auth`, asking its own `owns`). Each registration still tells only its own open documents of
+  a write.
+- **Every backend: `owns` or `shared` given without an auth module is refused** (todo #6's
+  review). Nothing asks them without one, so `registerDocs(..., { owns })` with no `auth`, or
+  `docTypeFromDef(def, pool, { owns })` on a listener with none, looked guarded while every
+  socket opened every document. `registerDocs` and `docTypeFromDef` now throw when given `owns`
+  or `shared` without `auth`, and `registerDocs` or `createDocListener` without `auth` when a
+  custom doc says either (`authless`, beside `ownerless` in `./auth`). A `docTypeFromDef` that
+  says `shared` for a listener with `auth` passes that `auth` too.
+- **Every backend: a row moved through a document goes only under a parent the document holds**
+  (todo #6's review). Writing a parent key checked only its type, so a writer who owned
+  `fo-board:1` alone moved its household into wedding 2 (`replace /households/1/weddings_id 2`)
+  or its drink under wedding 2's course, and the board of wedding 2 was told the rows arrived --
+  on SQLite and the JSON file, and on Postgres wherever RLS did not stop it (PGlite, or no
+  policy). A parent key written, in a field or a row's merge, is now held to the rule an add's
+  is: under the document's root, or a parent in it (through the tables for one it does not
+  include), else a 404 that tells nobody. A list holds every row of its collections, so moves
+  one; a single document's own root is not under its parent and still moves. `delta_apply`
+  (`001d`) is replaced in place. The shared cases that moved a household through the board now
+  move a course through a list, or pin the refusal.
+- **SQLite: two processes on one file** (todo #1). Nothing set `busy_timeout` and writes ran
+  in deferred transactions, so a write while another process held the write lock failed at
+  once (`SQLITE_BUSY`, a 500), and one whose reads came before the other's commit could not
+  then write; and each process served the copies it had cached, so a write merged a field over
+  a stale row and put back what the other had just written. `createTables` and `registerDocs`
+  now set `PRAGMA busy_timeout = 5000` (unless the app set one); a write takes the lock first
+  (`db.transaction(…).immediate()`: still a savepoint inside a caller's own transaction), and
+  an undo or redo plans and walks under it; and before a copy is served or written from, the
+  backend asks `PRAGMA data_version`, which moves when another connection commits, and reads
+  every copy again from the tables when it has. A document open in one process is still not
+  told live of another's write: it reads it when it is next opened or written through
+  (`tests/sqlite-processes.test.ts` drives a second `bun` process on the file). Two costs, in the
+  reference: another process's write drops every copy this one keeps (50 open: a write pair from
+  about 0.3 ms to about 7 ms), and a wait for its lock blocks the event loop up to 5s.
+- **SQLite and Postgres: an included collection whose parent the document does not include
+  reads the same on both** (todo #32). A document holds an included collection by its chain of
+  parents to the root, walked whether or not it includes the parents on the way. A wedding's
+  document with `include: ["drinks"]` (drinks under courses) read its courses' drinks on both,
+  but on SQLite could not add one (404: the course was not in the document); it now may, to its
+  own courses, as on Postgres. A chain that meets a collection with no parent never reaches the
+  root: a course's document with `include: ["households"]` (households under the wedding) read
+  none on SQLite and every wedding's households on Postgres, which let it write them and was
+  never told of them (the fan-out already judged them not its). Postgres now reads none and
+  refuses their writes (404), as SQLite does -- and so does SQLite where the parent with no
+  parent is itself included, which it used to read in full and never told. The framework SQL
+  changes in place: `_delta_load_collection` (`001c`) and `_delta_row_in_scope` (`001b`) are
+  replaced, and `delta_apply` (`001d`) no longer asks a single document's root row, added (an
+  undo of its removal), for a parent in scope: its value names it, as on SQLite.
 - **Postgres: a custom document hears each write once, as it was applied, as on SQLite and the
   JSON file** (todo #44). The listener ran a membership doc's `matches` on the ops told to each
   document the write reached, one document after another. A write told to two documents was

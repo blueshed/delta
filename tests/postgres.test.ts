@@ -222,7 +222,7 @@ describe("createDocListener (end-to-end WS flow)", () => {
 
   test("auth gate rejects with 401 when auth is configured and gate returns error", async () => {
     clearRegistry();   // with auth, a document says who owns it: this list is everyone's
-    registerDocType(docTypeFromDef(defineDoc("items:", { root: "items", include: [] }), pool, { shared: true }));
+    registerDocType(docTypeFromDef(defineDoc("items:", { root: "items", include: [] }), pool, { auth: { gate: () => ({ error: "no" }) }, shared: true }));
     const ws = createWs();
     ws.publish = () => {};
     const listener = await createDocListener(ws, pool, {

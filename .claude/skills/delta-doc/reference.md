@@ -98,8 +98,8 @@ What is different from Postgres (the full list is SKILL.md → *Backends side by
 - **A single document's root row** must exist before the document opens — seed it with SQL, or declare the document `implied: true` and its first write makes it (*Implied documents*, below).
 - **`createTables(db, schema)` before the first open.** A missing table's error says so. `migrateSchema(db, schema)` adds columns a later schema declares.
 - **Ids are serial numbers, as on Postgres.** `add /todos/-` takes the next serial, and the echo carries it (`/todos/1`). A client-chosen id (`/todos/<id>`) works too, and may be text, as `groceries` is; on Postgres it must be a number. Digits name their number (`/todos/007` is `/todos/7`), up to 2^53 - 1; a path with an id past that is a 400 on every backend, since no JavaScript number holds it exactly (a client minting ids from `Date.now() * 1000` stays under it until the year 2255). `add` of an id that exists is a 409, on every backend and a temporal table too -- and so is an `add /todos/-` whose next serial a client already named: a serial does not step past the ids clients choose, so keep one way of naming rows per collection.
-- **No auth.** `registerDocs` has no gate: every socket may open every document of a prefix. Keep per-user data out of a shared SQLite backend, or put it behind Postgres.
-- **One process per file**: the backend caches documents in memory, and a second process would not hear the first's writes.
+- **Auth, as on Postgres, without RLS.** `registerDocs(ws, db, schema, docs, customDocs, { auth, owns })` (or `shared: true`) takes the same `DeltaAuth` (`wireAuth(ws, auth)` for its actions): every open, delta, open_at, history, undo, redo and close passes `auth.gate` (401 without an identity), and `owns(identity, docName)` says who may have each document (404 otherwise); with `auth`, `registerDocs` throws without `owns` or `shared`, and so for a custom doc with neither. One `owns` answers for every document of the call -- switch on the name's prefix -- where Postgres takes one per `docTypeFromDef`. Or register a public set and a private set in two calls on one database (`shared` on one, `owns` on the other): they share the ledger, and an undo or redo is walked by the registration whose document its entry was written through. Each call tells only its own open documents of a write, so keep the two sets over different rows. **There is no RLS**: nothing under `owns` filters what a document reads, so a name its owner may open holds every row its scope admits. The name is the whole check: scope a per-user document by its owner (`scope: { owner_id: ":id" }`) and have `owns` say that id is the caller's; a custom doc's `query`, `matches` and `recompute` are given the identity and must check rows against it themselves. *Per-user list isolation*, below.
+- **Several processes may share the file.** A write takes the write lock first (`BEGIN IMMEDIATE`) and waits up to 5s for another process's (`PRAGMA busy_timeout`, set by `createTables` and `registerDocs` unless the app set its own), so it lands rather than failing `SQLITE_BUSY`; an undo plans and walks under that lock. A copy the backend read before another process wrote (`PRAGMA data_version` moved) is read again before it is served or written from, so an open answers what the other wrote and a write never merges over a stale row. **A document open in one process is not told of a write made in another**: it reads it when it is next opened, or written through. For live fan-out across processes, Postgres. Two costs come with it. A write from another process drops *every* copy this one keeps, each read again from the tables when next needed: with 50 documents open, a write here went from about 0.3 ms to about 7 ms when the other process wrote between each (its write included). And `bun:sqlite` is synchronous, so waiting for another process's lock blocks this process's event loop, for up to the busy timeout (5 s unless you set `PRAGMA busy_timeout` lower): keep writes short on a file processes share.
 - **Fan-out**: a write reaches every open document that holds the row (*Fan-out*, below).
 - **An included collection with no `parent` is shared**: nothing ties its rows to one document, so every document of the prefix holds all of them (open, `loadDocAt` and the fan-out agree), as on Postgres. Give it a `parent` to make it per document.
 
@@ -232,7 +232,7 @@ interface DocDef {
   include: string[];                 // additional collections in the lens
   scope: Record<string, string>;     // root column → a binding read from the doc name, one rule on every
                                      // backend (`scope` syntax): ":id", "<=:end", "like:prefix"; a plain "name" is ":name", not a literal
-  implied?: boolean;                 // SQLite: opens empty until its first write makes the root row
+  implied?: boolean;                 // opens empty until its first write makes the root row (Postgres: by number)
 }
 
 // DeltaAuth — pluggable authentication; identity is yours.
@@ -358,9 +358,13 @@ defineDoc("venue:", {
 // `WHERE id = <doc-id>` which is the same thing.
 ```
 
+**An included collection travels its parent chain**, whether or not the document includes the parents on the way, on every backend: a `wedding:` document with `include: ["drinks"]` (drinks under courses, courses under the wedding) holds the drinks of its wedding's courses, is told of them and may add one to its own courses (another wedding's course is a 404). A chain that meets a collection with no `parent` on the way up never reaches the root, so nothing under it is in a single document, included or not: a `course:` document with `include: ["households"]` (households under the wedding) holds none of them, and may neither write nor add one (404). Open, the write gate and the fan-out read it by the one rule; to hold such rows, root the document where their chain ends, or list them (list mode holds each included collection in full).
+
+**Moving a row** -- writing its parent key -- puts it only under a parent the document holds, as an add names one, on every backend: through `wedding:1`, `replace /households/7/weddings_id 2` (or a drink moved to wedding 2's course) is a 404, and nobody is told, since the row would arrive in a document the writer may not have. Move it through a document that holds both parents (a list: every course, say), or through the row's own document (a single document's root is not under its parent: its value names it -- give that document an `owns` that says so).
+
 **Removing a row** takes the row and, through `parent` and `cascadeOn`, the rows under it in the collections the document includes, and theirs in turn. A document writes what it may read, so it removes only rows it holds: through `venues:` (`root: "venues", include: []`), `remove /venues/42` takes the venue and leaves its areas and sites, their `venues_id` naming a row that is gone. The same on every backend. To take them with it, remove the venue through a document that holds them: `venue:42` itself (below), or a list with `include: ["areas", "sites"]`, which holds every area and site.
 
-A single document may remove the root it is named for, on every backend: `remove /venues/42` through `venue:42` takes the venue and the rows the document holds under it (its areas and sites), and answers their removes, the venue's first. The copy open on `venue:42` is told its root is null (`replace /venues` null, as when the root is removed through another document) and each of those rows removed; every other document that held them is told they left. The document is then not found (404, as for any missing root row) -- an implied one (SQLite) opens empty again, as before its first write. Undo puts the venue back as it was before the write (a field the same write set first, `[replace /venues/name, remove /venues/42]`, included), then its rows, parent first; redo takes them again, children first. `/venues/<id>` names the document's own root: another id is a 404 to remove on every backend; to add, a 400 on the JSON file and SQLite, where Postgres adds that row, which the document then does not hold. Until the undo, the document takes no writes (404) -- asked before each op, so a write that takes the root out writes nothing more through it (an add under it would be an orphan), but the root's own add back: `[remove /venues/42, add /venues/42 {...}]` puts it back and writes on through it, one row to the ledger. (`replace /venues/<field>` is still a field of the root; `replace /venues/42` and `replace /venues/42/<field>`, the root by its id as a list document says it, write the root too and are told as `replace /venues`, on every backend -- another id is a 404.)
+A single document may remove the root it is named for, on every backend: `remove /venues/42` through `venue:42` takes the venue and the rows the document holds under it (its areas and sites), and answers their removes, the venue's first. The copy open on `venue:42` is told its root is null (`replace /venues` null, as when the root is removed through another document) and each of those rows removed; every other document that held them is told they left. The document is then not found (404, as for any missing root row) -- an implied one opens empty again, as before its first write. Undo puts the venue back as it was before the write (a field the same write set first, `[replace /venues/name, remove /venues/42]`, included), then its rows, parent first; redo takes them again, children first. `/venues/<id>` names the document's own root: another id is a 404 to remove on every backend; to add, a 400 on the JSON file and SQLite, where Postgres adds that row, which the document then does not hold. Until the undo, the document takes no writes (404) -- asked before each op, so a write that takes the root out writes nothing more through it (an add under it would be an orphan), but the root's own add back: `[remove /venues/42, add /venues/42 {...}]` puts it back and writes on through it, one row to the ledger. (`replace /venues/<field>` is still a field of the root; `replace /venues/42` and `replace /venues/42/<field>`, the root by its id as a list document says it, write the root too and are told as `replace /venues`, on every backend -- another id is a 404.)
 
 **Per-user list isolation** — each user sees only their own rows. The most common multi-tenant shape.
 
@@ -393,6 +397,9 @@ registerDocType(docTypeFromDef<User>(docs[0], pool, {
   auth,
   owns: (user, docName) => docName === `todos:${user.id}`,
 }));
+
+// SQLite or the JSON file: the same auth and owns, for the documents of the call
+registerDocs<User>(ws, db, schema, docs, [], { auth, owns: (user, docName) => docName === `todos:${user.id}` });
 ```
 
 ```tsx
@@ -407,11 +414,13 @@ An `add /todos/-` on this list-mode doc takes `owner_id` from the scope (the doc
 
 **Every document says who owns it.** With `auth` on the listener it is default-deny, whoever made the document:
 
+- **SQLite and the JSON file** — `owns` or `shared: true` in `registerDocs`' options beside `auth`, for every document of the call; it throws without one, and for a custom doc with neither.
+
 - **`docTypeFromDef`** — `owns` or `shared: true` in its options; with `auth` it throws without one. Given no `auth` it makes a type with neither, which the listener then refuses.
 - **A `DocType` written by hand** — an `owns(identity, docName)` method, or `shared: true` on it. `createDocListener(ws, pool, { auth })` refuses to start while a registered type has neither, and while such a listener runs, `registerDocType` refuses one.
-- **A custom doc** — `owns` or `shared: true` in `defineCustomDoc`; `createDocListener` refuses one with neither. `owns` is asked on open (a 404, and no subscription, when it says no), and again before each change the document is told.
+- **A custom doc** — `owns` or `shared: true` in `defineCustomDoc`; `createDocListener` (or `registerDocs`) refuses one with neither. `owns` is asked on open (a 404, and no subscription, when it says no), and on Postgres again before each change the document is told.
 
-The error names the prefix and says what to add. Without `auth` nothing is asked.
+The error names the prefix and says what to add. Without `auth` nothing is asked -- so `owns` or `shared` given without it (to `registerDocs`, `docTypeFromDef`, or a custom doc on a listener or `registerDocs` with no `auth`) is refused too, on every backend: it would say a document is guarded when every socket may open it.
 
 ### Custom read docs — `defineCustomDoc`
 
@@ -430,16 +439,16 @@ const sitesInBbox = defineCustomDoc<BBox>("sites-in-bbox:", {
   }),
   matches: (_coll, row, c) =>                      // does this changed row still belong?
     row.lng >= c.minLng && row.lng <= c.maxLng && row.lat >= c.minLat && row.lat <= c.maxLat,
-  shared: true,                                    // with auth: every signed-in identity may open every bbox
+  shared: true,                                    // with auth: every signed-in identity may open every bbox (without auth, leave it out)
 });
 ```
 
 - Doc shape is `{ [collection]: { [id]: row } }` — the framework keys rows by `id`. On a watched write it diffs membership: a row that now matches is `add`/`replace`d into the map, one that no longer matches is `remove`d — single ops, never a whole-doc resend.
-- **The `query` result is cached per doc name and identity** (Postgres; without `auth`, per name) and shared only by the subscribers who are that identity. `query(pool, criteria, identity)` runs once for each: bind the identity yourself (`withAppAuth(pool, id, …)`) so RLS scopes what it reads, as recompute does. `matches(collection, row, criteria, identity)` decides live membership per identity too; the row comes from the change log, which RLS does not filter, so check it against the identity there when the name is `shared` or several identities `own` it. SQLite has no auth: its membership docs are cached per name.
+- **The `query` result is cached per doc name and identity** (on every backend; without `auth`, per name) and shared only by the subscribers who are that identity. `query(pool, criteria, identity)` runs once for each: bind the identity yourself (`withAppAuth(pool, id, …)`) so RLS scopes what it reads, as recompute does. `matches(collection, row, criteria, identity)` decides live membership per identity too; the row comes from the change log, which RLS does not filter, so check it against the identity there when the name is `shared` or several identities `own` it. On SQLite, with no RLS, `query(db, criteria, identity)` must check its rows against the identity too.
 - **With auth, say who owns it** — `owns: (identity, docName) => …` or `shared: true` (*Every document says who owns it*, above).
-- **The callback shape differs by backend.** Postgres: `query: async (pool, criteria) => …` — a `Pool`, awaited (the shape above). SQLite: `query: (db, criteria) => …` — a synchronous `bun:sqlite` handle, no `await`. `matches` is identical on both.
+- **The callback shape differs by backend.** Postgres: `query: async (pool, criteria) => …` — a `Pool`, awaited (the shape above). SQLite and the JSON file: `query: (db, criteria) => …` — a synchronous `bun:sqlite` handle, no `await`. `matches` is identical on both. So is `recompute`'s: `async (pool, criteria, identity)` on Postgres, `(db, criteria, identity)` on SQLite.
 
-**Recompute — `recompute` (Postgres only).** A *whole-doc* view for shapes a per-row predicate can't express — nested, joined, aggregated, or identity-dependent. No `matches`; instead, on open and on **any** write to a watched collection, the framework re-evaluates the entire doc and republishes it.
+**Recompute — `recompute` (SQLite + Postgres).** A *whole-doc* view for shapes a per-row predicate can't express — nested, joined, aggregated, or identity-dependent. No `matches`; instead, on open and on **any** write to a watched collection, the framework re-evaluates the entire doc and republishes it.
 
 ```ts
 import { withAppAuth } from "@blueshed/delta/postgres";
@@ -448,7 +457,7 @@ const dashboard = defineCustomDoc<{ userId: string }, { id: number }>("dashboard
   watch: ["orders", "invoices"],
   parse: (id) => ({ userId: id }),
   owns: (me, docName) => docName === `dashboard:${me.id}`,   // with auth: whose name it is (anyone else: 404)
-  recompute: async (pool, c, identity) => {         // re-evaluated PER SUBSCRIBER, under their identity
+  recompute: async (pool, c, identity) => {         // re-evaluated PER IDENTITY subscribed, as it
     const me = identity?.id;
     if (me == null || String(me) !== c.userId) return null;  // doc-name id is untrusted — verify it → 404 / skip
     return withAppAuth(pool, me, async (db) => {             // bind app.user_id, so RLS scopes every read below
@@ -461,10 +470,11 @@ const dashboard = defineCustomDoc<{ userId: string }, { id: number }>("dashboard
 ```
 
 - Returns the **whole doc** (any JSON shape, object or array). Return `null` for "doesn't exist": a 404 on open, a silent skip on fan-out.
-- **Re-evaluated once per subscriber, under that client's gated identity** (the third arg). Bind it yourself — `withAppAuth(pool, id, …)` or a `*_as` stored function (see *Composing doc operations from SQL*) — so RLS scopes each subscriber's view. `identity` is `undefined` on an unauthenticated connection; **guard it** (the example returns `null` rather than dereferencing it — a recompute that throws is caught, logged, and silently drops that subscriber's update).
+- **Re-evaluated once per identity among the subscribers, under that gated identity** (the third arg): a write reads it once for each identity, however many of the name's subscribers are that identity (keyed as a membership view is, by `auth.asSqlArg`), and sends each subscriber its identity's. Bind it yourself — `withAppAuth(pool, id, …)` or a `*_as` stored function (see *Composing doc operations from SQL*) — so RLS scopes each subscriber's view. `identity` is `undefined` on an unauthenticated connection; **guard it** (the example returns `null` rather than dereferencing it — a recompute that throws is caught, logged, and silently drops that subscriber's update).
 - **The doc-name id is untrusted.** `parse` reads whatever name the client asked to open, so a raw `WHERE … = c.userId` is a confused-deputy: say whose name it is with `owns` (asked before `recompute`), verify the parsed id against the identity (return `null` → 404), and/or treat RLS as the authoritative tenant guard. Delta is persistence + broadcast, not authorization.
-- **No relevance gate.** Unlike membership's `matches`, recompute re-evaluates on *any* write to *any* watched collection, for *every* subscriber of *every* doc under the prefix — there's no per-doc filter. Cost ≈ (subscribers under the prefix) × (writes to any watched collection); it is **not** cached. Keep `watch` tight and `recompute` cheap.
-- The recomputed doc reaches each client as a single **root-replace** op — see below.
+- **No relevance gate.** Unlike membership's `matches`, recompute re-evaluates on *any* write to *any* watched collection, for *every* identity subscribed to *every* doc under the prefix — there's no per-doc filter. Cost ≈ (identities subscribed under the prefix) × (writes to any watched collection); it is **not** cached. Keep `watch` tight and `recompute` cheap.
+- The recomputed doc reaches each client as a single **root-replace** op — see below — sent to that client alone (no `v`); in-process, `createLocal().onPublish` hears it on the document's channel, with `to` naming the identity.
+- **On SQLite** (and the JSON file), `recompute(db, criteria, identity)` is synchronous and reads the database handle, as `query` does; it is read again in the write's own turn, so each subscriber is told the document as that write left it. On Postgres it is read when the listener hears the write, as the tables then stand. Without `auth` the identity is `undefined` on both.
 
 **Root-replace — the client-side primitive recompute rides on.** `applyOps` treats the empty path `""` as "swap or clear the whole doc, in place" (`"/"` is the member named `""`, per RFC 6901):
 
@@ -505,17 +515,19 @@ const venueAt: DocType<{ venueId: number; at: string }> = {
 registerDocType(venueAt);
 ```
 
-## Implied documents (SQLite)
+## Implied documents
 
-`defineDoc(prefix, { root, include, implied: true })` declares a document that is there before its root row is. Opening a name whose root row does not exist answers an empty document — the root `{ id: <doc id>, ...column defaults }` and an empty map per included collection — and makes no row. The first write makes the root row, in the same transaction as the write; a failed first write makes none. Its root removed through it (`remove /rooms/attic`), the row and the rows under it go and it opens empty again -- an open copy is told that empty root (`replace /rooms`), not null; an undo makes them again. A chat room, a user's settings, a board keyed by a slug: anything a name can mean before anyone has written to it.
+`defineDoc(prefix, { root, include, implied: true })` declares a document that is there before its root row is. Opening a name whose root row does not exist answers an empty document — the root `{ id: <doc id>, ...column defaults }` and an empty map per included collection — and makes no row. The first write makes the root row, in the same transaction as the write; a failed first write makes none. Its root removed through it (`remove /rooms/attic`), the row and the rows under it go and it opens empty again -- an open copy is told that empty root (`replace /rooms`), not null; an undo makes them again. The same on every backend: the JSON file, SQLite and Postgres (in process or a server). A chat room, a user's settings, a board: anything a name can mean before anyone has written to it.
 
 ```ts
 const room = defineDoc("room:", { root: "rooms", include: ["messages"], implied: true });
 // open "room:attic" → { rooms: { id: "attic", topic: null }, messages: {} }, no row yet
 // delta "room:attic" add /messages/m1 → the rooms row "attic" is made, then the message
+// on Postgres, and on every backend for an app that will move: by number
+// open "room:7" → { rooms: { id: 7, topic: null }, messages: {} }, no row yet
 ```
 
-An implied document is keyed by its root id, so it cannot also declare a `scope` (`defineDoc` throws). A document that is not implied still answers 404 for a missing root row. The Postgres backend ignores `implied` (todo: an implied document keyed by a name, `room:attic`, cannot move to Postgres, whose ids are serials).
+An implied document is keyed by its root id, so it cannot also declare a `scope` (`defineDoc` throws). A document that is not implied still answers 404 for a missing root row. **A name is a number on Postgres**: its ids are serials, so `room:attic` is refused there as a mistake (400), as any text id is. An app that will move along the path names its implied documents by number (`room:7`); keep a name-keyed one (`session:<token>`) to documents that never move. On Postgres the root row is made by `delta_apply` in the write's transaction (`_delta_make_implied`), under the writer's `app.user_id`, so RLS's `WITH CHECK` sees it.
 
 ## Fan-out — which open documents hear a write
 
@@ -530,7 +542,7 @@ A write's ops land in the order sent, on every backend, and are told in that ord
 
 **Where it is worked out.** On Postgres, in the database: `delta_apply` asks `_delta_holders` for each changed row before and after, and `_delta_tell` logs each document's ops and NOTIFYs its name -- so every process's listener, and a reader catching up from `delta_fetch_ops`, hears it. The documents considered are those ever opened (a name in `_delta_versions`) and the writer's. On SQLite and the JSON file, in the process, over the documents open there; each told document's copy is then read again from the tables.
 
-**Custom read docs** hear writes to the collections they `watch`, on every backend (membership), or recompute on them (Postgres). A membership doc hears each write once, as the writer applied it, however many documents it was told to: a row whichever document it was written through, a single document's root (`replace /<root>`) included, and its undo. Each row the write changed is tested as it now is -- it matches: an `add`, or a `replace` if the doc holds it; it no longer matches, or is gone: a `remove` -- so a row that leaves a document (its parent key rewritten) is not taken for removed while it still matches. On Postgres the writer's entry in `_delta_ops_log` carries the write as applied where the writer was told otherwise (`applied`; null where they agree, heard as told; each other told document's entry, `[]`), so every process's listener tests it once. `tests/helpers/path.ts` asks every backend, a custom doc's copy held against one opened afresh.
+**Custom read docs** hear writes to the collections they `watch`, on every backend: a membership doc row by row, a recompute doc read again whole. A membership doc hears each write once, as the writer applied it, however many documents it was told to: a row whichever document it was written through, a single document's root (`replace /<root>`) included, and its undo. Each row the write changed is tested as it now is -- it matches: an `add`, or a `replace` if the doc holds it; it no longer matches, or is gone: a `remove` -- so a row that leaves a document (its parent key rewritten) is not taken for removed while it still matches. On Postgres the writer's entry in `_delta_ops_log` carries the write as applied where the writer was told otherwise (`applied`; null where they agree, heard as told; each other told document's entry, `[]`), so every process's listener tests it once. `tests/helpers/path.ts` asks every backend, a custom doc's copy held against one opened afresh.
 
 ## Authentication
 
@@ -559,6 +571,7 @@ wireAuth(ws, auth);                            // auth.actions → WS "call" han
 ws.upgrade = upgradeWithAuth(ws, auth);        // auth.onUpgrade → HTTP handshake (after the Origin check: *Origins*)
 docTypeFromDef(def, pool, { auth, owns });     // queries → *_as (RLS session); owns → who may have the doc
 createDocListener(ws, pool, { auth });         // gate every open / delta
+// SQLite or the JSON file, in place of the last two: registerDocs(ws, db, schema, docs, customDocs, { auth, owns })
 ```
 
 **Token flow — never in the URL.** Two routes:
@@ -844,12 +857,12 @@ local.onPublish((channel, change) => redraw(channel, change));   // { doc, ops, 
 
 - **`local.call(action, msg)`** runs `open`, `delta`, `close`, `call`, `undo`, `redo`, `history` (whatever is registered) and resolves with the first answer, `{ result }` or `{ error: { code, message } }`. Calls are **async** for every backend: the SQLite backend answers at once, the Postgres backend after the database does. An action nothing handles answers `No handler matched`.
 - **`local.as(identity)`** gives a caller that is `identity`: one client per identity (keyed by its JSON), carrying it as `client.data.identity`, where an auth module's `gate` and the ledger's `who` read it. Identity crosses per call, not per connection. `local.call` itself is anonymous.
-- **`local.onPublish(fn)`** hears every broadcast on every channel — the one stream of changes. It returns the unsubscribe. A listener that throws is logged (`fan-out failed (write committed)`), and every other listener and document is still told.
+- **`local.onPublish(fn)`** hears every broadcast on every channel — the one stream of changes — and each message sent to one caller alone (a membership or recompute document's view, which is that identity's own), on its document's channel, with a third argument `to`: `{ identity }`, who it went to (a broadcast has none). It returns the unsubscribe. A listener that throws is logged (`fan-out failed (write committed)`), and every other listener and document is still told.
 - **The cursor is yours to name.** An in-process client carries `data.local = true`, so the ledger takes `cursor` from the message (a session id: undo takes back what this session did). A socket client cannot.
 - **Any backend** registers on it: `registerDocs`, `createDocListener`, `registerDoc`, the kinds.
 - **Every answer and every broadcast is the caller's own copy**, as over a socket (which sends JSON): a later write never changes what an `open` handed out, and changing it, or a row you were told, changes nothing the backend serves. Keep what you open and apply what you are told to it, in place or on a clone. The copy costs about what the socket's JSON does (an open of a 50,000-row document, some 15 ms).
 
-**Savepoints (SQLite).** The SQLite backend writes with `db.transaction()`, so a write made inside your own transaction becomes a savepoint: it rolls back alone when it fails, and with yours when you roll back. Three things stay outside your transaction: the backend's cache, its broadcasts, and the version numbers it has handed out.
+**Savepoints (SQLite).** The SQLite backend writes with `db.transaction(…).immediate()`, so a write made inside your own transaction becomes a savepoint: it rolls back alone when it fails, and with yours when you roll back. Three things stay outside your transaction: the backend's cache, its broadcasts, and the version numbers it has handed out.
 
 So a rollback after delta has written means **subscribers have already heard a change that did not happen**, and the backend's cache still holds it. Evicting is not enough: `evict(docName)` makes the backend read the document again from the tables the next time it needs it, but its subscribers still hold what they heard, and with a ledger the version is taken again from what is left in the ledger, so the rolled-back version number is reused — a browser already at that `v` drops the real change as one it has. What to do:
 
@@ -874,7 +887,7 @@ await createDocListener(ws, pool, { auth, ledger: true, who: (identity) => Strin
 ```
 
 - **SQLite** keeps it in a `delta_ledger` table the backend creates (`src/server/ledger.ts`). **Postgres** keeps it in `_delta_ledger` (`src/sql/001g-delta-ledger.sql`), in the database every process shares, so a write made in one process can be undone from another and every process broadcasts the undo over `NOTIFY`. `_delta_ops_log` stays a catch-up buffer pruned within the hour; the ledger is the history, kept. A lock per document holds from the read the inverse is taken from until the write commits, so concurrent writers each record the inverse of what they replaced.
-- **`who`** is the writer's identity: `client.data.identity` (what `createLocal().as(identity)` or an auth module's upgrade sets), or on Postgres with an `auth` module, what `auth.gate(client)` gives. A string or number as it is, anything else as JSON, or what your `who(identity)` returns. It is for the audit.
+- **`who`** is the writer's identity: `client.data.identity` (what `createLocal().as(identity)` or an auth module's upgrade sets), or, with an `auth` module (on either backend), what `auth.gate(client)` gives. A string or number as it is, anything else as JSON, or what your `who(identity)` returns. It is for the audit.
 - **The cursor** is what undo walks, opaque to delta. In-process (`createLocal`, or any client with `data.local`) the caller names it with `cursor` on the message. Over the socket it is the connection's `clientId`, and a `cursor` on the message is ignored; for a signed-in connection (an `auth` gate gave an identity) it is the person and the `clientId` together, so another person holding the same id cannot walk it. The `clientId` is random unless the browser passed `connectWs(url, { clientId })`; a client that chooses its `clientId` keeps its cursor across reconnects. Without sign-in, anyone who learns a chosen id could walk its cursor, so treat a chosen id as a secret there.
 - **A write answers** `{ ack: true, version, entry, ops, inverse }` (`ops` as applied: whole rows) and its broadcast carries `v`. An empty write records nothing.
 - **Facts.** A write sent with `undoable: false` (a price tick, a sensor reading) is recorded but never walked back by undo, and ends no redo.
@@ -891,7 +904,7 @@ Undo walks back what the cursor wrote, newest first, across documents; redo walk
 
 **A walk sets back only what its entry changed, and only where the document still holds what the entry left.** A field someone else has written since is a **conflict**: the walk changes nothing and answers `conflict: [paths]` (a row it made and someone has edited is not removed; a row it removed and someone has put back is not added). Each row is walked once, by the entry's net change: a row one batch made and then changed is removed, one it removed and made again gets its fields back. A single document's root is one row whichever path the write named it by (`/venues`, `/venues/42`): removed, added back and written in one write, it is walked as one row, its fields set back at `/venues`. The walk is recorded all the same — an entry with no ops that is never redone — so the next undo goes on to the entry before it; a walk the document refuses (the row's parent is gone) is recorded the same way. `null` still means nothing to walk.
 
-**Asking first.** `dry: true` answers what the walk would do — `{ doc, entry, ops, conflict? }` — and walks nothing, so a caller can ask whoever owns the document (a deadline, a permission) before it walks. `entry: <id>` then walks only if that is still the cursor's next entry, and answers 409 if it is not. A removed row comes back under its own id, a cascaded remove comes back parent first (and so does a redo of an undo that took a row and its children), and an undo reaches a document nobody has open (SQLite loads it for the walk and leaves it closed). `history` goes to whoever may open the document (Postgres checks `open` first); each entry says `mine` — whether the asker's cursor wrote it — never who did, never a cursor. On Postgres with `auth`, `undo` and `redo` pass the gate first (401 without an identity) and use the `_as` forms so RLS applies.
+**Asking first.** `dry: true` answers what the walk would do — `{ doc, entry, ops, conflict? }` — and walks nothing, so a caller can ask whoever owns the document (a deadline, a permission) before it walks. `entry: <id>` then walks only if that is still the cursor's next entry, and answers 409 if it is not. A removed row comes back under its own id, a cascaded remove comes back parent first (and so does a redo of an undo that took a row and its children), and an undo reaches a document nobody has open (SQLite loads it for the walk and leaves it closed). `history` goes to whoever may open the document (each backend asks the gate, `owns`, and that it opens); each entry says `mine` — whether the asker's cursor wrote it — never who did, never a cursor. With `auth`, `undo` and `redo` pass the gate first (401 without an identity) and walk only into a document the walker `owns` (404); on Postgres they use the `_as` forms so RLS applies.
 
 **The inverse without a ledger (SQLite).** A `delta` message with `inverse: true` is answered `{ ack: true, ops, inverse }`: the ops as applied and what would take them back, read from the document as it was. For a writer that keeps its own history. `inverseOf(before, applied, asked?)` is exported from `@blueshed/delta/sqlite`: an add is removed, a remove added back, a replace replaced by its old self, in reverse order, except that each remove comes back with the rows its removal cascaded to, parent first; temporal storage columns are left out. `asked`, the ops as sent, tells a remove asked for from one cascaded; without it, removes one after another are taken for one cascade, so removes asked children first would come back children first. On Postgres the inverse comes with the ledger.
 
@@ -944,7 +957,7 @@ Apply `src/sql/001a-001g-*.sql` alphabetically to every database — idempotent.
 
 | Function | Purpose |
 |---|---|
-| `delta_open(doc_name)` | returns `{ ...collections, _version }` |
+| `delta_open(doc_name)` | returns `{ ...collections, _version }`; an implied document with no root row, its empty root and empty collections |
 | `delta_open_at(doc_name, timestamptz)` | same, at a historical instant (temporal docs only) |
 | `delta_apply(doc_name, ops jsonb)` | applies ops, writes `_delta_ops_log`, NOTIFYs `delta_changes`; `delta_apply(doc_name, ops, walk)` with `walk` for an undo or redo, which may write through a single document whose root is gone (001d) |
 | `delta_fetch_ops(doc_name, since_version)` | returns (version, ops) rows after a base version |

@@ -57,13 +57,13 @@ export function importTables(file: string, _schema: Schema, snapshot: Snapshot):
  * the file in place of the database. `persisted()` resolves once every change
  * so far is in the file.
  */
-export function registerDocs(
+export function registerDocs<I = unknown>(
   ws: WsServer,
   file: string,
   schema: Schema,
   docs: DocDef[],
-  customDocs: CustomDocDef<any>[] = [],
-  options: Omit<RegisterOptions, "committed"> = {},
+  customDocs: CustomDocDef<any, I>[] = [],
+  options: Omit<RegisterOptions<I>, "committed"> = {},
 ) {
   const db = new Database(":memory:");
   createTables(db, schema);
@@ -83,7 +83,7 @@ export function registerDocs(
     saving = saving.then(() => Bun.write(file, text)).then(() => {});
   };
 
-  const handle = registerSqlite(ws, db, schema, docs, customDocs, { ...options, committed: save });
+  const handle = registerSqlite<I>(ws, db, schema, docs, customDocs, { ...options, committed: save });
 
   // the ledger as it was left: undo carries across a restart
   if (options.ledger && saved.ledger) {
