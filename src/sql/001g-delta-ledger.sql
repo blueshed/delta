@@ -216,8 +216,9 @@ $$;
 -- -- the rule of planWalk in src/server/ledger.ts. Only the fields the entry
 -- changed are set back, each guarded by what the entry left there: a row it
 -- changed gets back those fields if each still holds what it wrote; a row it
--- made is removed if it is as it was left; a row it removed comes back if
--- nobody has put one there. Each row is walked once, from what it was before
+-- made is removed if it is as it was left, and every row its removal would take
+-- with it (_delta_cascade_rows, in the document's include) the entry made too;
+-- a row it removed comes back if nobody has put one there. Each row is walked once, from what it was before
 -- the entry (every inverse op of a path carries it: an add or replace its
 -- value, a remove none) to what the entry left, so a row the entry touched
 -- twice is walked by its net change. A guard that fails is a conflict, by
@@ -241,6 +242,8 @@ DECLARE
   v_fields   TEXT[];
   v_ops      JSONB := '[]'::jsonb;
   v_conflict JSONB := '[]'::jsonb;
+  v_include  TEXT[] := (_delta_find_doc(p_entry.doc_name)).include;
+  v_others   BOOLEAN;
 BEGIN
   FOR v_op IN SELECT * FROM jsonb_array_elements(p_entry.ops) LOOP
     v_left := v_left || jsonb_build_object(_delta_walk_key(v_op->>'path', v_op->'value', v_doc),
@@ -266,7 +269,13 @@ BEGIN
     v_was := NULLIF(v_before->v_path, 'null'::jsonb);
     CONTINUE WHEN v_was IS NULL AND v_wrote IS NULL;   -- made and removed by the entry
     IF v_was IS NULL THEN                               -- it made the row
-      IF v_here IS NULL OR EXISTS (
+      -- a row under it that the entry did not make: what its removal would take with it
+      v_others := array_length(v_parts, 1) = 2 AND EXISTS (
+        SELECT 1 FROM jsonb_array_elements(_delta_cascade_rows(v_parts[1], _delta_row_id(v_parts[1], v_parts[2]), v_include)) WITH ORDINALITY AS c(r, i)
+         WHERE i > 1 AND NOT (
+           COALESCE(v_before->_delta_build_path(r->>'coll', r->>'id'), 'null'::jsonb) = 'null'::jsonb
+           AND COALESCE(v_left->_delta_build_path(r->>'coll', r->>'id'), 'null'::jsonb) <> 'null'::jsonb));
+      IF v_here IS NULL OR v_others OR EXISTS (
         SELECT 1 FROM jsonb_each(v_wrote) w
          WHERE w.key NOT IN ('valid_from', 'valid_to') AND NOT _delta_same(v_here->w.key, w.value)
       ) THEN v_conflict := v_conflict || to_jsonb(v_at);

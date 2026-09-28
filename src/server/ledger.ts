@@ -104,7 +104,9 @@ export function rowAt(doc: any, path: string): any {
  * - The entry changed a row's fields (`replace`): set back those fields, if
  *   each still holds what the entry wrote.
  * - The entry made a row (`remove` walks it): take the row away, if it is as
- *   the entry left it.
+ *   the entry left it, and nobody has put a row under it since: `under` names
+ *   the rows its removal would take with it, each of which the entry must have
+ *   made too.
  * - The entry removed a row (`add` walks it): put it back, if nobody has.
  *
  * Each row is walked once, from what it was before the entry to what the entry
@@ -121,7 +123,7 @@ export function rowAt(doc: any, path: string): any {
  * backend takes it; an add or a remove at `/<root>/<id>`. Postgres's
  * `_delta_walk_plan` (001g) keys it the same.
  */
-export function planWalk(entry: { ops: DeltaOp[]; inverse: DeltaOp[] }, current: any): { ops: DeltaOp[]; conflict: string[] } {
+export function planWalk(entry: { ops: DeltaOp[]; inverse: DeltaOp[] }, current: any, under: (key: string) => string[] = () => []): { ops: DeltaOp[]; conflict: string[] } {
   // a row's key: its path, and a root at /<root> by /<root>/<id> -- its id from the row, or from the document
   const keyOf = (path: string, value?: any): string => {
     const [coll, id] = splitPath(path);
@@ -149,7 +151,8 @@ export function planWalk(entry: { ops: DeltaOp[]; inverse: DeltaOp[] }, current:
     const at = shown.get(key)!;
     if (was == null && wrote == null) continue;       // made and removed by the entry: nothing to walk
     if (was == null) {                                // it made the row
-      if (here == null || data(wrote).some((f) => !same(here[f], wrote[f]))) conflict.push(at);
+      const others = () => under(key).some((row) => before.get(row) != null || left.get(row) == null);
+      if (here == null || data(wrote).some((f) => !same(here[f], wrote[f])) || others()) conflict.push(at);
       else ops.push({ op: "remove", path: key });
     } else if (wrote == null) {                       // it removed the row
       if (here != null) conflict.push(at);

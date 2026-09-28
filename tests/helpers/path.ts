@@ -1561,6 +1561,54 @@ export function fanOutCases(backend: () => PathBackend): void {
     });
   });
 
+  describe("a row someone has put rows under since", () => {
+    const fish = { op: "add", path: "/courses/10", value: { name: "Fish" } };
+    const chablis = { op: "add", path: "/drinks/10", value: { courses_id: 10, name: "Chablis" } };
+    const held = async (b: PathBackend) => {
+      const board = (await b.process.call("open", { doc: "fo-board:1" })).result;
+      return { course: board.courses["10"]?.name, drink: board.drinks["10"]?.name };
+    };
+
+    test("undoing its making is a conflict: nothing is walked, the course stays with the drink put under it, and the drink's own undo still takes the drink", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1", "fo-all-courses:"]);
+      await write(b.process, "fo-board:1", [fish], { cursor: "s1" });
+      await write(b.process, "fo-board:1", [chablis], { cursor: "s2" });
+      for (const doc of ["fo-board:1", "fo-menu:1"]) expect({ doc, dry: (await b.process.call("undo", { cursor: "s1", dry: true })).result.conflict }).toEqual({ doc, dry: ["/courses/10"] });
+      const met = await b.process.call("undo", { cursor: "s1" });
+      expect({ ops: met.result.ops, conflict: met.result.conflict }).toEqual({ ops: [], conflict: ["/courses/10"] });
+      expect(await held(b)).toEqual({ course: "Fish", drink: "Chablis" });
+      const theirs = await b.process.call("undo", { cursor: "s2" });
+      expect({ ops: theirs.result.ops, conflict: theirs.result.conflict }).toEqual({ ops: [{ op: "remove", path: "/drinks/10" }], conflict: undefined });
+      expect(await held(b)).toEqual({ course: "Fish", drink: undefined });
+      await assertCopiesHold(b, copies);
+    });
+
+    test("so is a named undo of it, which records nothing: once the rows under it are gone, it is undone", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1"]);
+      const made = await write(b.process, "fo-board:1", [fish], { cursor: "s1" });
+      await write(b.process, "fo-board:1", [chablis], { cursor: "s2" });
+      const met = await b.process.call("undo", { cursor: "s1", change: made.entry });
+      expect({ ops: met.result.ops, conflict: met.result.conflict }).toEqual({ ops: [], conflict: ["/courses/10"] });
+      expect(await held(b)).toEqual({ course: "Fish", drink: "Chablis" });
+      await b.process.call("undo", { cursor: "s2" });
+      const undone = await b.process.call("undo", { cursor: "s1", change: made.entry });
+      expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "remove", path: "/courses/10" }], conflict: undefined });
+      await assertCopiesHold(b, copies);
+    });
+
+    test("rows the change made under it itself are its own: the course and its drink made in one write, then another row added beside them, undo as one", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1"]);
+      await write(b.process, "fo-board:1", [fish, chablis], { cursor: "s1" });
+      await write(b.process, "fo-board:1", [{ op: "add", path: "/drinks/11", value: { courses_id: 1, name: "Port" } }], { cursor: "s2" });   // under another course
+      const undone = await b.process.call("undo", { cursor: "s1" });
+      expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "remove", path: "/drinks/10" }, { op: "remove", path: "/courses/10" }], conflict: undefined });
+      await assertCopiesHold(b, copies);
+    });
+  });
+
   describe("a change named by its entry", () => {
     /** What a walk answered, as the cases compare it. */
     const walked = (res: any) => ({ doc: res.result?.doc, ops: res.result?.ops, conflict: res.result?.conflict, error: res.error });

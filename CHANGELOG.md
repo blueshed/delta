@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **An undo of a row's making is a conflict once someone has put rows under it**, on every
+  backend. W1 adds a venue, W2 an area under it: W1's undo removed the venue and, by the cascade,
+  W2's area with it, and W2's own undo then met a conflict. Now the walk's guard (`planWalk`,
+  `_delta_walk_plan`) asks what the removal would take with it -- the rows its cascade reaches in
+  the document -- and a row among them the entry did not make is a conflict at the made row's path:
+  nothing is walked. Rows the same write made under it are its own, and go with it as before.
+
 ### Added
 
 - **Undo or redo a named change, not only the cursor's last** (eta n99). `undo` and `redo` take

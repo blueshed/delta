@@ -1339,7 +1339,13 @@ export function registerDocs<I = unknown>(
       if (!match || !doc) return respond({ error: { code: 404, message: `Not found: ${entry.doc}` } });
       try {
         // an implied document whose root row is not written yet holds no root to guard
-        const plan = planWalk(entry, implied.has(entry.doc) ? { ...doc, [match.def.root]: null } : doc);
+        // what removing a row would take with it: the rows its cascade reaches in this document
+        const under = (key: string) => {
+          const [coll, id] = splitPath(key);
+          const table = schema.tables[coll!];
+          return table && id !== undefined ? cascadeRows(table, id, match.def).slice(1).map(({ table: t, row }) => joinPath(t.docKey, String(row.id))) : [];
+        };
+        const plan = planWalk(entry, implied.has(entry.doc) ? { ...doc, [match.def.root]: null } : doc, under);
         if (msg.dry) return respond({ result: { doc: entry.doc, entry: entry.id, ops: plan.ops, ...(plan.conflict.length ? { conflict: plan.conflict } : {}) } });
         const by = { who: whoOf(client), cursor };
         const out = plan.conflict.length || !plan.ops.length ? null : write(entry.doc, match.def, doc, plan.ops, { ...by, undoes: entry.id });
