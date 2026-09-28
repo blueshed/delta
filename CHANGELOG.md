@@ -193,8 +193,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `add /courses/1`; SQLite and the JSON file answer 404, as the document opens. And with its root
   there it took `add /courses/7`, a row it cannot read; they answer 400. `delta_apply` (`001d`,
   replaced in place) now asks, before each op of a single document, that its root is there
-  (404 when not, so a batch that takes the root out writes nothing more through it), and refuses
+  (404 when not, so a batch that takes the root out writes nothing more through it -- but that
+  root back, where the document opened as the write began, and then on through it: a root
+  removed and added back in one write is walked as one row, #61), and refuses
   an add to the root's collection but of its own root (400; its own, there already, is a 409).
+  SQLite and the JSON file ask the same before each op: they took an add under a root the same
+  write had taken out (`[remove /courses/1, add /drinks/-]` through `course:1`, a drink under no
+  course), where Postgres answers 404 and writes nothing.
   An undo or redo is not asked: undoing the removal of a document's own root puts it back (#43),
   and a walk of a document whose root is gone starts from it absent, as on SQLite and the JSON
   file. `delta_apply` gains a three-argument form, `delta_apply(doc, ops, walk)`, which

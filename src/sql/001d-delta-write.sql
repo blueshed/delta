@@ -245,7 +245,8 @@ RETURNS BIGINT LANGUAGE sql AS $$ SELECT _delta_tell(p_writer, p_touched, NULL);
 -- `p_walk`: the write is a walk of the ledger, an undo or redo (001g's
 -- delta_apply_logged says so for delta_walk). A single document whose root is
 -- gone takes no writes but a walk, which may put that root back (todo #43,
--- #59). The two-argument form is no walk.
+-- #59), or its root's add in a write that took it out (todo #61). The
+-- two-argument form is no walk.
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION delta_apply(p_doc_name TEXT, p_ops JSONB, p_walk BOOLEAN)
@@ -262,6 +263,8 @@ DECLARE
   v_coll          RECORD;
   v_view          TEXT;
   v_root_view     TEXT;
+  v_opened        BOOLEAN;   -- a single document's root was there as the write began
+  v_back          BOOLEAN;   -- this op adds that root back, taken out earlier in the write
   v_id            BIGINT;
   v_id_text       TEXT;
   v_field         TEXT;
@@ -306,13 +309,24 @@ BEGIN
     -- A single document is its root row and what hangs from it. One whose
     -- root is not there -- taken out, through it or another, or never there --
     -- opens as not found, and takes no writes (todo #59): asked before each
-    -- op, so an add under a root that is gone makes no orphan. A walk is not
-    -- asked: an undo of the root's removal puts it back (todo #43), and a
-    -- walk of such a document starts from the root absent, guarded by its
-    -- plan (_delta_walk_plan), as SQLite's and the JSON file's are.
+    -- op, so an add under a root that is gone makes no orphan. But a write
+    -- through a document that opened (its root there as the write began, the
+    -- first op's answer) may add that root back after taking it out, and
+    -- write on through it: a remove and an add of the root in one write is
+    -- one row, walked as one (_delta_walk_key). A walk is not asked: an undo
+    -- of the root's removal puts it back (todo #43), and a walk of such a
+    -- document starts from the root absent, guarded by its plan
+    -- (_delta_walk_plan), as SQLite's and the JSON file's are.
     IF NOT v_is_list AND NOT COALESCE(p_walk, FALSE) THEN   -- a walk not said (null) is none
       EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I WHERE id = $1)', v_root_view) INTO v_exists USING v_doc_id;
-      IF NOT v_exists THEN
+      v_opened := COALESCE(v_opened, v_exists);
+      v_back := FALSE;
+      IF NOT v_exists AND v_opened AND v_op->>'op' = 'add' THEN
+        v_parts := _delta_split_path(v_op->>'path');
+        v_back := array_length(v_parts, 1) = 2 AND v_parts[1] = v_def.root_collection
+                  AND v_parts[2] ~ '^[0-9]+$' AND v_parts[2]::numeric = v_doc_id;
+      END IF;
+      IF NOT v_exists AND NOT v_back THEN
         RAISE EXCEPTION 'document not found: % (its root, %, is not there)',
           p_doc_name, _delta_build_path(v_def.root_collection, v_doc_id::text)
           USING ERRCODE = 'P0002';
@@ -437,8 +451,9 @@ BEGIN
     IF array_length(v_parts, 1) = 2 AND v_op->>'op' = 'add' THEN
       -- ... and it holds one root row, the one its name names: it adds no
       -- other (todo #52). A row it could not read would be told to no one.
-      -- Its own it adds only when it is gone, by a walk (above: an undo of its
-      -- removal); there, the live check below answers 409.
+      -- Its own it adds only when it is gone (above: taken out earlier in this
+      -- write, or by a walk, an undo of its removal); there, the live check
+      -- below answers 409.
       IF NOT v_is_list AND v_coll_key = v_def.root_collection
          AND (v_parts[2] !~ '^[0-9]+$' OR v_parts[2]::numeric <> v_doc_id) THEN
         RAISE EXCEPTION 'invalid op: add % -- document % holds one %, its root: add it through a document that lists them',

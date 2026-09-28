@@ -481,10 +481,12 @@ export function registerDocs(
     return next;
   }
 
-  function applyOps(docName: string, def: DocDef, doc: any, ops: DeltaOp[]): { applied: DeltaOp[]; touched: Touched[] } {
+  function applyOps(docName: string, def: DocDef, doc: any, ops: DeltaOp[], walk: boolean): { applied: DeltaOp[]; touched: Touched[] } {
     const scope = resolveScope(def, docName.slice(def.prefix.length));
     const list = scope.mode === "list";
     const rootId = list ? undefined : rowId(scope.id ?? doc[def.root]?.id);
+    const rootTable = schema.tables[def.root]!;
+    let opened: boolean | undefined;   // a single document's root was there as the write began
     const broadcastOps: DeltaOp[] = [];
     const touched: Touched[] = [];
     // A write is one moment, as a Postgres transaction's NOW() is: every version
@@ -572,6 +574,19 @@ export function registerDocs(
       const table = schema.tables[collKey];
       // A single-mode document's root is one row, held at /<root>.
       const isRoot = !list && collKey === def.root;
+
+      // A single document whose root is not there takes no writes (404), as it
+      // opens: asked before each op, so one that takes its root out writes
+      // nothing more through it -- an add under it would be an orphan -- but
+      // that root back, and then on through it (delta_apply asks the same). A
+      // walk is not asked: it may start from the root absent (an undo of its
+      // removal), guarded by its plan.
+      if (!list && !walk) {
+        const there = readRow(rootTable, rootId!) != null;
+        opened ??= there;
+        const back = opened && op.op === "add" && isRoot && parts.length === 2 && parts[1] !== "-" && sameId(rowId(parts[1]!), rootId);
+        if (!there && !back) refuse(404, `Document not found: ${docName} (its root, ${joinPath(def.root, String(rootId))}, is not there)`);
+      }
 
       // /<root>/<id> and /<root>/<id>/<field> name it by its id, as on Postgres
       // and as a list document would say it: a replace of it, or of one field.
@@ -826,7 +841,7 @@ export function registerDocs(
       const addsRoot = scope.mode === "single" && ops.some((op) => op.op === "add" && splitPath(op.path).length === 2 && splitPath(op.path)[0] === def.root);
       written = db.transaction(() => {
         if (implied.has(docName) && !addsRoot) ensureImpliedRoot(def, doc);
-        const done = applyOps(docName, def, doc, ops);
+        const done = applyOps(docName, def, doc, ops, by.undoes !== undefined);
         touched = done.touched;
         const inverse = inverseOf(snapshot, done.applied, ops);
         const recorded = ledger?.record({ doc: docName, ops: done.applied, inverse, ...by });

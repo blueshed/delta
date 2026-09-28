@@ -626,6 +626,22 @@ export function documentCases(backend: () => PathBackend): void {
       expect(content((await b.process.call("open", { doc: "fo-course:1" })).result)).toEqual({ courses: course(1, "Broth"), drinks: { "1": drink(1, 1, "Sherry") } });
     });
 
+    test("a single document that takes its root out in a write writes nothing more through it (404, nothing written) but that root back, and then on through it (todo #59, #61)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-course:1", "fo-board:1", "fo-menu:1"]);
+      const code = async (ops: unknown[]) => (await b.process.call("delta", { doc: "fo-course:1", ops })).error?.code;
+      const out = { op: "remove", path: "/courses/1" };
+      expect(await code([out, { op: "add", path: "/drinks/-", value: { name: "Port" } }])).toBe(404); // a drink under no course
+      expect(await code([out, { op: "replace", path: "/courses/name", value: "Broth" }])).toBe(404);
+      expect(await code([out, { op: "remove", path: "/drinks/1" }])).toBe(404);
+      await expectSilent(b, "fo-course:1", "fo-board:1", "fo-menu:1");
+      expect(content((await b.process.call("open", { doc: "fo-course:1" })).result)).toEqual({ courses: course(1, "Soup"), drinks: { "1": drink(1, 1, "Sherry") } });
+      const { ops } = await write(b.process, "fo-course:1", [out, { op: "add", path: "/courses/1", value: { weddings_id: 1, name: "Broth" } }, { op: "add", path: "/drinks/-", value: { name: "Port" } }]);
+      expect(ops).toEqual([out, { op: "remove", path: "/drinks/1" }, { op: "add", path: "/courses/1", value: course(1, "Broth") }, { op: "add", path: "/drinks/3", value: drink(3, 1, "Port") }]);
+      expect(content((await b.process.call("open", { doc: "fo-course:1" })).result)).toEqual({ courses: course(1, "Broth"), drinks: { "3": drink(3, 1, "Port") } });
+      await assertCopiesHold(b, copies);
+    });
+
     test("every change a document is told carries its next version, and an open reads the version it is at", async () => {
       const b = backend();
       const before = (await b.process.call("open", { doc: "fo-menu:1" })).result._v as number;
