@@ -434,6 +434,16 @@ BEGIN
         ) INTO v_new_row USING v_new_row;
       END IF;
 
+      -- The root written through its document stays in its scope, as a list's
+      -- rows do (below): one written out of the rest of its name's scope -- a
+      -- seat of fo-seat-of:1:3 to table 7 -- is refused, and the write undone
+      -- (0.10.0 review).
+      IF NOT _delta_row_in_scope(v_def, p_doc_name, v_coll_key, v_doc_id) THEN
+        RAISE EXCEPTION 'row not found: %/% -- the write would take it out of %',
+          v_coll_key, v_doc_id, p_doc_name
+          USING ERRCODE = 'P0002';
+      END IF;
+
       -- A replace straight after a replace of the same row is one run: answered,
       -- logged and told once, as the run leaves it (who held it before, the
       -- run's first). SQLite's applyOps keeps the same rule.
@@ -704,8 +714,9 @@ BEGIN
       -- add through it is given its bindings: a field, a row or a merge that
       -- takes it out -- into another owner's list by its key, or out of a
       -- condition -- is refused, and the write undone (todo #6's review).
-      -- Asked of the row as written, RLS or none.
-      IF v_is_list AND v_coll_key = v_def.root_collection
+      -- Asked of the row as written, RLS or none; and of a single document's
+      -- root named by its id, as above (0.10.0 review).
+      IF v_coll_key = v_def.root_collection
          AND NOT _delta_row_in_scope(v_def, p_doc_name, v_coll_key, v_id) THEN
         RAISE EXCEPTION 'row not found: %/% -- the write would take it out of %',
           v_coll_key, v_id, p_doc_name

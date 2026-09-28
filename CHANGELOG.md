@@ -164,6 +164,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `delta_open_at` (`001e`), `delta_apply` (`001d`) and `_delta_row_in_scope` (`001b`), each
   replaced in place -- so such a name whose row does not meet it is not there (404), opened,
   written through, read as it stood or asked its history.
+- **Every backend: a single document's root written through it stays in its scope, as a list's
+  rows do** (0.10.0 review). `seat-of:1:3` (`scope: { id: ":id", table_no: ":table" }`) took
+  `replace /seats/table_no 7`: the seat left its own document (told `replace /seats` null) and
+  arrived in `seats-at:7`, another owner's list, which was told an add -- where the list
+  `seats-at:3` refuses the same write. A replace of a single document's root (a field, the root,
+  a merge, or the row by its id) now asks that the root as written still meets the whole of
+  its name's scope: when not, a 404, the write undone and nobody told. `delta_apply` (`001d`,
+  replaced in place) asks `_delta_row_in_scope` after each root write; SQLite and the JSON file,
+  `holds` of the run's row.
 
 ### Added
 

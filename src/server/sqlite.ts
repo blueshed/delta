@@ -874,8 +874,10 @@ export function registerDocs<I = unknown>(
       // A list's root row written through the list stays in its scope, as an
       // add through it is given its bindings: a field, a row or a merge that
       // takes it out -- into another owner's list by its key, or out of a
-      // condition -- is refused, and the write undone (todo #6's review).
-      if (list && collKey === def.root && !holds(def, scope, collKey, run.row)) {
+      // condition -- is refused, and the write undone (todo #6's review). So
+      // does a single document's root, out of the rest of its name's scope
+      // (a seat of fo-seat-of:1:3 to table 7; 0.10.0 review).
+      if (((list && collKey === def.root) || root) && !holds(def, scope, collKey, run.row)) {
         refuse(404, `Row not found: ${collKey}/${id} -- the write would take it out of ${docName}`);
       }
     };

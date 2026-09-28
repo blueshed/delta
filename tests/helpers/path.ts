@@ -1798,6 +1798,21 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
+    test("a single document's root written through it stays in its scope, as a list's rows do: a field, the root, the row by its id or a run that takes it out of its own name's condition -- a seat to another table's list -- is refused (404), the write undone, and nobody is told (0.10.0 review)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-seat-of:1:3", "fo-seats-at:3", "fo-seats-at:7", "fo-seating:1"]);
+      const code = async (ops: unknown[]) => (await b.process.call("delta", { doc: "fo-seat-of:1:3", ops })).error?.code;
+      expect(await code([{ op: "replace", path: "/seats/table_no", value: 7 }])).toBe(404);
+      expect(await code([{ op: "replace", path: "/seats", value: { table_no: 7 } }])).toBe(404);
+      expect(await code([{ op: "replace", path: "/seats/1", value: { table_no: 7 } }])).toBe(404);
+      expect(await code([{ op: "replace", path: "/seats/1/table_no", value: 7 }])).toBe(404);
+      expect(await code([{ op: "replace", path: "/seats/kept", value: false }, { op: "replace", path: "/seats/table_no", value: 7 }])).toBe(404);   // a run: its first write undone too
+      await expectSilent(b, "fo-seat-of:1:3", "fo-seats-at:3", "fo-seats-at:7", "fo-seating:1");
+      expect(content((await b.process.call("open", { doc: "fo-seat-of:1:3" })).result)).toEqual({ seats: seat(1, 3, true, { veg: true }) });
+      await write(b.process, "fo-seat-of:1:3", [{ op: "replace", path: "/seats/kept", value: false }]);   // within it
+      await assertCopiesHold(b, copies);
+    });
+
     test("a course moved to the other wedding through a list, which holds every course, leaves this board and arrives on that one", async () => {
       const b = backend();
       await b.process.call("open", { doc: "fo-board:1" });
