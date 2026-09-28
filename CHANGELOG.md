@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-28
+
 ### Breaking
 
 - **Upgrading from 0.9.1.** Nothing to migrate. The framework SQL (`src/sql/001*.sql`) is
