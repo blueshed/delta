@@ -273,6 +273,7 @@ DECLARE
   v_removed       JSONB;
   v_r             JSONB;
   v_rp            TEXT[];
+  v_told_path     TEXT;
 BEGIN
   -- Guard: ops must be a JSON array
   IF p_ops IS NULL OR jsonb_typeof(p_ops) != 'array' THEN
@@ -390,11 +391,20 @@ BEGIN
         ) INTO v_new_row USING v_new_row;
       END IF;
 
-      v_broadcast_ops := v_broadcast_ops || jsonb_build_array(
-        jsonb_build_object('op', 'replace', 'path', _delta_build_path(v_def.root_collection), 'value', v_new_row)
-      );
-      v_touched := v_touched || jsonb_build_array(jsonb_build_object(
-        'coll', v_coll_key, 'id', v_doc_id, 'before', to_jsonb(v_before), 'after', v_new_row));
+      -- A replace straight after a replace of the same row is one run: answered,
+      -- logged and told once, as the run leaves it (who held it before, the
+      -- run's first). SQLite's applyOps keeps the same rule.
+      v_told_path := _delta_build_path(v_def.root_collection);
+      IF v_broadcast_ops->-1->>'op' = 'replace' AND v_broadcast_ops->-1->>'path' = v_told_path THEN
+        v_broadcast_ops := jsonb_set(v_broadcast_ops, '{-1,value}', v_new_row);
+        v_touched := jsonb_set(v_touched, '{-1,after}', v_new_row);
+      ELSE
+        v_broadcast_ops := v_broadcast_ops || jsonb_build_array(
+          jsonb_build_object('op', 'replace', 'path', v_told_path, 'value', v_new_row)
+        );
+        v_touched := v_touched || jsonb_build_array(jsonb_build_object(
+          'coll', v_coll_key, 'id', v_doc_id, 'before', to_jsonb(v_before), 'after', v_new_row));
+      END IF;
       CONTINUE;
     END IF;
 
@@ -604,16 +614,21 @@ BEGIN
       -- For single-item docs updating the root entity, broadcast as /collection
       -- so the client replaces the direct object (not a Record entry)
       IF NOT v_is_list AND v_coll_key = v_def.root_collection AND v_id = v_doc_id THEN
-        v_broadcast_ops := v_broadcast_ops || jsonb_build_array(
-          jsonb_build_object('op', 'replace', 'path', _delta_build_path(v_coll_key), 'value', v_new_row)
-        );
+        v_told_path := _delta_build_path(v_coll_key);
+      ELSE
+        v_told_path := _delta_build_path(v_coll_key, v_id::text);
+      END IF;
+      -- a replace straight after a replace of the same row: one run, told once (as the root's, above)
+      IF v_broadcast_ops->-1->>'op' = 'replace' AND v_broadcast_ops->-1->>'path' = v_told_path THEN
+        v_broadcast_ops := jsonb_set(v_broadcast_ops, '{-1,value}', v_new_row);
+        v_touched := jsonb_set(v_touched, '{-1,after}', v_new_row);
       ELSE
         v_broadcast_ops := v_broadcast_ops || jsonb_build_array(
-          jsonb_build_object('op', 'replace', 'path', _delta_build_path(v_coll_key, v_id::text), 'value', v_new_row)
+          jsonb_build_object('op', 'replace', 'path', v_told_path, 'value', v_new_row)
         );
+        v_touched := v_touched || jsonb_build_array(jsonb_build_object(
+          'coll', v_coll_key, 'id', v_id, 'before', to_jsonb(v_before), 'after', v_new_row));
       END IF;
-      v_touched := v_touched || jsonb_build_array(jsonb_build_object(
-        'coll', v_coll_key, 'id', v_id, 'before', to_jsonb(v_before), 'after', v_new_row));
       CONTINUE;
     END IF;
 

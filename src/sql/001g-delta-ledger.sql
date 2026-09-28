@@ -73,6 +73,7 @@ DECLARE
   v_heads   TEXT[] := '{}';   -- the removes asked for, at the path the write tells each (/t/007 at /t/7)
   v_op      JSONB;
   v_i       BIGINT;
+  v_removed JSONB;    -- each path the write removes, at its last remove: one pass, however long the write
   v_parts   TEXT[];
   v_prior   JSONB;
 BEGIN
@@ -84,12 +85,15 @@ BEGIN
       ELSE v_op->>'path' END;
   END LOOP;
 
+  SELECT COALESCE(jsonb_object_agg(path, last), '{}'::jsonb) INTO v_removed FROM (
+    SELECT o->>'path' AS path, max(i) AS last
+      FROM jsonb_array_elements(COALESCE(p_ops, '[]'::jsonb)) WITH ORDINALITY AS r(o, i)
+     WHERE o->>'op' = 'remove' GROUP BY 1) removes;
+
   FOR v_op, v_i IN SELECT o, i FROM jsonb_array_elements(COALESCE(p_ops, '[]'::jsonb)) WITH ORDINALITY AS t(o, i) LOOP
     v_parts := _delta_split_path(v_op->>'path');
-    CONTINUE WHEN v_op->>'op' = 'replace' AND array_length(v_parts, 1) = 1 AND p_before->v_parts[1]->>'id' IS NOT NULL AND EXISTS (
-      SELECT 1 FROM jsonb_array_elements(p_ops) WITH ORDINALITY AS l(o, i)
-       WHERE l.i > v_i AND l.o->>'op' = 'remove'
-         AND l.o->>'path' = _delta_build_path(v_parts[1], p_before->v_parts[1]->>'id'));
+    CONTINUE WHEN v_op->>'op' = 'replace' AND array_length(v_parts, 1) = 1 AND p_before->v_parts[1]->>'id' IS NOT NULL
+      AND (v_removed->>_delta_build_path(v_parts[1], p_before->v_parts[1]->>'id'))::bigint > v_i;
     v_prior := _delta_row_at(p_before, v_parts);
     IF v_prior IS NOT NULL AND jsonb_typeof(v_prior) = 'object' THEN
       v_prior := _delta_strip_temporal(v_prior);

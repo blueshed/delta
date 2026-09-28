@@ -191,8 +191,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   adds and removes, so `[replace /drinks/3/name, remove /drinks/3]` removed the drink first and
   then answered 404 for the replace, where Postgres writes the name and then removes the drink;
   and a batch was answered, recorded and told in another order than it was sent (`[replace
-  /weddings/name, add /courses/-]` told the add first; two replaces of one row were told as
-  one). Each op now lands where it is sent, read back as it is kept and told as it lands, and
+  /weddings/name, add /courses/-]` told the add first; a row replaced before and after another
+  op was written once, after it). Each op now lands where it is sent, read back as it is kept and told as it lands, and
   the answer, the ledger's entry and its inverse follow it: the drink's write is told as the
   replace and then the remove to every document that held it, and undone puts the drink back
   as it was. A row the write made is `null` in its inverse (`replace /<coll>/<id>` with
@@ -212,6 +212,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `replace /weddings/1/name` likewise. Another id is a 404 (`replace /courses/2` was a 400), a
   field that is no column still a 400. `validateOps` reads the segment as Postgres does: digits,
   or the root's own text id, where no column has that name, name the row.
+- **A run of replaces of one row is answered, recorded and told once, as it leaves the row, on
+  every backend.** Replaces of one row one straight after another (`/courses/1/name`, then
+  `/courses/1 { ... }`; a single document's `/courses/name`, `/courses` and `/courses/1/name`)
+  are one answer op, one ledger op and one telling of the row as the run leaves it, and one
+  version of a temporal row; a replace of another row, an add or a remove between them starts a
+  new run, so the ops still land in the order sent. Postgres answered and told each replace:
+  2000 of one course was 2000 ops answered and ledgered and 6000 told, 17 s on PGlite, now one
+  op and 1.9 s. SQLite, which writes such a run once, is back to main's speed with the ops in
+  order (51 ms, now 7 ms). `delta_apply` (`001d`, `CREATE OR REPLACE`) folds a replace into
+  the one before it when that replaced the same row; `_delta_inverse` (`001g`) and
+  `inverseOf` find a root's later removal in one pass.
 - **A row a write touches twice is told gone once, on every backend.** `[replace
   /drinks/1/name, remove /courses/1]` through `board:1` told the board and the menu `[remove
   /drinks/1, remove /courses/1, remove /drinks/1]` on SQLite, the JSON file and Postgres: who

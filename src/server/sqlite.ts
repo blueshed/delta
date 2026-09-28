@@ -507,31 +507,32 @@ export function registerDocs(
     };
 
     /**
-     * Replace fields of a row the document holds -- the root (`root`), or a row
-     * of a map -- as the op says, where it is sent: on a temporal table, the
-     * version before the write closed and the write's inserted (or, once the
-     * write has made it, that version rewritten); else one in-place UPDATE (`id`
-     * is the whole PK there, so a reinsert would collide). The row is read back
-     * as it is kept (a parent key's "5" is 5), as Postgres's RETURNING gives it,
-     * and told as it lands. The path names the row, so `id` and the temporal
-     * columns in a value are not taken from it.
+     * A run of replaces of one row, one op straight after another: merged as
+     * they come and written when the run ends -- one write of the row, one
+     * answer, one entry and one telling of the run's net change. Every other op
+     * ends the run first, so the ops still land in the order sent; nothing
+     * between them could see the row part-way. Postgres's `delta_apply` answers
+     * such a run once too.
      */
-    const replaceRow = (table: ResolvedTable, id: string | number, fields: Record<string, unknown>, root: boolean) => {
-      const collKey = table.docKey;
-      const present = held(table, id);
-      if (!present) refuse(404, `Row not found: ${collKey}/${id}`);   // not this document's, or gone from it earlier in this write
-      const before = holders(collKey, present, docName);
-      const updated = { ...present };
-      for (const [field, value] of Object.entries(fields)) {
-        if (field === "id" || field === "valid_from" || field === "valid_to") continue;
-        updated[field] = value;
-      }
-      const key = `${collKey}/${id}`;
+    let run: { table: ResolvedTable; id: string | number; root: boolean; key: string; before: string[]; row: any } | undefined;
+
+    /**
+     * Write the run's row: on a temporal table, the version before the write
+     * closed and the write's inserted (or, once the write has made it, that
+     * version rewritten); else one in-place UPDATE (`id` is the whole PK there,
+     * so a reinsert would collide). The row is read back as it is kept (a parent
+     * key's "5" is 5), as Postgres's RETURNING gives it, and told as it lands.
+     */
+    const endRun = () => {
+      if (!run) return;
+      const { table, id, root, key, before, row } = run;
+      run = undefined;
       if (table.temporal && !made.has(key)) {
         closeRow(db, table, id, ts);
-        insertRow(db, table, updated, ts);
+        insertRow(db, table, row, ts);
         made.add(key);
-      } else updateRow(db, table, id, updated);
+      } else updateRow(db, table, id, row);
+      const collKey = table.docKey;
       const stored = readRow(table, id);
       if (root) doc[collKey] = stored;
       else doc[collKey][id] = stored;
@@ -539,10 +540,33 @@ export function registerDocs(
       touched.push({ coll: collKey, id, before, after: stored });
     };
 
+    /**
+     * Replace fields of a row the document holds -- the root (`root`), or a row
+     * of a map -- as the op says, into the run of that row. The path names the
+     * row, so `id` and the temporal columns in a value are not taken from it.
+     */
+    const replaceRow = (table: ResolvedTable, id: string | number, fields: Record<string, unknown>, root: boolean) => {
+      const collKey = table.docKey;
+      const key = `${collKey}/${id}`;
+      if (run && run.key !== key) endRun();
+      if (!run) {
+        const present = held(table, id);
+        if (!present) refuse(404, `Row not found: ${collKey}/${id}`);   // not this document's, or gone from it earlier in this write
+        run = { table, id, root, key, before: holders(collKey, present, docName), row: { ...present } };
+      } else if (!holds(def, scope, collKey, run.row)) {
+        refuse(404, `Row not found: ${collKey}/${id}`);   // the run moved it out of the document: as held() would read it
+      }
+      for (const [field, value] of Object.entries(fields)) {
+        if (field === "id" || field === "valid_from" || field === "valid_to") continue;
+        run.row[field] = value;
+      }
+    };
+
     // Each op lands in the order sent, as on Postgres: a field written and then
     // its row removed is written first, and a row removed is not there for an
     // op after it.
     for (const op of ops) {
+      if (op.op !== "replace") endRun();
       const parts = splitPath(op.path);
       const collKey = parts[0]!;
       const table = schema.tables[collKey];
@@ -641,6 +665,7 @@ export function registerDocs(
         throw new Error(`Invalid op: ${op.op} ${op.path}`);
       }
     }
+    endRun();
 
     return { applied: broadcastOps, touched };
   }
@@ -1087,9 +1112,12 @@ export function inverseOf(before: any, applied: DeltaOp[], asked?: DeltaOp[]): D
     run = [];
   };
   const rootAt = (coll: string) => (before?.[coll]?.id != null ? joinPath(coll, String(before[coll].id)) : undefined);
+  const lastRemoved = new Map<string, number>();   // each path the write removes, at its last remove: one pass, however long the write
+  applied.forEach((op, i) => { if (op.op === "remove") lastRemoved.set(op.path, i); });
   for (const [i, op] of applied.entries()) {
     const parts = splitPath(op.path);
-    if (op.op === "replace" && parts.length === 1 && applied.slice(i + 1).some((later) => later.op === "remove" && later.path === rootAt(parts[0]!))) continue;
+    const root = parts.length === 1 ? rootAt(parts[0]!) : undefined;
+    if (op.op === "replace" && root !== undefined && (lastRemoved.get(root) ?? -1) > i) continue;
     const prior = withoutStorage(rowAt(before, op.path)) ?? null;   // null: not there before the write (made by it), as Postgres says it
     if (op.op === "remove") {
       if (heads?.has(op.path)) flush();   // a remove asked for starts its own run; one it cascaded to joins it

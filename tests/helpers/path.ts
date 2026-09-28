@@ -573,7 +573,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("the wedding renamed, a course added and named twice, in one write: each op lands and is told where it was sent, and the undo takes the course and gives the name back", async () => {
+    test("the wedding renamed, a course added and named twice, in one write: each op lands and is told where it was sent (the two namings, one straight after the other, as one), and the undo takes the course and gives the name back", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1", "fo-title:1"]);
       const { ops, inverse } = await write(b.process, "fo-board:1", [
@@ -586,11 +586,9 @@ export function fanOutCases(backend: () => PathBackend): void {
       expect(ops).toEqual([
         renamed,
         { op: "add", path: "/courses/3", value: course(3, "Fish") },
-        { op: "replace", path: "/courses/3", value: course(3, "Cod") },
         { op: "replace", path: "/courses/3", value: course(3, "Hake") },
       ]);
       expect(inverse).toEqual([
-        { op: "replace", path: "/courses/3", value: null },
         { op: "replace", path: "/courses/3", value: null },
         { op: "remove", path: "/courses/3" },
         { op: "replace", path: "/weddings", value: { id: 1, name: "ours" } },
@@ -600,6 +598,36 @@ export function fanOutCases(backend: () => PathBackend): void {
       expect({ ops: undone.result.ops.map((o: any) => o.op === "remove" ? o : { ...o, value: { name: o.value.name } }), conflict: undone.result.conflict }).toEqual({ ops: taken, conflict: undefined });
       await expectTold(b, "fo-menu:1", [ops, undone.result.ops]);
       await expectTold(b, "fo-title:1", [[renamed], [{ op: "replace", path: "/weddings", value: { id: 1, name: "ours" } }]]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a row replaced again and again, one op straight after another, is answered, recorded and told once, as the run leaves it; a replace of another row between starts a run of its own", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-course:1", "fo-board:1", "fo-menu:1"]);
+      const { ops, inverse } = await write(b.process, "fo-course:1", [
+        { op: "replace", path: "/courses/name", value: "A" },
+        { op: "replace", path: "/courses", value: { name: "B" } },
+        { op: "replace", path: "/courses/01/name", value: "C" },
+        { op: "replace", path: "/drinks/1/name", value: "Port" },
+        { op: "replace", path: "/drinks/1", value: { name: "Madeira" } },
+        { op: "replace", path: "/courses/name", value: "D" },
+      ], { cursor: "s1" });
+      expect(ops).toEqual([
+        { op: "replace", path: "/courses", value: course(1, "C") },
+        { op: "replace", path: "/drinks/1", value: drink(1, 1, "Madeira") },
+        { op: "replace", path: "/courses", value: course(1, "D") },
+      ]);
+      expect(inverse).toEqual([
+        { op: "replace", path: "/courses", value: course(1, "Soup") },
+        { op: "replace", path: "/drinks/1", value: drink(1, 1, "Sherry") },
+        { op: "replace", path: "/courses", value: course(1, "Soup") },
+      ]);
+      const undone = await b.process.call("undo", { cursor: "s1" });
+      expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "replace", path: "/courses", value: course(1, "Soup") }, { op: "replace", path: "/drinks/1", value: drink(1, 1, "Sherry") }], conflict: undefined });
+      const inMap = (o: any) => (o.path === "/courses" ? { ...o, path: "/courses/1" } : o);
+      await expectTold(b, "fo-course:1", [ops, undone.result.ops]);
+      await expectTold(b, "fo-board:1", [ops.map(inMap), undone.result.ops.map(inMap)]);
+      await expectTold(b, "fo-menu:1", [ops.map(inMap), undone.result.ops.map(inMap)]);
       await assertCopiesHold(b, copies);
     });
 
@@ -716,14 +744,14 @@ export function fanOutCases(backend: () => PathBackend): void {
         { op: "replace", path: "/courses/1", value: { id: 9, name: "Bisque" } },
         { op: "replace", path: "/courses/01/name", value: "Broth" },
       ], { cursor: "s1" });
-      expect(ops).toEqual([{ op: "replace", path: "/courses", value: course(1, "Bisque") }, { op: "replace", path: "/courses", value: course(1, "Broth") }]);
+      expect(ops).toEqual([{ op: "replace", path: "/courses", value: course(1, "Broth") }]); // one straight after the other: one run
       const titled = await write(b.process, "fo-board:1", [{ op: "replace", path: "/weddings/1/name", value: "our day" }]);
       expect(titled.ops).toEqual([{ op: "replace", path: "/weddings", value: { id: 1, name: "our day" } }]);
       const undone = await b.process.call("undo", { cursor: "s1" });
       expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "replace", path: "/courses", value: course(1, "Soup") }], conflict: undefined });
       const renamed = (name: string) => ({ op: "replace", path: "/courses/1", value: course(1, name) });
-      await expectTold(b, "fo-menu:1", [[renamed("Bisque"), renamed("Broth")], titled.ops, [renamed("Soup")]]);
-      await expectTold(b, "fo-all-courses:", [[renamed("Bisque"), renamed("Broth")], [renamed("Soup")]]);
+      await expectTold(b, "fo-menu:1", [[renamed("Broth")], titled.ops, [renamed("Soup")]]);
+      await expectTold(b, "fo-all-courses:", [[renamed("Broth")], [renamed("Soup")]]);
       await expectTold(b, "fo-title:1", [titled.ops]);
       await assertCopiesHold(b, copies);
     });
