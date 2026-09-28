@@ -2,6 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { createLocal } from "../src/server/local";
 import { createTables, defineDoc, defineSchema, inverseOf, registerDocs } from "../src/server/sqlite";
+import { registerDoc } from "../src/server/server";
+import { registerMemory } from "../src/server/kinds";
+import { applyOps, type DeltaOp } from "../src/core";
+import { setLogLevel } from "../src/server/logger";
+
+setLogLevel("silent");
 
 const schema = defineSchema({
   rooms: { columns: { topic: "text?" }, temporal: false },
@@ -45,6 +51,88 @@ describe("createLocal", () => {
     off();
     local.server.publish("y", {});
     expect(heard).toEqual(["x"]);
+  });
+});
+
+describe("in process, an answer is the caller's own, as over the socket", () => {
+  /** Open, keep the answer, write: it is unchanged. Change it, reopen: the change is not served. */
+  async function ownAnswer(local: ReturnType<typeof createLocal>, doc: string, ops: DeltaOp[], mutate: (kept: any) => void) {
+    const kept = (await local.call("open", { doc })).result;
+    const was = structuredClone(kept);
+    expect((await local.call("delta", { doc, ops })).error).toBeUndefined();
+    expect(kept).toEqual(was);
+    mutate(kept);
+    expect(JSON.stringify((await local.call("open", { doc })).result)).not.toContain("MUTATED");
+  }
+
+  test("the JSON file (registerDoc)", async () => {
+    const file = `/tmp/delta-local-own-${Date.now()}.json`;
+    const local = createLocal();
+    await registerDoc(local.server, "chat:room", { file, empty: { messages: { m1: { text: "hi" }, m2: { text: "yo" } } as Record<string, any>, title: "t" } });
+    await ownAnswer(local, "chat:room", [{ op: "replace", path: "/messages/m1/text", value: "edited" }, { op: "remove", path: "/messages/m2" }],
+      (kept) => { kept.messages.m1.text = "MUTATED"; kept.title = "MUTATED"; });
+    try { (await import("node:fs")).unlinkSync(file); } catch {}
+  });
+
+  test("a memory document, and what peek gives", async () => {
+    const local = createLocal();
+    const here = registerMemory(local.server, { prefix: "here:", empty: () => ({ people: { p1: { name: "Ada" } } as Record<string, any> }) });
+    await ownAnswer(local, "here:a", [{ op: "add", path: "/people/p2", value: { name: "Bo" } }], (kept) => { kept.people.p1.name = "MUTATED"; });
+    here.peek("here:a")!.people.p1.name = "MUTATED";
+    expect(JSON.stringify((await local.call("open", { doc: "here:a" })).result)).not.toContain("MUTATED");
+  });
+
+  test("SQLite, the cached copy", async () => {
+    const { local } = setup();
+    await local.call("open", { doc: "room:a" });
+    await local.call("delta", { doc: "room:a", ops: [{ op: "add", path: "/messages/m1", value: { text: "hi" } }, { op: "add", path: "/messages/m2", value: { text: "yo" } }] });
+    await ownAnswer(local, "room:a", [{ op: "replace", path: "/messages/m1/text", value: "edited" }, { op: "remove", path: "/messages/m2" }],
+      (kept) => { kept.messages.m1.text = "MUTATED"; kept.rooms.topic = "MUTATED"; });
+  });
+
+  test("the copy keeps what is not plain data as it is: an own __proto__ stays a key, a Date a Date, a function handed over", async () => {
+    const local = createLocal();
+    const fn = () => 1;
+    const value = { row: JSON.parse('{"__proto__":{"polluted":true},"a":1}'), at: new Date(0), fn, list: [{ b: 2 }] };
+    local.server.on("probe", (_m, _c, respond) => respond({ result: value }));
+    const { result } = await local.call("probe", {});
+    expect(result).not.toBe(value);
+    expect(Object.getPrototypeOf(result.row)).toBe(Object.prototype);
+    expect(Object.keys(result.row)).toEqual(["__proto__", "a"]);
+    expect(result.row.polluted).toBeUndefined();
+    expect(result.at).toEqual(new Date(0));
+    expect(result.at).not.toBe(value.at);
+    expect(result.list).toEqual([{ b: 2 }]);
+    expect(result.list[0]).not.toBe(value.list[0]);
+    expect(result.fn).toBe(fn);
+  });
+
+  test("a copy kept eta's way -- the open spread, each told change applied to a clone -- takes a remove (#4)", async () => {
+    // eta's documents.ts: `const { _v, ...value } = answer.result`, then applyOps(structuredClone(held), data.ops)
+    const db = new Database(":memory:");
+    createTables(db, schema);
+    const local = createLocal();
+    registerDocs(local.server, db, schema, [room, defineDoc("all-messages:", { root: "messages", include: [] })], [], { ledger: true });
+    await local.call("open", { doc: "room:a" });
+    await local.call("delta", { doc: "room:a", ops: [{ op: "add", path: "/messages/m1", value: { text: "hi" } }] });
+    const held = new Map<string, any>();
+    const failed: string[] = [];
+    local.onPublish((doc, data) => {
+      if (!held.has(doc)) return;
+      try { const next = structuredClone(held.get(doc)); applyOps(next, data.ops); held.set(doc, next); }
+      catch (err: any) { failed.push(`${doc}: ${err.message}`); }
+    });
+    for (const doc of ["room:a", "all-messages:"]) {
+      const { _v, ...value } = (await local.call("open", { doc })).result;
+      held.set(doc, value);
+    }
+    await local.call("delta", { doc: "room:a", ops: [{ op: "remove", path: "/messages/m1" }] });
+    expect(failed).toEqual([]);
+    for (const [doc, value] of held) {
+      const { _v, ...fresh } = (await local.call("open", { doc })).result;
+      expect({ doc, value }).toEqual({ doc, value: fresh });
+    }
+    expect(held.get("all-messages:").messages).toEqual({});
   });
 });
 

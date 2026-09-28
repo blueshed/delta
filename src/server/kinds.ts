@@ -109,8 +109,11 @@ export function registerMemory<T>(ws: WsServer, options: MemoryOptions<T>) {
   });
 
   return {
-    /** The document as it is now, or undefined if nothing has made it. */
-    peek: (name: string): T | undefined => docs.get(name)?.value,
+    /** A copy of the document as it is now, or undefined if nothing has made it. */
+    peek: (name: string): T | undefined => {
+      const d = docs.get(name);
+      return d === undefined ? undefined : structuredClone(d.value);
+    },
     /** Forgets a document: it starts again from `empty`. */
     forget: (name: string) => void docs.delete(name),
   };

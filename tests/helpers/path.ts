@@ -264,6 +264,37 @@ export function documentCases(backend: () => PathBackend): void {
       });
     });
 
+    test("what a document answers is the caller's own: a write does not change it, and a change to it is not served -- the open's, the custom document's, a told row", async () => {
+      const b = backend();
+      const docs = ["fo-board:1", "fo-inbox:a@x"];
+      const kept = new Map<string, any>();
+      for (const doc of docs) kept.set(doc, (await b.process.call("open", { doc })).result);
+      const was = structuredClone(kept);
+      b.process.heard.length = 0;
+      await write(b.process, "fo-board:1", [
+        { op: "replace", path: "/courses/1/name", value: "Broth" },
+        { op: "replace", path: "/households/1/email", value: "moved@x" },
+        { op: "remove", path: "/households/2" },
+        { op: "add", path: "/courses/-", value: { name: "Fish" } },
+      ]);
+      await b.quiet();
+      expect(kept).toEqual(was);   // a write does not change what was handed out
+      // a caller that changes what it was handed, or a row it was told, changes nothing it is served
+      const board = kept.get("fo-board:1");
+      board.weddings.name = "MUTATED";
+      board.courses["1"].name = "MUTATED";
+      delete board.drinks["1"];
+      kept.get("fo-inbox:a@x").households["1"].email = "MUTATED";
+      for (const h of b.process.heard) for (const op of h.data.ops) if (op.value && typeof op.value === "object") op.value.name = "MUTATED";
+      const text = JSON.stringify([
+        (await b.process.call("open", { doc: "fo-board:1" })).result,
+        (await b.process.call("open", { doc: "fo-inbox:a@x" })).result,
+        (await b.process.call("open", { doc: "fo-menu:1" })).result,
+      ]);
+      expect(text).not.toContain("MUTATED");
+      expect(text).toContain("Broth");
+    });
+
     test("a document whose root is a child row reads that row as its root", async () => {
       const { result } = await backend().process.call("open", { doc: "fo-course:1" });
       expect(content(result)).toEqual({ courses: course(1, "Soup"), drinks: { "1": drink(1, 1, "Sherry") } });

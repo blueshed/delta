@@ -23,6 +23,10 @@
  * Calls are asynchronous, so any backend answers through them: the SQLite
  * backend's handlers answer at once, the Postgres backend's after the
  * database does.
+ *
+ * Every answer and every broadcast is the caller's own copy, as it is over a
+ * socket, which sends each as JSON: a write never changes what an open
+ * handed out, and a caller that changes it changes nothing anyone is served.
  */
 import type { ActionHandler, WsServer } from "./server";
 
@@ -46,6 +50,45 @@ export interface Local extends Caller {
   onPublish(fn: (channel: string, data: any) => void): () => void;
 }
 
+/**
+ * A value as the caller's own. A backend answers with, and broadcasts, objects
+ * it keeps -- SQLite's cached documents, the JSON file's document, the Postgres
+ * listener's custom documents -- and changes them in place when it writes. A
+ * socket sends a copy (JSON); here nothing is sent, so the copy is taken, when
+ * the backend answers.
+ *
+ * Documents are plain data, so plain objects and arrays are copied member by
+ * member: several times quicker than `structuredClone`, and quicker than the
+ * JSON a socket spends on the same answer. Anything else (a Date, a blob) is
+ * cloned; what cannot be (a method's answer holding a function) is handed over
+ * as it is.
+ */
+function own<T>(value: T): T {
+  try {
+    return copyData(value);
+  } catch {
+    return value;   // a cycle, or something no clone takes
+  }
+}
+
+function copyData(v: any): any {
+  if (v === null || typeof v !== "object") return v;
+  if (Array.isArray(v)) {
+    const out = new Array(v.length);
+    for (let i = 0; i < v.length; i++) out[i] = copyData(v[i]);
+    return out;
+  }
+  const proto = Object.getPrototypeOf(v);
+  if (proto !== Object.prototype && proto !== null) return structuredClone(v);
+  const out: any = {};
+  for (const k of Object.keys(v)) {
+    // an own "__proto__" (JSON.parse makes one) stays a key, not the copy's prototype
+    if (k === "__proto__") Object.defineProperty(out, k, { value: copyData(v[k]), enumerable: true, writable: true, configurable: true });
+    else out[k] = copyData(v[k]);
+  }
+  return out;
+}
+
 export function createLocal(): Local {
   const actions = new Map<string, ActionHandler[]>();
   const listeners = new Set<(channel: string, data: any) => void>();
@@ -63,7 +106,7 @@ export function createLocal(): Local {
       actions.set(action, [...(actions.get(action) ?? []), handler]);
     },
     publish(channel, data) {
-      for (const fn of listeners) fn(channel, data);
+      for (const fn of listeners) fn(channel, own(data));   // each listener its own copy
     },
     sendTo() {},
     setServer() {},
@@ -74,7 +117,7 @@ export function createLocal(): Local {
   async function callAs(from: LocalClient, action: string, msg: Record<string, unknown>): Promise<LocalAnswer> {
     let answer: LocalAnswer | undefined;
     for (const handler of actions.get(action) ?? []) {
-      await handler({ action, ...msg }, from, (response) => (answer ??= response));
+      await handler({ action, ...msg }, from, (response) => (answer ??= own(response)));
       if (answer) return answer;
     }
     return { error: { code: 404, message: `No handler matched: ${action}` } };

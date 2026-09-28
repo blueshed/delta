@@ -841,6 +841,7 @@ local.onPublish((channel, change) => redraw(channel, change));   // { doc, ops, 
 - **`local.onPublish(fn)`** hears every broadcast on every channel — the one stream of changes. It returns the unsubscribe.
 - **The cursor is yours to name.** An in-process client carries `data.local = true`, so the ledger takes `cursor` from the message (a session id: undo takes back what this session did). A socket client cannot.
 - **Any backend** registers on it: `registerDocs`, `createDocListener`, `registerDoc`, the kinds.
+- **Every answer and every broadcast is the caller's own copy**, as over a socket (which sends JSON): a later write never changes what an `open` handed out, and changing it, or a row you were told, changes nothing the backend serves. Keep what you open and apply what you are told to it, in place or on a clone. The copy costs about what the socket's JSON does (an open of a 50,000-row document, some 15 ms).
 
 **Savepoints (SQLite).** The SQLite backend writes with `db.transaction()`, so a write made inside your own transaction becomes a savepoint: it rolls back alone when it fails, and with yours when you roll back. Three things stay outside your transaction: the backend's cache, its broadcasts, and the version numbers it has handed out.
 

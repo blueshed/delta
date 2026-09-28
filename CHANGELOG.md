@@ -132,6 +132,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or a release publish fail, with no change here. Both now pin 1.4.2, the Bun the repo is
   developed on; CLAUDE.md says how to move it, and `tests/package-exports.test.ts` fails if the
   two differ or are not an exact version.
+- **In process, every answer and every broadcast is the caller's own copy, as over a socket.**
+  `createLocal()` handed a caller what the backend answered and broadcast as it was: SQLite's
+  open gave its cached document (or a shallow copy with `_v`), the JSON file's `registerDoc` its
+  live document, the Postgres listener its kept custom documents, and every listener the same
+  broadcast objects. Each backend changes those in place when it writes, so a write changed what
+  a caller held before it was told -- a copy kept from the stream, told a remove, found the row
+  already gone, and with `applyOps` now strict (todo #4) the told remove failed, the throw
+  stopping the backend's fan-out (eta's documents hold their copies so) -- and a caller that
+  changed what it was handed changed what everyone was then served. `createLocal` now copies
+  each answer as the backend gives it, and each broadcast for each listener. Documents are plain
+  data, so the copy is member by member (a Date or a blob is cloned, a function handed over):
+  an in-process open of a cached 50,000-row document takes some 12-18 ms where it took none,
+  about the JSON a socket spends on it (15-20 ms), and a third of `structuredClone`'s; writes
+  are unchanged. A memory document's `peek` gives a copy too; `registerDoc`'s `getDoc` is still
+  the live document it is the handle of. A case in `tests/helpers/path.ts` asks every backend:
+  answers kept across a write are unchanged, and a change to them, or to a told row, is never
+  served; `tests/local.test.ts` asks the JSON file, a memory document and eta's way of keeping
+  a copy.
 
 ### Changed
 
