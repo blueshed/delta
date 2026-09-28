@@ -111,7 +111,7 @@ BEGIN
   SELECT * INTO v_coll FROM _delta_collections WHERE collection_key = p_collection_key;
   IF NOT FOUND THEN RETURN v_rows; END IF;
   v_view := _delta_source_view(v_coll.table_name, v_coll.temporal);
-  EXECUTE format('SELECT to_jsonb(t) FROM %I t WHERE t.id = $1', v_view) INTO v_row USING p_id;
+  EXECUTE format('SELECT to_jsonb(t.*) FROM %I t WHERE t.id = $1', v_view) INTO v_row USING p_id;
   IF v_row IS NULL THEN RETURN v_rows; END IF;
   v_rows := jsonb_build_array(jsonb_build_object('coll', p_collection_key, 'id', p_id, 'row', _delta_strip_temporal(v_row)));
 
@@ -335,12 +335,12 @@ BEGIN
       -- Read + lock
       IF v_coll.temporal THEN
         EXECUTE format(
-          'SELECT to_jsonb(t) FROM %I t WHERE t.id = $1 AND valid_to IS NULL FOR UPDATE',
+          'SELECT to_jsonb(t.*) FROM %I t WHERE t.id = $1 AND valid_to IS NULL FOR UPDATE',
           v_coll.table_name
         ) INTO v_row USING v_doc_id;
       ELSE
         EXECUTE format(
-          'SELECT to_jsonb(t) FROM %I t WHERE t.id = $1 FOR UPDATE',
+          'SELECT to_jsonb(t.*) FROM %I t WHERE t.id = $1 FOR UPDATE',
           v_coll.table_name
         ) INTO v_row USING v_doc_id;
       END IF;
@@ -363,7 +363,7 @@ BEGIN
         v_new_row := v_new_row || jsonb_build_object('valid_from', v_ts, 'valid_to', NULL);
 
         EXECUTE format(
-          'INSERT INTO %I AS t SELECT * FROM jsonb_populate_record(null::%I, $1) RETURNING to_jsonb(t)',
+          'INSERT INTO %I AS t SELECT * FROM jsonb_populate_record(null::%I, $1) RETURNING to_jsonb(t.*)',
           v_coll.table_name, v_coll.table_name
         ) INTO v_new_row USING v_new_row;
 
@@ -371,7 +371,7 @@ BEGIN
       ELSE
         EXECUTE format('DELETE FROM %I WHERE id = $1', v_coll.table_name) USING v_doc_id;
         EXECUTE format(
-          'INSERT INTO %I AS t SELECT * FROM jsonb_populate_record(null::%I, $1) RETURNING to_jsonb(t)',
+          'INSERT INTO %I AS t SELECT * FROM jsonb_populate_record(null::%I, $1) RETURNING to_jsonb(t.*)',
           v_coll.table_name, v_coll.table_name
         ) INTO v_new_row USING v_new_row;
       END IF;
@@ -470,7 +470,7 @@ BEGIN
       -- timestamptz) is told as a later open reads it, so the broadcast, the
       -- ledger's entry and undo's guard agree with the table.
       EXECUTE format(
-        'INSERT INTO %I AS t SELECT * FROM jsonb_populate_record(null::%I, $1) RETURNING to_jsonb(t)',
+        'INSERT INTO %I AS t SELECT * FROM jsonb_populate_record(null::%I, $1) RETURNING to_jsonb(t.*)',
         v_coll.table_name, v_coll.table_name
       ) INTO v_new_row USING v_new_row;
 
@@ -542,12 +542,12 @@ BEGIN
 
       IF v_coll.temporal THEN
         EXECUTE format(
-          'SELECT to_jsonb(t) FROM %I t WHERE t.id = $1 AND valid_to IS NULL FOR UPDATE',
+          'SELECT to_jsonb(t.*) FROM %I t WHERE t.id = $1 AND valid_to IS NULL FOR UPDATE',
           v_coll.table_name
         ) INTO v_row USING v_id;
       ELSE
         EXECUTE format(
-          'SELECT to_jsonb(t) FROM %I t WHERE t.id = $1 FOR UPDATE',
+          'SELECT to_jsonb(t.*) FROM %I t WHERE t.id = $1 FOR UPDATE',
           v_coll.table_name
         ) INTO v_row USING v_id;
       END IF;
@@ -570,7 +570,7 @@ BEGIN
         v_new_row := v_new_row || jsonb_build_object('valid_from', v_ts, 'valid_to', NULL);
 
         EXECUTE format(
-          'INSERT INTO %I AS t SELECT * FROM jsonb_populate_record(null::%I, $1) RETURNING to_jsonb(t)',
+          'INSERT INTO %I AS t SELECT * FROM jsonb_populate_record(null::%I, $1) RETURNING to_jsonb(t.*)',
           v_coll.table_name, v_coll.table_name
         ) INTO v_new_row USING v_new_row;
       ELSE
@@ -579,7 +579,7 @@ BEGIN
           'DELETE FROM %I WHERE id = $1', v_coll.table_name
         ) USING v_id;
         EXECUTE format(
-          'INSERT INTO %I AS t SELECT * FROM jsonb_populate_record(null::%I, $1) RETURNING to_jsonb(t)',
+          'INSERT INTO %I AS t SELECT * FROM jsonb_populate_record(null::%I, $1) RETURNING to_jsonb(t.*)',
           v_coll.table_name, v_coll.table_name
         ) INTO v_new_row USING v_new_row;
       END IF;

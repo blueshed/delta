@@ -30,11 +30,12 @@ import { waitFor } from "../setup";
  * of the wedding; drinks are grandchildren (children of a course); tags have
  * no parent, so every document that includes them holds all of them; notes are
  * temporal (a remove closes the row; its history stays); seats carry the other
- * column types: an integer, a boolean and a json column.
+ * column types: an integer, a boolean and a json column. A household's `t` is
+ * named as the write SQL once named its row (todo #58): a column may take any name.
  */
 export const pathSchema = defineSchema({
   weddings: { table: "fo_weddings", columns: { name: "text" }, temporal: false },
-  households: { table: "fo_households", parent: "weddings", columns: { email: "text" }, temporal: false },
+  households: { table: "fo_households", parent: "weddings", columns: { email: "text", t: "text?" }, temporal: false },
   courses: { table: "fo_courses", parent: "weddings", columns: { name: "text" }, temporal: false },
   drinks: { table: "fo_drinks", parent: "courses", columns: { name: "text" }, temporal: false },
   tags: { table: "fo_tags", columns: { label: "text" }, temporal: false },
@@ -142,7 +143,7 @@ export const pathSeed: Snapshot = {
 /** Rows as a fresh open reads them. */
 export const course = (id: number, name: string, wedding = 1) => ({ id, weddings_id: wedding, name });
 export const drink = (id: number, courseId: number, name: string) => ({ id, courses_id: courseId, name });
-export const household = (id: number, email: string, wedding = 1) => ({ id, weddings_id: wedding, email });
+export const household = (id: number, email: string, wedding = 1, t: string | null = null) => ({ id, weddings_id: wedding, email, t });
 export const seat = (id: number, tableNo: number, kept: boolean, wishes: unknown = null, wedding = 1) => ({ id, weddings_id: wedding, table_no: tableNo, kept, wishes });
 
 // ---------------------------------------------------------------------------
@@ -545,6 +546,24 @@ export function documentCases(backend: () => PathBackend): void {
       const root = await write(b.process, "fo-household:1", [{ op: "replace", path: "/households", value: { id: 9, email: "r@x" } }]);
       expect(root.ops).toEqual([{ op: "replace", path: "/households", value: household(1, "r@x") }]);
       expect((await b.process.call("open", { doc: "fo-household:9" })).error?.code).toBe(404);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a column may take any name: a household's t, named as the write SQL named its row, is written and read in every form (todo #58)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-household:1", "fo-inbox:a@x"]);
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/t", value: "field" }]);
+      await write(b.process, "fo-household:1", [{ op: "replace", path: "/households/t", value: "root" }]);
+      await write(b.process, "fo-household:1", [{ op: "replace", path: "/households", value: { t: "merged" } }]);
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/2", value: { t: "row" } }]);
+      const added = await write(b.process, "fo-board:1", [{ op: "add", path: "/households/-", value: { email: "a@x", t: "added" } }]);
+      expect(added.ops).toEqual([{ op: "add", path: "/households/4", value: household(4, "a@x", 1, "added") }]);
+      expect(content((await b.process.call("open", { doc: "fo-board:1" })).result).households).toEqual({
+        "1": household(1, "a@x", 1, "merged"), "2": household(2, "b@x", 1, "row"), "4": household(4, "a@x", 1, "added"),
+      });
+      const now = await b.process.call("open_at", { doc: "fo-household:1", at: new Date(Date.now() + 1000).toISOString() });
+      expect(content(now.result)).toEqual({ households: household(1, "a@x", 1, "merged") });
+      await write(b.process, "fo-board:1", [{ op: "remove", path: "/households/4" }]);
       await assertCopiesHold(b, copies);
     });
 

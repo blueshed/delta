@@ -22,7 +22,7 @@ import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
 import { applyFramework, newPool } from "./setup";
 import {
-  assertCopiesHold, course, expectTold, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresInbox, postgresOpenSeats, readAll, told, write,
+  assertCopiesHold, course, expectTold, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresInbox, postgresOpenSeats, readAll, told, write,
   type PathBackend, type PathProcess,
 } from "./helpers/path";
 
@@ -86,7 +86,7 @@ describe("postgres: what only a database shared by processes has", () => {
       { op: "replace", path: "/households/1/email", value: "new@x" },
     ]);
     await expectTold(there, "fo-menu:1", [[{ op: "replace", path: "/courses/1", value: course(1, "Broth") }]]);
-    await expectTold(there, "fo-household:1", [[{ op: "replace", path: "/households", value: { id: 1, weddings_id: 1, email: "new@x" } }]]);
+    await expectTold(there, "fo-household:1", [[{ op: "replace", path: "/households", value: household(1, "new@x") }]]);
     await assertCopiesHold(backend, copies);
     await assertCopiesHold(there, theirs);
   });

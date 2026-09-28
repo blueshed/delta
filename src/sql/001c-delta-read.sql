@@ -64,12 +64,12 @@ BEGIN
   IF v_coll.parent_collection IS NULL THEN
     IF v_strip THEN
       EXECUTE format(
-        'SELECT COALESCE(jsonb_object_agg(t.id, _delta_strip_temporal(to_jsonb(t))), ''{}''::jsonb) FROM %I t WHERE %s',
+        'SELECT COALESCE(jsonb_object_agg(t.id, _delta_strip_temporal(to_jsonb(t.*))), ''{}''::jsonb) FROM %I t WHERE %s',
         v_source, v_where
       ) INTO v_result;
     ELSE
       EXECUTE format(
-        'SELECT COALESCE(jsonb_object_agg(t.id, to_jsonb(t)), ''{}''::jsonb) FROM %I t',
+        'SELECT COALESCE(jsonb_object_agg(t.id, to_jsonb(t.*)), ''{}''::jsonb) FROM %I t',
         v_source
       ) INTO v_result;
     END IF;
@@ -80,12 +80,12 @@ BEGIN
   IF v_coll.parent_collection = p_root_collection THEN
     IF v_strip THEN
       EXECUTE format(
-        'SELECT COALESCE(jsonb_object_agg(t.id, _delta_strip_temporal(to_jsonb(t))), ''{}''::jsonb) FROM %I t WHERE t.%I = $1 AND %s',
+        'SELECT COALESCE(jsonb_object_agg(t.id, _delta_strip_temporal(to_jsonb(t.*))), ''{}''::jsonb) FROM %I t WHERE t.%I = $1 AND %s',
         v_source, v_coll.parent_fk, v_where
       ) INTO v_result USING p_root_id;
     ELSE
       EXECUTE format(
-        'SELECT COALESCE(jsonb_object_agg(t.id, to_jsonb(t)), ''{}''::jsonb) FROM %I t WHERE t.%I = $1',
+        'SELECT COALESCE(jsonb_object_agg(t.id, to_jsonb(t.*)), ''{}''::jsonb) FROM %I t WHERE t.%I = $1',
         v_source, v_coll.parent_fk
       ) INTO v_result USING p_root_id;
     END IF;
@@ -103,12 +103,12 @@ BEGIN
 
   IF v_strip THEN
     EXECUTE format(
-      'SELECT COALESCE(jsonb_object_agg(t.id, _delta_strip_temporal(to_jsonb(t))), ''{}''::jsonb) FROM %I t WHERE t.%I = ANY($1) AND %s',
+      'SELECT COALESCE(jsonb_object_agg(t.id, _delta_strip_temporal(to_jsonb(t.*))), ''{}''::jsonb) FROM %I t WHERE t.%I = ANY($1) AND %s',
       v_source, v_coll.parent_fk, v_where
     ) INTO v_result USING v_parent_ids;
   ELSE
     EXECUTE format(
-      'SELECT COALESCE(jsonb_object_agg(t.id, to_jsonb(t)), ''{}''::jsonb) FROM %I t WHERE t.%I = ANY($1)',
+      'SELECT COALESCE(jsonb_object_agg(t.id, to_jsonb(t.*)), ''{}''::jsonb) FROM %I t WHERE t.%I = ANY($1)',
       v_source, v_coll.parent_fk
     ) INTO v_result USING v_parent_ids;
   END IF;
@@ -140,13 +140,13 @@ BEGIN
 
   IF v_coll.temporal THEN
     EXECUTE format(
-      'SELECT COALESCE(jsonb_object_agg(t.id, _delta_strip_temporal(to_jsonb(t))), ''{}''::jsonb) FROM %I t WHERE %s',
+      'SELECT COALESCE(jsonb_object_agg(t.id, _delta_strip_temporal(to_jsonb(t.*))), ''{}''::jsonb) FROM %I t WHERE %s',
       v_source,
       CASE WHEN p_at IS NOT NULL THEN _delta_temporal_where(p_at) ELSE 'TRUE' END
     ) INTO v_result;
   ELSE
     EXECUTE format(
-      'SELECT COALESCE(jsonb_object_agg(t.id, to_jsonb(t)), ''{}''::jsonb) FROM %I t',
+      'SELECT COALESCE(jsonb_object_agg(t.id, to_jsonb(t.*)), ''{}''::jsonb) FROM %I t',
       v_source
     ) INTO v_result;
   END IF;
@@ -205,12 +205,12 @@ BEGIN
     -- List mode: return all matching rows as a map
     IF v_root_coll.temporal THEN
       EXECUTE format(
-        'SELECT COALESCE(jsonb_object_agg(t.id, _delta_strip_temporal(to_jsonb(t))), ''{}''::jsonb) FROM %I t WHERE %s',
+        'SELECT COALESCE(jsonb_object_agg(t.id, _delta_strip_temporal(to_jsonb(t.*))), ''{}''::jsonb) FROM %I t WHERE %s',
         v_view, v_where
       ) INTO v_root_map;
     ELSE
       EXECUTE format(
-        'SELECT COALESCE(jsonb_object_agg(t.id, to_jsonb(t)), ''{}''::jsonb) FROM %I t WHERE %s',
+        'SELECT COALESCE(jsonb_object_agg(t.id, to_jsonb(t.*)), ''{}''::jsonb) FROM %I t WHERE %s',
         v_view, v_where
       ) INTO v_root_map;
     END IF;
@@ -233,7 +233,7 @@ BEGIN
     -- Single mode: one root row + included collections
     v_doc_id := (v_resolved->'values'->>'id')::BIGINT;
 
-    EXECUTE format('SELECT to_jsonb(t) FROM %I t WHERE t.id = $1', v_view)
+    EXECUTE format('SELECT to_jsonb(t.*) FROM %I t WHERE t.id = $1', v_view)
       INTO v_root_row USING v_doc_id;
 
     IF v_root_row IS NULL THEN RETURN NULL; END IF;

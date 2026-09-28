@@ -14,7 +14,7 @@ export async function exportTables(pool: Pool, schema: Schema): Promise<Snapshot
   const sequences: Record<string, number> = {};
   for (const [key, table] of Object.entries(schema.tables)) {
     const order = table.temporal ? "id, valid_from" : "id";
-    const { rows } = await pool.query(`SELECT to_jsonb(t) AS row FROM ${q(table.name)} t ORDER BY ${order}`);
+    const { rows } = await pool.query(`SELECT to_jsonb(t.*) AS row FROM ${q(table.name)} t ORDER BY ${order}`);
     tables[key] = rows.map(({ row }: { row: Record<string, unknown> }) =>
       table.temporal ? { ...row, valid_from: isoTime(row.valid_from), valid_to: isoTime(row.valid_to) } : row,
     );

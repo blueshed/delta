@@ -162,6 +162,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `_delta_resolve_scope`); `list` and `values`, SQLite's options, still work and win over the
   name's. Given neither, a document is read as single, as before.
   `tests/path-pglite.test.ts` now asks its 75 writes of it by name.
+- **Postgres: a table may have a column named `t`** (todo #58). The framework SQL read a row as
+  `to_jsonb(t)` over the alias `t`, and a bare `t` names a column before a table, so with such a
+  column every open read the column's value for each row, and every write failed (`cannot
+  delete from scalar`, or a 404 where the column was null): SQLite and the JSON file took it.
+  Each whole-row read now says so, `to_jsonb(t.*)`, which no column can take: in `001c` (the
+  document loads), `001d` (`delta_apply` and the row reads it makes), `001e` (`delta_open_at`),
+  all replaced in place, and in `exportTables`. The path's households carry a `t` column, so
+  every shared case asks it of every backend, and one writes and reads it in each form.
 - **`bun.lock` matches `package.json`** (todo #49): it lacked the optional `@electric-sql/pglite`
   peer, so every `bun install` in a fresh checkout changed it.
 - **`bun run test` runs every file that needs no Postgres server** (todo #48): it named 8 of the

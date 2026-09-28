@@ -68,12 +68,12 @@ BEGIN
 
   IF v_root_coll.temporal THEN
     EXECUTE format(
-      'SELECT to_jsonb(t) FROM %I t WHERE t.id = $1 AND %s',
+      'SELECT to_jsonb(t.*) FROM %I t WHERE t.id = $1 AND %s',
       v_root_coll.table_name, _delta_temporal_where(p_at)
     ) INTO v_root_row USING v_doc_id;
     v_root_row := _delta_strip_temporal(v_root_row);
   ELSE
-    EXECUTE format('SELECT to_jsonb(t) FROM %I t WHERE t.id = $1', v_root_coll.table_name)
+    EXECUTE format('SELECT to_jsonb(t.*) FROM %I t WHERE t.id = $1', v_root_coll.table_name)
       INTO v_root_row USING v_doc_id;
   END IF;
 
