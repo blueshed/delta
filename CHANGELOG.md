@@ -212,6 +212,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `replace /weddings/1/name` likewise. Another id is a 404 (`replace /courses/2` was a 400), a
   field that is no column still a 400. `validateOps` reads the segment as Postgres does: digits,
   or the root's own text id, where no column has that name, name the row.
+- **A single document's root is walked as one row, however the write named it, on every
+  backend.** The root has two paths: `/courses` (a replace of it) and `/courses/1` (its add, its
+  remove), and the walk planned each path on its own. `[remove /courses/1, add /courses/1,
+  replace /courses/name]` through `course:1` -- or with a rename first -- found the root it
+  added changed since, and every undo was a conflict. `[remove /households/1, add
+  /households/1 {...}]` through `household:1` walked back as `replace /households/1`, which
+  Postgres took as the root and SQLite and the JSON file (before #53, on this release) refused, so
+  the write undid on Postgres alone. `planWalk` (`src/server/ledger.ts`) and `_delta_walk_plan`
+  (`001g`, `CREATE OR REPLACE`, with `_delta_walk_key`, new) key the root by `/<root>/<id>`,
+  its id read from the row, and plan a replace of it at `/<root>`: the course comes back as it
+  was with its drink, the household's email is set back at `/households`, and each is redone and
+  undone again. A conflict is still reported at the path the entry first gave the row.
 - **A run of replaces of one row is answered, recorded and told once, as it leaves the row, on
   every backend.** Replaces of one row one straight after another (`/courses/1/name`, then
   `/courses/1 { ... }`; a single document's `/courses/name`, `/courses` and `/courses/1/name`)
