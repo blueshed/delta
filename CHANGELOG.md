@@ -120,6 +120,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row it does not hold) threw out of the socket's message handler and left the copy behind. The SQL backends are unchanged; the every-backend copy check
   (`tests/helpers/path.ts`) now replays what each document is told under the strict rules, and
   its mistake case asks a remove and a replace of a row not there on every backend.
+- **A memory document's `add /<coll>/-` makes a row the document names, as the JSON file and
+  SQLite do** (todo #14). `registerMemory` applied the ops as sent, so `add /people/-` on a map
+  of rows kept the row under the key `"-"`, and a second such add overwrote the first. It now
+  names the row as the JSON file (`registerDoc`) does, with the same `mintIds`: a uuid in the
+  path and in the value's `id`, in what it keeps, answers (`ops`) and broadcasts. `/-` on an array
+  still appends. `tests/create-row.test.ts` asks it with the other backends.
 
 ## [0.9.1] - 2026-09-27
 

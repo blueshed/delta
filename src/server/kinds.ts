@@ -22,7 +22,7 @@
  * `{ doc, ops, v }`, the one stream of changes.
  */
 import { applyOps, type DeltaOp } from "../core";
-import { onClientDrop, trackSubscribe, trackUnsubscribe, type WsServer } from "./server";
+import { mintIds, onClientDrop, trackSubscribe, trackUnsubscribe, type WsServer } from "./server";
 
 type Respond = (response: any) => void;
 
@@ -88,15 +88,17 @@ export function registerMemory<T>(ws: WsServer, options: MemoryOptions<T>) {
     if (options.writable !== "any" && !client?.data?.local) return refuse(respond, "a live document is written by the server, not over the socket");
     const d = doc(name);
     const next = structuredClone(d.value);
+    let ops: DeltaOp[];
     try {
-      applyOps(next, msg.ops as DeltaOp[]);
+      ops = mintIds(next, msg.ops as DeltaOp[]); // add /<coll>/- names the row, as the JSON file and SQLite do
+      applyOps(next, ops);
     } catch (err: any) {
       return respond({ error: { code: 400, message: err.message } });
     }
     d.value = next;
     d.v += 1;
-    ws.publish(name, { doc: name, ops: msg.ops, v: d.v });
-    respond({ result: { ack: true, version: d.v, ops: msg.ops } });
+    ws.publish(name, { doc: name, ops, v: d.v });
+    respond({ result: { ack: true, version: d.v, ops } });
   });
 
   ws.on("close", (msg, client, respond) => {

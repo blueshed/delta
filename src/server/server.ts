@@ -380,8 +380,10 @@ export function normalizeForBroadcast(doc: unknown, ops: DeltaOp[]): DeltaOp[] {
  * server names it": mint a uuid, put it in the path and in the value's `id`,
  * so the op as applied -- and as broadcast -- names the row, as the SQL
  * backends' echoes do. On an array, `/-` appends, as RFC 6902 says.
+ * Shared by the JSON file (`registerDoc`) and memory documents (`kinds.ts`).
+ * @internal
  */
-function mintIds(doc: unknown, ops: DeltaOp[]): DeltaOp[] {
+export function mintIds(doc: unknown, ops: DeltaOp[]): DeltaOp[] {
   return ops.map((op) => {
     if (op.op !== "add" || !op.path.endsWith("/-")) return op;
     const segs = splitPath(op.path);

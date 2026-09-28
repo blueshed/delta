@@ -37,6 +37,18 @@ describe("memory: live documents", () => {
     expect((await local.call("close", { doc: "here:a" })).result).toEqual({ ack: true });
   });
 
+  test("add /<coll>/- makes a row the server names, as the JSON file does: answered, heard and kept under its id (#14)", async () => {
+    const { local, heard } = setup();
+    const here = registerMemory(local.server, { prefix: "here:", empty: () => ({ people: {} as Record<string, any> }) });
+    const { result } = await local.call("delta", { doc: "here:general", ops: [{ op: "add", path: "/people/-", value: { name: "Ada" } }] });
+    const [op] = result.ops;
+    const id = op.path.split("/")[2];
+    expect(id).not.toBe("-");
+    expect(op).toEqual({ op: "add", path: `/people/${id}`, value: { name: "Ada", id } });
+    expect(heard).toEqual([{ doc: "here:general", ops: result.ops, v: 1 }]);
+    expect(here.peek("here:general")).toEqual({ people: { [id]: { name: "Ada", id } } });
+  });
+
   test("anyone may write one that says so", async () => {
     const handlers: any[] = [];
     const server = { on: (a: string, h: any) => a === "delta" && handlers.push(h), publish() {} } as any;

@@ -3,8 +3,8 @@
  * op on every rung of the ladder (D3).
  *
  * `add /<coll>/-` on a collection of rows is a new row whose id the server
- * mints: a uuid on the JSON file and SQLite, the table's sequence on
- * Postgres. The broadcast names it (`/<coll>/<id>`) and the row carries it
+ * mints: a uuid on the JSON file and a memory document, the collection's
+ * serial on SQLite and Postgres. The broadcast names it (`/<coll>/<id>`) and the row carries it
  * (`value.id`), so a client applying the echo -- `applyOps`, keyed `list()`,
  * `applyOpsToCollection` -- lands on the same row as the server. Before, the
  * JSON file and SQLite stored the row under the key `"-"`.
@@ -14,6 +14,7 @@ import { Database } from "bun:sqlite";
 import type { Pool } from "pg";
 import { applyOps, splitPath } from "../src/core";
 import { createWs, registerDoc } from "../src/server/server";
+import { registerMemory } from "../src/server/kinds";
 import { defineSchema, defineDoc, createTables, registerDocs } from "../src/server/sqlite";
 import {
   applySql, generateSql, createDocListener, registerDocType, docTypeFromDef, clearRegistry,
@@ -75,6 +76,22 @@ describe("add /coll/- makes a row the server names, on every backend", () => {
     h.applyAndBroadcast([{ op: "add", path: "/items/-", value: "a" }]);
     expect(h.getDoc()).toEqual({ items: ["a"] });
     try { unlinkSync(file); } catch {}
+  });
+
+  test("memory document (#14)", async () => {
+    const ws = createWs();
+    const here = registerMemory(ws, { prefix: "cr-here:", empty: () => ({ cr_messages: {} as Record<string, any> }), writable: "any" });
+    const { view, published } = await story(ws, "cr-here:1");
+    await heard(published, view, 2);
+    expect(Object.keys(here.peek("cr-here:1")!.cr_messages)).not.toContain("-");
+  });
+
+  test("memory document: /- on an array still appends (#14)", async () => {
+    const ws = createWs();
+    const here = registerMemory(ws, { prefix: "cr-list:", empty: () => ({ items: [] as string[] }), writable: "any" });
+    const r = await sendAndAwait(ws, mockClient(), { action: "delta", doc: "cr-list:1", ops: [{ op: "add", path: "/items/-", value: "a" }] });
+    expect(r.result.ops).toEqual([{ op: "add", path: "/items/-", value: "a" }]);
+    expect(here.peek("cr-list:1")).toEqual({ items: ["a"] });
   });
 
   test("SQLite", async () => {
