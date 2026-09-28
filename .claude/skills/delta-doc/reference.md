@@ -152,7 +152,8 @@ import { provide, effect } from "@blueshed/railroad";
 import { connectWs, WS, openDoc, call, DeltaError } from "@blueshed/delta/client";
 
 // Sign in on EVERY connect -- the first and each reconnect -- before any doc
-// opens or re-opens. `onConnect` runs first and everything else waits for it.
+// opens or re-opens. `onConnect` runs first and the documents wait for it; what
+// it sends, through the `ws` it is given or through DI, goes out at once.
 // (An `await call("authenticate")` made once is not enough: a reconnect
 // re-opens every doc on a new, unauthenticated socket, they 401 and stop.)
 let signedIn!: (user: User) => void;

@@ -215,8 +215,11 @@ export interface ConnectOptions {
    *
    *   connectWs("/ws", { onConnect: (ws) => call("authenticate", { token }, ws) })
    *
-   * The client it is given sends at once; everything else waits for it. A hook
-   * that throws is logged, and the documents open anyway (and may 401).
+   * While it runs, a request goes out at once, through the client it is given
+   * or through DI (`call("authenticate", { token })`), and the server handles
+   * them in the order they were sent; the documents' opens and re-opens, and
+   * requests made before the connect, wait for it. A hook that throws is
+   * logged, and the documents open anyway (and may 401).
    */
   onConnect?: (client: WsClient) => unknown;
 }
@@ -262,6 +265,10 @@ export function connectWs(
     readyResolve = r;
   });
   let isReady = false;
+  // The connect whose onConnect is running, 0 when none is: while one runs,
+  // requests go straight out on its socket (see `sendInternal`).
+  let connects = 0;
+  let hooking = 0;
 
   /** A request on the socket as it is now. */
   function request(msg: any): Promise<any> {
@@ -274,10 +281,17 @@ export function connectWs(
     });
   }
 
-  /** A request once the socket is ready: connected, and `onConnect` done. */
+  /**
+   * A request once the socket is ready: connected, and `onConnect` done. While
+   * `onConnect` runs, one goes straight out instead, so a hook that calls
+   * through DI (`call("authenticate", params)`, no client) is not waiting for
+   * itself: the page has no way to tell its requests from the hook's, and the
+   * server handles a socket's messages in the order they came, so they are
+   * handled behind what the hook has sent.
+   */
   async function sendInternal(msg: any): Promise<any> {
     if (isClosed) throw { code: 0, message: "closed" };
-    await ready;
+    if (!hooking) await ready;
     return request(msg);
   }
 
@@ -357,10 +371,13 @@ export function connectWs(
   ws.addEventListener("open", async () => {
     log.info("connected");
     if (opts?.onConnect) {
-      // Before anything else goes out: its requests skip the `ready` queue,
-      // and the re-opens below wait for it.
+      // Before anything else goes out: requests made while it runs skip the
+      // `ready` queue (its own, through the client it is given or through
+      // DI), and the re-opens below wait for it.
+      const connect = hooking = ++connects;
       try { await opts.onConnect({ ...client, send: request }); }
       catch (err: any) { log.error(`onConnect: ${err?.message ?? String(err)}`); }
+      finally { if (hooking === connect) hooking = 0; }
       if (isClosed || ws.readyState !== WebSocket.OPEN) return;   // dropped meanwhile; the next open runs it again
     }
     connected.set(true);
@@ -381,6 +398,7 @@ export function connectWs(
   ws.addEventListener("close", () => {
     log.info("disconnected");
     connected.set(false);
+    hooking = 0;   // its socket is gone: what is sent now waits for the next connect
     // A new gate only once the last one opened: what waits on one that never
     // did (a failed attempt, a drop during onConnect) waits for the next connect.
     if (isReady) {

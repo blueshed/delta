@@ -4,7 +4,7 @@
  * touch the network.
  */
 import { describe, test, expect, afterEach } from "bun:test";
-import { connectWs, openDoc, WS, type Doc, type WsClient } from "../src/client/client";
+import { connectWs, openDoc, call, WS, type Doc, type WsClient } from "../src/client/client";
 import { provide, clearProviders, signal } from "@blueshed/railroad";
 import type { DeltaOp } from "../src/core";
 
@@ -661,6 +661,60 @@ describe("onConnect: saying who you are before the docs re-open", () => {
     const doc = openDoc<{ rows: string[] }>("rows:", client);   // opened while connecting
     await doc.ready;
     expect(doc.data.peek()).toEqual({ rows: ["x"] });
+    client.close();
+  });
+
+  // todo #19: only the client onConnect is given skipped `ready`. One that
+  // called through DI -- `call("authenticate", params)`, no client, as
+  // everywhere else in a page -- sent through inject(WS), which waited for
+  // `ready`, which waited for onConnect: it never connected, and said nothing.
+  test("an onConnect that calls through DI connects, before an await and after one (#19)", async () => {
+    server = makeAuthServer(0, ["x"]);
+    const answers: unknown[] = [];
+    const client = connectWs(`ws://localhost:${server.port}/ws`, {
+      onConnect: async () => {
+        answers.push(await call("authenticate", { token: "t" }));   // no client: through DI
+        await Bun.sleep(5);                                          // a token refreshed, say
+        answers.push(await call("authenticate", { token: "t" }));
+      },
+    });
+    provide(WS, client);
+    try {
+      const doc = openDoc<{ rows: string[] }>("rows:");   // DI too: it opens once onConnect is done
+      expect(await Promise.race([doc.ready.then(() => "opened"), Bun.sleep(3000).then(() => "hung")])).toBe("opened");
+      expect(client.connected.peek()).toBe(true);
+      expect(answers).toEqual([{ id: 1 }, { id: 1 }]);
+      expect(doc.data.peek()).toEqual({ rows: ["x"] });
+    } finally {
+      client.close();
+      clearProviders();
+    }
+  });
+
+  // What onConnect lets out at once goes to the socket it runs on: once that
+  // socket drops, a request waits for the next connect, as before.
+  test("a request made after the socket dropped, while onConnect still runs, waits for the next connect", async () => {
+    let drops = 1;
+    server = Bun.serve({
+      port: 0,
+      fetch(req, s) { return s.upgrade(req) ? undefined as any : new Response("no", { status: 400 }); },
+      websocket: {
+        open(ws) { if (drops-- > 0) setTimeout(() => ws.close(), 20); },   // the first socket drops mid-onConnect
+        message(ws, raw) { const msg = JSON.parse(String(raw)); ws.send(JSON.stringify({ id: msg.id, result: msg.method })); },
+      },
+    });
+    let hooks = 0;
+    let letFirstGo!: () => void;
+    const firstMayGo = new Promise<void>((r) => (letFirstGo = r));
+    const client = connectWs(`ws://localhost:${server.port}/ws`, {
+      onConnect: () => (++hooks === 1 ? firstMayGo : undefined),   // the first waits on something that is not the socket
+    });
+    await new Promise<void>((r) => client.on("close", () => r()));   // the first socket has dropped; its onConnect still runs
+    expect(hooks).toBe(1);
+    const answer = client.send({ action: "call", method: "ping" });
+    letFirstGo();
+    expect(await Promise.race([answer, Bun.sleep(4000).then(() => "hung")])).toBe("ping");
+    expect(hooks).toBe(2);
     client.close();
   });
 });

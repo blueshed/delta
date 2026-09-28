@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An `onConnect` that calls through DI connects** (todo #19). Only the client `onConnect` is
+  given skipped the wait for the connect; `connectWs(url, { onConnect: () => call("authenticate",
+  { token }) })` with `provide(WS, ...)` sent through `inject(WS)`, which waited for the connect,
+  which waited for `onConnect`: `connected` stayed false, no document opened, and nothing was
+  logged. While `onConnect` runs, a request now goes out at once, whichever way it is made (a
+  page cannot tell the hook's requests from its own); the documents' opens and re-opens, and
+  requests made before the connect, still wait for it. A request made while it runs by something
+  other than the hook is no longer held: it can reach the server before the hook has signed in
+  (one sent before the hook's own first request, as by a hook that fetches a token first, or
+  beside its `authenticate`), and so goes out unsigned, and may 401.
 - **A time's name is a date, compared as an instant, on every backend** (todo #60). A list
   document scoped by a `timestamptz` (`scope: { starts: "<=:end" }`) compared the name's text
   with the row's on SQLite and the JSON file, which keep a time as the text it was given, so
