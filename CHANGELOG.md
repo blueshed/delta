@@ -110,10 +110,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `remove` of a member that was not there set it or did nothing, so the JSON file
   (`registerDoc`) acked `remove /messages/nope` and broadcast it where SQLite and Postgres answer
   404. Now `add` at an index inserts before it (up to the end; `-` still appends), and `replace`
-  or `remove` of a member or index not there fails with 404, the batch undone. This changes what
-  a caller of `applyOps` gets: an `add` at an index shifts the elements after it, and a `replace`
-  that used to create a field (`replace /messages/m1/seen` on a row without `seen`) is a 404 on
-  the JSON file and a memory document -- write it with `add`.
+  or `remove` of a member or index not there fails with 404, the batch undone.
+
+  **Who it can break.** A write that removes or replaces what is not there was accepted on 0.9.1
+  and is now refused (404), with the rest of its batch; and an `add` at an array index now
+  shifts the elements after it instead of overwriting one. On the JSON file (`registerDoc`) and
+  memory documents -- SQLite and Postgres refused them already:
+  - **a remove of what is already gone**: a memory document's second `remove /people/p1`, acked
+    and broadcast before, is refused.
+  - **a replace of a key that is not there**: `replace /messages/m1/seen` on a row without `seen`
+    used to create the field on the JSON file; it is refused.
+  - **a writer that diffs from a copy it holds**, removing what its copy has and the truth no
+    longer should, as eta's chat presence (`keepPresence`) and the wedding's `keepEveryone` do:
+    if two runs overlap, both compute the same removes from the same copy, and the second's
+    batch is refused whole, its adds with it. Before, its removes were quiet no-ops.
+
+  The fix for such a writer: create with `add` (it sets a member, there or not), and take a 404
+  on a remove as another run's work done -- read again and diff anew, since the batch's other
+  ops did not land either -- or let one run go at a time.
+
   The browser client, which applies each broadcast with the same `applyOps`, now takes one that
   does not apply to its copy (a remove of a row it does not hold) as drift: the copy is left as
   it was and the document re-opened, as for a version gap, where one that failed (a field of a
