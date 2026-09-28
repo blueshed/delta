@@ -21,8 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `logout`), through `ws.changesIdentity(method)`, which a hand-registered sign-in method
   can call too. Nothing else waits: a slow `registerMethod` or a recompute holds up nothing,
   as before, and a burst of calls runs side by side. A socket that closes with messages
-  held runs none of them. **A socket may hold 1000** (`createWs({ maxHeld })`); one more
-  closes it with 1008 (policy violation), running none. A sign-in that never answers, or a
+  held runs none of them. **A socket may hold 1000 messages and 1 MiB**
+  (`createWs({ maxHeld, maxHeldBytes })`, a frame counted by its size on the wire); a message
+  past either closes it with 1008 (policy violation), running none -- so a frame over 1 MiB
+  sent before a sign-in has answered closes its socket. A sign-in that never answers, or a
   message ahead of one that never finishes, holds its socket's later messages until the
   socket closes. And a message still running when its
   socket closes has what it registered for the socket let go when it ends: an `open` whose

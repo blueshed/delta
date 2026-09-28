@@ -924,8 +924,8 @@ describe("a call that changes who the socket is holds its later messages (#5)", 
    * jwtAuth's shape: it clears the identity and drops the socket's
    * subscriptions without waiting on anything.
    */
-  function serve(opts: { maxHeld?: number; signIn?: Promise<void>; lateMayGo?: Promise<void>; logoutAtOnce?: boolean } = {}) {
-    const ws = createWs({ maxHeld: opts.maxHeld });
+  function serve(opts: { maxHeld?: number; maxHeldBytes?: number; signIn?: Promise<void>; lateMayGo?: Promise<void>; logoutAtOnce?: boolean } = {}) {
+    const ws = createWs({ maxHeld: opts.maxHeld, maxHeldBytes: opts.maxHeldBytes });
     const ran: string[] = [];
     const subscribers = new Set<any>();
     const signIns: any[] = [];
@@ -1148,6 +1148,40 @@ describe("a call that changes who the socket is holds its later messages (#5)", 
     await Bun.sleep(30);
     expect(ran.filter((r) => r.startsWith("open past"))).toEqual([]);
     expect(ran).toEqual(["open in2", "open in3", "open in4"]);
+    within.sock.close();
+  });
+
+  test("a socket may hold maxHeldBytes of messages; one that would take it past closes it with 1008 and runs none of them (#5 review)", async () => {
+    let letSignIn!: () => void;
+    const signIn = new Promise<void>((r) => (letSignIn = r));
+    const { port, ran } = serve({ maxHeldBytes: 1000, signIn });
+    const pad = "x".repeat(400);
+
+    const within = await connect(port);
+    within.send(1, authenticate);
+    within.send(2, open(`a${pad}`));   // ~430 bytes each: two fit
+    within.send(3, open(`b${pad}`));
+
+    const past = await connect(port);
+    past.send(1, authenticate);
+    past.send(2, open(`c${pad}`));
+    past.send(3, open(`d${pad}`));
+    past.send(4, open(`e${pad}`));     // the third does not
+    const closed = await Promise.race([past.closed, Bun.sleep(1000).then(() => null)]);
+    expect(closed?.code).toBe(1008);
+    expect(closed?.reason).toMatch(/1000 bytes/);
+
+    letSignIn();
+    expect((await within.answer(2)).result?.who).toEqual({ id: 1 });
+    expect((await within.answer(3)).result?.who).toEqual({ id: 1 });
+    await Bun.sleep(30);
+    expect(ran).toEqual([`open a${pad}`, `open b${pad}`]);
+
+    within.send(4, { action: "call", method: "logout" });   // what ran no longer counts: as much again waits on this
+    within.send(5, open(`f${pad}`));
+    within.send(6, open(`g${pad}`));
+    const sixth = await Promise.race([within.answer(6).then((m) => m.error?.code), within.closed.then((e) => `closed ${e.code}`)]);
+    expect(sixth).toBe(401);   // answered after the logout, not closed
     within.sock.close();
   });
 });

@@ -160,6 +160,14 @@ export interface WsOptions {
    * Default 1000.
    */
   maxHeld?: number;
+  /**
+   * How many bytes of messages (their size on the wire) one socket may have
+   * waiting so, beside `maxHeld`: a message that would take it past this
+   * closes the socket with 1008, and none of them runs. So a frame bigger
+   * than this, sent before a sign-in has answered, closes its socket: wait
+   * for the answer (`onConnect` does). Default 1 MiB.
+   */
+  maxHeldBytes?: number;
 }
 
 /**
@@ -203,6 +211,7 @@ export function createWs(opts?: WsOptions): WsServer {
   const path = opts?.path ?? "/ws";
   const origins = allowedOrigins(opts?.origins);
   const maxHeld = opts?.maxHeld ?? 1000;
+  const maxHeldBytes = opts?.maxHeldBytes ?? 1024 * 1024;
 
   // A socket's messages run side by side, as they arrive: Bun does not wait
   // for an async handler. Only a call that changes who the socket is stands
@@ -212,19 +221,24 @@ export function createWs(opts?: WsOptions): WsServer {
   // `logout` is handled (and subscribed, and let go) before the logout, and a
   // slow method holds nothing up. A socket's `line` is what of it is running,
   // and, while such a call is waiting or in flight, what came after it
-  // (`held`); `gone` has the sockets that have closed. With no such call
-  // registered (no `wireAuth`), nothing is kept: each message just runs.
-  type Held = { raw: any; done: () => void };
-  type Line = { running: Set<Promise<void>>; held: Held[] | null };
+  // (`held`, and its size in `bytes`); `gone` has the sockets that have
+  // closed. With no such call registered (no `wireAuth`), nothing is kept:
+  // each message just runs.
+  type Held = { raw: any; size: number; done: () => void };
+  type Line = { running: Set<Promise<void>>; held: Held[] | null; bytes: number };
   const identityCalls = new Set<string>();
   const lines = new WeakMap<object, Line>();
   const gone = new WeakSet<object>();
 
   function lineOf(ws: any): Line {
     let line = lines.get(ws);
-    if (!line) lines.set(ws, (line = { running: new Set(), held: null }));
+    if (!line) lines.set(ws, (line = { running: new Set(), held: null, bytes: 0 }));
     return line;
   }
+
+  /** A frame's size on the wire, as Bun's `maxPayloadLength` counts it. */
+  const sizeOf = (raw: any): number =>
+    typeof raw === "string" ? Buffer.byteLength(raw) : (raw?.byteLength ?? 0);
 
   /** Run one message on its socket's line: it is running until it settles. */
   function start(ws: any, raw: any, line: Line): Promise<void> {
@@ -350,24 +364,26 @@ export function createWs(opts?: WsOptions): WsServer {
         for (let j = i; j < held.length; j++) held[j]!.done();
         return;
       }
-      const { raw, done } = held[i]!;
+      const { raw, size, done } = held[i]!;
+      line.bytes -= size;   // no longer waiting
       void start(ws, raw, line).then(done);
       // Another call that changes who it is: the rest wait on that one.
       const again = line.held as Held[] | null;   // start() may have set it
       if (again) {
-        for (let j = i + 1; j < held.length; j++) again.push(held[j]!);
+        for (let j = i + 1; j < held.length; j++) again.push(held[j]!);   // still counted in `bytes`
         return;
       }
     }
   }
 
-  /** Past `maxHeld`: the socket is closed, and none of what it held runs. */
-  function refuseHeld(ws: any, held: Held[]): void {
+  /** Past `maxHeld` or `maxHeldBytes`: the socket is closed, and none of what it held runs. */
+  function refuseHeld(ws: any, line: Line, over: string): void {
     gone.add(ws);
-    for (const { done } of held.splice(0)) done();
-    log.warn(`close id=${ws.data?.clientId ?? "?"}: more than ${maxHeld} messages held behind a call that changes identity`);
+    for (const { done } of line.held!.splice(0)) done();
+    const why = `more than ${over} held behind a call that changes identity`;
+    log.warn(`close id=${ws.data?.clientId ?? "?"}: ${why}`);
     try {
-      ws.close(1008, `more than ${maxHeld} messages held behind a call that changes identity`);
+      ws.close(1008, why);
     } catch { /* already closing */ }
   }
 
@@ -427,8 +443,11 @@ export function createWs(opts?: WsOptions): WsServer {
         const line = lineOf(ws);
         const held = line.held;
         if (!held) return start(ws, raw, line);
-        if (held.length >= maxHeld) return refuseHeld(ws, held);
-        return new Promise<void>((done) => held.push({ raw, done }));
+        if (held.length >= maxHeld) return refuseHeld(ws, line, `${maxHeld} messages`);
+        const size = sizeOf(raw);
+        if (line.bytes + size > maxHeldBytes) return refuseHeld(ws, line, `${maxHeldBytes} bytes`);
+        line.bytes += size;
+        return new Promise<void>((done) => held.push({ raw, size, done }));
       },
       close(ws: any) {
         gone.add(ws);
