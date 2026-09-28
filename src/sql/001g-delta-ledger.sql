@@ -298,16 +298,52 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql STABLE;
 
+-- _delta_change_tip: the entry a walk of one change takes -- the rule of
+-- changeTip in src/server/ledger.ts. The change is the chain that holds entry
+-- p_change, named by any entry of it (its write, an undo, a redo); its write
+-- must be the cursor's own and undoable, else SQLSTATE P0002 (404). Its tip, if
+-- it goes the way asked: back when the change stands (an even depth), forward
+-- when it was undone by a walk that changed something (odd); else a NULL row.
+CREATE OR REPLACE FUNCTION _delta_change_tip(p_cursor TEXT, p_change BIGINT, p_back BOOLEAN)
+RETURNS _delta_ledger AS $$
+DECLARE
+  v_tip   _delta_ledger;
+  v_next  _delta_ledger;
+  v_depth INT := 0;
+BEGIN
+  SELECT * INTO v_tip FROM _delta_ledger WHERE id = p_change;
+  WHILE v_tip.undoes IS NOT NULL LOOP   -- up to the change's write
+    SELECT * INTO v_tip FROM _delta_ledger WHERE id = v_tip.undoes;
+  END LOOP;
+  IF v_tip.id IS NULL OR v_tip.cursor IS DISTINCT FROM p_cursor OR NOT v_tip.undoable THEN
+    RAISE EXCEPTION 'Entry % is no change of this cursor''s', p_change USING ERRCODE = 'P0002';
+  END IF;
+  LOOP                                  -- down to the entry nothing has walked
+    SELECT * INTO v_next FROM _delta_ledger WHERE undoes = v_tip.id;
+    EXIT WHEN NOT FOUND;
+    v_tip := v_next;
+    v_depth := v_depth + 1;
+  END LOOP;
+  IF (p_back AND v_depth % 2 = 0) OR (NOT p_back AND v_depth % 2 = 1 AND v_tip.undoable) THEN
+    RETURN v_tip;
+  END IF;
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
 -- delta_walk: the cursor's next entry (p_back: the next to undo, else to
--- redo), walked through delta_apply_logged -- by its plan, above -- and
+-- redo), or the next of one change (p_change: any entry of it, the cursor's
+-- own), walked through delta_apply_logged -- by its plan, above -- and
 -- recorded as walking it. NULL when there is none.
 --   p_dry    answer the plan ({ doc, entry, ops, conflict? }) and walk nothing
---   p_entry  walk only if this is the cursor's next entry (SQLSTATE 40001 → 409)
+--   p_entry  walk only if this is the entry the walk would take (SQLSTATE 40001 → 409)
 -- A conflict, a walk the document refuses, or one that changes nothing is
 -- recorded all the same (no ops, not undoable: never redone), so the cursor
--- moves on to the entry before it instead of meeting it again for ever.
+-- moves on to the entry before it instead of meeting it again for ever. A
+-- named walk has no cursor to move on: it walks nothing and records nothing,
+-- and the change stays to be walked once it can be.
 CREATE OR REPLACE FUNCTION delta_walk(
-  p_cursor TEXT, p_who TEXT, p_back BOOLEAN, p_dry BOOLEAN DEFAULT FALSE, p_entry BIGINT DEFAULT NULL
+  p_cursor TEXT, p_who TEXT, p_back BOOLEAN, p_dry BOOLEAN, p_entry BIGINT, p_change BIGINT
 ) RETURNS JSONB AS $$
 DECLARE
   v_entry   _delta_ledger;
@@ -315,13 +351,22 @@ DECLARE
   v_version BIGINT;
   v_skip    BIGINT;
 BEGIN
-  IF p_cursor IS NULL THEN RETURN NULL; END IF;
+  IF p_cursor IS NULL THEN
+    IF p_change IS NOT NULL THEN
+      RAISE EXCEPTION 'Entry % is no change of this cursor''s', p_change USING ERRCODE = 'P0002';
+    END IF;
+    RETURN NULL;
+  END IF;
   -- one walker per cursor at a time: two undos pressed at once take two entries, not one twice
   PERFORM pg_advisory_xact_lock(hashtext('delta-cursor:' || p_cursor));
-  v_entry := _delta_ledger_tip(p_cursor, p_back);
+  IF p_change IS NULL THEN
+    v_entry := _delta_ledger_tip(p_cursor, p_back);
+  ELSE
+    v_entry := _delta_change_tip(p_cursor, p_change, p_back);
+  END IF;
   IF v_entry.id IS NULL THEN RETURN NULL; END IF;
   IF p_entry IS NOT NULL AND p_entry <> v_entry.id THEN
-    RAISE EXCEPTION 'The cursor''s next entry to % is %, not %',
+    RAISE EXCEPTION 'The %''s next entry to % is %, not %', CASE WHEN p_change IS NULL THEN 'cursor' ELSE 'change' END,
       CASE WHEN p_back THEN 'undo' ELSE 'redo' END, v_entry.id, p_entry USING ERRCODE = '40001';
   END IF;
   -- the document's lock (delta_apply_logged takes it again): no writer lands between plan and walk
@@ -338,11 +383,22 @@ BEGIN
     END;
   END IF;
   SELECT COALESCE((SELECT version FROM _delta_versions WHERE doc_name = v_entry.doc_name), 0) INTO v_version;
-  INSERT INTO _delta_ledger (doc_name, version, ops, inverse, who, cursor, undoes, undoable)
-    VALUES (v_entry.doc_name, v_version, '[]'::jsonb, '[]'::jsonb, p_who, p_cursor, v_entry.id, FALSE)
-    RETURNING id INTO v_skip;
-  RETURN jsonb_build_object('doc', v_entry.doc_name, 'ops', '[]'::jsonb, 'inverse', '[]'::jsonb, 'version', v_version, 'entry', v_skip)
+  IF p_change IS NULL THEN
+    INSERT INTO _delta_ledger (doc_name, version, ops, inverse, who, cursor, undoes, undoable)
+      VALUES (v_entry.doc_name, v_version, '[]'::jsonb, '[]'::jsonb, p_who, p_cursor, v_entry.id, FALSE)
+      RETURNING id INTO v_skip;
+  END IF;
+  RETURN jsonb_strip_nulls(jsonb_build_object('doc', v_entry.doc_name, 'ops', '[]'::jsonb, 'inverse', '[]'::jsonb, 'version', v_version, 'entry', v_skip))
     || CASE WHEN v_plan ? 'conflict' THEN jsonb_build_object('conflict', v_plan->'conflict') ELSE '{}'::jsonb END;
+END;
+$$ LANGUAGE plpgsql;
+
+-- The cursor's next entry, as delta_walk was first called: no change named.
+CREATE OR REPLACE FUNCTION delta_walk(
+  p_cursor TEXT, p_who TEXT, p_back BOOLEAN, p_dry BOOLEAN DEFAULT FALSE, p_entry BIGINT DEFAULT NULL
+) RETURNS JSONB AS $$
+BEGIN
+  RETURN delta_walk(p_cursor, p_who, p_back, p_dry, p_entry, NULL::BIGINT);
 END;
 $$ LANGUAGE plpgsql;
 
@@ -405,5 +461,14 @@ CREATE OR REPLACE FUNCTION delta_walk_as(
 BEGIN
   PERFORM set_config('app.user_id', p_user_id, true);
   RETURN delta_walk(p_cursor, p_who, p_back, p_dry, p_entry);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION delta_walk_as(
+  p_user_id TEXT, p_cursor TEXT, p_who TEXT, p_back BOOLEAN, p_dry BOOLEAN, p_entry BIGINT, p_change BIGINT
+) RETURNS JSONB LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM set_config('app.user_id', p_user_id, true);
+  RETURN delta_walk(p_cursor, p_who, p_back, p_dry, p_entry, p_change);
 END;
 $$;

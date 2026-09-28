@@ -21,7 +21,7 @@ import { trackSubscribe, trackUnsubscribe, onClientDrop } from "./server";
 import { authless, isAuthError, ownerless, type DeltaAuth } from "./auth";
 import { applyOps as deltaApplyOps, type DeltaOp, splitPath, joinPath } from "../core";
 import { createLogger } from "./logger";
-import { createLedger, planWalk, rowAt, socketCursor } from "./ledger";
+import { createLedger, isEntryId, planWalk, rowAt, socketCursor } from "./ledger";
 import { meets, pastSafeId, resolveScope, rowId, sameId, whereOf, type Keep, type Scope } from "./scope";
 import {
   type ColumnDef,
@@ -1291,6 +1291,22 @@ export function registerDocs<I = unknown>(
 
   if (ledger) {
     /**
+     * The entry a walk takes: the named change's next (`change`), or else the
+     * cursor's; 400 for a change that is not an entry's id, 404 for one that is
+     * no change of this cursor's.
+     */
+    const nextWalk = (way: "undo" | "redo", msg: any, client: any) => {
+      const cursor = cursorOf(msg, client);
+      if (msg.change == null) {
+        const entry = cursor === null ? undefined : way === "undo" ? ledger.nextUndo(cursor) : ledger.nextRedo(cursor);
+        return { entry, cursor, named: false };
+      }
+      if (!isEntryId(msg.change)) return { error: { code: 400, message: "change must be an entry's id: a whole number from 1" } };
+      const entry = cursor === null ? null : ledger.changeTip(cursor, msg.change, way === "undo");
+      if (entry === null) return { error: { code: 404, message: `Entry ${msg.change} is no change of this cursor's` } };
+      return { entry, cursor, named: true };
+    };
+    /**
      * Undo or redo: the cursor's next entry, walked through the same write path
      * and recorded as walking it -- only the fields it changed, guarded by what
      * it left (`planWalk`). A walk that meets a later write by someone else, or
@@ -1298,13 +1314,20 @@ export function registerDocs<I = unknown>(
      * recorded all the same, so the next walk goes on to the entry before it.
      * `dry: true` answers what the walk would do and walks nothing; `entry: id`
      * walks only if that is the cursor's next entry (409 otherwise).
+     *
+     * `change: id` walks one change instead of the cursor's next: the chain
+     * that holds that entry, which must be the cursor's own (404), walked at its
+     * tip (`ledger.changeTip`). A named walk that meets a conflict, or that the
+     * document refuses, walks nothing and records nothing: no cursor has to
+     * move past it, and the change stays to be walked once it can be.
      */
     const walk = (way: "undo" | "redo") => (msg: any, client: any, respond: (r: any) => void) => {
-      const cursor = cursorOf(msg, client);
-      const entry = cursor === null ? undefined : way === "undo" ? ledger.nextUndo(cursor) : ledger.nextRedo(cursor);
+      const next = nextWalk(way, msg, client);
+      if ("error" in next) return respond(next);
+      const { entry, cursor, named } = next;
       if (!entry) return respond({ result: null });
       if (msg.entry != null && msg.entry !== entry.id) {
-        return respond({ error: { code: 409, message: `The cursor's next entry to ${way} is ${entry.id}, not ${msg.entry}` } });
+        return respond({ error: { code: 409, message: `The ${named ? "change" : "cursor"}'s next entry to ${way} is ${entry.id}, not ${msg.entry}` } });
       }
       const match = findDoc(entry.doc);
       if (!match) return;   // written through another registration's document (one ledger, one database): its walk answers
@@ -1322,11 +1345,14 @@ export function registerDocs<I = unknown>(
         const out = plan.conflict.length || !plan.ops.length ? null : write(entry.doc, match.def, doc, plan.ops, { ...by, undoes: entry.id });
         if (out && !("error" in out) && out.entry !== undefined) return respond({ result: { doc: entry.doc, ...out } });
         if (out && "error" in out && out.error.code >= 500) return respond(out);
+        const conflict = plan.conflict.length ? plan.conflict : out && "error" in out ? plan.ops.map((o) => o.path) : undefined;
+        const said = conflict ? { conflict } : {};
+        // named, it is left as it is: nothing walked, nothing recorded
+        if (named) return respond({ result: { doc: entry.doc, ops: [], inverse: [], version: ledger.version(entry.doc), ...said } });
         // A conflict, a walk the document refuses, or one that changes nothing: walked all the same.
         const skipped = ledger.skip({ doc: entry.doc, ...by, undoes: entry.id });
         options.committed?.();
-        const conflict = plan.conflict.length ? plan.conflict : out && "error" in out ? plan.ops.map((o) => o.path) : undefined;
-        respond({ result: { doc: entry.doc, ops: [], inverse: [], version: skipped.version, entry: skipped.entry, ...(conflict ? { conflict } : {}) } });
+        respond({ result: { doc: entry.doc, ops: [], inverse: [], version: skipped.version, entry: skipped.entry, ...said } });
       } finally {
         if (!subscriptions.has(entry.doc)) cache.delete(entry.doc); // loaded for this walk only
       }
@@ -1343,8 +1369,8 @@ export function registerDocs<I = unknown>(
         if (!auth) return walked(msg, client, respond);
         const g = gated(client);
         if ("error" in g) return respond(g);
-        const cursor = cursorOf(msg, client);
-        const entry = cursor === null ? undefined : way === "undo" ? ledger.nextUndo(cursor) : ledger.nextRedo(cursor);
+        const next = nextWalk(way, msg, client);
+        const entry = "error" in next ? undefined : next.entry;
         if (!entry || !options.owns || !findDoc(entry.doc)) return walked(msg, client, respond);   // another registration's: it asks its own owns
         return whenOwned(options.owns(g.identity, entry.doc), respond, () => walked(msg.entry == null ? { ...msg, entry: entry.id } : msg, client, respond));
       };

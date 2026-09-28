@@ -21,7 +21,7 @@ import type { DocType } from "./registry";
 import type { DeltaAuth } from "../auth";
 import { authless, isAuthError } from "../auth";
 import { type DeltaOp, splitPath, joinPath } from "../../core";
-import { socketCursor } from "../ledger";
+import { isEntryId, socketCursor } from "../ledger";
 
 const log = createLogger("[doc]");
 
@@ -809,9 +809,13 @@ export async function createDocListener<I = unknown>(
      * Undo or redo: the cursor's next entry, walked in the database (001g
      * `delta_walk`) by its guarded plan and recorded as walking it; a conflict
      * changes nothing, answers `conflict`, and moves the cursor on. `dry: true`
-     * answers the plan; `entry: id` walks only that entry.
+     * answers the plan; `entry: id` walks only that entry. `change: id` walks
+     * one change of the cursor's instead (`_delta_change_tip`), and a conflict
+     * then records nothing.
      */
     const walk = (way: "undo" | "redo") => async (msg: any, client: any, respond: (r: any) => void) => {
+      const change = msg.change ?? null;
+      if (change !== null && !isEntryId(change)) return respond({ error: { code: 400, message: "change must be an entry's id: a whole number from 1" } });
       let identity: I | undefined;
       if (auth) {
         const gated = auth.gate(client);
@@ -828,18 +832,20 @@ export async function createDocListener<I = unknown>(
         // asked about is the one walked.
         if (auth && cursor !== null) {
           await db.query("SELECT pg_advisory_xact_lock(hashtext('delta-cursor:' || $1::text))", [cursor]);
-          const tip = (await db.query("SELECT doc_name FROM _delta_ledger_tip($1, $2)", [cursor, way === "undo"])).rows[0]?.doc_name;
+          const tip = (change === null
+            ? await db.query("SELECT doc_name FROM _delta_ledger_tip($1, $2)", [cursor, way === "undo"])
+            : await db.query("SELECT doc_name FROM _delta_change_tip($1, $2, $3)", [cursor, change, way === "undo"])).rows[0]?.doc_name;
           const found = tip ? resolveDoc(tip) : null;
           if (found?.type.owns && !(await found.type.owns(identity as I, tip))) {
             await db.query("ROLLBACK");
             return respond({ error: { code: 404, message: "Not found" } });
           }
         }
-        const args = [cursor, whoOf(writer), way === "undo", msg.dry === true, msg.entry ?? null];
+        const args = [cursor, whoOf(writer), way === "undo", msg.dry === true, msg.entry ?? null, change];
         const { rows } =
           auth?.asSqlArg && identity !== undefined
-            ? await db.query("SELECT delta_walk_as($1, $2, $3, $4, $5, $6) AS result", [String(auth.asSqlArg(identity)), ...args])
-            : await db.query("SELECT delta_walk($1, $2, $3, $4, $5) AS result", args);
+            ? await db.query("SELECT delta_walk_as($1, $2, $3, $4, $5, $6, $7) AS result", [String(auth.asSqlArg(identity)), ...args])
+            : await db.query("SELECT delta_walk($1, $2, $3, $4, $5, $6) AS result", args);
         await db.query("COMMIT");
         const result = rows[0]?.result ?? null;
         respond({ result: result && { ...result, ...(result.version != null ? { version: Number(result.version) } : {}), entry: result.entry == null ? undefined : Number(result.entry) } });

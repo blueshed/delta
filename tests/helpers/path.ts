@@ -1561,6 +1561,104 @@ export function fanOutCases(backend: () => PathBackend): void {
     });
   });
 
+  describe("a change named by its entry", () => {
+    /** What a walk answered, as the cases compare it. */
+    const walked = (res: any) => ({ doc: res.result?.doc, ops: res.result?.ops, conflict: res.result?.conflict, error: res.error });
+    const name = async (b: PathBackend) => (await b.process.call("open", { doc: "fo-course:1" })).result.courses.name;
+    const soup = { op: "replace", path: "/courses/1/name", value: "Broth" };
+    const wedding = { op: "replace", path: "/weddings/name", value: "the big day" };
+
+    test("undo names a change: the cursor's older write is walked back and its later one stands; the cursor's own undo then takes the later one, and passes the named one by", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1", "fo-title:1"]);
+      const older = await write(b.process, "fo-board:1", [soup], { cursor: "s1" });
+      const later = await write(b.process, "fo-board:1", [wedding], { cursor: "s1" });
+      const undone = await b.process.call("undo", { cursor: "s1", change: older.entry });
+      expect(walked(undone)).toEqual({ doc: "fo-board:1", ops: [{ op: "replace", path: "/courses/1", value: course(1, "Soup") }], conflict: undefined, error: undefined });
+      expect(await name(b)).toBe("Soup");
+      expect((await b.process.call("open", { doc: "fo-title:1" })).result.weddings.name).toBe("the big day");
+      const next = await b.process.call("undo", { cursor: "s1" });
+      expect(walked(next)).toEqual({ doc: "fo-board:1", ops: [{ op: "replace", path: "/weddings", value: { id: 1, name: "ours" } }], conflict: undefined, error: undefined });
+      expect((await b.process.call("undo", { cursor: "s1" })).result).toBeNull();
+      await expectTold(b, "fo-menu:1", [older.ops, later.ops, undone.result.ops, next.result.ops]);
+      await expectTold(b, "fo-title:1", [later.ops, next.result.ops]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("redo names a change: one undone is walked forward again, even after the cursor's fresh write, by any entry of its chain -- its write, its undo, its redo; one that stands has nothing to redo, and one undone nothing to undo (null)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1"]);
+      const made = await write(b.process, "fo-board:1", [soup], { cursor: "s1" });
+      expect((await b.process.call("redo", { cursor: "s1", change: made.entry })).result).toBeNull();
+      const undone = await b.process.call("undo", { cursor: "s1", change: made.entry });
+      expect((await b.process.call("undo", { cursor: "s1", change: made.entry })).result).toBeNull();
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/email", value: "z@x" }], { cursor: "s1" });
+      expect((await b.process.call("redo", { cursor: "s1" })).result).toBeNull();   // the fresh write ended the cursor's redo
+      const redone = await b.process.call("redo", { cursor: "s1", change: undone.result.entry });
+      expect(walked(redone)).toEqual({ doc: "fo-board:1", ops: [{ op: "replace", path: "/courses/1", value: course(1, "Broth") }], conflict: undefined, error: undefined });
+      expect((await b.process.call("redo", { cursor: "s1", change: made.entry })).result).toBeNull();
+      const again = await b.process.call("undo", { cursor: "s1", change: redone.result.entry });
+      expect(walked(again)).toEqual({ doc: "fo-board:1", ops: [{ op: "replace", path: "/courses/1", value: course(1, "Soup") }], conflict: undefined, error: undefined });
+      await expectTold(b, "fo-menu:1", [made.ops, undone.result.ops, redone.result.ops, again.result.ops]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a change that is not the cursor's -- another cursor's, a fact, an entry there is not -- is not found (404), and nothing is walked; a change that is not an entry's id is malformed (400)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1"]);
+      const theirs = await write(b.process, "fo-board:1", [soup], { cursor: "s2" });
+      const fact = await write(b.process, "fo-board:1", [wedding], { cursor: "s1", undoable: false });
+      const undone = await b.process.call("undo", { cursor: "s2", change: theirs.entry });   // its undo, which is s2's too
+      for (const change of [theirs.entry, fact.entry, undone.result.entry, 999]) {
+        for (const way of ["undo", "redo"]) {
+          expect({ way, change, error: (await b.process.call(way, { cursor: "s1", change })).error }).toEqual({ way, change, error: { code: 404, message: `Entry ${change} is no change of this cursor's` } });
+        }
+      }
+      for (const change of ["1", 1.5, -1, 0, null, {}]) {
+        if (change === null) continue;   // null is no change named: the cursor's own next
+        expect({ change, code: (await b.process.call("undo", { cursor: "s1", change })).error?.code }).toEqual({ change, code: 400 });
+      }
+      expect(await name(b)).toBe("Soup");
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a named undo that meets a later write -- anyone's, or the cursor's own -- walks nothing, answers the conflict and records nothing: once the field holds what the change left, it is undone", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1"]);
+      const older = await write(b.process, "fo-board:1", [soup], { cursor: "s1" });
+      await write(b.process, "fo-board:1", [{ ...soup, value: "Bisque" }], { cursor: "s2" });
+      const met = await b.process.call("undo", { cursor: "s1", change: older.entry });
+      expect({ ...walked(met), entry: met.result.entry }).toEqual({ doc: "fo-board:1", ops: [], conflict: ["/courses/1"], error: undefined, entry: undefined });
+      // the cursor's own later write, over it: the same
+      const own = await write(b.process, "fo-board:1", [{ ...soup, value: "Consommé" }], { cursor: "s1" });
+      expect(walked(await b.process.call("undo", { cursor: "s1", change: older.entry }))).toEqual({ doc: "fo-board:1", ops: [], conflict: ["/courses/1"], error: undefined });
+      expect(await name(b)).toBe("Consommé");
+      // the cursor's own undo takes its later write back to Bisque; s2's to Broth, what the change left
+      expect(walked(await b.process.call("undo", { cursor: "s1", change: own.entry })).ops).toEqual([{ op: "replace", path: "/courses/1", value: course(1, "Bisque") }]);
+      expect(walked(await b.process.call("undo", { cursor: "s2" })).ops).toEqual([{ op: "replace", path: "/courses/1", value: course(1, "Broth") }]);
+      const undone = await b.process.call("undo", { cursor: "s1", change: older.entry });
+      expect(walked(undone)).toEqual({ doc: "fo-board:1", ops: [{ op: "replace", path: "/courses/1", value: course(1, "Soup") }], conflict: undefined, error: undefined });
+      await assertCopiesHold(b, copies);
+    });
+
+    test("asking first: dry answers what the named walk would do, and the entry it would walk, and walks nothing; entry then walks it only if that is still the change's next (409 otherwise)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1"]);
+      const older = await write(b.process, "fo-board:1", [soup], { cursor: "s1" });
+      const later = await write(b.process, "fo-board:1", [wedding], { cursor: "s1" });
+      const dry = await b.process.call("undo", { cursor: "s1", change: older.entry, dry: true });
+      expect(dry.result).toEqual({ doc: "fo-board:1", entry: older.entry, ops: [{ op: "replace", path: "/courses/1", value: { name: "Soup" } }] });
+      expect(await name(b)).toBe("Broth");
+      expect((await b.process.call("undo", { cursor: "s1", change: older.entry, entry: later.entry })).error?.code).toBe(409);
+      expect(await name(b)).toBe("Broth");
+      const undone = await b.process.call("undo", { cursor: "s1", change: older.entry, entry: older.entry });
+      expect(walked(undone).ops).toEqual([{ op: "replace", path: "/courses/1", value: course(1, "Soup") }]);
+      const redry = await b.process.call("redo", { cursor: "s1", change: older.entry, dry: true });
+      expect(redry.result).toEqual({ doc: "fo-board:1", entry: undone.result.entry, ops: [{ op: "replace", path: "/courses/1", value: { name: "Broth" } }] });
+      await assertCopiesHold(b, copies);
+    });
+  });
+
   describe("a custom document that watches the rows", () => {
     test("a household's email written through its own document, as its root, leaves the one inbox and joins the other; undone, it goes back", async () => {
       const b = backend();

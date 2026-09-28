@@ -25,6 +25,12 @@
  * written since is a conflict, and a walk with a conflict changes nothing. It
  * is still recorded (`skip`: no ops, not walkable), so the cursor moves on to
  * the entry before it instead of meeting the same conflict for ever.
+ *
+ * A change is one chain: a write and every walk of it. A walk may name one
+ * (`changeTip`, by any entry of its chain) in place of the cursor's next: two
+ * writers on one cursor -- a person and an assistant in one browser -- each
+ * undo their own. It is the cursor's own change or none, walked by the same
+ * guard; but a conflict records nothing, since no cursor has to move past it.
  */
 import { joinPath, splitPath, type DeltaOp } from "../core";
 
@@ -54,6 +60,13 @@ export type Ledger = {
   nextUndo(cursor: string): LedgerEntry | undefined;
   /** The undo this cursor would walk forward again, unless a fresh write has come since. */
   nextRedo(cursor: string): LedgerEntry | undefined;
+  /**
+   * The entry a walk of one change would take (`back`: an undo, else a redo): the tip of the chain
+   * that holds entry `change`, named by any entry of it -- its write, an undo, a redo. Back if the
+   * change stands, forward if it was undone (by a walk that changed something), else undefined.
+   * Null when the chain is no change of this cursor's: another's, a fact, none.
+   */
+  changeTip(cursor: string, change: number, back: boolean): LedgerEntry | undefined | null;
   /** Records that `undoes` was walked and changed nothing (a conflict): the cursor moves past it, and it is never redone. */
   skip(entry: { doc: string; who: string | null; cursor: string | null; undoes: number }): { version: number; entry: number };
 };
@@ -214,6 +227,21 @@ export function createLedger(db: any): Ledger {
     WHERE t.depth % 2 = 1 AND l.undoable = 1
       AND l.id > COALESCE((SELECT MAX(id) FROM delta_ledger WHERE cursor = ?1 AND undoes IS NULL AND undoable = 1), 0)
     ORDER BY l.id DESC LIMIT 1`);
+  // Up the chain from the entry named to its write, which must be the cursor's own and undoable;
+  // then down it to its tip, the one entry nothing has walked.
+  const changeTipStmt = db.query(`
+    WITH RECURSIVE up(id, undoes) AS (
+      SELECT id, undoes FROM delta_ledger WHERE id = ?2
+      UNION ALL
+      SELECT l.id, l.undoes FROM delta_ledger l JOIN up u ON l.id = u.undoes
+    ),
+    chain(id, depth) AS (
+      SELECT l.id, 0 FROM up u CROSS JOIN delta_ledger l ON l.id = u.id
+      WHERE u.undoes IS NULL AND l.cursor = ?1 AND l.undoable = 1
+      UNION ALL
+      SELECT l.id, c.depth + 1 FROM delta_ledger l JOIN chain c ON l.undoes = c.id
+    )
+    SELECT ${columns}, c.depth FROM chain c CROSS JOIN delta_ledger l ON l.id = c.id ORDER BY c.depth DESC LIMIT 1`);
 
   const version = (doc: string): number => (versionStmt.get(doc) as { version: number | null } | null)?.version ?? 0;
 
@@ -242,6 +270,12 @@ export function createLedger(db: any): Ledger {
       const row = redoStmt.get(cursor) as Row | null;
       return row ? toEntry(row) : undefined;
     },
+    changeTip(cursor, change, back) {
+      const tip = changeTipStmt.get(cursor, change) as (Row & { depth: number }) | null;
+      if (!tip) return null;
+      // the same rule as the cursor's own walk: back from a write or a redo; forward from an undo that changed something
+      return (back ? tip.depth % 2 === 0 : tip.depth % 2 === 1 && tip.undoable === 1) ? toEntry(tip) : undefined;
+    },
     skip({ doc, who, cursor, undoes }) {
       const v = version(doc);
       const result = insertStmt.run(doc, v, "[]", "[]", who, cursor, Date.now(), undoes, 0);
@@ -259,3 +293,6 @@ export function socketCursor(who: string | null, clientId: string | undefined): 
   if (!clientId) return null;
   return who === null ? clientId : JSON.stringify([who, clientId]);
 }
+
+/** An entry's id, as a walk names a change by it: a whole number from 1. */
+export const isEntryId = (id: unknown): id is number => Number.isSafeInteger(id) && (id as number) > 0;

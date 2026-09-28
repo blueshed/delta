@@ -96,6 +96,8 @@ export function ownsCases(backend: () => OwnsBackend): void {
         ["history", { doc: "fo-board:1" }],
         ["undo", { cursor: "c1" }],
         ["redo", { cursor: "c1" }],
+        ["undo", { cursor: "c1", change: 1 }],
+        ["redo", { cursor: "c1", change: 1 }],
         ["close", { doc: "fo-board:1" }],
         ["open", { doc: "fo-inbox:a@x" }],
         ["open", { doc: "fo-menu-card:1" }],
@@ -135,6 +137,23 @@ export function ownsCases(backend: () => OwnsBackend): void {
       expect((await p.as(bob).call("redo", { cursor: "c1" })).error).toEqual({ code: 404, message: "Not found" });
       expect(await name()).toBe("ours");
       expect((await p.as(ada).call("redo", { cursor: "c1" })).error).toBeUndefined();
+      expect(await name()).toBe("renamed");
+    });
+
+    test("an undo or redo of a named change reaches only a document the walker owns: another identity naming it on the same cursor is a 404, and walks nothing", async () => {
+      const p = await backend().start({ owns: ownsByName, custom: "owned" });
+      await p.as(ada).call("open", { doc: "fo-board:1" });
+      const made = (await p.as(ada).call("delta", { doc: "fo-board:1", ops: [{ op: "replace", path: "/weddings/name", value: "renamed" }], cursor: "c3" })).result;
+      await p.as(ada).call("delta", { doc: "fo-board:1", ops: [{ op: "replace", path: "/households/1/email", value: "z@x" }], cursor: "c3" });
+      const name = async () => (await p.as(ada).call("open", { doc: "fo-board:1" })).result.weddings.name;
+      expect((await p.as(bob).call("undo", { cursor: "c3", change: made.entry })).error).toEqual({ code: 404, message: "Not found" });
+      expect((await p.as(bob).call("undo", { cursor: "c3", change: made.entry, dry: true })).error).toEqual({ code: 404, message: "Not found" });
+      expect(await name()).toBe("renamed");
+      expect((await p.as(ada).call("undo", { cursor: "c3", change: made.entry })).error).toBeUndefined();
+      expect(await name()).toBe("ours");
+      expect((await p.as(bob).call("redo", { cursor: "c3", change: made.entry })).error).toEqual({ code: 404, message: "Not found" });
+      expect(await name()).toBe("ours");
+      expect((await p.as(ada).call("redo", { cursor: "c3", change: made.entry })).error).toBeUndefined();
       expect(await name()).toBe("renamed");
     });
 
