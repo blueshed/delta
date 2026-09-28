@@ -42,8 +42,8 @@ describe("pglite", () => ownsCases(() => ({
     const withAuth = opts.noAuth ? undefined : auth;
     for (const def of pathDocs) registerDocType(docTypeFromDef<Me>(def, pool, { auth: withAuth, owns: opts.owns, shared: opts.shared }));
     const local = createLocal();
-    const heard: { channel: string; data: any }[] = [];
-    local.onPublish((channel, data) => heard.push({ channel, data }));
+    const heard: { channel: string; data: any; to?: { identity: unknown } }[] = [];
+    local.onPublish((channel, data, to) => heard.push({ channel, data, to }));
     listeners.push(await createDocListener(local.server, pool, { auth: withAuth, ledger: true, custom: custom(opts.custom) }));
     return {
       as: (identity?: Me) => (identity ? local.as(identity) : local),

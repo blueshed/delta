@@ -58,6 +58,12 @@ export interface OwnsBackend {
   start(opts: { owns?: (me: Me, docName: string) => boolean | Promise<boolean>; shared?: boolean; custom?: "owned" | "neither"; noAuth?: boolean }): Promise<OwnsProcess>;
 }
 
+/** Who each message on `channel` was sent to alone (`createLocal`'s `to`), with its first op's value (or the op). */
+const sentTo = (p: OwnsProcess, channel: string) =>
+  (p.backend.process.heard as { channel: string; data: any; to?: { identity: any } }[])
+    .filter((h) => h.channel === channel)
+    .map((h) => [h.to?.identity?.id, h.data.ops[0].path === "" ? h.data.ops[0].value : h.data.ops[0]]);
+
 const ada: Me = { id: 1, email: "a@x" };
 const bob: Me = { id: 2, email: "c@x" };
 
@@ -172,6 +178,7 @@ export function ownsCases(backend: () => OwnsBackend): void {
         [{ op: "add", path: "/households/3", value: { id: 3, weddings_id: 1, email: "c@x" } }],   // ada's
         [{ op: "remove", path: "/households/3" }],                                                // bob's
       ]);
+      expect(sentTo(p, "fo-mine:x").slice(1)).toEqual([[1, { op: "add", path: "/households/3", value: { id: 3, weddings_id: 1, email: "c@x" } }], [2, { op: "remove", path: "/households/3" }]]);
       expect(Object.keys(await rows(ada)).sort()).toEqual(["1", "2", "3"]);
       expect(await rows(bob)).toEqual({});
     });
@@ -184,6 +191,8 @@ export function ownsCases(backend: () => OwnsBackend): void {
       await p.as(ada).call("open", { doc: "fo-board:1" });
       expect((await p.as(ada).call("delta", { doc: "fo-board:1", ops: [{ op: "add", path: "/courses/-", value: { name: "Fish" } }] })).error).toBeUndefined();
       await expectTold(p.backend, "fo-whoami:x", [[{ op: "replace", path: "", value: { me: 1 } }], [{ op: "replace", path: "", value: { me: 2 } }]]);
+      // each sent to the identity it was read as
+      expect(sentTo(p, "fo-whoami:x")).toEqual([[1, { me: 1 }], [2, { me: 2 }]]);
     });
   });
 }

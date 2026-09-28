@@ -29,8 +29,8 @@ function over(register: (local: ReturnType<typeof createLocal>, opts: Parameters
   return () => ({
     async start(opts) {
       const local = createLocal();
-      const heard: { channel: string; data: any }[] = [];
-      local.onPublish((channel, data) => heard.push({ channel, data }));
+      const heard: { channel: string; data: any; to?: { identity: unknown } }[] = [];
+      local.onPublish((channel, data, to) => heard.push({ channel, data, to }));
       register(local, opts);
       return {
         as: (identity?: Me) => (identity ? local.as(identity) : local),

@@ -47,9 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `recompute(db, criteria, identity)` synchronous over the `bun:sqlite` handle, as `query` is. An
   app with one can start on the JSON file or SQLite and move on. `query` and `matches` are now
   optional in SQLite's `CustomDocDef`, as in Postgres's. `createLocal()`'s callers take a message
-  sent to them alone (`send`), which `onPublish` hears on its document's channel: a recompute
-  document's view, on Postgres too, where in process it was lost (the listener's
-  `client.send` threw on a caller with none).
+  sent to them alone (`send`), which `onPublish` hears on its document's channel with `to`, who
+  it went to (`{ identity }`; a broadcast has none), each listener its own copy and its own
+  mistake, as a broadcast is: a membership or recompute document's view, on Postgres too, where
+  in process it was lost (the listener's `client.send` threw on a caller with none).
 
 ### Fixed
 

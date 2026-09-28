@@ -74,6 +74,41 @@ describe("createLocal", () => {
     expect(errors.every((e) => e.includes("fan-out failed (write committed)") && e.includes("a listener's own mistake"))).toBe(true);
   });
 
+  test("a message sent to one caller alone (a view of its own) is heard with who it went to, each listener its own copy; one that throws is logged and the rest still hear it (todo #6's review)", async () => {
+    const local = createLocal();
+    local.server.on("open", (msg, client, respond) => {
+      client.send(JSON.stringify({ doc: msg.doc, ops: [{ op: "replace", path: "", value: { me: client.data.identity ?? null } }] }));
+      respond({ result: {} });
+    });
+    local.onPublish(() => { throw new Error("a listener's own mistake"); });
+    const heard: { channel: string; data: any; to: unknown }[] = [];
+    local.onPublish((channel, data, to) => { heard.push({ channel, data, to }); if (data.ops[0]) data.ops[0].value.me = "changed"; });
+    local.onPublish((channel, data, to) => heard.push({ channel, data, to }));
+    const errors: string[] = [];
+    const error = console.error;
+    console.error = (line: string) => void errors.push(String(line));
+    setLogLevel("error");
+    try {
+      await local.as({ id: 7 }).call("open", { doc: "mine:x" });
+      await local.call("open", { doc: "mine:x" });
+      local.server.publish("mine:x", { doc: "mine:x", ops: [] });
+    } finally {
+      console.error = error;
+      setLogLevel("silent");
+    }
+    const view = (me: unknown) => ({ doc: "mine:x", ops: [{ op: "replace", path: "", value: { me } }] });
+    expect(heard).toEqual([
+      { channel: "mine:x", data: { doc: "mine:x", ops: [{ op: "replace", path: "", value: { me: "changed" } }] }, to: { identity: { id: 7 } } },
+      { channel: "mine:x", data: view({ id: 7 }), to: { identity: { id: 7 } } },
+      { channel: "mine:x", data: { doc: "mine:x", ops: [{ op: "replace", path: "", value: { me: "changed" } }] }, to: { identity: undefined } },
+      { channel: "mine:x", data: view(null), to: { identity: undefined } },
+      { channel: "mine:x", data: { doc: "mine:x", ops: [] }, to: undefined },
+      { channel: "mine:x", data: { doc: "mine:x", ops: [] }, to: undefined },
+    ]);
+    expect(errors).toHaveLength(3);   // one per message, each to the listener that threw
+    expect(errors.every((e) => e.includes("fan-out failed (write committed)") && e.includes("a listener's own mistake"))).toBe(true);
+  });
+
   test("unsubscribing from publish stops the hearing", async () => {
     const local = createLocal();
     const heard: string[] = [];

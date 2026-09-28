@@ -49,11 +49,13 @@ export interface Local extends Caller {
   as(identity: unknown): Caller;
   /**
    * Hears every broadcast the backend makes, on every channel, as its own copy
-   * -- and each message it sends to one caller alone, on its document's channel
-   * (a recompute document's view, which is each subscriber's own); one that
-   * throws is logged, and the rest are told. Returns the unsubscribe.
+   * -- and each message it sends to one caller alone, on its document's
+   * channel, with `to`: who it went to (`{ identity }`, undefined for the
+   * anonymous caller) -- a membership or recompute document's view, which is
+   * that identity's own. A broadcast has no `to`. One that throws is logged,
+   * and the rest are told. Returns the unsubscribe.
    */
-  onPublish(fn: (channel: string, data: any) => void): () => void;
+  onPublish(fn: (channel: string, data: any, to?: { identity: unknown }) => void): () => void;
 }
 
 /**
@@ -103,15 +105,28 @@ function copyData(v: any): any {
 export function createLocal(): Local {
   const log = createLogger("[local]");
   const actions = new Map<string, ActionHandler[]>();
-  const listeners = new Set<(channel: string, data: any) => void>();
+  const listeners = new Set<(channel: string, data: any, to?: { identity: unknown }) => void>();
+  // Each listener its own copy, and its own mistake: a backend publishes (or
+  // sends) after its write has committed, so one listener that throws must not
+  // stop the others hearing it, nor the backend telling the documents after this one.
+  function deliver(channel: string, data: any, to?: { identity: unknown }): void {
+    for (const fn of listeners) {
+      try {
+        if (to) fn(channel, own(data), to);
+        else fn(channel, own(data));
+      } catch (err: any) {
+        log.error(`fan-out failed (write committed): a listener on ${channel} threw: ${err?.message ?? String(err)}`);
+      }
+    }
+  }
   const clientFor = (identity?: unknown): LocalClient => ({
     data: identity === undefined ? { local: true } : { local: true, identity },
     subscribe() {},
     unsubscribe() {},
-    // what a socket would be sent alone: heard as the backend's other changes are
+    // what a socket would be sent alone: heard as the backend's other changes are, with who it went to
     send(raw) {
       const data = JSON.parse(raw);
-      for (const fn of listeners) fn(data.doc, data);
+      deliver(data.doc, data, { identity });
     },
   });
   const client = clientFor();
@@ -123,16 +138,7 @@ export function createLocal(): Local {
       actions.set(action, [...(actions.get(action) ?? []), handler]);
     },
     publish(channel, data) {
-      // Each listener its own copy, and its own mistake: a backend publishes
-      // after its write has committed, so one listener that throws must not stop
-      // the others hearing it, nor the backend telling the documents after this one.
-      for (const fn of listeners) {
-        try {
-          fn(channel, own(data));
-        } catch (err: any) {
-          log.error(`fan-out failed (write committed): a listener on ${channel} threw: ${err?.message ?? String(err)}`);
-        }
-      }
+      deliver(channel, data);
     },
     sendTo() {},
     setServer() {},
@@ -149,7 +155,7 @@ export function createLocal(): Local {
     return { error: { code: 404, message: `No handler matched: ${action}` } };
   }
 
-  function onPublish(fn: (channel: string, data: any) => void) {
+  function onPublish(fn: (channel: string, data: any, to?: { identity: unknown }) => void) {
     listeners.add(fn);
     return () => void listeners.delete(fn);
   }
