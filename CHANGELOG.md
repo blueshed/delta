@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-28
+
 ### Changed
 
 - **An undo of a row's making is a conflict once someone has put rows under it**, on every
