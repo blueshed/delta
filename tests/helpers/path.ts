@@ -965,6 +965,23 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
+    test("a seat added through a json list named as a JSON string, object or array, or a number spelled another way, is given the JSON the name is, told to the writer and read back by it", async () => {
+      const b = backend();
+      const names: [string, unknown][] = [['"5"', "5"], ['"a"', "a"], ["{}", {}], ["[]", []], ["5.0", 5], [" 5", 5], ["1e0", 1], ['[1, "a", null]', [1, "a", null]]];
+      const lists = names.map(([name]) => `fo-seats-wished:${name}`);
+      const copies = await openAll(b.process, [...lists, "fo-seating:1"]);
+      let id = 1;
+      for (const [name, wishes] of names) {
+        const doc = `fo-seats-wished:${name}`;
+        const { ops } = await write(b.process, doc, [{ op: "add", path: "/seats/-", value: { weddings_id: 1, table_no: 4, kept: false } }]);
+        id += 1;
+        expect({ name, ops }).toEqual({ name, ops: [{ op: "add", path: `/seats/${id}`, value: seat(id, 4, false, wishes) }] });
+        await b.quiet();
+        expect({ name, told: told(b.process, doc).at(-1) }).toEqual({ name, told: ops });
+      }
+      await assertCopiesHold(b, copies);
+    });
+
     test("a seat added through a boolean list named off is read back by it, told to every list its value meets -- off, no, 0, false and up to off -- and not to yes; undone and redone without a conflict", async () => {
       const b = backend();
       const lists = ["fo-seats-kept:off", "fo-seats-kept:no", "fo-seats-kept:0", "fo-seats-kept:false", "fo-seats-upto:off"];
