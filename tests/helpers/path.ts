@@ -1096,12 +1096,17 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("a household that leaves the only document open over it, still matching, is not taken for removed: the inbox is told a replace and keeps it", async () => {
+    test("a seat that leaves the only document open over it (a list's condition), still matching, is not taken for removed: the custom document is told a replace and keeps it", async () => {
       const b = backend();
-      const copies = await openAll(b.process, ["fo-board:1", "fo-inbox:a@x"]);
-      await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/weddings_id", value: 2 }]);
-      await expectTold(b, "fo-board:1", [[{ op: "remove", path: "/households/1" }]]);
-      await expectTold(b, "fo-inbox:a@x", [[{ op: "replace", path: "/households/1", value: household(1, "a@x", 2) }]]);
+      await b.process.call("open", { doc: "fo-seating:1" });
+      await write(b.process, "fo-seating:1", [{ op: "replace", path: "/seats/1/kept", value: false }]);
+      await b.process.call("close", { doc: "fo-seating:1" });
+      await b.quiet();
+      const copies = await openAll(b.process, ["fo-seats-at:3", "fo-seats-at:open:all"]);
+      copies.delete("fo-seats-at:open:all"); // its first read is the backend's own query, not a document's
+      await write(b.process, "fo-seats-at:3", [{ op: "replace", path: "/seats/1/table_no", value: 5 }]);
+      await expectTold(b, "fo-seats-at:3", [[{ op: "remove", path: "/seats/1" }]]);
+      await expectTold(b, "fo-seats-at:open:all", [[{ op: "replace", path: "/seats/1", value: seat(1, 5, false, { veg: true }) }]]);
       await assertCopiesHold(b, copies);
     });
 
@@ -1258,13 +1263,31 @@ export function fanOutCases(backend: () => PathBackend): void {
   });
 
   describe("a row that moves from one document's scope to another's", () => {
-    test("a household moved to the other wedding leaves this board and arrives on that one", async () => {
+    test("a row moved through a document to a parent it does not hold is refused (404), as an add there is -- a household to the other wedding, a drink to its course -- and nobody is told (todo #6's review)", async () => {
       const b = backend();
-      const copies = await openAll(b.process, ["fo-board:1", "fo-board:2", "fo-household:1"]);
-      await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/weddings_id", value: 2 }]);
-      await expectTold(b, "fo-board:1", [[{ op: "remove", path: "/households/1" }]]);
-      await expectTold(b, "fo-board:2", [[{ op: "add", path: "/households/1", value: household(1, "a@x", 2) }]]);
-      await expectTold(b, "fo-household:1", [[{ op: "replace", path: "/households", value: household(1, "a@x", 2) }]]);
+      const copies = await openAll(b.process, ["fo-board:1", "fo-board:2", "fo-menu:1", "fo-drinks:1", "fo-household:1", "fo-course:2"]);
+      const code = async (doc: string, ops: unknown[]) => (await b.process.call("delta", { doc, ops })).error?.code;
+      expect(await code("fo-board:1", [{ op: "replace", path: "/households/1/weddings_id", value: 2 }])).toBe(404);
+      expect(await code("fo-board:1", [{ op: "replace", path: "/households/1", value: { weddings_id: 2 } }])).toBe(404);
+      expect(await code("fo-board:1", [{ op: "replace", path: "/drinks/1/courses_id", value: 2 }])).toBe(404);
+      expect(await code("fo-board:1", [{ op: "replace", path: "/drinks/1", value: { courses_id: 2, name: "Gin" } }])).toBe(404);
+      expect(await code("fo-menu:1", [{ op: "replace", path: "/drinks/1/courses_id", value: 2 }])).toBe(404);
+      expect(await code("fo-drinks:1", [{ op: "replace", path: "/drinks/1/courses_id", value: 2 }])).toBe(404);   // its courses left out: their chain, from the tables
+      expect(await code("fo-board:1", [{ op: "replace", path: "/drinks/1/courses_id", value: 99 }])).toBe(404);   // no such course
+      await expectSilent(b, "fo-board:1", "fo-board:2", "fo-menu:1", "fo-drinks:1", "fo-household:1", "fo-course:2");
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a course moved to the other wedding through a list, which holds every course, leaves this board and arrives on that one", async () => {
+      const b = backend();
+      await b.process.call("open", { doc: "fo-board:1" });
+      await write(b.process, "fo-board:1", [{ op: "add", path: "/courses/10", value: { name: "Fish" } }]);
+      await b.quiet();
+      const copies = await openAll(b.process, ["fo-all-courses:", "fo-board:1", "fo-board:2", "fo-course:10"]);
+      await write(b.process, "fo-all-courses:", [{ op: "replace", path: "/courses/10/weddings_id", value: 2 }]);
+      await expectTold(b, "fo-board:1", [[{ op: "remove", path: "/courses/10" }]]);
+      await expectTold(b, "fo-board:2", [[{ op: "add", path: "/courses/10", value: course(10, "Fish", 2) }]]);
+      await expectTold(b, "fo-course:10", [[{ op: "replace", path: "/courses", value: course(10, "Fish", 2) }]]);
       await assertCopiesHold(b, copies);
     });
 

@@ -108,6 +108,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refuse)` (with `refuse` false a value refused answers the scope that holds nothing, with
   `refused` its message) and replaces the two-argument one, which calls it, and
   `_delta_doc_holds` (`CREATE OR REPLACE`: re-apply the framework, or `delta init`).
+- **Every backend: a row moved through a document goes only under a parent the document holds**
+  (todo #6's review). Writing a parent key checked only its type, so a writer who owned
+  `fo-board:1` alone moved its household into wedding 2 (`replace /households/1/weddings_id 2`)
+  or its drink under wedding 2's course, and the board of wedding 2 was told the rows arrived --
+  on SQLite and the JSON file, and on Postgres wherever RLS did not stop it (PGlite, or no
+  policy). A parent key written, in a field or a row's merge, is now held to the rule an add's
+  is: under the document's root, or a parent in it (through the tables for one it does not
+  include), else a 404 that tells nobody. A list holds every row of its collections, so moves
+  one; a single document's own root is not under its parent and still moves. `delta_apply`
+  (`001d`) is replaced in place. The shared cases that moved a household through the board now
+  move a course through a list, or pin the refusal.
 - **SQLite: two processes on one file** (todo #1). Nothing set `busy_timeout` and writes ran
   in deferred transactions, so a write while another process held the write lock failed at
   once (`SQLITE_BUSY`, a 500), and one whose reads came before the other's commit could not

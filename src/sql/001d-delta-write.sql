@@ -537,6 +537,19 @@ BEGIN
       END IF;
       PERFORM _delta_assert_fields(v_coll_key, v_coll.columns_def, v_coll.parent_fk, v_op->'value');
 
+      -- A parent key written moves the row, and only under a parent this
+      -- document holds, as an add names one: through it, a row is never moved
+      -- into another document (you may write what you may read), RLS or none.
+      -- A single document's own root is not under its parent: its value names it.
+      IF v_coll.parent_fk IS NOT NULL
+         AND jsonb_typeof(v_op->'value'->v_coll.parent_fk) IN ('number', 'string')
+         AND (v_is_list OR v_coll_key IS DISTINCT FROM v_def.root_collection)
+         AND NOT _delta_row_in_scope(v_def, p_doc_name, v_coll.parent_collection,
+               (v_op->'value'->>v_coll.parent_fk)::BIGINT) THEN
+        RAISE EXCEPTION 'row not found: %/%', v_coll.parent_collection, v_op->'value'->>v_coll.parent_fk
+          USING ERRCODE = 'P0002';
+      END IF;
+
       IF v_coll.temporal THEN
         EXECUTE format(
           'SELECT to_jsonb(t) FROM %I t WHERE t.id = $1 AND valid_to IS NULL FOR UPDATE',

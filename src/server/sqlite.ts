@@ -643,6 +643,12 @@ export function registerDocs<I = unknown>(
     const broadcastOps: DeltaOp[] = [];
     const touched: Touched[] = [];
 
+    // Does a parent the document does not include hang from its root? Asked of the tables (todo #32).
+    const reaches = (coll: string, id: unknown): boolean => {
+      const parent = readRow(schema.tables[coll]!, rowId(id as string | number));
+      return !!parent && sameId(chainRoot(coll, parent, def.root), rootId);
+    };
+
     // Separate row-field updates for batching
     const rowFieldBatches = new Map<string, { table: ResolvedTable; id: string | number; fields: Map<string, unknown> }>();
     // Root-level field updates are batched too: applying them one-at-a-time
@@ -727,11 +733,7 @@ export function registerDocs<I = unknown>(
           // new row onto another doc's parent — a cross-doc write. Require the named
           // parent to be in THIS doc's scope. (The root's own parent is not in the
           // document: its value names it, as a list's root row's does.)
-          if (!isRoot) assertParentInScope(doc, def, table, row, list, (coll, id) => {
-            // a parent the document does not include: held when its chain reaches this root, as the tables say (todo #32)
-            const parent = readRow(schema.tables[coll]!, rowId(id as string | number));
-            return !!parent && sameId(chainRoot(coll, parent, def.root), rootId);
-          });
+          if (!isRoot) assertParentInScope(doc, def, table, row, list, reaches);
           const ts = now();
           const fullRow = insertCollectionRow(db, schema, table, id, rootId, def, row, ts, list);
           if (isRoot) doc[collKey] = fullRow;
@@ -793,6 +795,17 @@ export function registerDocs<I = unknown>(
       const collKey = batch.table.docKey;
       const present = doc[collKey]?.[batch.id];
       if (!present) refuse(404, `Row not found: ${collKey}/${batch.id}`);
+      // A parent key written moves the row, and only under a parent this
+      // document holds, as an add names one: through it, a row is never moved
+      // into another document (you may write what you may read). A single
+      // document's own root is not under its parent: its value names it.
+      const fk = batch.table.parent?.fkColumn;
+      if (fk && batch.fields.has(fk) && batch.fields.get(fk) != null && (list || collKey !== def.root)) {
+        const to = batch.fields.get(fk) as string | number;
+        if (!list && batch.table.parent!.collection === def.root) {
+          if (!sameId(rowId(to), rootId)) refuse(404, `Row not found: ${def.root}/${to}`);
+        } else assertParentInScope(doc, def, batch.table, { [fk]: to }, list, reaches);
+      }
       const before = holders(collKey, present, docName);
 
       const ts = now();

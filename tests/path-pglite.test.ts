@@ -214,12 +214,11 @@ describe("pglite: the log keeps the write as applied only where the writer was t
     expect(await entries()).toEqual([["fo-household:1", null], ["fo-board:1", []]]);
   });
 
-  test("told otherwise -- the row left the writer -- its entry carries the write as applied", async () => {
-    await openAll(backend.process, ["fo-board:1", "fo-inbox:a@x"]);
-    const { ops } = await write(backend.process, "fo-board:1", [{ op: "replace", path: "/households/1/weddings_id", value: 2 }]);
-    await expectTold(backend, "fo-inbox:a@x", [[{ op: "replace", path: "/households/1", value: household(1, "a@x", 2) }]]);
-    expect(await entries()).toEqual([["fo-board:1", ops]]);
-    expect(told(backend.process, "fo-board:1")).toEqual([[{ op: "remove", path: "/households/1" }]]);
+  test("told otherwise -- the row left the writer, a list, by its condition -- its entry carries the write as applied", async () => {
+    await openAll(backend.process, ["fo-courses-like:So"]);
+    const { ops } = await write(backend.process, "fo-courses-like:So", [{ op: "replace", path: "/courses/1/name", value: "Fish" }]);
+    await expectTold(backend, "fo-courses-like:So", [[{ op: "remove", path: "/courses/1" }]]);
+    expect(await entries()).toEqual([["fo-courses-like:So", ops]]);
   });
 });
 
@@ -281,5 +280,20 @@ describe("pglite: an implied document named by text", () => {
     expect((await backend.process.call("open", { doc: "fo-plan:attic" })).error?.code).toBe(400);
     expect((await backend.process.call("delta", { doc: "fo-plan:attic", ops: [{ op: "add", path: "/courses/-", value: { name: "Soup" } }] })).error?.code).toBe(400);
     expect((await backend.process.call("open", { doc: "fo-plan:12" })).result).toMatchObject({ weddings: { id: 12, name: "" }, courses: {}, drinks: {} });
+  });
+});
+
+/**
+ * A single document's own root is not under its parent: its value names it.
+ * Postgres also takes the root by its id (`replace /households/1` through
+ * `fo-household:1`), and a parent key written there moves the root, as
+ * `replace /households/weddings_id` does -- the move check of todo #6's review
+ * is for the rows a document holds under its root.
+ */
+describe("pglite: a single document's root, addressed by its id", () => {
+  test("moves to the parent its value names", async () => {
+    await openAll(backend.process, ["fo-household:1"]);
+    await write(backend.process, "fo-household:1", [{ op: "replace", path: "/households/1", value: { weddings_id: 2 } }]);
+    expect((await backend.process.call("open", { doc: "fo-household:1" })).result.households).toEqual(household(1, "a@x", 2));
   });
 });
