@@ -100,6 +100,27 @@ describe("postgres: what only a database shared by processes has", () => {
     expect(rows.map((r: any) => ({ v: Number(r.version), ops: r.ops }))).toEqual([{ v: before + 1, ops: told(backend.process, "fo-menu:1")[0] }]);
   });
 
+  test("two adds of one note id at once, through two documents, make one live note: the second waits for the first, and is refused as already there (todo #16)", async () => {
+    const first = await pool.connect();
+    const second = await pool.connect();
+    try {
+      await first.query("BEGIN");
+      await first.query(`SELECT delta_apply('fo-board:1', '[{"op":"add","path":"/notes/5","value":{"text":"one"}}]'::jsonb)`);
+      // another document, so another document lock: only the row itself can keep them apart
+      const racing = second.query(`SELECT delta_apply('fo-notes:1', '[{"op":"add","path":"/notes/5","value":{"text":"two"}}]'::jsonb)`)
+        .then(() => "taken", (err: any) => err.code);
+      await new Promise((r) => setTimeout(r, 200));
+      await first.query("COMMIT");
+      expect(await racing).toBe("23505");
+      const { rows } = await pool.query("SELECT text FROM fo_notes WHERE id = 5 AND valid_to IS NULL");
+      expect(rows).toEqual([{ text: "one" }]);
+    } finally {
+      await first.query("ROLLBACK").catch(() => {});
+      first.release();
+      second.release();
+    }
+  });
+
   test("a document opened in no process is not told, and costs no version", async () => {
     await openAll(backend.process, ["fo-board:1"]);
     await write(backend.process, "fo-board:1", [{ op: "replace", path: "/courses/1/name", value: "Broth" }]);

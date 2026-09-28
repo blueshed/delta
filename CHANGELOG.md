@@ -118,6 +118,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file the row keeps its id, and `id` is not a field (400). `delta_apply` (`001d`, replaced in
   place) now keeps the id its path names in a merge, as an add does, and refuses `id` as a field
   (400), and `validateOps` says so ahead.
+- **Postgres: an add never makes a second live version of a temporal row** (todo #16). A
+  temporal table's key is `(id, valid_from)`, and the 409 on an add of a live id was a check
+  the `-` branch skipped and two writers could both pass: `add /notes/2` then `add /notes/-`
+  (the sequence minting 2) left two live notes 2, and two adds of one id through two documents
+  at once did the same, while `open` showed one of them. `delta_apply` (`001d`, replaced in
+  place) now takes a lock on the id, held to commit, for every add to a temporal table, named or
+  minted, and checks the live rows under it: the second waits for the first and is refused
+  (409), as a plain table's key refuses it and as SQLite and the JSON file answer. A serial
+  still does not step past ids clients choose: an `add /<coll>/-` whose next serial a client
+  named is a 409 on every backend.
 - **`bun.lock` matches `package.json`** (todo #49): it lacked the optional `@electric-sql/pglite`
   peer, so every `bun install` in a fresh checkout changed it.
 - **`bun run test` runs every file that needs no Postgres server** (todo #48): it named 8 of the

@@ -395,9 +395,18 @@ BEGIN
         EXECUTE format('SELECT nextval(%L)', 'seq_' || v_coll.table_name) INTO v_id;
       ELSE
         v_id := _delta_row_id(v_coll_key, v_id_text);
-        -- An add names a new row. A temporal key is (id, valid_from), so an add
-        -- of a live id would insert a second live version of it: refuse it
-        -- (SQLSTATE 23505, 409 on the wire), as a plain table's key does.
+      END IF;
+      -- An add names a new row. A temporal key is (id, valid_from), so nothing
+      -- in the table stops a second live version of an id (todo #16): a mint
+      -- can meet an id a client named, and two writers through two documents
+      -- can name one id at once. A lock on the id, held to commit, and the live
+      -- check under it do: a second add waits for the first, then sees its row
+      -- (each statement reads what is committed) and is refused (SQLSTATE
+      -- 23505, 409 on the wire), as a plain table's key refuses it.
+      IF v_coll.temporal THEN
+        PERFORM pg_advisory_xact_lock(hashtext('delta-row:' || v_coll.table_name), hashtext(v_id::text));
+      END IF;
+      IF v_id_text <> '-' OR v_coll.temporal THEN
         EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I WHERE id = $1)', v_view) INTO v_exists USING v_id;
         IF v_exists THEN
           RAISE EXCEPTION 'row already exists: % -- replace it, or add to % for a new id',

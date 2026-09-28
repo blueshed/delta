@@ -763,6 +763,22 @@ export function fanOutCases(backend: () => PathBackend): void {
       await expectTold(b, "fo-notes:1", [[{ op: "remove", path: "/notes/1" }]]);
       await assertCopiesHold(b, copies);
     });
+
+    test("an add never makes a second live note: one at /- that meets an id a client named is refused as already there (409), as a plain row's is (todo #16)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-notes:1"]);
+      const code = async (ops: unknown[]) => (await b.process.call("delta", { doc: "fo-board:1", ops })).error?.code;
+      // the seed's sequences stop at the rows it holds: 2 is the next each would mint
+      await write(b.process, "fo-board:1", [{ op: "add", path: "/notes/2", value: { text: "named" } }]);
+      expect(await code([{ op: "add", path: "/notes/-", value: { text: "minted" } }])).toBe(409);
+      await write(b.process, "fo-board:1", [{ op: "add", path: "/courses/3", value: { name: "named" } }]);
+      expect(await code([{ op: "add", path: "/courses/-", value: { name: "minted" } }])).toBe(409);
+      expect(content((await b.process.call("open", { doc: "fo-notes:1" })).result).notes).toEqual({
+        "1": { id: 1, weddings_id: 1, text: "bring chairs" },
+        "2": { id: 2, weddings_id: 1, text: "named" },
+      });
+      await assertCopiesHold(b, copies);
+    });
   });
 
   describe("undo and redo are writes too", () => {
