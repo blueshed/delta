@@ -477,6 +477,14 @@ BEGIN
        WHERE NOT v_new_row ? col_key AND col_def ? 'default';
 
       IF v_coll.temporal THEN
+        -- One moment per write: a version this write made and took back (its
+        -- valid_from and valid_to both the write's NOW()) never was outside it,
+        -- so an add of the same id takes its place rather than colliding with it
+        -- on (id, valid_from). SQLite's insertCollectionRow keeps the same rule.
+        EXECUTE format(
+          'DELETE FROM %I WHERE id = $1 AND valid_from = $2 AND valid_to = $2',
+          v_coll.table_name
+        ) USING v_id, v_ts;
         v_new_row := v_new_row || jsonb_build_object('valid_from', v_ts, 'valid_to', NULL);
       END IF;
 

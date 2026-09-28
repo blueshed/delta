@@ -255,7 +255,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   version it makes and then writes again gives way to the next (`delta_apply` in `001d`,
   `CREATE OR REPLACE`; on SQLite the version is rewritten in place, and every version the write
   makes or closes is stamped with one time). The note's history keeps the version before the
-  write and the write's.
+  write and the write's. A row the write removes and adds back is the same: `[replace
+  /notes/1/text, remove /notes/1, add /notes/1]` through the board or `note:1`, and `[add
+  /notes/7, remove /notes/7, add /notes/7]`, were a 409 on Postgres alone, since the remove
+  closed the write's version at the instant it began and the add collided with it. The add now
+  takes that version's place (`delta_apply`'s add in `001d`, `CREATE OR REPLACE`), as SQLite's
+  does, and each write is undone, redone and undone again to the notes as they were.
 - **A single document's root written and then removed in one write can be undone, on every
   backend** (todo #61). `[replace /courses/name, remove /courses/1]` through `course:1` recorded
   an inverse of the course's add (as it was before the write), its drink's, and a `replace
