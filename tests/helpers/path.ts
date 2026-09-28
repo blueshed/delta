@@ -364,6 +364,17 @@ export function documentCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
+    test("a root row is made over the wire through a list document, and then opens as its own single document", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-all-courses:", "fo-board:1"]);
+      expect((await b.process.call("open", { doc: "fo-course:3" })).error?.code).toBe(404);
+      const { ops } = await write(b.process, "fo-all-courses:", [{ op: "add", path: "/courses/-", value: { weddings_id: 1, name: "Fish" } }]);
+      expect(ops).toEqual([{ op: "add", path: "/courses/3", value: course(3, "Fish") }]);
+      await expectTold(b, "fo-board:1", [ops]);
+      expect(content((await b.process.call("open", { doc: "fo-course:3" })).result)).toEqual({ courses: course(3, "Fish"), drinks: {} });
+      await assertCopiesHold(b, copies);
+    });
+
     test("a row told of an add is, key for key, the row a fresh open reads -- as JSON, the same text", async () => {
       const b = backend();
       await openAll(b.process, ["fo-board:1"]);
