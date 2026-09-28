@@ -1773,7 +1773,8 @@ function encodeValue(table: ResolvedTable, col: string, value: unknown): any {
  * 2^53 - 1; a real's finite decimal number -- by the grammar Postgres's
  * resolver holds its casts to (`_delta_resolve_scope`, which refuses 1_000,
  * 0x10 and Infinity); a json column's text as the JSON it is; a text or a time as the text;
- * an id or a parent key as an id is kept. Text the column cannot take is a 400.
+ * an id or a parent key a whole number, or text (an id SQLite keeps as text).
+ * Text the column cannot take is a 400.
  */
 function scopeValue(table: ResolvedTable, col: string, text: string): unknown {
   const t = text.trim();
@@ -1796,7 +1797,13 @@ function scopeValue(table: ResolvedTable, col: string, text: string): unknown {
     }
     case "json": try { return JSON.parse(text); } catch { return refuse(400, `${col} must be JSON, not "${text}"`); }
     case "text": case "timestamptz": return text;
-    default: return rowId(text);
+    default:
+      // An id or a parent key, as Postgres's resolver reads one: a whole number, signed (+5, 007 and " 5 " are 5), up
+      // to 2^53 - 1; a number not whole is no id (1.5, 1e0 -- the column's affinity would compare it as a number);
+      // other text is an id kept as text (a session's token), which on Postgres, where every id is a number, is no row's.
+      if (/^[+-]?\d+$/.test(t)) return Number.isSafeInteger(Number(t)) ? Number(t) : refuse(400, `${col} ${text} is past 2^53 - 1, which no number holds exactly`);
+      if (/^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i.test(t)) return refuse(400, `${col} must be an id -- a whole number, or text -- not "${text}"`);
+      return text;
   }
 }
 

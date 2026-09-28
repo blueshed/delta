@@ -35,7 +35,8 @@ $$ LANGUAGE sql STABLE;
 -- SQLite backend's scopeValue is its twin), and one it cannot take is refused
 -- (22P02, a 400): an integer's is digits, signed, up to 2^53 - 1 (not 1_000 or
 -- 0x10, which Postgres's own cast takes); a real's a finite decimal number (not
--- Infinity, NaN or 0x10), one a double holds. Other types are left to the
+-- Infinity, NaN or 0x10), one a double holds; an id's or a parent key's a whole
+-- number, or text no row here has (below). Other types are left to the
 -- column's cast, which reads them as SQLite does.
 --
 -- Returns JSONB:
@@ -68,6 +69,7 @@ DECLARE
   v_root_coll RECORD;
   v_type      TEXT;
   v_refused   TEXT;
+  v_cond      TEXT;
 BEGIN
   v_doc_id := substring(p_doc_name FROM length(p_def.prefix) + 1);
   v_scope  := p_def.scope;
@@ -187,9 +189,27 @@ BEGIN
     IF v_resolved IS NULL OR v_resolved = '' THEN CONTINUE; END IF;
 
     -- The value as its column takes it: one its column cannot take is refused
+    v_cond := NULL;
     IF v_op NOT IN ('at', 'like') THEN
       v_type := v_root_coll.columns_def->v_key->>'type';
-      IF v_type = 'integer' THEN
+      IF v_key = 'id' OR v_key = v_root_coll.parent_fk THEN
+        -- An id, as SQLite reads one: a whole number, signed, up to 2^53 - 1;
+        -- one not whole is none (1.5, 1e0); other text is an id SQLite keeps as
+        -- text (a session's token). No row here has one -- every id is a number --
+        -- so it compares as SQLite orders it, after every number: = > >= read no
+        -- row, != < <= every row. (Single mode's id is the root's: still a 400.)
+        IF v_resolved ~ '^\s*[+-]?[0-9]+\s*$' THEN
+          IF v_resolved !~ '^\s*[+-]?0*[0-9]{1,16}\s*$' THEN
+            v_refused := format('%s %s is past 2^53 - 1, which no number holds exactly', v_key, v_resolved);
+          ELSIF abs(v_resolved::numeric) > 9007199254740991 THEN
+            v_refused := format('%s %s is past 2^53 - 1, which no number holds exactly', v_key, v_resolved);
+          END IF;
+        ELSIF v_resolved ~* '^\s*[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)(e[+-]?[0-9]+)?\s*$' THEN
+          v_refused := format('%s must be an id -- a whole number, or text -- not "%s"', v_key, v_resolved);
+        ELSE
+          v_cond := CASE WHEN v_op IN ('!=', '<', '<=') THEN format('%I IS NOT NULL', v_key) ELSE 'FALSE' END;
+        END IF;
+      ELSIF v_type = 'integer' THEN
         -- at most 16 digits past any zeros (2^53 - 1 has 16), so the cast that follows cannot fail
         IF v_resolved !~ '^\s*[+-]?0*[0-9]{1,16}\s*$' THEN
           v_refused := format('%s must be an integer, not "%s"', v_key, v_resolved);
@@ -224,13 +244,13 @@ BEGIN
 
       WHEN '=' THEN
         IF v_where != '' THEN v_where := v_where || ' AND '; END IF;
-        v_where := v_where || format('%I = %L', v_key, v_resolved);
+        v_where := v_where || COALESCE(v_cond, format('%I = %L', v_key, v_resolved));
         v_values := v_values || jsonb_build_object(v_key, v_resolved);
 
       ELSE
         -- Range operators: >=, <=, >, <, !=
         IF v_where != '' THEN v_where := v_where || ' AND '; END IF;
-        v_where := v_where || format('%I %s %L', v_key, v_op, v_resolved);
+        v_where := v_where || COALESCE(v_cond, format('%I %s %L', v_key, v_op, v_resolved));
     END CASE;
   END LOOP;
 

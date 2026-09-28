@@ -76,6 +76,9 @@ export const pathDocs = [
   defineDoc("fo-seats-wished:", { root: "seats", include: [], scope: { wishes: ":wishes" } }),
   // list mode by a real's range: the slots that cost at most the name
   defineDoc("fo-slots-upto:", { root: "slots", include: [], scope: { price: "<=:max" } }),
+  // list mode by a parent key: a wedding's slots, and those of the weddings up to one
+  defineDoc("fo-slots-of:", { root: "slots", include: [], scope: { weddings_id: ":wedding" } }),
+  defineDoc("fo-slots-under:", { root: "slots", include: [], scope: { weddings_id: "<=:most" } }),
 ];
 
 /**
@@ -364,6 +367,35 @@ export function documentCases(backend: () => PathBackend): void {
         ...["1_000", "0x10", "9007199254740992"].map((name) => `fo-seats-at:${name}`),
       ];
       for (const doc of refused) {
+        const open = (await b.process.call("open", { doc })).error?.code;
+        const written = (await b.process.call("delta", { doc, ops: add })).error?.code;
+        expect({ doc, open, written }).toEqual({ doc, open: 400, written: 400 });
+      }
+    });
+
+    test("a parent key's name is an id: a whole number (+1, 01 and ' 1' are 1); text that is no number is no row's, where every id is a number, and sorts after every number, as SQLite orders an id kept as text; a number not whole, or past 2^53 - 1, is refused (400)", async () => {
+      const b = backend();
+      await openAll(b.process, ["fo-slots-upto:"]);
+      await write(b.process, "fo-slots-upto:", [
+        { op: "add", path: "/slots/-", value: { weddings_id: 1, price: 1 } },
+        { op: "add", path: "/slots/-", value: { weddings_id: 2, price: 2 } },
+      ]);
+      const names = ["fo-slots-of:1", "fo-slots-of:+1", "fo-slots-of:01", "fo-slots-of: 1", "fo-slots-of:abc", "fo-slots-under:1", "fo-slots-under:abc", "fo-slots-under:-1"];
+      const copies = await openAll(b.process, names);
+      expect(names.map((doc) => ({ doc, slots: Object.keys(copies.get(doc).slots).map(Number) }))).toEqual([
+        { doc: "fo-slots-of:1", slots: [1] },
+        { doc: "fo-slots-of:+1", slots: [1] },
+        { doc: "fo-slots-of:01", slots: [1] },
+        { doc: "fo-slots-of: 1", slots: [1] },
+        { doc: "fo-slots-of:abc", slots: [] },
+        { doc: "fo-slots-under:1", slots: [1] },
+        { doc: "fo-slots-under:abc", slots: [1, 2] },
+        { doc: "fo-slots-under:-1", slots: [] },
+      ]);
+      await write(b.process, "fo-slots-upto:", [{ op: "replace", path: "/slots/2/weddings_id", value: 1 }]);
+      await assertCopiesHold(b, copies);
+      const add = [{ op: "add", path: "/slots/-", value: { weddings_id: 1, price: 1 } }];
+      for (const doc of ["fo-slots-of:1.5", "fo-slots-of:1e0", "fo-slots-of:9007199254740992", "fo-slots-under:1.5"]) {
         const open = (await b.process.call("open", { doc })).error?.code;
         const written = (await b.process.call("delta", { doc, ops: add })).error?.code;
         expect({ doc, open, written }).toEqual({ doc, open: 400, written: 400 });

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A parent key's name is an id on every backend** (todo #60). A list document scoped by a
+  parent key (`scope: { weddings_id: ":wedding" }`) opened as `slots-of:abc` read no rows on
+  SQLite and the JSON file and was a 400 on Postgres, whose bigint cast refused the text. SQLite
+  keeps a text id (a session's token), so the text names an id there, and on Postgres, where
+  every id is a number, one no row has: `_delta_resolve_scope` (`001b`, replaced in place) now
+  reads it so, and compares it as SQLite orders an id kept as text, after every number (`=`,
+  `>`, `>=` no rows; `!=`, `<`, `<=` every row). An add through such a name is still a 400 on
+  Postgres, as a path's text id is. SQLite read `+1` and ` 1` as text, which its column's
+  affinity then compared as 1 while the fan-out did not: `slots-of:+1` read wedding 1's slots
+  but was told of none written elsewhere. Both backends now read an id's or a parent key's name
+  as a whole number, signed, up to 2^53 - 1 (past it a 400, as in a path), a number that is not
+  whole (`1.5`, `1e0`) as none (400), and other text as a text id.
 - **A number's name is read by one grammar on every backend** (todo #60). A list document
   scoped by a `real` (`scope: { price: "<=:max" }`) opened as `slots-upto:Infinity` or
   `slots-upto:NaN` was a 400 on SQLite and the JSON file and every row on Postgres, which cast
