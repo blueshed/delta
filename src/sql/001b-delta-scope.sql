@@ -383,9 +383,14 @@ BEGIN
      WHERE collection_key = v_cur_coll;
     IF NOT FOUND THEN RETURN FALSE; END IF;
 
-    -- Unparented collection: _delta_load_collection loads it whole, so it is
-    -- shared by every doc of this type and every row of it is in scope.
-    IF v_coll.parent_collection IS NULL THEN RETURN TRUE; END IF;
+    -- Unparented collection: included, _delta_load_collection loads it whole,
+    -- so it is shared by every doc of this type and every row of it is in
+    -- scope. Met on the way up from a row, or not included (the parent of a
+    -- row being added), it ends a chain that never reaches the root: nothing
+    -- under it is in the document (todo #32).
+    IF v_coll.parent_collection IS NULL THEN
+      RETURN v_depth = 1 AND v_cur_coll = ANY(COALESCE(p_def.include, ARRAY[]::text[]));
+    END IF;
 
     v_view := _delta_source_view(v_coll.table_name, v_coll.temporal);
     EXECUTE format('SELECT t.%I FROM %I t WHERE t.id = $1', v_coll.parent_fk, v_view)

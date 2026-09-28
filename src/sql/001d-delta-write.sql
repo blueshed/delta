@@ -422,9 +422,11 @@ BEGIN
 
       -- A direct child's FK was just injected above, so it is in scope by
       -- construction. A grandchild's arrives verbatim from the client — without
-      -- this check it grafts the new row onto ANOTHER doc's parent.
+      -- this check it grafts the new row onto ANOTHER doc's parent. A single
+      -- document's root row is not under its parent: its value names it.
       IF v_coll.parent_collection IS NOT NULL
          AND v_coll.parent_collection IS DISTINCT FROM v_def.root_collection
+         AND (v_is_list OR v_coll_key IS DISTINCT FROM v_def.root_collection)
          AND NOT _delta_row_in_scope(
                v_def, p_doc_name, v_coll.parent_collection,
                (v_new_row->>v_coll.parent_fk)::BIGINT) THEN

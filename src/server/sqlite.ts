@@ -346,10 +346,8 @@ export function registerDocs(
     if (!table.parent) {
       // No parent: no key ties a row of it to one document. Included, it is
       // loaded in full, as the Postgres backend loads it: every document of
-      // the prefix holds every row, and the fan-out (rowInScope) and loadDocAt
-      // say the same. Met only on the way up from an included grandchild, it
-      // is not in the document, and so neither is anything under it.
-      if (!def.include.includes(table.docKey)) return [];
+      // the prefix holds every row, and the fan-out (holds) and loadDocAt say
+      // the same.
       const viewName = table.temporal ? `current_${table.name}` : table.name;
       return db.query(`SELECT * FROM ${viewName}`).all();
     }
@@ -362,9 +360,13 @@ export function registerDocs(
       return db.query(`SELECT * FROM ${viewName} WHERE ${table.parent.fkColumn} = ?`).all(rootRow.id);
     }
 
-    // Grandchild — load parent rows first, then filter by their IDs
+    // Grandchild — load parent rows first, then filter by their IDs. A parent
+    // the document need not include: its rows are walked all the same. One
+    // with no parent of its own ends the chain short of the root, so nothing
+    // under it is in the document, as the fan-out's chainRoot (and Postgres's
+    // _delta_load_collection) judge it (todo #32).
     const parentTable = schema.tables[parentCollection];
-    if (!parentTable) return [];
+    if (!parentTable?.parent) return [];
     const parentRows = loadCollection(parentTable, def, rootRow);
     const parentIds = parentRows.map((r: any) => r.id);
     if (parentIds.length === 0) return [];
@@ -572,7 +574,11 @@ export function registerDocs(
           // new row onto another doc's parent — a cross-doc write. Require the named
           // parent to be in THIS doc's scope. (The root's own parent is not in the
           // document: its value names it, as a list's root row's does.)
-          if (!isRoot) assertParentInScope(doc, def, table, row, list);
+          if (!isRoot) assertParentInScope(doc, def, table, row, list, (coll, id) => {
+            // a parent the document does not include: held when its chain reaches this root, as the tables say (todo #32)
+            const parent = readRow(schema.tables[coll]!, rowId(id as string | number));
+            return !!parent && sameId(chainRoot(coll, parent, def.root), rootId);
+          });
           const ts = now();
           const fullRow = insertCollectionRow(db, schema, table, id, rootId, def, row, ts, list);
           if (isRoot) doc[collKey] = fullRow;
@@ -1150,15 +1156,16 @@ function temporalQuery(db: any, table: ResolvedTable, where: string, params: any
 }
 
 function loadCollectionAt(db: any, schema: Schema, table: ResolvedTable, def: DocDef, rootRow: any, at: string): any[] {
-  // No parent: in full when included, as open loads it; else not in the document.
-  if (!table.parent) return def.include.includes(table.docKey) ? temporalQuery(db, table, "TRUE", [], at) : [];
+  // No parent: included, in full, as open loads it.
+  if (!table.parent) return temporalQuery(db, table, "TRUE", [], at);
 
   if (table.parent.collection === def.root) {
     return temporalQuery(db, table, `${table.parent.fkColumn} = ?`, [rootRow.id], at);
   }
 
+  // a parent with no parent of its own ends the chain short of the root: nothing under it is in the document, as open reads it
   const parentTable = schema.tables[table.parent.collection];
-  if (!parentTable) return [];
+  if (!parentTable?.parent) return [];
   const parentRows = loadCollectionAt(db, schema, parentTable, def, rootRow, at);
   const parentIds = parentRows.map((r: any) => r.id);
   if (parentIds.length === 0) return [];
@@ -1678,7 +1685,8 @@ function assertRowInScope(doc: any, collKey: string, id: string | number): void 
  * Throw unless a new row's parent is in scope. Only meaningful for
  * grandchildren-and-deeper: a direct child of the doc root has its FK assigned
  * server-side, and an unparented collection is loaded in full (so every row of
- * it is in scope by construction).
+ * it is in scope by construction). A parent in a collection the document does
+ * not hold is asked of `reaches`: does its chain reach the document's root?
  */
 function assertParentInScope(
   doc: any,
@@ -1686,6 +1694,7 @@ function assertParentInScope(
   table: ResolvedTable,
   row: Record<string, unknown> | undefined,
   list = false,
+  reaches: (collection: string, id: unknown) => boolean = () => false,
 ): void {
   const parent = table.parent;
   if (!parent) return;
@@ -1693,9 +1702,8 @@ function assertParentInScope(
   if (!list && parent.collection === def.root) return;
   if (list && parent.collection !== def.root) return;
   const fk = row?.[parent.fkColumn];
-  if (fk == null || doc[parent.collection]?.[String(fk)] == null) {
-    refuse(404, `Row not found: ${parent.collection}/${fk ?? ""}`);
-  }
+  const held = fk != null && (doc[parent.collection] ? doc[parent.collection][String(fk)] != null : !list && reaches(parent.collection, fk));
+  if (!held) refuse(404, `Row not found: ${parent.collection}/${fk ?? ""}`);
 }
 
 function removeRow(

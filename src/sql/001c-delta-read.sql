@@ -92,7 +92,16 @@ BEGIN
     RETURN v_result;
   END IF;
 
-  -- Grandchild+: load parent rows recursively, then filter by their IDs
+  -- Grandchild+: load parent rows recursively, then filter by their IDs. The
+  -- parent is walked whether or not the document includes it; one with no
+  -- parent of its own ends the chain short of the root, so nothing under it is
+  -- in the document -- as _delta_chain_root and _delta_row_in_scope judge it,
+  -- and the SQLite backend reads it (todo #32).
+  IF NOT EXISTS (SELECT 1 FROM _delta_collections
+                  WHERE collection_key = v_coll.parent_collection
+                    AND parent_collection IS NOT NULL) THEN
+    RETURN '{}'::jsonb;
+  END IF;
   v_parent_map := _delta_load_collection(
     v_coll.parent_collection, p_root_collection, p_root_id, p_at
   );

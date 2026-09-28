@@ -64,6 +64,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refuse)` (with `refuse` false a value refused answers the scope that holds nothing, with
   `refused` its message) and replaces the two-argument one, which calls it, and
   `_delta_doc_holds` (`CREATE OR REPLACE`: re-apply the framework, or `delta init`).
+- **SQLite and Postgres: an included collection whose parent the document does not include
+  reads the same on both** (todo #32). A document holds an included collection by its chain of
+  parents to the root, walked whether or not it includes the parents on the way. A wedding's
+  document with `include: ["drinks"]` (drinks under courses) read its courses' drinks on both,
+  but on SQLite could not add one (404: the course was not in the document); it now may, to its
+  own courses, as on Postgres. A chain that meets a collection with no parent never reaches the
+  root: a course's document with `include: ["households"]` (households under the wedding) read
+  none on SQLite and every wedding's households on Postgres, which let it write them and was
+  never told of them (the fan-out already judged them not its). Postgres now reads none and
+  refuses their writes (404), as SQLite does -- and so does SQLite where the parent with no
+  parent is itself included, which it used to read in full and never told. The framework SQL
+  changes in place: `_delta_load_collection` (`001c`) and `_delta_row_in_scope` (`001b`) are
+  replaced, and `delta_apply` (`001d`) no longer asks a single document's root row, added (an
+  undo of its removal), for a parent in scope: its value names it, as on SQLite.
 - **Postgres: a custom document hears each write once, as it was applied, as on SQLite and the
   JSON file** (todo #44). The listener ran a membership doc's `matches` on the ops told to each
   document the write reached, one document after another. A write told to two documents was

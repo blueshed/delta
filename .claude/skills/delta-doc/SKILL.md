@@ -137,7 +137,7 @@ One app can live in four places, and move from one to the next unchanged -- the 
 
 What is the same on the JSON file, SQLite and Postgres (in process or a server) -- `tests/helpers/path.ts` asks it of each:
 
-- A document is one root row and its children (single mode), or every root row its scope admits (list mode: `items:`), with included collections in full. The scope rule is one (*`scope` syntax*).
+- A document is one root row and its children (single mode: each included collection by its chain of parents to the root, whether or not it includes the parents on the way; a chain that meets a collection with no parent holds nothing), or every root row its scope admits (list mode: `items:`), with included collections in full. The scope rule is one (*`scope` syntax*).
 - `add /<coll>/-` makes a row the store names: the next serial. Ids and parent keys come back as **numbers**; a temporal row comes without `valid_from` / `valid_to`.
 - A write is told to every open document holding a row it changed, arriving, staying or leaving (*Fan-out*). Writing a row's parent key moves it.
 - One error-code table; `open_at` reads a document as it stood; with `ledger: true`, undo, redo, history, and a version on every change told.

@@ -82,6 +82,10 @@ export const pathDocs = [
   // list mode by a time: the slots that start by a date, and those that start on its midnight
   defineDoc("fo-slots-by:", { root: "slots", include: [], scope: { starts: "<=:end" } }),
   defineDoc("fo-slots-on:", { root: "slots", include: [], scope: { starts: ":on" } }),
+  // the wedding's drinks, without the courses they hang from: held through them all the same
+  defineDoc("fo-drinks:", { root: "weddings", include: ["drinks"] }),
+  // one course and the households, which hang from the wedding: a chain that meets no course, so none of them
+  defineDoc("fo-course-guests:", { root: "courses", include: ["households"] }),
 ];
 
 /**
@@ -743,6 +747,40 @@ export function fanOutCases(backend: () => PathBackend): void {
       for (const doc of ["fo-board:2", "fo-tagged:1", "fo-tagged:2"]) {
         await expectTold(b, doc, [[{ op: "add", path: "/tags/10", value: { id: 10, label: "blue" } }]]);
       }
+      await assertCopiesHold(b, copies);
+    });
+  });
+
+  describe("an included collection whose parent the document does not include (todo #32)", () => {
+    test("the wedding's drinks, their courses left out, are held through the courses they hang from: opened, written, told and read as they stood", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-drinks:1", "fo-drinks:2", "fo-board:1"]);
+      expect(content(copies.get("fo-drinks:1"))).toEqual({ weddings: { id: 1, name: "ours" }, drinks: { "1": drink(1, 1, "Sherry") } });
+      // a drink of another wedding's course is not this document's to add
+      expect((await b.process.call("delta", { doc: "fo-drinks:1", ops: [{ op: "add", path: "/drinks/11", value: { courses_id: 2, name: "Gin" } }] })).error?.code).toBe(404);
+      const added = await write(b.process, "fo-drinks:1", [{ op: "add", path: "/drinks/10", value: { courses_id: 1, name: "Port" } }]);
+      expect(added.ops).toEqual([{ op: "add", path: "/drinks/10", value: drink(10, 1, "Port") }]);
+      const renamed = await write(b.process, "fo-board:1", [{ op: "replace", path: "/drinks/1/name", value: "Madeira" }]);
+      await expectTold(b, "fo-drinks:1", [added.ops, renamed.ops]);
+      await expectTold(b, "fo-board:1", [added.ops, renamed.ops]);
+      await expectSilent(b, "fo-drinks:2");
+      const then = await b.process.call("open_at", { doc: "fo-drinks:1", at: new Date().toISOString() });
+      expect(content(then.result).drinks).toEqual({ "1": drink(1, 1, "Madeira"), "10": drink(10, 1, "Port") });
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a course's households, which hang from the wedding it does not include, are none of its: not read, not written, not told", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-course-guests:1", "fo-board:1"]);
+      expect(content(copies.get("fo-course-guests:1"))).toEqual({ courses: course(1, "Soup"), households: {} });
+      const code = async (ops: unknown[]) => (await b.process.call("delta", { doc: "fo-course-guests:1", ops })).error?.code;
+      expect(await code([{ op: "replace", path: "/households/1/email", value: "x@x" }])).toBe(404);
+      expect(await code([{ op: "remove", path: "/households/1" }])).toBe(404);
+      expect(await code([{ op: "add", path: "/households/10", value: { weddings_id: 1, email: "n@x" } }])).toBe(404);
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/email", value: "new@x" }]);
+      await expectSilent(b, "fo-course-guests:1");
+      const then = await b.process.call("open_at", { doc: "fo-course-guests:1", at: new Date().toISOString() });
+      expect(content(then.result).households).toEqual({});
       await assertCopiesHold(b, copies);
     });
   });
