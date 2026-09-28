@@ -7,6 +7,153 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **Upgrading from 0.9.1.** Nothing to migrate. The framework SQL (`src/sql/001*.sql`) is
+  `CREATE OR REPLACE` and applies over a 0.9.1 database as it stands, and the ledger entries
+  0.9.1 recorded still undo and redo. One keeps its 0.9.1 result: a single document's root
+  removal recorded on Postgres by 0.9.1 undoes as it did then, its rows back and the root not
+  (todo #43, under Fixed). Take railroad 0.15 with it if you use delta's client (under Changed).
+- **Writes 0.9.1 took that 0.10.0 refuses**, each with the rest of its batch:
+  - a remove or replace of what is not there, on the JSON file and a memory document (404; #4,
+    below) -- SQLite and Postgres refused them already;
+  - a parent key moved to a parent the document does not hold (404; under Security);
+  - a list's root row replaced so that it leaves the list's scope (404; under Security);
+  - on SQLite and the JSON file, a single document's op after its root is removed in the same
+    write, other than adding that root back (404, as on Postgres; todo #59, under Security).
+
+  How to move across: write through a document that holds both ends (a list that includes
+  them), create with `add`, and take a 404 on a remove as someone else's work done.
+- **Registrations 0.9.1 took that 0.10.0 refuses:** `owns` or `shared` without `auth` (below);
+  on SQLite and the JSON file, a second `registerDocs` of a prefix another registration on the
+  server already holds (under Fixed), and, now that they take `auth`, `registerDocs` with `auth`
+  but neither `owns` nor `shared` (under Added).
+- **A socket that sends too much while its sign-in runs is closed** (1008): past 1000 messages
+  or 1 MiB held behind a running `authenticate`, `login`, `register` or `logout` (todo #5, under
+  Fixed). Connect with `onConnect`, which sends nothing else until the sign-in answers, or raise
+  `createWs({ maxHeld, maxHeldBytes })`.
+- **`applyOps` follows RFC 6902 for arrays and missing members** (todo #4). It was RFC 6901's
+  pointers with two rules of delta's own: `add /items/1` overwrote element 1, and a `replace` or
+  `remove` of a member that was not there set it or did nothing, so the JSON file
+  (`registerDoc`) acked `remove /messages/nope` and broadcast it where SQLite and Postgres answer
+  404. Now `add` at an index inserts before it (up to the end; `-` still appends), and `replace`
+  or `remove` of a member or index not there fails with 404, the batch undone.
+
+  **Who it can break.** A write that removes or replaces what is not there was accepted on 0.9.1
+  and is now refused (404), with the rest of its batch; and an `add` at an array index now
+  shifts the elements after it instead of overwriting one. On the JSON file (`registerDoc`) and
+  memory documents -- SQLite and Postgres refused them already:
+  - **a remove of what is already gone**: a memory document's second `remove /people/p1`, acked
+    and broadcast before, is refused.
+  - **a replace of a key that is not there**: `replace /messages/m1/seen` on a row without `seen`
+    used to create the field on the JSON file; it is refused.
+  - **a writer that diffs from a copy it holds**, removing what its copy has and the truth no
+    longer should, as eta's chat presence (`keepPresence`) and the wedding's `keepEveryone` do:
+    if two runs overlap, both compute the same removes from the same copy, and the second's
+    batch is refused whole, its adds with it. Before, its removes were quiet no-ops.
+
+  The fix for such a writer: create with `add` (it sets a member, there or not), and take a 404
+  on a remove as another run's work done -- read again and diff anew, since the batch's other
+  ops did not land either -- or let one run go at a time.
+
+  The browser client, which applies each broadcast with the same `applyOps`, now takes one that
+  does not apply to its copy (a remove of a row it does not hold) as drift: the copy is left as
+  it was and the document re-opened, as for a version gap, where one that failed (a field of a
+  row it does not hold) threw out of the socket's message handler and left the copy behind. The
+  SQL backends are unchanged; the every-backend copy check (`tests/helpers/path.ts`) now
+  replays what each document is told under the strict rules, and its mistake case asks a remove
+  and a replace of a row not there on every backend.
+- **Every backend: `owns` or `shared` given without an auth module is refused** (todo #6's
+  review). Nothing asks them without one, so `registerDocs(..., { owns })` with no `auth`, or
+  `docTypeFromDef(def, pool, { owns })` on a listener with none, looked guarded while every
+  socket opened every document. `registerDocs` and `docTypeFromDef` now throw when given `owns`
+  or `shared` without `auth`, and `registerDocs` or `createDocListener` without `auth` when a
+  custom doc says either (`authless`, beside `ownerless` in `./auth`). A `docTypeFromDef` that
+  says `shared` for a listener with `auth` passes that `auth` too.
+- **`doc.data` is typed `ReadonlySignal<T | null>`** (todo #10). It was a writable railroad
+  `Signal`, so an optimistic `doc.data.set()` (or `update`, `patch`, `mutate`, `touch`)
+  type-checked, though it double-applies when the write's echo lands. It is the same signal at
+  run time; only the type changes. A `set()` on it, or passing it where a `Signal` is wanted, is
+  now a type error: send the ops and let the echo change it (`get`, `peek` and `map` are as
+  before, and `list()` and `when()` take it). `tests/client.test.ts` holds the writes as `@ts-expect-error`, which
+  `bun run check` checks.
+
+### Security
+
+- **A list's root row written through the list stays in its scope** (todo #6's review). Ada,
+  who owns `slots-of:1` (`scope: { weddings_id: ":wedding" }`), added a slot through it -- given
+  `weddings_id` 1 -- and then `replace /slots/1/weddings_id 2`, or the merge
+  `replace /slots/1 { weddings_id: 2 }`, was taken: the slot moved into Bob's `slots-of:2`, and
+  Bob was told it arrived. So on SQLite, the JSON file and PGlite, and on a Postgres server with
+  no RLS `WITH CHECK` to stop it; #6's review had closed it for a single document's rows, not a
+  list's. A replace (a field, a row or a merge) of a list document's root row now asks that the
+  row as written still meets the document's scope, as an add through it is given its bindings:
+  when not, a 404, the write undone and nobody told. `delta_apply` (`001d`, replaced in place)
+  asks it of the row as written, `_delta_row_in_scope`; SQLite and the JSON file, of the run's
+  row, `holds`. A row still leaves a list's condition -- told as a remove -- by a write through
+  another document that holds it (the board renaming a course out of `courses-like:So`).
+- **Every backend: a row moved through a document goes only under a parent the document holds**
+  (todo #6's review). Writing a parent key checked only its type, so a writer who owned
+  `fo-board:1` alone moved its household into wedding 2 (`replace /households/1/weddings_id 2`)
+  or its drink under wedding 2's course, and the board of wedding 2 was told the rows arrived --
+  on SQLite and the JSON file, and on Postgres wherever RLS did not stop it (PGlite, or no
+  policy). A parent key written, in a field or a row's merge, is now held to the rule an add's
+  is: under the document's root, or a parent in it (through the tables for one it does not
+  include), else a 404 that tells nobody. A list holds every row of its collections, so moves
+  one; a single document's own root is not under its parent and still moves. `delta_apply`
+  (`001d`) is replaced in place. The shared cases that moved a household through the board now
+  move a course through a list, or pin the refusal.
+- **Postgres: a single document writes only what it holds, as on SQLite and the JSON file**
+  (todos #59, #52). Once its root was gone -- a course removed through the board, or never there
+  -- `course:1` still took `add /drinks/-` (a drink under no course, told to no one) and
+  `add /courses/1`; SQLite and the JSON file answer 404, as the document opens. And with its root
+  there it took `add /courses/7`, a row it cannot read; they answer 400. `delta_apply` (`001d`,
+  replaced in place) now asks, before each op of a single document, that its root is there
+  (404 when not, so a batch that takes the root out writes nothing more through it -- but that
+  root back, where the document opened as the write began, and then on through it: a root
+  removed and added back in one write is walked as one row, #61), and refuses
+  an add to the root's collection but of its own root (400; its own, there already, is a 409).
+  SQLite and the JSON file ask the same before each op: they took an add under a root the same
+  write had taken out (`[remove /courses/1, add /drinks/-]` through `course:1`, a drink under no
+  course), where Postgres answers 404 and writes nothing.
+  An undo or redo is not asked: undoing the removal of a document's own root puts it back (#43),
+  and a walk of a document whose root is gone starts from it absent, as on SQLite and the JSON
+  file. `delta_apply` gains a three-argument form, `delta_apply(doc, ops, walk)`, which
+  `delta_apply_logged` calls with `walk` for an entry that walks another; the two-argument form,
+  and a `walk` of null, is no walk. `validateOps` refuses the add of another root row too, when it knows the document
+  is single (`{ doc }`, or `list: false`); given no mode, a root row's add is taken, as a list's.
+- **Postgres: a socket hears a document while it may open it** (todo #17). With `auth`, `owns`
+  was asked when a socket opened a document and at each request, and `jwtAuth`'s gate checked a
+  token's `exp` at each request; nothing asked either between requests, so a socket taken off
+  a document (its `owns` now false), or whose token ran out, heard every write through what it
+  had open until it next asked for something. The listener now asks, before it tells a change,
+  what an open asks: each socket's gate, and the document's `owns` (a custom document's too,
+  membership or recompute), and lets go of each socket refused -- unsubscribed from that
+  document, and told so at once: `{ doc, error: { code, message } }`. The client acts on it:
+  on a 404 it opens the document again, and when that is refused lets its copy go (`doc.data`
+  null, `onOps` told `replace ""` null; the next connect opens it again); on a 401 it connects
+  again, so `onConnect` signs it in and every document re-opens; a write of its own waiting for
+  its echo resolves then. A gate that throws refuses that socket alone, and the change still
+  reaches the rest. The gate is asked per socket (cheap by
+  contract); `owns` once per identity per change, so a change costs the identities a document
+  has open, not its sockets, and a `shared` document asks the gate alone; without `auth` nothing
+  is asked. Asked at the change, not on a timer (late by its interval) or by a hook the app
+  must call (and call in every process): exact, in every process, with nothing new to call.
+  `jwtAuth`'s gate now answers `Session expired: authenticate again` at every request after
+  `exp` until the socket signs in again (the listener may have asked it first), and `logout`
+  forgets the expiry.
+- **SQLite and the JSON file: a socket hears a document while it may open it, as on Postgres**
+  (todo #6's review; #17). With `auth`, `registerDocs` asked the gate and `owns` at an open and
+  at each request, and never between: Bob, granted `board:1` and taken off it, still heard Ada's
+  next household; so did a socket whose identity was cleared with no request since. Before a
+  change is told, each subscriber is now asked what an open asks -- the gate, then the
+  document's `owns` (once per identity per change; a custom document's own, a membership view's
+  identity too) -- and one refused is let go of the document and told so,
+  `{ doc, error: { code, message } }` (401 from the gate, 404 from `owns`), which the client acts
+  on as it does for Postgres. With no promise to wait on a write is still told before it
+  answers; an `owns` that answers with a promise holds that write's telling, and those after
+  it, until it has, so each document hears its changes in order.
+
 ### Added
 
 - **SQLite and the JSON file: auth, a gate and `owns`, as on Postgres** (todo #6). Every socket
@@ -51,6 +198,124 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it went to (`{ identity }`; a broadcast has none), each listener its own copy and its own
   mistake, as a broadcast is: a membership or recompute document's view, on Postgres too, where
   in process it was lost (the listener's `client.send` threw on a caller with none).
+
+### Changed
+
+- **railroad 0.15 is accepted** as the peer (`^0.11.0 || … || ^0.15.0`), the devDependency is
+  `^0.15.0`, and the vendored `railroad` and `bun-route` skills are synced to its v0.15.0. delta's
+  client needs no change: it reads its signals in effects and computeds, never in a render body,
+  so 0.15's development warning for a `.get()` there says nothing of it, and its typed JSX props
+  give delta's own code no errors.
+- **SQLite: a write's ops land in the order sent, as on Postgres** (todo #20, #54). SQLite and the
+  JSON file held back a write's field replaces (and whole-row replaces) and wrote them after its
+  adds and removes, so `[replace /drinks/3/name, remove /drinks/3]` removed the drink first and
+  then answered 404 for the replace, where Postgres writes the name and then removes the drink;
+  and a batch was answered, recorded and told in another order than it was sent (`[replace
+  /weddings/name, add /courses/-]` told the add first; a row replaced before and after another
+  op was written once, after it). Each op now lands where it is sent, read back as it is kept and told as it lands, and
+  the answer, the ledger's entry and its inverse follow it: the drink's write is told as the
+  replace and then the remove to every document that held it, and undone puts the drink back
+  as it was. A row the write made is `null` in its inverse (`replace /<coll>/<id>` with
+  `value: null`), as on Postgres, where SQLite left the value out. A row that leaves the
+  document earlier in the write -- `replace /courses/1/weddings_id` to another wedding, a name
+  out of a list's condition, an add outside it -- is not the document's to write for the rest of
+  it (404, and nothing is written), as on Postgres: each op asks the document's scope of the
+  tables as they stand at that point, as `_delta_row_in_scope` does, not of the copy it opened
+  with, which let SQLite and the JSON file rename, remove or add under a row the document no
+  longer held.
+- **SQLite: a single document's root named by its id is its root, as on Postgres** (todo #53).
+  Through `course:1`, `replace /courses/1 { name }` -- the root by its collection and id, as a
+  list document says it -- was a 400 (`Unknown field: 1`) on SQLite and the JSON file, and
+  `replace /courses/1/name` a 404, where Postgres writes the root. Both spellings now write it
+  (`/courses/01` too: the id its digits name), told as `replace /courses` to the document and
+  as the row to every other that holds it, and undone as a root replace; the board's
+  `replace /weddings/1/name` likewise. Another id is a 404 (`replace /courses/2` was a 400), a
+  field that is no column still a 400. `validateOps` reads the segment as Postgres does: digits,
+  or the root's own text id, where no column has that name, name the row.
+- **A single document's root is walked as one row, however the write named it, on every
+  backend.** The root has two paths: `/courses` (a replace of it) and `/courses/1` (its add, its
+  remove), and the walk planned each path on its own. `[remove /courses/1, add /courses/1,
+  replace /courses/name]` through `course:1` -- or with a rename first -- found the root it
+  added changed since, and every undo was a conflict. `[remove /households/1, add
+  /households/1 {...}]` through `household:1` walked back as `replace /households/1`, which
+  Postgres took as the root and SQLite and the JSON file (before #53, on this release) refused, so
+  the write undid on Postgres alone. `planWalk` (`src/server/ledger.ts`) and `_delta_walk_plan`
+  (`001g`, `CREATE OR REPLACE`, with `_delta_walk_key`, new) key the root by `/<root>/<id>`,
+  its id read from the row, and plan a replace of it at `/<root>`: the course comes back as it
+  was with its drink, the household's email is set back at `/households`, and each is redone and
+  undone again. A conflict is still reported at the path the entry first gave the row.
+- **A run of replaces of one row is answered, recorded and told once, as it leaves the row, on
+  every backend.** Replaces of one row one straight after another (`/courses/1/name`, then
+  `/courses/1 { ... }`; a single document's `/courses/name`, `/courses` and `/courses/1/name`)
+  are one answer op, one ledger op and one telling of the row as the run leaves it, and one
+  version of a temporal row; a replace of another row, an add or a remove between them starts a
+  new run, so the ops still land in the order sent. Postgres answered and told each replace:
+  2000 of one course was 2000 ops answered and ledgered and 6000 told, 17 s on PGlite, now one
+  op and 1.9 s. SQLite, which writes such a run once, is back to main's speed with the ops in
+  order (51 ms, now 7 ms). `delta_apply` (`001d`, `CREATE OR REPLACE`) folds a replace into
+  the one before it when that replaced the same row; `_delta_inverse` (`001g`) and
+  `inverseOf` find a root's later removal in one pass.
+- **A row a write touches twice is told gone once, on every backend.** `[replace
+  /drinks/1/name, remove /courses/1]` through `board:1` told the board and the menu `[remove
+  /drinks/1, remove /courses/1, remove /drinks/1]` on SQLite, the JSON file and Postgres: who
+  holds a row is asked after the whole write, so the drink written first was told gone (its
+  course was), and then told gone again with the cascade. Under the RFC 6902 `applyOps` (#4) the
+  second remove throws, the client resyncs, and its copy is not what a fresh open reads. Each
+  document is now told each row from where the telling left it earlier in the same write: a row
+  told gone is not removed again, nor replaced (`tell` in `src/server/sqlite.ts`, and
+  `_delta_tell` in `001d`, `CREATE OR REPLACE`: re-apply the framework, or
+  `bunx @blueshed/delta init`).
+- **A temporal row written twice in one write is one new version, on every backend.** On
+  Postgres `[replace /notes/1/text, replace /notes/1/text]` was a 409 (`duplicate key ...
+  fo_notes_pkey`): every version a write makes is stamped with its transaction's `NOW()`, so the
+  second replace closed the first's version at the same instant and collided with it on
+  `(id, valid_from)`. SQLite took it, as a version per op, each a millisecond after the last, so
+  a big write ran `valid_from` past the clock (2000 replaces of one note: 2001 versions, the last
+  2 s ahead, and `open_at` now read a stale text). A write is now one moment on every backend: a
+  version it makes and then writes again gives way to the next (`delta_apply` in `001d`,
+  `CREATE OR REPLACE`; on SQLite the version is rewritten in place, and every version the write
+  makes or closes is stamped with one time). The note's history keeps the version before the
+  write and the write's. A row the write removes and adds back is the same: `[replace
+  /notes/1/text, remove /notes/1, add /notes/1]` through the board or `note:1`, and `[add
+  /notes/7, remove /notes/7, add /notes/7]`, were a 409 on Postgres alone, since the remove
+  closed the write's version at the instant it began and the add collided with it. The add now
+  takes that version's place (`delta_apply`'s add in `001d`, `CREATE OR REPLACE`), as SQLite's
+  does, and each write is undone, redone and undone again to the notes as they were.
+- **A single document's root written and then removed in one write can be undone, on every
+  backend** (todo #61). `[replace /courses/name, remove /courses/1]` through `course:1` recorded
+  an inverse of the course's add (as it was before the write), its drink's, and a `replace
+  /courses` putting the old name back -- one row at two paths, so the walk found `/courses` gone
+  and answered a conflict: the write could never be undone (SQLite, the JSON file and Postgres
+  alike). A root's replaces before its removal in the same write now have no inverse of their
+  own, since the add puts the root back as it was: the undo adds the course, then its drink,
+  the redo takes them, and the undo after it puts them back. `001g` replaces `_delta_inverse`
+  (`CREATE OR REPLACE`: re-apply the framework, or `bunx @blueshed/delta init`). A write recorded
+  before this keeps the inverse it was recorded with, its `replace /courses` included, and undoes
+  all the same, on every backend: the walk takes a single document's root as one row however the
+  entry names it (above), so the course comes back as it was with its drink, and is redone and
+  undone again.
+- **In process, every answer and every broadcast is the caller's own copy, as over a socket.**
+  `createLocal()` handed a caller what the backend answered and broadcast as it was: SQLite's
+  open gave its cached document (or a shallow copy with `_v`), the JSON file's `registerDoc` its
+  live document, the Postgres listener its kept custom documents, and every listener the same
+  broadcast objects. Each backend changes those in place when it writes, so a write changed what
+  a caller held before it was told -- a copy kept from the stream, told a remove, found the row
+  already gone, and with `applyOps` now strict (todo #4) the told remove failed, the throw
+  stopping the backend's fan-out (eta's documents hold their copies so) -- and a caller that
+  changed what it was handed changed what everyone was then served. `createLocal` now copies
+  each answer as the backend gives it, and each broadcast for each listener. Documents are plain
+  data, so the copy is member by member (a Date, a blob or a cycle is cloned whole, and only
+  what nothing clones, a function, is handed over): an in-process open of a cached 50,000-row
+  document takes some 12-18 ms where it took none, about the JSON a socket spends on it (15-20
+  ms), and a third of `structuredClone`'s; writes are unchanged. A memory document's `peek` gives a copy too; `registerDoc`'s `getDoc` is still
+  the live document it is the handle of. A case in `tests/helpers/path.ts` asks every backend:
+  answers kept across a write are unchanged, and a change to them, or to a told row, is never
+  served; `tests/local.test.ts` asks the JSON file, a memory document and eta's way of keeping
+  a copy.
+- **A memory document refuses with the code every backend gives: 404 for what is not there.**
+  `registerMemory` answered every op that did not land with 400, where the JSON file, SQLite and
+  Postgres answer a remove or replace of something not there 404. It now answers with the code
+  `applyOps` gives (404 not there, 400 a malformed path), and 400 for anything else.
 
 ### Fixed
 
@@ -154,24 +419,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an entry whose document is not its own by, and the registration that holds it walks it (with
   `auth`, asking its own `owns`). Each registration still tells only its own open documents of
   a write.
-- **Every backend: `owns` or `shared` given without an auth module is refused** (todo #6's
-  review). Nothing asks them without one, so `registerDocs(..., { owns })` with no `auth`, or
-  `docTypeFromDef(def, pool, { owns })` on a listener with none, looked guarded while every
-  socket opened every document. `registerDocs` and `docTypeFromDef` now throw when given `owns`
-  or `shared` without `auth`, and `registerDocs` or `createDocListener` without `auth` when a
-  custom doc says either (`authless`, beside `ownerless` in `./auth`). A `docTypeFromDef` that
-  says `shared` for a listener with `auth` passes that `auth` too.
-- **Every backend: a row moved through a document goes only under a parent the document holds**
-  (todo #6's review). Writing a parent key checked only its type, so a writer who owned
-  `fo-board:1` alone moved its household into wedding 2 (`replace /households/1/weddings_id 2`)
-  or its drink under wedding 2's course, and the board of wedding 2 was told the rows arrived --
-  on SQLite and the JSON file, and on Postgres wherever RLS did not stop it (PGlite, or no
-  policy). A parent key written, in a field or a row's merge, is now held to the rule an add's
-  is: under the document's root, or a parent in it (through the tables for one it does not
-  include), else a 404 that tells nobody. A list holds every row of its collections, so moves
-  one; a single document's own root is not under its parent and still moves. `delta_apply`
-  (`001d`) is replaced in place. The shared cases that moved a household through the board now
-  move a course through a list, or pin the refusal.
 - **SQLite: two processes on one file** (todo #1). Nothing set `busy_timeout` and writes ran
   in deferred transactions, so a write while another process held the write lock failed at
   once (`SQLITE_BUSY`, a 500), and one whose reads came before the other's commit could not
@@ -266,26 +513,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   40P01), and the listener now answers it 409, not 500: nothing was written, send it again. A serial
   still does not step past ids clients choose: an `add /<coll>/-` whose next serial a client
   named is a 409 on every backend.
-- **Postgres: a socket hears a document while it may open it** (todo #17). With `auth`, `owns`
-  was asked when a socket opened a document and at each request, and `jwtAuth`'s gate checked a
-  token's `exp` at each request; nothing asked either between requests, so a socket taken off
-  a document (its `owns` now false), or whose token ran out, heard every write through what it
-  had open until it next asked for something. The listener now asks, before it tells a change,
-  what an open asks: each socket's gate, and the document's `owns` (a custom document's too,
-  membership or recompute), and lets go of each socket refused -- unsubscribed from that
-  document, and told so at once: `{ doc, error: { code, message } }`. The client acts on it:
-  on a 404 it opens the document again, and when that is refused lets its copy go (`doc.data`
-  null, `onOps` told `replace ""` null; the next connect opens it again); on a 401 it connects
-  again, so `onConnect` signs it in and every document re-opens; a write of its own waiting for
-  its echo resolves then. A gate that throws refuses that socket alone, and the change still
-  reaches the rest. The gate is asked per socket (cheap by
-  contract); `owns` once per identity per change, so a change costs the identities a document
-  has open, not its sockets, and a `shared` document asks the gate alone; without `auth` nothing
-  is asked. Asked at the change, not on a timer (late by its interval) or by a hook the app
-  must call (and call in every process): exact, in every process, with nothing new to call.
-  `jwtAuth`'s gate now answers `Session expired: authenticate again` at every request after
-  `exp` until the socket signs in again (the listener may have asked it first), and `logout`
-  forgets the expiry.
 - **Postgres: a listener hears each entry once, however late its notification** (todo #55). A
   process without the writer's document open tracks it only while it drains it, for its custom
   documents: a drain started by one notification read every entry committed by then, let the
@@ -313,25 +540,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   document loads), `001d` (`delta_apply` and the row reads it makes), `001e` (`delta_open_at`),
   all replaced in place, and in `exportTables`. The path's households carry a `t` column, so
   every shared case asks it of every backend, and one writes and reads it in each form.
-- **Postgres: a single document writes only what it holds, as on SQLite and the JSON file**
-  (todos #59, #52). Once its root was gone -- a course removed through the board, or never there
-  -- `course:1` still took `add /drinks/-` (a drink under no course, told to no one) and
-  `add /courses/1`; SQLite and the JSON file answer 404, as the document opens. And with its root
-  there it took `add /courses/7`, a row it cannot read; they answer 400. `delta_apply` (`001d`,
-  replaced in place) now asks, before each op of a single document, that its root is there
-  (404 when not, so a batch that takes the root out writes nothing more through it -- but that
-  root back, where the document opened as the write began, and then on through it: a root
-  removed and added back in one write is walked as one row, #61), and refuses
-  an add to the root's collection but of its own root (400; its own, there already, is a 409).
-  SQLite and the JSON file ask the same before each op: they took an add under a root the same
-  write had taken out (`[remove /courses/1, add /drinks/-]` through `course:1`, a drink under no
-  course), where Postgres answers 404 and writes nothing.
-  An undo or redo is not asked: undoing the removal of a document's own root puts it back (#43),
-  and a walk of a document whose root is gone starts from it absent, as on SQLite and the JSON
-  file. `delta_apply` gains a three-argument form, `delta_apply(doc, ops, walk)`, which
-  `delta_apply_logged` calls with `walk` for an entry that walks another; the two-argument form,
-  and a `walk` of null, is no walk. `validateOps` refuses the add of another root row too, when it knows the document
-  is single (`{ doc }`, or `list: false`); given no mode, a root row's add is taken, as a list's.
 - **Postgres: a remove of a row that is not there is a 404, whatever holds its collection**
   (review A6), as on SQLite and the JSON file. A document holds a collection with no parent
   (`board:1`'s tags) or a list's include (`catalog:`'s drinks) whole, so the scope gate let
@@ -380,37 +588,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   undoes as it did on 0.9.1: the root does not come back. A document with nothing under it (a
   household's) undoes as no ops and no conflict, nobody told; one with rows under it puts back only
   those, under a root that is gone.
-- **`applyOps` follows RFC 6902 for arrays and missing members** (todo #4). It was RFC 6901's
-  pointers with two rules of delta's own: `add /items/1` overwrote element 1, and a `replace` or
-  `remove` of a member that was not there set it or did nothing, so the JSON file
-  (`registerDoc`) acked `remove /messages/nope` and broadcast it where SQLite and Postgres answer
-  404. Now `add` at an index inserts before it (up to the end; `-` still appends), and `replace`
-  or `remove` of a member or index not there fails with 404, the batch undone.
-
-  **Who it can break.** A write that removes or replaces what is not there was accepted on 0.9.1
-  and is now refused (404), with the rest of its batch; and an `add` at an array index now
-  shifts the elements after it instead of overwriting one. On the JSON file (`registerDoc`) and
-  memory documents -- SQLite and Postgres refused them already:
-  - **a remove of what is already gone**: a memory document's second `remove /people/p1`, acked
-    and broadcast before, is refused.
-  - **a replace of a key that is not there**: `replace /messages/m1/seen` on a row without `seen`
-    used to create the field on the JSON file; it is refused.
-  - **a writer that diffs from a copy it holds**, removing what its copy has and the truth no
-    longer should, as eta's chat presence (`keepPresence`) and the wedding's `keepEveryone` do:
-    if two runs overlap, both compute the same removes from the same copy, and the second's
-    batch is refused whole, its adds with it. Before, its removes were quiet no-ops.
-
-  The fix for such a writer: create with `add` (it sets a member, there or not), and take a 404
-  on a remove as another run's work done -- read again and diff anew, since the batch's other
-  ops did not land either -- or let one run go at a time.
-
-  The browser client, which applies each broadcast with the same `applyOps`, now takes one that
-  does not apply to its copy (a remove of a row it does not hold) as drift: the copy is left as
-  it was and the document re-opened, as for a version gap, where one that failed (a field of a
-  row it does not hold) threw out of the socket's message handler and left the copy behind. The
-  SQL backends are unchanged; the every-backend copy check (`tests/helpers/path.ts`) now
-  replays what each document is told under the strict rules, and its mistake case asks a remove
-  and a replace of a row not there on every backend.
 - **A memory document's `add /<coll>/-` makes a row the document names, as the JSON file and
   SQLite do** (todo #14). `registerMemory` applied the ops as sent, so `add /people/-` on a map
   of rows kept the row under the key `"-"`, and a second such add overwrote the first. It now
@@ -422,24 +599,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or a release publish fail, with no change here. Both now pin 1.4.2, the Bun the repo is
   developed on; CLAUDE.md says how to move it, and `tests/package-exports.test.ts` fails if the
   two differ or are not an exact version.
-- **In process, every answer and every broadcast is the caller's own copy, as over a socket.**
-  `createLocal()` handed a caller what the backend answered and broadcast as it was: SQLite's
-  open gave its cached document (or a shallow copy with `_v`), the JSON file's `registerDoc` its
-  live document, the Postgres listener its kept custom documents, and every listener the same
-  broadcast objects. Each backend changes those in place when it writes, so a write changed what
-  a caller held before it was told -- a copy kept from the stream, told a remove, found the row
-  already gone, and with `applyOps` now strict (todo #4) the told remove failed, the throw
-  stopping the backend's fan-out (eta's documents hold their copies so) -- and a caller that
-  changed what it was handed changed what everyone was then served. `createLocal` now copies
-  each answer as the backend gives it, and each broadcast for each listener. Documents are plain
-  data, so the copy is member by member (a Date, a blob or a cycle is cloned whole, and only
-  what nothing clones, a function, is handed over): an in-process open of a cached 50,000-row
-  document takes some 12-18 ms where it took none, about the JSON a socket spends on it (15-20
-  ms), and a third of `structuredClone`'s; writes are unchanged. A memory document's `peek` gives a copy too; `registerDoc`'s `getDoc` is still
-  the live document it is the handle of. A case in `tests/helpers/path.ts` asks every backend:
-  answers kept across a write are unchanged, and a change to them, or to a told row, is never
-  served; `tests/local.test.ts` asks the JSON file, a memory document and eta's way of keeping
-  a copy.
 - **In process, a listener that throws no longer stops the telling.** `createLocal`'s publish
   called its listeners one after another with nothing around them, and a backend publishes
   after its write has committed, one document at a time: a listener that threw (a copy that
@@ -447,21 +606,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the write, and SQLite's custom-document fan-out, and the write was logged as `fan-out failed`.
   Each listener is now called on its own: one that throws is logged
   (`fan-out failed (write committed): a listener on <doc> threw`), and the rest are told.
-- **A memory document refuses with the code every backend gives: 404 for what is not there.**
-  `registerMemory` answered every op that did not land with 400, where the JSON file, SQLite and
-  Postgres answer a remove or replace of something not there 404. It now answers with the code
-  `applyOps` gives (404 not there, 400 a malformed path), and 400 for anything else.
-- **SQLite and the JSON file: a socket hears a document while it may open it, as on Postgres**
-  (todo #6's review; #17). With `auth`, `registerDocs` asked the gate and `owns` at an open and
-  at each request, and never between: Bob, granted `board:1` and taken off it, still heard Ada's
-  next household; so did a socket whose identity was cleared with no request since. Before a
-  change is told, each subscriber is now asked what an open asks -- the gate, then the
-  document's `owns` (once per identity per change; a custom document's own, a membership view's
-  identity too) -- and one refused is let go of the document and told so,
-  `{ doc, error: { code, message } }` (401 from the gate, 404 from `owns`), which the client acts
-  on as it does for Postgres. With no promise to wait on a write is still told before it
-  answers; an `owns` that answers with a promise holds that write's telling, and those after
-  it, until it has, so each document hears its changes in order.
 - **SQLite and the JSON file: a name is answered by the longest prefix across registrations**
   (todo #6's review). With two `registerDocs` calls on one server -- a public set and a private
   one -- the first registered answered every name its prefix matched: a public implied
@@ -471,125 +615,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whichever registered first; and a prefix another registration on the server holds already is
   refused as the second registers (`"fo-board:" is registered already on this server`), since
   either order would then decide it.
-
-### Changed
-
-- **railroad 0.15 is accepted** as the peer (`^0.11.0 || … || ^0.15.0`), the devDependency is
-  `^0.15.0`, and the vendored `railroad` and `bun-route` skills are synced to its v0.15.0. delta's
-  client needs no change: it reads its signals in effects and computeds, never in a render body,
-  so 0.15's development warning for a `.get()` there says nothing of it, and its typed JSX props
-  give delta's own code no errors.
-
-- **`doc.data` is typed `ReadonlySignal<T | null>`** (todo #10). It was a writable railroad
-  `Signal`, so an optimistic `doc.data.set()` (or `update`, `patch`, `mutate`, `touch`)
-  type-checked, though it double-applies when the write's echo lands. It is the same signal at
-  run time; only the type changes. A `set()` on it, or passing it where a `Signal` is wanted, is
-  now a type error: send the ops and let the echo change it (`get`, `peek` and `map` are as
-  before, and `list()` and `when()` take it). `tests/client.test.ts` holds the writes as `@ts-expect-error`, which
-  `bun run check` checks.
-- **SQLite: a write's ops land in the order sent, as on Postgres** (todo #20, #54). SQLite and the
-  JSON file held back a write's field replaces (and whole-row replaces) and wrote them after its
-  adds and removes, so `[replace /drinks/3/name, remove /drinks/3]` removed the drink first and
-  then answered 404 for the replace, where Postgres writes the name and then removes the drink;
-  and a batch was answered, recorded and told in another order than it was sent (`[replace
-  /weddings/name, add /courses/-]` told the add first; a row replaced before and after another
-  op was written once, after it). Each op now lands where it is sent, read back as it is kept and told as it lands, and
-  the answer, the ledger's entry and its inverse follow it: the drink's write is told as the
-  replace and then the remove to every document that held it, and undone puts the drink back
-  as it was. A row the write made is `null` in its inverse (`replace /<coll>/<id>` with
-  `value: null`), as on Postgres, where SQLite left the value out. A row that leaves the
-  document earlier in the write -- `replace /courses/1/weddings_id` to another wedding, a name
-  out of a list's condition, an add outside it -- is not the document's to write for the rest of
-  it (404, and nothing is written), as on Postgres: each op asks the document's scope of the
-  tables as they stand at that point, as `_delta_row_in_scope` does, not of the copy it opened
-  with, which let SQLite and the JSON file rename, remove or add under a row the document no
-  longer held.
-- **SQLite: a single document's root named by its id is its root, as on Postgres** (todo #53).
-  Through `course:1`, `replace /courses/1 { name }` -- the root by its collection and id, as a
-  list document says it -- was a 400 (`Unknown field: 1`) on SQLite and the JSON file, and
-  `replace /courses/1/name` a 404, where Postgres writes the root. Both spellings now write it
-  (`/courses/01` too: the id its digits name), told as `replace /courses` to the document and
-  as the row to every other that holds it, and undone as a root replace; the board's
-  `replace /weddings/1/name` likewise. Another id is a 404 (`replace /courses/2` was a 400), a
-  field that is no column still a 400. `validateOps` reads the segment as Postgres does: digits,
-  or the root's own text id, where no column has that name, name the row.
-- **A single document's root is walked as one row, however the write named it, on every
-  backend.** The root has two paths: `/courses` (a replace of it) and `/courses/1` (its add, its
-  remove), and the walk planned each path on its own. `[remove /courses/1, add /courses/1,
-  replace /courses/name]` through `course:1` -- or with a rename first -- found the root it
-  added changed since, and every undo was a conflict. `[remove /households/1, add
-  /households/1 {...}]` through `household:1` walked back as `replace /households/1`, which
-  Postgres took as the root and SQLite and the JSON file (before #53, on this release) refused, so
-  the write undid on Postgres alone. `planWalk` (`src/server/ledger.ts`) and `_delta_walk_plan`
-  (`001g`, `CREATE OR REPLACE`, with `_delta_walk_key`, new) key the root by `/<root>/<id>`,
-  its id read from the row, and plan a replace of it at `/<root>`: the course comes back as it
-  was with its drink, the household's email is set back at `/households`, and each is redone and
-  undone again. A conflict is still reported at the path the entry first gave the row.
-- **A run of replaces of one row is answered, recorded and told once, as it leaves the row, on
-  every backend.** Replaces of one row one straight after another (`/courses/1/name`, then
-  `/courses/1 { ... }`; a single document's `/courses/name`, `/courses` and `/courses/1/name`)
-  are one answer op, one ledger op and one telling of the row as the run leaves it, and one
-  version of a temporal row; a replace of another row, an add or a remove between them starts a
-  new run, so the ops still land in the order sent. Postgres answered and told each replace:
-  2000 of one course was 2000 ops answered and ledgered and 6000 told, 17 s on PGlite, now one
-  op and 1.9 s. SQLite, which writes such a run once, is back to main's speed with the ops in
-  order (51 ms, now 7 ms). `delta_apply` (`001d`, `CREATE OR REPLACE`) folds a replace into
-  the one before it when that replaced the same row; `_delta_inverse` (`001g`) and
-  `inverseOf` find a root's later removal in one pass.
-- **A row a write touches twice is told gone once, on every backend.** `[replace
-  /drinks/1/name, remove /courses/1]` through `board:1` told the board and the menu `[remove
-  /drinks/1, remove /courses/1, remove /drinks/1]` on SQLite, the JSON file and Postgres: who
-  holds a row is asked after the whole write, so the drink written first was told gone (its
-  course was), and then told gone again with the cascade. Under the RFC 6902 `applyOps` (#4) the
-  second remove throws, the client resyncs, and its copy is not what a fresh open reads. Each
-  document is now told each row from where the telling left it earlier in the same write: a row
-  told gone is not removed again, nor replaced (`tell` in `src/server/sqlite.ts`, and
-  `_delta_tell` in `001d`, `CREATE OR REPLACE`: re-apply the framework, or
-  `bunx @blueshed/delta init`).
-- **A temporal row written twice in one write is one new version, on every backend.** On
-  Postgres `[replace /notes/1/text, replace /notes/1/text]` was a 409 (`duplicate key ...
-  fo_notes_pkey`): every version a write makes is stamped with its transaction's `NOW()`, so the
-  second replace closed the first's version at the same instant and collided with it on
-  `(id, valid_from)`. SQLite took it, as a version per op, each a millisecond after the last, so
-  a big write ran `valid_from` past the clock (2000 replaces of one note: 2001 versions, the last
-  2 s ahead, and `open_at` now read a stale text). A write is now one moment on every backend: a
-  version it makes and then writes again gives way to the next (`delta_apply` in `001d`,
-  `CREATE OR REPLACE`; on SQLite the version is rewritten in place, and every version the write
-  makes or closes is stamped with one time). The note's history keeps the version before the
-  write and the write's. A row the write removes and adds back is the same: `[replace
-  /notes/1/text, remove /notes/1, add /notes/1]` through the board or `note:1`, and `[add
-  /notes/7, remove /notes/7, add /notes/7]`, were a 409 on Postgres alone, since the remove
-  closed the write's version at the instant it began and the add collided with it. The add now
-  takes that version's place (`delta_apply`'s add in `001d`, `CREATE OR REPLACE`), as SQLite's
-  does, and each write is undone, redone and undone again to the notes as they were.
-- **A single document's root written and then removed in one write can be undone, on every
-  backend** (todo #61). `[replace /courses/name, remove /courses/1]` through `course:1` recorded
-  an inverse of the course's add (as it was before the write), its drink's, and a `replace
-  /courses` putting the old name back -- one row at two paths, so the walk found `/courses` gone
-  and answered a conflict: the write could never be undone (SQLite, the JSON file and Postgres
-  alike). A root's replaces before its removal in the same write now have no inverse of their
-  own, since the add puts the root back as it was: the undo adds the course, then its drink,
-  the redo takes them, and the undo after it puts them back. `001g` replaces `_delta_inverse`
-  (`CREATE OR REPLACE`: re-apply the framework, or `bunx @blueshed/delta init`). A write recorded
-  before this keeps the inverse it was recorded with, its `replace /courses` included, and undoes
-  all the same, on every backend: the walk takes a single document's root as one row however the
-  entry names it (above), so the course comes back as it was with its drink, and is redone and
-  undone again.
-
-### Security
-
-- **A list's root row written through the list stays in its scope** (todo #6's review). Ada,
-  who owns `slots-of:1` (`scope: { weddings_id: ":wedding" }`), added a slot through it -- given
-  `weddings_id` 1 -- and then `replace /slots/1/weddings_id 2`, or the merge
-  `replace /slots/1 { weddings_id: 2 }`, was taken: the slot moved into Bob's `slots-of:2`, and
-  Bob was told it arrived. So on SQLite, the JSON file and PGlite, and on a Postgres server with
-  no RLS `WITH CHECK` to stop it; #6's review had closed it for a single document's rows, not a
-  list's. A replace (a field, a row or a merge) of a list document's root row now asks that the
-  row as written still meets the document's scope, as an add through it is given its bindings:
-  when not, a 404, the write undone and nobody told. `delta_apply` (`001d`, replaced in place)
-  asks it of the row as written, `_delta_row_in_scope`; SQLite and the JSON file, of the run's
-  row, `holds`. A row still leaves a list's condition -- told as a remove -- by a write through
-  another document that holds it (the board renaming a course out of `courses-like:So`).
 
 ## [0.9.1] - 2026-09-27
 
