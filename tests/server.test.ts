@@ -1,8 +1,9 @@
 import { describe, test, expect, afterAll } from "bun:test";
 import {
   createWs, registerDoc, registerMethod, normalizeForBroadcast,
-  trackSubscribe, trackUnsubscribe, dropClientSubscriptions,
+  trackSubscribe, trackUnsubscribe, dropClientSubscriptions, onClientDrop,
 } from "../src/server/server";
+import { wireAuth, isAuthError, type DeltaAuth } from "../src/server/auth";
 import { setLogLevel } from "../src/server/logger";
 import { unlinkSync } from "fs";
 
@@ -897,6 +898,291 @@ describe("persist queue", () => {
     // inheriting the rejected promise.
     await handle.persist().catch(() => {});
     expect(handle.getDoc().n).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// todo #5: createWs handles a socket's messages side by side, so an `open`
+// sent straight after `authenticate`, without waiting for its answer, was
+// handled while the authentication still ran, and 401'd. A call that changes
+// who the socket is (every action wireAuth wires) now holds that socket's
+// later messages until it settles; everything else runs side by side, as it did.
+// ---------------------------------------------------------------------------
+
+describe("a call that changes who the socket is holds its later messages (#5)", () => {
+  const servers: ReturnType<typeof Bun.serve>[] = [];
+  afterAll(() => { for (const s of servers) s.stop(true); });
+
+  /**
+   * A server whose `authenticate` takes as long as `signIn` does (a token
+   * checked against a database) and whose `logout` takes a moment; `open`
+   * answers a signed-in socket only, and, signed in, keeps it as a subscriber
+   * until the socket is dropped, as a backend does. `late` opens after `lateMayGo`;
+   * `checks-late` asks the gate after a moment (the listener's custom-doc open
+   * awaits first), and `subscribes-late` subscribes a moment after the gate said
+   * yes (a document read in between). With `logoutAtOnce`, `logout` is
+   * jwtAuth's shape: it clears the identity and drops the socket's
+   * subscriptions without waiting on anything.
+   */
+  function serve(opts: { maxHeld?: number; maxHeldBytes?: number; signIn?: Promise<void>; lateMayGo?: Promise<void>; logoutAtOnce?: boolean } = {}) {
+    const ws = createWs({ maxHeld: opts.maxHeld, maxHeldBytes: opts.maxHeldBytes });
+    const ran: string[] = [];
+    const subscribers = new Set<any>();
+    const signIns: any[] = [];
+    const auth: DeltaAuth<{ id: number }> = {
+      actions: {
+        async authenticate(_params, client) {
+          signIns.push(client);
+          await (opts.signIn ?? Bun.sleep(30));
+          client.data.identity = { id: 1 };
+          return { result: { id: 1 } };
+        },
+        async logout(_params, client) {
+          if (!opts.logoutAtOnce) await Bun.sleep(30);
+          delete client.data.identity;
+          dropClientSubscriptions(client);
+          return { result: { ack: true } };
+        },
+      },
+      gate: (client) => client.data.identity ?? { error: "Authentication required" },
+    };
+    wireAuth(ws, auth);
+    ws.on("open", async (msg, client, respond) => {
+      if (msg.doc === "late") await opts.lateMayGo;
+      if (msg.doc === "checks-late") await Bun.sleep(20);
+      ran.push(`open ${msg.doc}`);
+      const who = auth.gate(client);
+      if (isAuthError(who)) return respond({ error: { code: 401, message: who.error } });
+      if (msg.doc === "subscribes-late") await Bun.sleep(20);
+      subscribers.add(client);
+      onClientDrop(client, (c) => subscribers.delete(c));
+      respond({ result: { doc: msg.doc, who } });
+    });
+    registerMethod(ws, "slow", async () => { await Bun.sleep(100); return "slow"; });
+    registerMethod(ws, "ping", () => "pong");
+    const server = Bun.serve({ port: 0, routes: { [ws.path]: ws.upgrade }, websocket: ws.websocket });
+    ws.setServer(server);
+    servers.push(server);
+    return { port: server.port!, ran, subscribers, signIns };
+  }
+
+  async function connect(port: number) {
+    const sock = new WebSocket(`ws://localhost:${port}/ws`);
+    const got = new Map<number, any>();
+    const waiting = new Map<number, (m: any) => void>();
+    sock.addEventListener("message", (ev) => {
+      const m = JSON.parse(String(ev.data));
+      got.set(m.id, m);
+      waiting.get(m.id)?.(m);
+    });
+    const closed = new Promise<CloseEvent>((resolve) => sock.addEventListener("close", resolve));
+    await new Promise((resolve, reject) => {
+      sock.addEventListener("open", resolve);
+      sock.addEventListener("error", reject);
+    });
+    const answer = (id: number): Promise<any> =>
+      got.has(id) ? Promise.resolve(got.get(id)) : new Promise((resolve) => waiting.set(id, resolve));
+    const send = (id: number, msg: object) => sock.send(JSON.stringify({ id, ...msg }));
+    return { sock, answer, send, got, closed };
+  }
+  const authenticate = { action: "call", method: "authenticate", params: { token: "t" } };
+  const open = (doc: string) => ({ action: "open", doc });
+
+  test("an open sent straight after authenticate, without waiting for its answer, is handled signed in", async () => {
+    const { port } = serve();
+    const c = await connect(port);
+    c.send(1, authenticate);
+    c.send(2, open("rows"));   // no waiting: straight behind it
+    expect((await c.answer(1)).result).toEqual({ id: 1 });
+    expect(await c.answer(2)).toEqual({ id: 2, result: { doc: "rows", who: { id: 1 } } });
+    c.sock.close();
+  });
+
+  test("what waited runs in the order it came, and a logout among it holds what came after it", async () => {
+    const { port, ran } = serve();
+    const c = await connect(port);
+    c.send(1, authenticate);
+    c.send(2, open("a"));
+    c.send(3, { action: "call", method: "logout" });
+    c.send(4, open("b"));
+    c.send(5, open("c"));
+    expect((await c.answer(2)).result?.who).toEqual({ id: 1 });   // under authenticate
+    expect((await c.answer(4)).error?.code).toBe(401);             // under logout, not beside it
+    expect((await c.answer(5)).error?.code).toBe(401);
+    expect(ran).toEqual(["open a", "open b", "open c"]);
+    c.sock.close();
+  });
+
+  test("what was held ahead of a logout runs signed in, though it asks the gate late and the logout signs out at once (#5 review)", async () => {
+    const { port } = serve({ logoutAtOnce: true });
+    const c = await connect(port);
+    c.send(1, authenticate);
+    c.send(2, open("checks-late"));   // sent signed in
+    c.send(3, { action: "call", method: "logout" });
+    c.send(4, open("checks-late"));   // sent signed out
+    expect((await c.answer(2)).result?.who).toEqual({ id: 1 });
+    expect((await c.answer(4)).error?.code).toBe(401);
+    c.sock.close();
+  });
+
+  test("an open still running when a logout comes is let go by the logout, not left subscribed after it (#5 review)", async () => {
+    const { port, subscribers } = serve({ logoutAtOnce: true });
+    const c = await connect(port);
+    c.send(1, authenticate);
+    expect((await c.answer(1)).result).toEqual({ id: 1 });
+    c.send(2, open("subscribes-late"));   // past the gate, reading, when the logout arrives
+    c.send(3, { action: "call", method: "logout" });
+    expect((await c.answer(2)).result?.who).toEqual({ id: 1 });
+    expect((await c.answer(3)).result).toEqual({ ack: true });
+    expect(subscribers.size).toBe(0);
+    c.sock.close();
+  });
+
+  test("a sign-in waiting on what came before it does not run when its socket closes meanwhile (#5 review)", async () => {
+    let letLateGo!: () => void;
+    const lateMayGo = new Promise<void>((r) => (letLateGo = r));
+    const { port, signIns } = serve({ lateMayGo });
+    const c = await connect(port);
+    c.send(1, open("late"));        // running: the sign-in waits for it
+    c.send(2, authenticate);
+    await Bun.sleep(20);
+    c.sock.close();
+    await c.closed;
+    await Bun.sleep(20);            // the server has run its close
+    letLateGo();
+    await Bun.sleep(50);
+    expect(signIns).toEqual([]);
+  });
+
+  test("a slow call that is not a sign-in holds nothing: the socket's next message is answered first", async () => {
+    const { port } = serve();
+    const c = await connect(port);
+    c.send(1, { action: "call", method: "slow" });
+    c.send(2, { action: "call", method: "ping" });
+    const first = await Promise.race([c.answer(1).then(() => "slow"), c.answer(2).then(() => "ping")]);
+    expect(first).toBe("ping");
+    expect((await c.answer(1)).result).toBe("slow");
+    c.sock.close();
+  });
+
+  test("a socket that closes while its messages wait never runs them, and leaves no subscriber behind", async () => {
+    let letSignIn!: () => void;
+    const signIn = new Promise<void>((r) => (letSignIn = r));
+    const { port, ran, subscribers } = serve({ signIn });
+    const c = await connect(port);
+    c.send(1, authenticate);
+    c.send(2, open("rows"));
+    await Bun.sleep(20);            // both have arrived: the open waits on the sign-in
+    c.sock.close();                 // the tab closes, the network drops
+    await c.closed;
+    await Bun.sleep(20);
+    letSignIn();                    // the sign-in settles after the socket is gone
+    await Bun.sleep(50);
+    expect(ran).toEqual([]);        // the open never ran for a socket that is gone
+    expect(subscribers.size).toBe(0);
+  });
+
+  test("what a closed socket held is let go at the close, though the sign-in it waited on never answers", async () => {
+    const ws = createWs();
+    wireAuth(ws, { actions: { authenticate: () => new Promise(() => {}) }, gate: () => ({ error: "no" }) });
+    const sock = mockSocket();
+    void ws.websocket.message(sock, JSON.stringify({ id: 1, action: "call", method: "authenticate" }));
+    const held: any = ws.websocket.message(sock, JSON.stringify({ id: 2, action: "call", method: "ping" }));
+    ws.websocket.close(sock);
+    expect(await Promise.race([held.then(() => "let go"), Bun.sleep(100).then(() => "kept")])).toBe("let go");
+  });
+
+  test("a held message that closes its socket stops the rest of what was held", async () => {
+    const ws = createWs();
+    let letSignIn!: () => void;
+    const signIn = new Promise<void>((r) => (letSignIn = r));
+    wireAuth(ws, { actions: { authenticate: async () => { await signIn; return { result: 1 }; } }, gate: () => ({ error: "no" }) });
+    ws.on("bye", (_msg, client) => ws.websocket.close(client));   // a server that shows a socket the door
+    const ran: string[] = [];
+    registerMethod(ws, "ping", () => { ran.push("ping"); return "pong"; });
+    const sock = mockSocket();
+    void ws.websocket.message(sock, JSON.stringify({ id: 1, action: "call", method: "authenticate" }));
+    void ws.websocket.message(sock, JSON.stringify({ id: 2, action: "bye" }));
+    const last: any = ws.websocket.message(sock, JSON.stringify({ id: 3, action: "call", method: "ping" }));
+    letSignIn();
+    await last;
+    expect(ran).toEqual([]);
+  });
+
+  test("a message still running when its socket closes has what it registered for the socket let go when it ends", async () => {
+    let letLateGo!: () => void;
+    const lateMayGo = new Promise<void>((r) => (letLateGo = r));
+    const { port, ran, subscribers } = serve({ lateMayGo });
+    const c = await connect(port);
+    c.send(1, authenticate);
+    expect((await c.answer(1)).result).toEqual({ id: 1 });
+    c.send(2, open("late"));        // in flight: it subscribes once it gets going again
+    await Bun.sleep(20);
+    c.sock.close();
+    await c.closed;
+    await Bun.sleep(20);            // the close has run the socket's drop hooks: none yet
+    letLateGo();
+    await Bun.sleep(50);
+    expect(ran).toEqual(["open late"]);
+    expect(subscribers.size).toBe(0);   // its drop hook ran when it ended, not never
+  });
+
+  test("a socket may hold maxHeld messages; one more closes it with 1008 and runs none of them", async () => {
+    let letSignIn!: () => void;
+    const signIn = new Promise<void>((r) => (letSignIn = r));
+    const { port, ran } = serve({ maxHeld: 3, signIn });
+
+    const within = await connect(port);
+    within.send(1, authenticate);
+    for (let i = 2; i <= 4; i++) within.send(i, open(`in${i}`));   // three: at the limit, not past it
+
+    const past = await connect(port);
+    past.send(1, authenticate);
+    for (let i = 2; i <= 5; i++) past.send(i, open(`past${i}`));   // four: one past it
+    const closed = await Promise.race([past.closed, Bun.sleep(1000).then(() => null)]);
+    expect(closed?.code).toBe(1008);
+    expect(closed?.reason).toMatch(/3 messages/);
+
+    letSignIn();
+    for (let i = 2; i <= 4; i++) expect((await within.answer(i)).result?.who).toEqual({ id: 1 });
+    await Bun.sleep(30);
+    expect(ran.filter((r) => r.startsWith("open past"))).toEqual([]);
+    expect(ran).toEqual(["open in2", "open in3", "open in4"]);
+    within.sock.close();
+  });
+
+  test("a socket may hold maxHeldBytes of messages; one that would take it past closes it with 1008 and runs none of them (#5 review)", async () => {
+    let letSignIn!: () => void;
+    const signIn = new Promise<void>((r) => (letSignIn = r));
+    const { port, ran } = serve({ maxHeldBytes: 1000, signIn });
+    const pad = "x".repeat(400);
+
+    const within = await connect(port);
+    within.send(1, authenticate);
+    within.send(2, open(`a${pad}`));   // ~430 bytes each: two fit
+    within.send(3, open(`b${pad}`));
+
+    const past = await connect(port);
+    past.send(1, authenticate);
+    past.send(2, open(`c${pad}`));
+    past.send(3, open(`d${pad}`));
+    past.send(4, open(`e${pad}`));     // the third does not
+    const closed = await Promise.race([past.closed, Bun.sleep(1000).then(() => null)]);
+    expect(closed?.code).toBe(1008);
+    expect(closed?.reason).toMatch(/1000 bytes/);
+
+    letSignIn();
+    expect((await within.answer(2)).result?.who).toEqual({ id: 1 });
+    expect((await within.answer(3)).result?.who).toEqual({ id: 1 });
+    await Bun.sleep(30);
+    expect(ran).toEqual([`open a${pad}`, `open b${pad}`]);
+
+    within.send(4, { action: "call", method: "logout" });   // what ran no longer counts: as much again waits on this
+    within.send(5, open(`f${pad}`));
+    within.send(6, open(`g${pad}`));
+    const sixth = await Promise.race([within.answer(6).then((m) => m.error?.code), within.closed.then((e) => `closed ${e.code}`)]);
+    expect(sixth).toBe(401);   // answered after the logout, not closed
+    within.sock.close();
   });
 });
 

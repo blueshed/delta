@@ -42,6 +42,15 @@ export interface WsServer {
   upgrade: (req: Request, server: any) => Response | undefined;
   /** The origins a browser may open the socket from besides the server's own, or "*" for any (`createWs({ origins })`). */
   origins?: readonly string[] | "*";
+  /**
+   * Say that a `call` of `method` changes who the socket is (`wireAuth` says
+   * it of every auth action: `authenticate`, `login`, `logout`...). One starts
+   * once what the socket sent before it has finished, under the identity it
+   * was sent under; what the socket sends after it waits for it, then runs in
+   * the order it came, under the identity it left. Every other message runs
+   * as it arrives, beside the rest. Optional: `createLocal()` has no socket.
+   */
+  changesIdentity?(method: string): void;
   websocket: {
     idleTimeout: number;
     sendPings: boolean;
@@ -144,6 +153,21 @@ export interface WsOptions {
    * (not a browser) is let in.
    */
   origins?: readonly string[] | "*";
+  /**
+   * How many messages one socket may send while a call that changes who it is
+   * is in flight (`WsServer.changesIdentity`): they wait for it. One more
+   * closes the socket with 1008 (policy violation), and none of them runs.
+   * Default 1000.
+   */
+  maxHeld?: number;
+  /**
+   * How many bytes of messages (their size on the wire) one socket may have
+   * waiting so, beside `maxHeld`: a message that would take it past this
+   * closes the socket with 1008, and none of them runs. So a frame bigger
+   * than this, sent before a sign-in has answered, closes its socket: wait
+   * for the answer (`onConnect` does). Default 1 MiB.
+   */
+  maxHeldBytes?: number;
 }
 
 /**
@@ -186,6 +210,43 @@ export function createWs(opts?: WsOptions): WsServer {
 
   const path = opts?.path ?? "/ws";
   const origins = allowedOrigins(opts?.origins);
+  const maxHeld = opts?.maxHeld ?? 1000;
+  const maxHeldBytes = opts?.maxHeldBytes ?? 1024 * 1024;
+
+  // A socket's messages run side by side, as they arrive: Bun does not wait
+  // for an async handler. Only a call that changes who the socket is stands
+  // between them: it starts once what the socket sent before it has finished,
+  // and what the socket sends after it waits until it settles. So an `open`
+  // sent straight behind `authenticate` is handled signed in, one sent before
+  // `logout` is handled (and subscribed, and let go) before the logout, and a
+  // slow method holds nothing up. A socket's `line` is what of it is running,
+  // and, while such a call is waiting or in flight, what came after it
+  // (`held`, and its size in `bytes`); `gone` has the sockets that have
+  // closed. With no such call registered (no `wireAuth`), nothing is kept:
+  // each message just runs.
+  type Held = { raw: any; size: number; done: () => void };
+  type Line = { running: Set<Promise<void>>; held: Held[] | null; bytes: number };
+  const identityCalls = new Set<string>();
+  const lines = new WeakMap<object, Line>();
+  const gone = new WeakSet<object>();
+
+  function lineOf(ws: any): Line {
+    let line = lines.get(ws);
+    if (!line) lines.set(ws, (line = { running: new Set(), held: null, bytes: 0 }));
+    return line;
+  }
+
+  /** A frame's size on the wire, as Bun's `maxPayloadLength` counts it. */
+  const sizeOf = (raw: any): number =>
+    typeof raw === "string" ? Buffer.byteLength(raw) : (raw?.byteLength ?? 0);
+
+  /** Run one message on its socket's line: it is running until it settles. */
+  function start(ws: any, raw: any, line: Line): Promise<void> {
+    const running = receive(ws, raw, line);
+    line.running.add(running);
+    void running.then(() => line.running.delete(running));
+    return running;
+  }
 
   function upgrade(req: Request, server: any) {
     const refused = refuseOrigin(req, origins);
@@ -193,6 +254,137 @@ export function createWs(opts?: WsOptions): WsServer {
     const clientId = new URL(req.url).searchParams.get("clientId") ?? crypto.randomUUID();
     if (server.upgrade(req, { data: { clientId } })) return undefined;
     return new Response("WebSocket upgrade failed", { status: 400 });
+  }
+
+  /** One message, answered on its `id`; never rejects. */
+  async function receive(ws: any, raw: any, line?: Line): Promise<void> {
+    // Parse INSIDE the try: this is an async handler, so a non-JSON frame
+    // used to reject with nothing to catch it — an unhandled rejection any
+    // client could trigger at will, and a remote kill for any process that
+    // installs a strict `unhandledRejection` handler. There is no `id` to
+    // answer on when the parse itself fails, so that case only logs.
+    let msg: any;
+    let id: any;
+    let action: any;
+    let holds = false;
+    try {
+      msg = JSON.parse(String(raw));
+      ({ id, action } = msg);
+
+      if (!action) {
+        for (const handler of actions.get("_raw") ?? []) {
+          await handler(msg, ws, () => {});
+        }
+        return;
+      }
+
+      // Private methods (leading `_`) are internal helpers: composable
+      // within other handlers' bodies, never reachable from the wire.
+      // Reject before any handler runs, so the gate can't be bypassed and
+      // covers unregistered `_` names too.
+      if (
+        action === "call" &&
+        typeof msg.method === "string" &&
+        msg.method.startsWith("_")
+      ) {
+        if (id)
+          ws.send(
+            JSON.stringify({
+              id,
+              error: { code: 403, message: `Private method: ${msg.method}` },
+            }),
+          );
+        return;
+      }
+
+      const handlers = actions.get(action);
+      if (!handlers?.length) {
+        if (id)
+          ws.send(
+            JSON.stringify({
+              id,
+              error: { code: 400, message: `Unknown action: ${action}` },
+            }),
+          );
+        return;
+      }
+      // A call that changes who the socket is: what comes after it waits
+      // (set before the first await, so the socket's next message sees it),
+      // and it waits for what came before it -- still running under the
+      // identity it was sent under -- to finish.
+      if (line && action === "call" && identityCalls.has(msg.method)) {
+        line.held = [];
+        holds = true;
+        if (line.running.size) await Promise.all(line.running);
+        if (gone.has(ws)) return;   // closed meanwhile: no one to change
+      }
+      let responded = false;
+      const respond = (response: any) => {
+        if (!responded && id) {
+          responded = true;
+          ws.send(JSON.stringify({ id, ...response }));
+        }
+      };
+      for (const handler of handlers) {
+        await handler(msg, ws, respond);
+        if (responded) break;
+      }
+      if (!responded && id) {
+        ws.send(
+          JSON.stringify({
+            id,
+            // No backend owns this name (or method): not there, as on Postgres.
+            error: { code: 404, message: `No handler matched: ${action}` },
+          }),
+        );
+      }
+    } catch (err: any) {
+      log.error(`error: ${err.message}`);
+      // An error that carries its wire code (applyOps: 400 / 404) is
+      // answered with it; anything else is the server's own (500).
+      if (id)
+        ws.send(
+          JSON.stringify({ id, error: { code: typeof err?.code === "number" ? err.code : 500, message: err.message } }),
+        );
+    } finally {
+      if (holds) release(ws, line!);
+      // The socket closed while this ran: what it registered for the socket
+      // meanwhile (a subscriber, a watch) is let go now, as the close would have.
+      if (gone.has(ws)) runClientDropHooks(ws);
+    }
+  }
+
+  /** A call that changes who `ws` is has settled: what waited on it runs, in the order it came. */
+  function release(ws: any, line: Line): void {
+    const held = line.held;
+    line.held = null;
+    if (!held) return;
+    for (let i = 0; i < held.length; i++) {
+      if (gone.has(ws)) {
+        for (let j = i; j < held.length; j++) held[j]!.done();
+        return;
+      }
+      const { raw, size, done } = held[i]!;
+      line.bytes -= size;   // no longer waiting
+      void start(ws, raw, line).then(done);
+      // Another call that changes who it is: the rest wait on that one.
+      const again = line.held as Held[] | null;   // start() may have set it
+      if (again) {
+        for (let j = i + 1; j < held.length; j++) again.push(held[j]!);   // still counted in `bytes`
+        return;
+      }
+    }
+  }
+
+  /** Past `maxHeld` or `maxHeldBytes`: the socket is closed, and none of what it held runs. */
+  function refuseHeld(ws: any, line: Line, over: string): void {
+    gone.add(ws);
+    for (const { done } of line.held!.splice(0)) done();
+    const why = `more than ${over} held behind a call that changes identity`;
+    log.warn(`close id=${ws.data?.clientId ?? "?"}: ${why}`);
+    try {
+      ws.close(1008, why);
+    } catch { /* already closing */ }
   }
 
   return {
@@ -219,6 +411,10 @@ export function createWs(opts?: WsOptions): WsServer {
     upgrade,
     origins,
 
+    changesIdentity(method: string) {
+      identityCalls.add(method);
+    },
+
     websocket: {
       idleTimeout: opts?.idleTimeout ?? 60,
       sendPings: opts?.sendPings ?? true,
@@ -241,87 +437,23 @@ export function createWs(opts?: WsOptions): WsServer {
         for (const ch of ws.data?.channels ?? []) ws.subscribe(ch);
         log.debug(`open id=${clientId}`);
       },
-      async message(ws: any, raw: any) {
-        // Parse INSIDE the try: this is an async handler, so a non-JSON frame
-        // used to reject with nothing to catch it — an unhandled rejection any
-        // client could trigger at will, and a remote kill for any process that
-        // installs a strict `unhandledRejection` handler. There is no `id` to
-        // answer on when the parse itself fails, so that case only logs.
-        let msg: any;
-        let id: any;
-        let action: any;
-        try {
-          msg = JSON.parse(String(raw));
-          ({ id, action } = msg);
-
-          if (!action) {
-            for (const handler of actions.get("_raw") ?? []) {
-              await handler(msg, ws, () => {});
-            }
-            return;
-          }
-
-          // Private methods (leading `_`) are internal helpers: composable
-          // within other handlers' bodies, never reachable from the wire.
-          // Reject before any handler runs, so the gate can't be bypassed and
-          // covers unregistered `_` names too.
-          if (
-            action === "call" &&
-            typeof msg.method === "string" &&
-            msg.method.startsWith("_")
-          ) {
-            if (id)
-              ws.send(
-                JSON.stringify({
-                  id,
-                  error: { code: 403, message: `Private method: ${msg.method}` },
-                }),
-              );
-            return;
-          }
-
-          const handlers = actions.get(action);
-          if (!handlers?.length) {
-            if (id)
-              ws.send(
-                JSON.stringify({
-                  id,
-                  error: { code: 400, message: `Unknown action: ${action}` },
-                }),
-              );
-            return;
-          }
-          let responded = false;
-          const respond = (response: any) => {
-            if (!responded && id) {
-              responded = true;
-              ws.send(JSON.stringify({ id, ...response }));
-            }
-          };
-          for (const handler of handlers) {
-            await handler(msg, ws, respond);
-            if (responded) break;
-          }
-          if (!responded && id) {
-            ws.send(
-              JSON.stringify({
-                id,
-                // No backend owns this name (or method): not there, as on Postgres.
-                error: { code: 404, message: `No handler matched: ${action}` },
-              }),
-            );
-          }
-        } catch (err: any) {
-          log.error(`error: ${err.message}`);
-          // An error that carries its wire code (applyOps: 400 / 404) is
-          // answered with it; anything else is the server's own (500).
-          if (id)
-            ws.send(
-              JSON.stringify({ id, error: { code: typeof err?.code === "number" ? err.code : 500, message: err.message } }),
-            );
-        }
+      message(ws: any, raw: any) {
+        if (gone.has(ws)) return;   // closed, or closing for holding too many: nothing more of it runs
+        if (!identityCalls.size) return receive(ws, raw);   // nothing changes who a socket is: nothing waits
+        const line = lineOf(ws);
+        const held = line.held;
+        if (!held) return start(ws, raw, line);
+        if (held.length >= maxHeld) return refuseHeld(ws, line, `${maxHeld} messages`);
+        const size = sizeOf(raw);
+        if (line.bytes + size > maxHeldBytes) return refuseHeld(ws, line, `${maxHeldBytes} bytes`);
+        line.bytes += size;
+        return new Promise<void>((done) => held.push({ raw, size, done }));
       },
       close(ws: any) {
+        gone.add(ws);
+        // What waited on a call that changes who it is never runs: the socket it came from is gone.
+        const held = lines.get(ws)?.held;
+        if (held) for (const { done } of held.splice(0)) done();
         const clientId = ws.data?.clientId;
         // Only delete our own mapping — a collision-replaced socket may now
         // own this id.

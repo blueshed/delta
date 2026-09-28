@@ -104,13 +104,19 @@ export type AuthAction<Identity> = (
 
 /**
  * Register an auth module's actions with a WebSocket server. Each declared
- * action becomes a `call` handler that delegates to the implementation.
+ * action becomes a `call` handler that delegates to the implementation, and
+ * a call that changes who the socket is (`ws.changesIdentity`): it starts once
+ * what the socket sent before it has finished, and what the socket sends after
+ * it waits, then runs under the identity it left -- so an `open` sent straight
+ * behind `authenticate`, without waiting for its answer, is handled signed in,
+ * and one sent before `logout` is handled signed in and let go by the logout.
  *
  * Call this once at server startup, before `createDocListener`.
  */
 export function wireAuth<I>(ws: WsServer, auth: DeltaAuth<I>): void {
   if (!auth.actions) return;
   const actions = auth.actions;
+  for (const name of Object.keys(actions)) ws.changesIdentity?.(name);
 
   ws.on("call", async (msg, client, respond) => {
     // Index by own-property only: `msg.method` is client-supplied, so a bare

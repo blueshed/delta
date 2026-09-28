@@ -61,9 +61,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   logged. While `onConnect` runs, a request now goes out at once, whichever way it is made (a
   page cannot tell the hook's requests from its own); the documents' opens and re-opens, and
   requests made before the connect, still wait for it. A request made while it runs by something
-  other than the hook is no longer held: it can reach the server before the hook has signed in
-  (one sent before the hook's own first request, as by a hook that fetches a token first, or
-  beside its `authenticate`), and so goes out unsigned, and may 401.
+  other than the hook goes out at once too, no longer held by the client. Sent after the hook's
+  `authenticate`, the server holds it behind the sign-in (todo #5, below) and it is handled
+  signed in; sent before the hook's first request -- as by a hook that fetches a token first --
+  it reaches the server ahead of the sign-in, is handled unsigned, and may 401.
+- **An `open` sent straight after `authenticate` is handled signed in** (todo #5). `createWs`
+  handles a socket's messages side by side, as they arrive, so an `open` or a write sent
+  without waiting for `authenticate`'s answer was handled while the token was still being
+  checked, and 401'd -- for any client that does not wait (delta's own without `onConnect`,
+  the CLI, a raw socket). A call that changes who the socket is now starts once what the
+  socket sent before it has finished (so an `open` sent before `logout` is answered signed in,
+  and its subscription is let go by the logout, not made after it), and holds what the socket
+  sends after it until it settles; that then runs in the order it came, under the new
+  identity. `wireAuth` says it of every auth action (`authenticate`, `login`, `register`,
+  `logout`), through `ws.changesIdentity(method)`, which a hand-registered sign-in method
+  can call too. Nothing else waits: a slow `registerMethod` or a recompute holds up nothing,
+  as before, and a burst of calls runs side by side. A socket that closes with messages
+  held runs none of them. **A socket may hold 1000 messages and 1 MiB**
+  (`createWs({ maxHeld, maxHeldBytes })`, a frame counted by its size on the wire); a message
+  past either closes it with 1008 (policy violation), running none -- so a frame over 1 MiB
+  sent before a sign-in has answered closes its socket. A sign-in that never answers, or a
+  message ahead of one that never finishes, holds its socket's later messages until the
+  socket closes. And a message still running when its
+  socket closes has what it registered for the socket let go when it ends: an `open` whose
+  read was in flight left the closed socket a subscriber (on Postgres a custom document
+  recomputed for it on every write to what it watches), since the close had already run the
+  socket's drop hooks.
 - **A time's name is a date, compared as an instant, on every backend** (todo #60). A list
   document scoped by a `timestamptz` (`scope: { starts: "<=:end" }`) compared the name's text
   with the row's on SQLite and the JSON file, which keep a time as the text it was given, so

@@ -168,7 +168,7 @@ Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/fi
 | `@blueshed/delta/core` | anywhere | `applyOps`, `DeltaOp`, `splitPath`, `joinPath`, `escapeSegment` |
 | `@blueshed/delta/client` | browser, Bun | `connectWs(url, { clientId?, onConnect? })` (with `close()`), `openDoc`, `call`, `WS`, `DeltaError` |
 | `@blueshed/delta/dom-ops` | browser | `applyOpsToCollection` — keyed-DOM op routing |
-| `@blueshed/delta/server` | Bun | `createWs({ path?, origins? })`, `registerDoc` (JSON-file backend), `registerMethod`, `refuseOrigin` |
+| `@blueshed/delta/server` | Bun | `createWs({ path?, origins?, maxHeld?, maxHeldBytes? })` (with `changesIdentity(method)`), `registerDoc` (JSON-file backend), `registerMethod`, `refuseOrigin` |
 | `@blueshed/delta/local` | Bun | `createLocal` — delta in-process, no socket |
 | `@blueshed/delta/kinds` | Bun | `registerMemory`, `registerStatic`, `registerSource` |
 | `@blueshed/delta/sqlite` | Bun | `defineSchema`, `defineDoc`, `defineCustomDoc`, `createTables`, `migrateSchema`, `registerDocs(..., customDocs?, { ledger?, who?, auth?, owns?, shared? })` → `{ evict }`, `validateOps`, `inverseOf`, `loadDocAt`, snapshots |
