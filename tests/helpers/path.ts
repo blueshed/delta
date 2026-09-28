@@ -63,6 +63,8 @@ export const pathDocs = [
   defineDoc("fo-notes:", { root: "weddings", include: ["notes"] }),
   // list mode: every course; and the courses whose name starts with the doc's id
   defineDoc("fo-all-courses:", { root: "courses", include: [] }),
+  // list mode with an include: every course, and every drink
+  defineDoc("fo-catalog:", { root: "courses", include: ["drinks"] }),
   defineDoc("fo-courses-like:", { root: "courses", include: [], scope: { name: "like:start" } }),
   // list mode by an equality: the tags of one label, which a tag added through it is given
   defineDoc("fo-tags-labelled:", { root: "tags", include: [], scope: { label: ":label" } }),
@@ -493,6 +495,19 @@ export function documentCases(backend: () => PathBackend): void {
       // RFC 6902: replace and remove need their target there (the JSON file's applyOps too, #4)
       expect(await code([{ op: "remove", path: "/courses/99" }])).toBe(404);
       expect(await code([{ op: "replace", path: "/courses/99", value: { name: "x" } }])).toBe(404);
+    });
+
+    test("a remove of a row that is not there is a 404, whatever holds its collection: a map, a collection with no parent, a list, a list's include (A6)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-catalog:"]);
+      const code = async (doc: string, ops: unknown[]) => (await b.process.call("delta", { doc, ops })).error?.code;
+      expect(await code("fo-board:1", [{ op: "remove", path: "/households/999" }])).toBe(404);
+      expect(await code("fo-board:1", [{ op: "remove", path: "/tags/999" }])).toBe(404);
+      expect(await code("fo-catalog:", [{ op: "remove", path: "/courses/999" }])).toBe(404);
+      expect(await code("fo-catalog:", [{ op: "remove", path: "/drinks/999" }])).toBe(404);
+      expect(await code("fo-board:1", [{ op: "remove", path: "/tags/1" }, { op: "remove", path: "/tags/1" }])).toBe(404);   // twice in one write: the second is not there
+      expect(content((await b.process.call("open", { doc: "fo-board:1" })).result).tags).toEqual({ "1": { id: 1, label: "red" } });
+      await assertCopiesHold(b, copies);
     });
 
     test("a path's id is the number its digits name, however many there are: /courses/0001000000000000 is /courses/1000000000000, as /courses/007 is /courses/7", async () => {

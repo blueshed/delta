@@ -538,6 +538,14 @@ BEGIN
           (v_r->>'coll') || '/' || (v_r->>'id'), to_jsonb(_delta_holders(v_r->>'coll', v_r->'row', p_doc_name)));
       END LOOP;
       v_removed := _delta_cascade_remove(v_coll_key, v_id, v_def.include);
+      -- A remove of a row that is not there is a 404, as on SQLite and the
+      -- JSON file (A6): the scope gate above lets any id of a collection a
+      -- document holds whole (one with no parent, a list's include) through,
+      -- and the cascade removes nothing (or RLS hid the row from this identity).
+      IF jsonb_array_length(v_removed) = 0 THEN
+        RAISE EXCEPTION 'row not found: %/%', v_coll_key, v_id
+          USING ERRCODE = 'P0002';
+      END IF;
       v_broadcast_ops := v_broadcast_ops || v_removed;
       FOR v_r IN SELECT jsonb_array_elements(v_removed) LOOP
         v_rp := _delta_split_path(v_r->>'path');

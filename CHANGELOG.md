@@ -187,6 +187,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `delta_apply_logged` calls with `walk` for an entry that walks another; the two-argument form,
   and a `walk` of null, is no walk. `validateOps` refuses the add of another root row too, when it knows the document
   is single (`{ doc }`, or `list: false`); given no mode, a root row's add is taken, as a list's.
+- **Postgres: a remove of a row that is not there is a 404, whatever holds its collection**
+  (review A6), as on SQLite and the JSON file. A document holds a collection with no parent
+  (`board:1`'s tags) or a list's include (`catalog:`'s drinks) whole, so the scope gate let
+  any id of it through, and `remove /tags/999` answered 200 with no ops. `delta_apply`
+  (`001d`, replaced in place) now refuses a remove that removed nothing (404), as it already
+  did a row of a map; so is the second of two removes of one row in one write.
 - **`bun.lock` matches `package.json`** (todo #49): it lacked the optional `@electric-sql/pglite`
   peer, so every `bun install` in a fresh checkout changed it.
 - **`bun run test` runs every file that needs no Postgres server** (todo #48): it named 8 of the
