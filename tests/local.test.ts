@@ -138,6 +138,20 @@ describe("in process, an answer is the caller's own, as over the socket", () => 
     expect(result.fn).toBe(fn);
   });
 
+  test("a cyclic value is still copied, whole: an answer, and a broadcast a listener changes", async () => {
+    const local = createLocal();
+    const value: any = { row: { n: 1 } };
+    value.self = value;
+    local.server.on("probe", (_m, _c, respond) => respond({ result: value }));
+    const { result } = await local.call("probe", {});
+    expect(result).not.toBe(value);
+    expect(result.self).toBe(result);   // the cycle, copied
+    result.row.n = 2;
+    local.onPublish((_channel, data) => { data.row.n = 3; data.self.row.n = 4; });
+    local.server.publish("x", value);
+    expect(value.row.n).toBe(1);
+  });
+
   test("a copy kept eta's way -- the open spread, each told change applied to a clone -- takes a remove (#4)", async () => {
     // eta's documents.ts: `const { _v, ...value } = answer.result`, then applyOps(structuredClone(held), data.ops)
     const db = new Database(":memory:");

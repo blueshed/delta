@@ -142,10 +142,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stopping the backend's fan-out (eta's documents hold their copies so) -- and a caller that
   changed what it was handed changed what everyone was then served. `createLocal` now copies
   each answer as the backend gives it, and each broadcast for each listener. Documents are plain
-  data, so the copy is member by member (a Date or a blob is cloned, a function handed over):
-  an in-process open of a cached 50,000-row document takes some 12-18 ms where it took none,
-  about the JSON a socket spends on it (15-20 ms), and a third of `structuredClone`'s; writes
-  are unchanged. A memory document's `peek` gives a copy too; `registerDoc`'s `getDoc` is still
+  data, so the copy is member by member (a Date, a blob or a cycle is cloned whole, and only
+  what nothing clones, a function, is handed over): an in-process open of a cached 50,000-row
+  document takes some 12-18 ms where it took none, about the JSON a socket spends on it (15-20
+  ms), and a third of `structuredClone`'s; writes are unchanged. A memory document's `peek` gives a copy too; `registerDoc`'s `getDoc` is still
   the live document it is the handle of. A case in `tests/helpers/path.ts` asks every backend:
   answers kept across a write are unchanged, and a change to them, or to a told row, is never
   served; `tests/local.test.ts` asks the JSON file, a memory document and eta's way of keeping

@@ -61,14 +61,19 @@ export interface Local extends Caller {
  * Documents are plain data, so plain objects and arrays are copied member by
  * member: several times quicker than `structuredClone`, and quicker than the
  * JSON a socket spends on the same answer. Anything else (a Date, a blob) is
- * cloned; what cannot be (a method's answer holding a function) is handed over
- * as it is.
+ * cloned, and so is a value the member-by-member copy cannot take (a cycle);
+ * only what no clone takes (a method's answer holding a function) is handed
+ * over as it is.
  */
 function own<T>(value: T): T {
   try {
     return copyData(value);
   } catch {
-    return value;   // a cycle, or something no clone takes
+    try {
+      return structuredClone(value);   // a cycle: structuredClone keeps it
+    } catch {
+      return value;                    // what nothing clones
+    }
   }
 }
 
