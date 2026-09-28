@@ -150,6 +150,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers kept across a write are unchanged, and a change to them, or to a told row, is never
   served; `tests/local.test.ts` asks the JSON file, a memory document and eta's way of keeping
   a copy.
+- **In process, a listener that throws no longer stops the telling.** `createLocal`'s publish
+  called its listeners one after another with nothing around them, and a backend publishes
+  after its write has committed, one document at a time: a listener that threw (a copy that
+  would not take a change) stopped the listeners after it, every document still to be told of
+  the write, and SQLite's custom-document fan-out, and the write was logged as `fan-out failed`.
+  Each listener is now called on its own: one that throws is logged
+  (`fan-out failed (write committed): a listener on <doc> threw`), and the rest are told.
 
 ### Changed
 

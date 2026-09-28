@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { createLocal } from "../src/server/local";
-import { createTables, defineDoc, defineSchema, inverseOf, registerDocs } from "../src/server/sqlite";
+import { createTables, defineCustomDoc, defineDoc, defineSchema, inverseOf, registerDocs } from "../src/server/sqlite";
 import { registerDoc } from "../src/server/server";
 import { registerMemory } from "../src/server/kinds";
 import { applyOps, type DeltaOp } from "../src/core";
@@ -41,6 +41,37 @@ describe("createLocal", () => {
     const local = createLocal();
     local.server.on("slow", async (_m, _c, respond) => { await Bun.sleep(1); respond({ result: 1 }); });
     expect((await local.call("slow", {})).result).toBe(1);
+  });
+
+  test("a listener that throws is logged, and every document is still told: the others, and the custom documents", async () => {
+    const db = new Database(":memory:");
+    createTables(db, schema);
+    const local = createLocal();
+    const said = defineCustomDoc("said:", {
+      watch: ["messages"],
+      parse: (text: string) => text,
+      query: (d: any, text: string) => ({ messages: d.query("SELECT * FROM messages WHERE text = ?").all(text) }),
+      matches: (_coll: string, row: any, text: string) => row.text === text,
+    });
+    registerDocs(local.server, db, schema, [room, defineDoc("all-messages:", { root: "messages", include: [] })], [said]);
+    local.onPublish(() => { throw new Error("a listener's own mistake"); });
+    const heard: string[] = [];
+    local.onPublish((channel) => heard.push(channel));
+    for (const doc of ["room:a", "all-messages:", "said:hi"]) await local.call("open", { doc });
+    const errors: string[] = [];
+    const error = console.error;
+    console.error = (line: string) => void errors.push(String(line));
+    setLogLevel("error");
+    try {
+      const r = await local.call("delta", { doc: "room:a", ops: [{ op: "add", path: "/messages/m1", value: { text: "hi" } }] });
+      expect(r.result).toEqual({ ack: true });
+    } finally {
+      console.error = error;
+      setLogLevel("silent");
+    }
+    expect(heard.sort()).toEqual(["all-messages:", "room:a", "said:hi"]);
+    expect(errors.length).toBe(3);   // one per telling, each to the listener that threw
+    expect(errors.every((e) => e.includes("fan-out failed (write committed)") && e.includes("a listener's own mistake"))).toBe(true);
   });
 
   test("unsubscribing from publish stops the hearing", async () => {

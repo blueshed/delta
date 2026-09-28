@@ -28,6 +28,7 @@
  * socket, which sends each as JSON: a write never changes what an open
  * handed out, and a caller that changes it changes nothing anyone is served.
  */
+import { createLogger } from "./logger";
 import type { ActionHandler, WsServer } from "./server";
 
 export type LocalAnswer = { result?: any; error?: { code: number; message: string } };
@@ -46,7 +47,7 @@ export interface Local extends Caller {
   server: WsServer;
   /** A caller that is `identity`: one client per identity, reused. With no identity, calls are anonymous. */
   as(identity: unknown): Caller;
-  /** Hears every broadcast the backend makes, on every channel. Returns the unsubscribe. */
+  /** Hears every broadcast the backend makes, on every channel, as its own copy; one that throws is logged, and the rest are told. Returns the unsubscribe. */
   onPublish(fn: (channel: string, data: any) => void): () => void;
 }
 
@@ -90,6 +91,7 @@ function copyData(v: any): any {
 }
 
 export function createLocal(): Local {
+  const log = createLogger("[local]");
   const actions = new Map<string, ActionHandler[]>();
   const listeners = new Set<(channel: string, data: any) => void>();
   const clientFor = (identity?: unknown): LocalClient => ({
@@ -106,7 +108,16 @@ export function createLocal(): Local {
       actions.set(action, [...(actions.get(action) ?? []), handler]);
     },
     publish(channel, data) {
-      for (const fn of listeners) fn(channel, own(data));   // each listener its own copy
+      // Each listener its own copy, and its own mistake: a backend publishes
+      // after its write has committed, so one listener that throws must not stop
+      // the others hearing it, nor the backend telling the documents after this one.
+      for (const fn of listeners) {
+        try {
+          fn(channel, own(data));
+        } catch (err: any) {
+          log.error(`fan-out failed (write committed): a listener on ${channel} threw: ${err?.message ?? String(err)}`);
+        }
+      }
     },
     sendTo() {},
     setServer() {},
