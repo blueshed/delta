@@ -529,6 +529,15 @@ export function registerDocs(
       // A single-mode document's root is one row, held at /<root>.
       const isRoot = !list && collKey === def.root;
 
+      // /<root>/<id> and /<root>/<id>/<field> name it by its id, as on Postgres
+      // and as a list document would say it: a replace of it, or of one field.
+      // It holds no other root row, so another id is not found.
+      if (isRoot && op.op === "replace" && (parts.length === 3 || (parts.length === 2 && namesRootRow(table!, parts[1]!, rootId)))) {
+        if (!sameId(rowId(parts[1]!), rootId)) refuse(404, `Row not found: ${collKey}/${rowId(parts[1]!)}`);
+        replaceRow(table!, rootId!, parts.length === 3 ? { [parts[2]!]: (op as any).value } : (op as any).value, true);
+        continue;
+      }
+
       // /<root>/fieldName is a field of it (an add or a remove of /<root>/<id> is the row itself, below)...
       if (isRoot && parts.length === 2 && op.op !== "add" && op.op !== "remove") {
         if (op.op !== "replace") throw new Error(`Root fields support replace only`);
@@ -1305,8 +1314,10 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
     // (not /<root>/<id> row), so validate parts[1] as a column name -- or the
     // parent key (the root row moves, as the whole-root merge moves it, and as on Postgres).
     // An add or a remove of /<root>/<id> is the root row itself, checked as a
-    // row below; applyOps holds it to the one the document is named for.
-    if (single(collKey) && parts.length === 2 && op.op !== "add" && op.op !== "remove") {
+    // row below, and so is a replace of it named by its id (`namesRootRow`, as
+    // Postgres reads the segment); applyOps holds it to the one the document is named for.
+    const rootId = opts.values?.id === undefined ? undefined : rowId(opts.values.id);
+    if (single(collKey) && parts.length === 2 && op.op !== "add" && op.op !== "remove" && !namesRootRow(table, parts[1]!, rootId)) {
       if (op.op !== "replace") {
         errors.push({ path: (op as DeltaOp).path, message: `Root fields support replace only (add and remove take /${collKey}/<id>, the root row)` });
         continue;
@@ -1383,6 +1394,17 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
   }
 
   return errors;
+}
+
+/**
+ * Does `/<root>/<segment>` name a single document's root row, not a field of
+ * it? Its id: digits, as Postgres reads the segment (`/courses/1`, `/courses/01`),
+ * or the root's own id as SQLite keeps a text one (`/rooms/attic`) -- where no
+ * column, nor the parent key, has that name.
+ */
+function namesRootRow(table: ResolvedTable, segment: string, rootId: unknown): boolean {
+  if (segment === table.parent?.fkColumn || Object.hasOwn(table.columns, segment)) return false;
+  return /^\d+$/.test(segment) || sameId(rowId(segment), rootId);
 }
 
 /**

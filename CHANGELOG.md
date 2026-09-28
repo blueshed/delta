@@ -197,6 +197,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replace and then the remove to every document that held it, and undone puts the drink back
   as it was. A row the write made is `null` in its inverse (`replace /<coll>/<id>` with
   `value: null`), as on Postgres, where SQLite left the value out.
+- **SQLite: a single document's root named by its id is its root, as on Postgres** (todo #53).
+  Through `course:1`, `replace /courses/1 { name }` -- the root by its collection and id, as a
+  list document says it -- was a 400 (`Unknown field: 1`) on SQLite and the JSON file, and
+  `replace /courses/1/name` a 404, where Postgres writes the root. Both spellings now write it
+  (`/courses/01` too: the id its digits name), told as `replace /courses` to the document and
+  as the row to every other that holds it, and undone as a root replace; the board's
+  `replace /weddings/1/name` likewise. Another id is a 404 (`replace /courses/2` was a 400), a
+  field that is no column still a 400. `validateOps` reads the segment as Postgres does: digits,
+  or the root's own text id, where no column has that name, name the row.
 
 ## [0.9.1] - 2026-09-27
 

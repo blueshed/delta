@@ -652,6 +652,33 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
+    test("a single document's root named by its id is its root: replace /courses/1 and /courses/01/name write it and are told as /courses; another id is not found (404); undone, it goes back", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-course:1", "fo-board:1", "fo-menu:1", "fo-title:1", "fo-all-courses:"]);
+      const code = async (doc: string, ops: unknown[]) => (await b.process.call("delta", { doc, ops })).error?.code;
+      expect(await code("fo-course:1", [{ op: "replace", path: "/courses/2", value: { name: "x" } }])).toBe(404); // another course: not this document's
+      expect(await code("fo-course:1", [{ op: "replace", path: "/courses/2/name", value: "x" }])).toBe(404);
+      expect(await code("fo-course:1", [{ op: "replace", path: "/courses/1", value: { nope: 1 } }])).toBe(400);
+      expect(await code("fo-course:1", [{ op: "replace", path: "/courses/1", value: 5 }])).toBe(400);
+      expect(await code("fo-course:1", [{ op: "replace", path: "/courses/1/nope", value: "x" }])).toBe(400);
+      expect(await code("fo-course:1", [{ op: "replace", path: "/courses/1/id", value: 9 }])).toBe(400);
+      expect(await code("fo-course:1", [{ op: "replace", path: "/courses/9007199254740993", value: { name: "x" } }])).toBe(400);
+      const { ops } = await write(b.process, "fo-course:1", [
+        { op: "replace", path: "/courses/1", value: { id: 9, name: "Bisque" } },
+        { op: "replace", path: "/courses/01/name", value: "Broth" },
+      ], { cursor: "s1" });
+      expect(ops).toEqual([{ op: "replace", path: "/courses", value: course(1, "Bisque") }, { op: "replace", path: "/courses", value: course(1, "Broth") }]);
+      const titled = await write(b.process, "fo-board:1", [{ op: "replace", path: "/weddings/1/name", value: "our day" }]);
+      expect(titled.ops).toEqual([{ op: "replace", path: "/weddings", value: { id: 1, name: "our day" } }]);
+      const undone = await b.process.call("undo", { cursor: "s1" });
+      expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "replace", path: "/courses", value: course(1, "Soup") }], conflict: undefined });
+      const renamed = (name: string) => ({ op: "replace", path: "/courses/1", value: course(1, name) });
+      await expectTold(b, "fo-menu:1", [[renamed("Bisque"), renamed("Broth")], titled.ops, [renamed("Soup")]]);
+      await expectTold(b, "fo-all-courses:", [[renamed("Bisque"), renamed("Broth")], [renamed("Soup")]]);
+      await expectTold(b, "fo-title:1", [titled.ops]);
+      await assertCopiesHold(b, copies);
+    });
+
     test("one write to two households: each household's document is told of its own row alone, once", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-household:1", "fo-household:2"]);
