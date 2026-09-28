@@ -101,6 +101,15 @@ function wireCode(err: unknown): number {
 
 interface DocState {
   version: number;
+  /**
+   * The last version a notification has announced (or an open read): a drain
+   * reads no further (todo #55). A later entry is heard when its own
+   * notification comes, so each notification maps to entries not yet heard,
+   * and a document let go of and tracked again by a late notification does not
+   * read an entry twice. A resync after a reconnect, which missed notifications,
+   * reads to the end.
+   */
+  until: number;
   subscribers: Set<any>;
   notifying: boolean;
   /** A notification arrived while a fetch was in flight — re-drain when it ends. */
@@ -319,6 +328,7 @@ export async function createDocListener<I = unknown>(
   // Re-drain all tracked docs (used after a reconnect to recover missed ops).
   async function resyncTracked() {
     for (const [docName, state] of tracked) {
+      state.until = Number.MAX_SAFE_INTEGER;   // the notifications while away are gone: read to the end
       if (state.notifying) { state.pending = true; continue; }
       state.notifying = true;
       try { await drainDoc(docName, state); }
@@ -353,11 +363,12 @@ export async function createDocListener<I = unknown>(
         // Custom docs loaded their initial state via `def.query` on open, so
         // pre-existing ops are already reflected — replaying history would
         // duplicate them. Same logic protects close-then-reopen.
-        state = { version: Math.max(0, v - 1), subscribers: new Set(), notifying: false, pending: false };
+        state = { version: Math.max(0, v - 1), until: v, subscribers: new Set(), notifying: false, pending: false };
         tracked.set(docName, state);
       }
 
       if (v <= state.version) return;
+      state.until = Math.max(state.until, v);
       if (state.notifying) {
         // A fetch is already running for this doc. Coalesce instead of dropping:
         // dropping here lost ops when a concurrent write's NOTIFY landed mid-fetch.
@@ -383,10 +394,12 @@ export async function createDocListener<I = unknown>(
   async function drainDoc(docName: string, state: DocState) {
     do {
       state.pending = false;
-      let pageRows = FETCH_PAGE;
-      while (pageRows >= FETCH_PAGE) {
-        const { rows } = await pool.query(fetchSql, [docName, state.version]);
-        pageRows = rows.length;
+      let more = true;
+      while (more && state.version < state.until) {
+        const page = (await pool.query(fetchSql, [docName, state.version])).rows;
+        // only what a notification has announced (`until`): the rest is heard with its own
+        const rows = page.filter((row: any) => Number(row.version) <= state.until);
+        more = page.length >= FETCH_PAGE && rows.length === page.length;
         // Told to those who may still hear it (todo #17): the document's own
         // subscribers, and the custom documents' that watch what it changed.
         if (auth && rows.length > 0) {
@@ -402,7 +415,7 @@ export async function createDocListener<I = unknown>(
             // compares them strictly, so both must be numbers.
             ws.publish(docName, { doc: docName, ops: row.ops, v: Number(row.version) });
           }
-          state.version = row.version;
+          state.version = Number(row.version);
           // A custom document hears each write once, as it was applied: the
           // writer's entry carries it (`applied`) where the writer was told
           // otherwise, and null where it was told the write as applied; each
@@ -414,6 +427,7 @@ export async function createDocListener<I = unknown>(
         }
       }
     } while (state.pending);
+    if (state.until > state.version) state.until = state.version;   // after a resync: from here, as announced
 
     pruneDoc(docName);
     log.debug(`notify ${docName} v${state.version}`);
@@ -737,10 +751,11 @@ export async function createDocListener<I = unknown>(
     pruneDoc(docName);
     let state = tracked.get(docName);
     if (!state) {
-      state = { version: result.version, subscribers: new Set(), notifying: false, pending: false };
+      state = { version: Number(result.version), until: Number(result.version), subscribers: new Set(), notifying: false, pending: false };
       tracked.set(docName, state);
     } else {
-      state.version = Math.max(state.version, result.version);
+      state.version = Math.max(state.version, Number(result.version));
+      state.until = Math.max(state.until, state.version);
     }
 
     state.subscribers.add(client);

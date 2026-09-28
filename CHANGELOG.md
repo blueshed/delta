@@ -143,6 +143,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `jwtAuth`'s gate now answers `Session expired: authenticate again` at every request after
   `exp` until the socket signs in again (the listener may have asked it first), and `logout`
   forgets the expiry.
+- **Postgres: a listener hears each entry once, however late its notification** (todo #55). A
+  process without the writer's document open tracks it only while it drains it, for its custom
+  documents: a drain started by one notification read every entry committed by then, let the
+  document go, and a later write's own notification, arriving after, read that entry again, so
+  a custom document was told one write twice (an add, then a replace; measured 3 runs in 11 of
+  40 concurrent adds). A drain now reads only as far as the notifications have announced, and a
+  later entry is heard with its own: no entry is read twice, with nothing kept for a document
+  let go of (a version kept per document would grow with every document written; an entry-id
+  mark would drop an entry that committed after a later id). A resync after a lost connection,
+  which missed its notifications, still reads to the end.
 - **`bun.lock` matches `package.json`** (todo #49): it lacked the optional `@electric-sql/pglite`
   peer, so every `bun install` in a fresh checkout changed it.
 - **`bun run test` runs every file that needs no Postgres server** (todo #48): it named 8 of the

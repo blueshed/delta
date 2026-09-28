@@ -15,6 +15,7 @@ import { setLogLevel } from "../src/server/logger";
 import {
   assertCopiesHold, expectTold, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresInbox, postgresOpenSeats, told, write, type PathBackend,
 } from "./helpers/path";
+import { waitFor } from "./setup";
 
 setLogLevel("silent");
 
@@ -269,4 +270,70 @@ describe("pglite: a listener on framework SQL older than it", () => {
       await behind.end();
     }
   }, 30_000);   // many PGlite round trips: past bun's 5s default on a loaded machine
+});
+
+/**
+ * A listener hears each entry of the log once, however late the notification
+ * that announced it (todo #55). One that does not have the writer's document
+ * open tracks it only while it drains it: a drain read past the notification
+ * that started it (a later write already committed), let the document go, and
+ * the later write's own notification then read it again -- a custom document
+ * told one write twice (an add, then a replace). Here the second process's
+ * notifications are held back and let through one at a time, after the drain,
+ * as a busy server can deliver them.
+ */
+describe("pglite: a listener hears each entry once, however late its notification", () => {
+  test("a process without the writer's document open tells its custom document each write once", async () => {
+    const held: (() => void)[] = [];
+    // the pool, with each LISTEN client's notifications held until let through
+    const slow = {
+      query: (...args: any[]) => (pool.query as any)(...args),
+      connect: async () => {
+        const client: any = await pool.connect();
+        const on = client.on.bind(client);
+        client.on = (event: string, fn: (m: any) => void) =>
+          on(event, event === "notification" ? (m: any) => held.push(() => fn(m)) : fn);
+        return client;
+      },
+    } as unknown as Pool;
+    const local = createLocal();
+    const heard: { channel: string; data: any }[] = [];
+    local.onPublish((channel, data) => heard.push({ channel, data }));
+    listeners.push(await createDocListener(local.server, slow, { custom: [postgresInbox] }));
+    const other: PathBackend = { ...backend, process: { call: (action, msg) => local.call(action, msg), heard } };
+    await openAll(other.process, ["fo-inbox:a@x"]);
+    await openAll(backend.process, ["fo-board:1"]);
+    await write(backend.process, "fo-board:1", [{ op: "replace", path: "/households/1/email", value: "gone@x" }]);
+    await write(backend.process, "fo-board:1", [{ op: "replace", path: "/households/2/email", value: "a@x" }]);
+    await waitFor(() => held.length >= 2);
+    while (held.length) { held.shift()!(); await backend.quiet(); }
+    await expectTold(other, "fo-inbox:a@x", [
+      [{ op: "remove", path: "/households/1" }],
+      [{ op: "add", path: "/households/2", value: household(2, "a@x") }],
+    ]);
+  });
+
+  test("a listener that lost its connection reads what it missed to the end, though no notification announced it", async () => {
+    const errors: ((err: Error) => void)[] = [];
+    const lossy = {
+      query: (...args: any[]) => (pool.query as any)(...args),
+      connect: async () => {
+        const client: any = await pool.connect();
+        const on = client.on.bind(client);
+        client.on = (event: string, fn: any) => { if (event === "error") errors.push(fn); return on(event, fn); };
+        return client;
+      },
+    } as unknown as Pool;
+    const local = createLocal();
+    const heard: { channel: string; data: any }[] = [];
+    local.onPublish((channel, data) => heard.push({ channel, data }));
+    listeners.push(await createDocListener(local.server, lossy, {}));
+    const other: PathBackend = { ...backend, process: { call: (action, msg) => local.call(action, msg), heard } };
+    const copies = await openAll(other.process, ["fo-menu:1"]);
+    errors.at(-1)!(new Error("connection lost"));   // it reconnects after a second, and resyncs
+    const { ops } = await write(backend.process, "fo-board:1", [{ op: "replace", path: "/courses/1/name", value: "Broth" }]);
+    await waitFor(() => told(other.process, "fo-menu:1").length > 0, { timeout: 4000 });
+    await expectTold(other, "fo-menu:1", [ops]);
+    await assertCopiesHold(other, copies);
+  });
 });
