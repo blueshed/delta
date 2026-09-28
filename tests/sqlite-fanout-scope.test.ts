@@ -235,8 +235,8 @@ describe("an included collection with no parent is loaded in full, on every path
   });
 });
 
-describe("a scope on a time compares instants: a stored time SQLite cannot read meets no condition", () => {
-  test("neither opened nor told, in the SQL and the fan-out alike", async () => {
+describe("a scope on a time compares instants, and an index on the column serves it", () => {
+  test("a stored time SQLite cannot read meets no condition, and one whose text is not its instant's ISO date is judged by the same bounds: in the SQL and the fan-out alike", async () => {
     const s = defineSchema({ shows: { columns: { title: "text", starts: "timestamptz?" }, temporal: false } });
     const db = new Database(":memory:");
     createTables(db, s);
@@ -246,6 +246,7 @@ describe("a scope on a time compares instants: a stored time SQLite cannot read 
     registerDocs(local.server, db, s, [
       defineDoc("shows:", { root: "shows", include: [] }),
       defineDoc("shows-from:", { root: "shows", include: [], scope: { starts: ">=:from" } }),
+      defineDoc("shows-until:", { root: "shows", include: [], scope: { starts: "<:end" } }),
     ]);
     await local.call("open", { doc: "shows:" });
     // SQLite keeps a time as the text it is given: this one is no time (Postgres would refuse it)
@@ -253,5 +254,38 @@ describe("a scope on a time compares instants: a stored time SQLite cannot read 
     expect((await local.call("open", { doc: "shows-from:2020-01-01" })).result.shows).toEqual({});
     await local.call("delta", { doc: "shows:", ops: [{ op: "replace", path: "/shows/1/title", value: "b" }] });
     expect(heard.filter((h) => h.channel === "shows-from:2020-01-01")).toEqual([]);
+    // nor one whose text is not on its instant's day (SQLite reads February 31st as March 3rd): the fan-out asks the SQL's bounds too
+    await local.call("delta", { doc: "shows:", ops: [{ op: "add", path: "/shows/-", value: { title: "c", starts: "2026-02-31T00:00:00Z" } }] });
+    expect((await local.call("open", { doc: "shows-from:2026-03-03" })).result.shows).toEqual({});
+    await local.call("delta", { doc: "shows:", ops: [{ op: "replace", path: "/shows/2/title", value: "d" }] });
+    expect(heard.filter((h) => h.channel === "shows-from:2026-03-03")).toEqual([]);
+    // and one that is no ISO date at all (a Julian day number, which SQLite reads as 2026-01-01)
+    await local.call("delta", { doc: "shows:", ops: [{ op: "add", path: "/shows/-", value: { title: "e", starts: "2461041.5" } }] });
+    expect((await local.call("open", { doc: "shows-until:2026-01-05" })).result.shows).toEqual({});
+    await local.call("delta", { doc: "shows:", ops: [{ op: "replace", path: "/shows/3/title", value: "f" }] });
+    expect(heard.filter((h) => h.channel === "shows-until:2026-01-05")).toEqual([]);
+  });
+
+  test("an index on the column serves it: each condition is asked first of the bare column, a day either side", async () => {
+    const s = defineSchema({ shows: { columns: { starts: "timestamptz?" }, temporal: false } });
+    const db = new Database(":memory:");
+    createTables(db, s);
+    db.run("CREATE INDEX idx_shows_starts ON shows (starts)");
+    const query = db.query.bind(db);
+    const seen: string[] = [];
+    (db as any).query = (sql: string) => { if (sql.includes("FROM shows WHERE")) seen.push(sql); return query(sql); };
+    const local = createLocal();
+    registerDocs(local.server, db, s, [
+      defineDoc("from:", { root: "shows", include: [], scope: { starts: ">=:start" } }),
+      defineDoc("until:", { root: "shows", include: [], scope: { starts: "<:end" } }),
+      defineDoc("on:", { root: "shows", include: [], scope: { starts: ":day" } }),
+    ]);
+    for (const doc of ["from:2026-01-01", "until:2026-01-01", "on:2026-01-01"]) {
+      seen.length = 0;
+      expect((await local.call("open", { doc })).error).toBeUndefined();
+      const sql = seen.at(-1)!;
+      const plan = (query(`EXPLAIN QUERY PLAN ${sql}`).all(...sql.split("?").slice(1).map(() => "x")) as { detail: string }[]).map((p) => p.detail).join("; ");
+      expect({ doc, plan }).toEqual({ doc, plan: expect.stringContaining("USING INDEX idx_shows_starts") });
+    }
   });
 });

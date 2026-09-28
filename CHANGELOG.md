@@ -17,13 +17,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `slots-by:garbage` read rows on SQLite and was a 500 on Postgres (`22007`, the cast's), as
   was `slots-by:2026-01-01T12:00:00Z`, whose `:` make its value `2026-01-01T12`. A condition
   on SQLite now compares instants: the column through SQLite's own `strftime` (`YYYY-MM-DD
-  HH:MM:SS.SSS` in UTC, the form it keeps a row's validity in) and the name the same way, in
-  the SQL and in the fan-out alike; a stored time it cannot read meets none. The name's value
-  is a date, `YYYY-MM-DD`, on every backend -- a name's `:` separates its values, so it holds
-  no time of day -- the instant midnight UTC begins it, whatever the session's `TimeZone`; any
-  other text (`garbage`, `2026-02-30`, and `20260101`, `today` or `now`, which Postgres's own
-  cast took) is a 400, opened or written through. An add through the name is given the date
-  (SQLite keeps its text). `_delta_resolve_scope` (`001b`) is replaced in place.
+  HH:MM:SS.SSS` in UTC, the form it keeps a row's validity in: to the millisecond, where
+  Postgres keeps the microsecond) and the name the same way, in the SQL and in the fan-out
+  alike; a stored time it cannot read meets none. So an index on the column still serves the
+  condition, it is asked first of the bare column, a day either side of the date (a time
+  written as ISO 8601 begins with a date within a day of its instant's, a zone being at most
+  14:59 away), and then exactly: a 176-row open of 50,000 rows searches the index, as before.
+  The name's value is a date, `YYYY-MM-DD`, on every backend -- a name's `:` separates its
+  values, so it holds no time of day -- the instant midnight UTC begins it; any other text
+  (`garbage`, `2026-02-30`, and `20260101`, `today` or `now`, which Postgres's own cast took)
+  is a 400, opened or written through (on Postgres a copy open on one of those goes stale, as
+  above). **On a Postgres server whose `TimeZone` is not UTC a date's boundary moves** from
+  midnight there, as the cast read it, to midnight UTC: in New York `slots-by:2026-01-01` read
+  up to 05:00 UTC, and now reads up to 00:00 UTC, as SQLite does. **A stored time with no zone
+  still differs**: `2026-01-01 00:00:00` is UTC on SQLite and in the session's `TimeZone` on
+  Postgres, whose write casts it so; write times with a zone (`toISOString()` does). An add
+  through the name is given the date (SQLite keeps its text). `_delta_resolve_scope` (`001b`)
+  is replaced in place.
 - **A parent key's name is an id on every backend** (todo #60). A list document scoped by a
   parent key (`scope: { weddings_id: ":wedding" }`) opened as `slots-of:abc` read no rows on
   SQLite and the JSON file and was a 400 on Postgres, whose bigint cast refused the text. SQLite
@@ -45,9 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the name to the grammar SQLite's `scopeValue` reads, before the column casts it: an
   `integer`'s is digits, signed, up to 2^53 - 1; a `real`'s a finite decimal number a double
   holds (SQLite now refuses `1e400` and `1e-400` too). Anything else is a 400, opened or
-  written through. A name opened before this that the rule now refuses is still in
-  `_delta_versions`, and the fan-out asks it of every write beside it: it holds nothing, as on
-  SQLite, and the write goes on. `001b` adds a three-argument `_delta_resolve_scope(def, name,
+  written through. **On Postgres such a name opened, and was told, before this**: a real's
+  `Infinity`, `NaN` or `0x10`, an integer's `1_000` or `0x10` (and a time's `20260101` or
+  `today`, below). A copy open on one when the framework is re-applied is told nothing more --
+  it goes stale -- and reopening it is a 400: rename such documents before upgrading. The name
+  stays in `_delta_versions`, where the fan-out asks it of every write beside it; it holds
+  nothing there, as on SQLite, so the write goes on. `001b` adds a three-argument `_delta_resolve_scope(def, name,
   refuse)` (with `refuse` false a value refused answers the scope that holds nothing, with
   `refused` its message) and replaces the two-argument one, which calls it, and
   `_delta_doc_holds` (`CREATE OR REPLACE`: re-apply the framework, or `delta init`).

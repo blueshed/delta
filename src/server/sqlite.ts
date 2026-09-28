@@ -1825,26 +1825,71 @@ function scopeValue(table: ResolvedTable, col: string, text: string): unknown {
  * rows an add through `fo-seats:true` made. A time is stored as the text it was
  * given, in whatever form, so a condition compares the instant each names, as
  * Postgres compares a timestamptz: the name's and the row's alike read by
- * SQLite's own date functions (`instant`), in the SQL and in the fan-out.
+ * SQLite's own date functions (`instant`), in the SQL and in the fan-out. That
+ * reading hides the column from an index, so each such condition is asked
+ * first of the bare column (`within`): a time that begins with its date, as
+ * ISO 8601 does, is within a day of its instant's (a zone is at most 14:59
+ * away), so the rows a date's condition meets lie between the days either
+ * side -- a range an index on the column searches, then read exactly.
  */
 function keeping(db: any, table: ResolvedTable): Keep {
+  let byTable = keeps.get(db);
+  if (!byTable) keeps.set(db, (byTable = new WeakMap()));
+  let keep = byTable.get(table);
+  if (keep) return keep;
   const time = (col: string) => Object.hasOwn(table.columns, col) && table.columns[col]!.type === "timestamptz";
-  return {
-    text: (col, text) => (time(col) ? instant(db, scopeValue(table, col, text)) : encodeValue(table, col, scopeValue(table, col, text))),
+  // a name's condition is read once, not for each row the fan-out asks it of (a refusal is not kept: it throws again)
+  const texts = new Map<string, unknown>();
+  const bounds = new Map<string, { from?: string; below?: string } | undefined>();
+  const once = <T>(memo: Map<string, T>, key: string, read: () => T): T => {
+    if (memo.has(key)) return memo.get(key)!;
+    const value = read();
+    if (memo.size >= 1_000) memo.clear();
+    memo.set(key, value);
+    return value;
+  };
+  keep = {
+    text: (col, text) => once(texts, `${col}:${text}`, () => (time(col) ? instant(db, scopeValue(table, col, text)) : encodeValue(table, col, scopeValue(table, col, text)))),
     value: (col, value) => (time(col) ? instant(db, value) : encodeValue(table, col, value)),
     column: (col) => (time(col) ? `strftime('%Y-%m-%d %H:%M:%f', ${col})` : col),
+    within: (col, op, text) => {
+      if (!time(col) || op === "!=") return undefined;
+      return once(bounds, `${col}:${op}:${text}`, () => {
+        const day = scopeValue(table, col, text) as string;   // a date, YYYY-MM-DD (or refused)
+        return { from: op === "<" || op === "<=" ? undefined : dayAfter(day, -1), below: op === ">" || op === ">=" ? undefined : dayAfter(day, 1) };
+      });
+    },
   };
+  byTable.set(table, keep);
+  return keep;
+}
+const keeps = new WeakMap<object, WeakMap<ResolvedTable, Keep>>();
+
+/** The date `days` from a date, YYYY-MM-DD (years below 100 too, which Date.UTC would read as 19xx); none past year 9999. */
+function dayAfter(day: string, days: number): string | undefined {
+  const d = new Date(0);
+  d.setUTCFullYear(Number(day.slice(0, 4)), Number(day.slice(5, 7)) - 1, Number(day.slice(8, 10)) + days);
+  const iso = d.toISOString();
+  return /^\d{4}-/.test(iso) ? iso.slice(0, 10) : undefined;
 }
 
 /**
  * A time as SQLite reads it, "YYYY-MM-DD HH:MM:SS.SSS" in UTC -- the sortable
  * form a row's validity is kept in (`sqliteTime`) -- or null for text it cannot
  * read: its own strftime, as `keeping`'s column is, so the fan-out and the SQL
- * read a stored time alike.
+ * read a stored time alike. Remembered, since the fan-out asks it of each row
+ * for each document open (and of a row before and after a write): strftime
+ * answers the same text the same way, whichever database asks -- but "now".
  */
+const instants = new Map<string, string | null>();
 function instant(db: any, value: unknown): string | null {
   const text = value instanceof Date ? value.toISOString() : String(value);
-  return (db.query("SELECT strftime('%Y-%m-%d %H:%M:%f', ?) AS t").get(text) as { t: string | null }).t;
+  if (instants.has(text)) return instants.get(text)!;
+  const t = (db.query("SELECT strftime('%Y-%m-%d %H:%M:%f', ?) AS t").get(text) as { t: string | null }).t;
+  if (/^\s*now\s*$/i.test(text)) return t;
+  if (instants.size >= 10_000) instants.clear();
+  instants.set(text, t);
+  return t;
 }
 
 function decodeRow(table: ResolvedTable, row: any) {

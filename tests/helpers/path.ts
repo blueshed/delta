@@ -416,26 +416,28 @@ export function documentCases(backend: () => PathBackend): void {
         at("2025-12-31T23:59:59.999Z"), // 4: before
         at("2026-01-01T01:00:00+01:00"), // 5: midnight
         at(null), // 6: no time
+        at("2025-12-31T10:00:00-14:00"), // 7: midnight, its text a day before -- as far as a zone takes it
+        at("2026-01-01T13:59:59+14:00"), // 8: before midnight, its text on the day
       ]);
       const names = ["fo-slots-by:2026-01-01", "fo-slots-by: 2026-01-01", "fo-slots-by:2025-12-31", "fo-slots-by:2026-01-02", "fo-slots-on:2026-01-01", "fo-slots-on:2025-12-31"];
       const copies = await openAll(b.process, names);
       expect(names.map((doc) => ({ doc, slots: Object.keys(copies.get(doc).slots).map(Number) }))).toEqual([
-        { doc: "fo-slots-by:2026-01-01", slots: [3, 4, 5] },
-        { doc: "fo-slots-by: 2026-01-01", slots: [3, 4, 5] },
+        { doc: "fo-slots-by:2026-01-01", slots: [3, 4, 5, 7, 8] },
+        { doc: "fo-slots-by: 2026-01-01", slots: [3, 4, 5, 7, 8] },
         { doc: "fo-slots-by:2025-12-31", slots: [] },
-        { doc: "fo-slots-by:2026-01-02", slots: [1, 2, 3, 4, 5] },
-        { doc: "fo-slots-on:2026-01-01", slots: [3, 5] },
+        { doc: "fo-slots-by:2026-01-02", slots: [1, 2, 3, 4, 5, 7, 8] },
+        { doc: "fo-slots-on:2026-01-01", slots: [3, 5, 7] },
         { doc: "fo-slots-on:2025-12-31", slots: [] },
       ]);
       // an add through the name is given its time, and read back by it; rows move across midnight
       const { ops } = await write(b.process, "fo-slots-on:2026-01-01", [{ op: "add", path: "/slots/-", value: { weddings_id: 1 } }]);
-      expect(ops.map((o: any) => o.path)).toEqual(["/slots/7"]);
+      expect(ops.map((o: any) => o.path)).toEqual(["/slots/9"]);
       await write(b.process, "fo-slots-upto:", [
         { op: "replace", path: "/slots/1/starts", value: "2025-06-01T00:00:00Z" },
         { op: "replace", path: "/slots/3/starts", value: "2026-01-01T00:00:00.001Z" },
       ]);
       await assertCopiesHold(b, copies);
-      expect(Object.keys((await b.process.call("open", { doc: "fo-slots-on:2026-01-01" })).result.slots).map(Number)).toEqual([5, 7]);
+      expect(Object.keys((await b.process.call("open", { doc: "fo-slots-on:2026-01-01" })).result.slots).map(Number)).toEqual([5, 7, 9]);
       const add = [{ op: "add", path: "/slots/-", value: { weddings_id: 1, starts: "2026-01-01T00:00:00Z" } }];
       const refused = ["garbage", "2026-01-01T12:00:00Z", "2026-02-30", "2026-13-01", "0000-01-01", "20260101", "2026-1-1", "today", "now"];
       for (const doc of [...refused.map((name) => `fo-slots-by:${name}`), "fo-slots-on:garbage"]) {

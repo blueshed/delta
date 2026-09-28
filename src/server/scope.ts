@@ -91,15 +91,27 @@ export interface Keep {
   value(col: string, value: unknown): unknown;
   /** The SQL every condition compares for the column, as `value` reads a row's (a time as its instant); the column itself when not given. */
   column?(col: string): string;
+  /**
+   * Bounds on the column as stored that every row meeting `op text` lies
+   * within, asked ahead of the comparison: a range an index on the bare column
+   * can search where `column` wraps it (a time's instant, read from its text).
+   */
+  within?(col: string, op: Op, text: string): { from?: string; below?: string } | undefined;
 }
 
-/** The conditions as SQL, for a query on the root's table: each value as its column keeps it (`like` a pattern of the text). */
+/** The conditions as SQL, for a query on the root's table: each value as its column keeps it (`like` a pattern of the text), inside its bounds. */
 export function whereOf(scope: Scope, keep: Keep): { sql: string; params: unknown[] } {
   if (scope.conds.length === 0) return { sql: "1 = 1", params: [] };
-  return {
-    sql: scope.conds.map(({ col, op }) => `${keep.column?.(col) ?? col} ${op === "like" ? "LIKE" : op} ?`).join(" AND "),
-    params: scope.conds.map(({ col, op, value }) => (op === "like" ? `${value}%` : keep.text(col, value))),
-  };
+  const sql: string[] = [];
+  const params: unknown[] = [];
+  for (const { col, op, value } of scope.conds) {
+    const bounds = op === "like" ? undefined : keep.within?.(col, op, value);
+    if (bounds?.from !== undefined) { sql.push(`${col} >= ?`); params.push(bounds.from); }
+    if (bounds?.below !== undefined) { sql.push(`${col} < ?`); params.push(bounds.below); }
+    sql.push(`${keep.column?.(col) ?? col} ${op === "like" ? "LIKE" : op} ?`);
+    params.push(op === "like" ? `${value}%` : keep.text(col, value));
+  }
+  return { sql: sql.join(" AND "), params };
 }
 
 /** Two values as a column keeps them, in SQLite's order: numbers by value, text as text, a number before any text. */
@@ -117,6 +129,9 @@ function compare(a: unknown, b: unknown): number {
 export function meets(scope: Scope, row: Record<string, unknown>, keep: Keep): boolean {
   return scope.conds.every(({ col, op, value }) => {
     if (row[col] === null || row[col] === undefined) return false;
+    const bounds = op === "like" ? undefined : keep.within?.(col, op, value);   // as the SQL asks them, of the value as stored
+    if (bounds?.from !== undefined && compare(row[col], bounds.from) < 0) return false;
+    if (bounds?.below !== undefined && compare(row[col], bounds.below) >= 0) return false;
     const v = keep.value(col, row[col]);
     if (v === null || v === undefined) return false;   // as the SQL's NULL: a stored time SQLite cannot read
     if (op === "like") return String(v).toLowerCase().startsWith(value.toLowerCase());
