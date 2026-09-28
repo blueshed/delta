@@ -123,7 +123,7 @@ One app can live in four places, and move from one to the next unchanged -- the 
 | The truth is | Pick when | Server wiring |
 |---|---|---|
 | **a JSON file** | Starting out: one process, a file you can read and edit. | `registerDocs(ws, file, schema, docs, customDocs?, { ledger? })` from `@blueshed/delta/json` |
-| **SQLite** | More rows, faster queries. One process per file. | `createTables(db, schema)` then `registerDocs(ws, db, schema, docs, customDocs?, { ledger? })` from `@blueshed/delta/sqlite` |
+| **SQLite** | More rows, faster queries. Processes may share the file; each reads the others' writes, but only hears its own live. | `createTables(db, schema)` then `registerDocs(ws, db, schema, docs, customDocs?, { ledger? })` from `@blueshed/delta/sqlite` |
 | **Postgres in this process** | The stored functions, with no database to run (PGlite). One process. | `openPglite(dir?)` from `@blueshed/delta/pglite`, then as Postgres |
 | **a Postgres server** | Several processes, RLS, stored-function auth. | `createDocListener(ws, pool, { custom?, ledger? })` + `registerDocType(docTypeFromDef(...))` from `@blueshed/delta/postgres` |
 | **one free-form JSON document** | A single typed document with no schema (settings, a scratchpad). | `registerDoc(ws, "name", { file, empty })` from `@blueshed/delta/server` |
@@ -142,7 +142,7 @@ What is the same on the JSON file, SQLite and Postgres (in process or a server) 
 - A write is told to every open document holding a row it changed, arriving, staying or leaving (*Fan-out*). Writing a row's parent key moves it.
 - One error-code table; `open_at` reads a document as it stood; with `ledger: true`, undo, redo, history, and a version on every change told.
 
-What differs: a client-chosen id `/<coll>/<id>` must be a number on Postgres (the JSON file and SQLite also keep text ids, as a session's token); versions are always on for Postgres, with `ledger: true` elsewhere; auth, RLS and several processes are Postgres's; an implied document named by text (`room:attic`) is the JSON file's and SQLite's -- on Postgres, name it by number (`room:7`). Postgres type-checking needs `bun add pg` and `bun add -d @types/pg`; PGlite needs `bun add @electric-sql/pglite`; keep what `createDocListener` returns and `await listener.destroy()` before `pool.end()`.
+What differs: a client-chosen id `/<coll>/<id>` must be a number on Postgres (the JSON file and SQLite also keep text ids, as a session's token); versions are always on for Postgres, with `ledger: true` elsewhere; auth, RLS and one process's documents told live of another's writes are Postgres's; an implied document named by text (`room:attic`) is the JSON file's and SQLite's -- on Postgres, name it by number (`room:7`). Postgres type-checking needs `bun add pg` and `bun add -d @types/pg`; PGlite needs `bun add @electric-sql/pglite`; keep what `createDocListener` returns and `await listener.destroy()` before `pool.end()`.
 
 On every backend: `await doc.send(ops)` resolves once its own echo is applied; a batch applies whole or not at all; errors have one code table (400 malformed, 401, 403 read-only, 404 not there, 409 already there). **The id rule:** create rows with `add /<coll>/-` and read the id from the echo (`/<coll>/<id>`, and `id` in the row); address a row by its id, never its position.
 

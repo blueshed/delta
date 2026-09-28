@@ -94,6 +94,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refuse)` (with `refuse` false a value refused answers the scope that holds nothing, with
   `refused` its message) and replaces the two-argument one, which calls it, and
   `_delta_doc_holds` (`CREATE OR REPLACE`: re-apply the framework, or `delta init`).
+- **SQLite: two processes on one file** (todo #1). Nothing set `busy_timeout` and writes ran
+  in deferred transactions, so a write while another process held the write lock failed at
+  once (`SQLITE_BUSY`, a 500), and one whose reads came before the other's commit could not
+  then write; and each process served the copies it had cached, so a write merged a field over
+  a stale row and put back what the other had just written. `createTables` and `registerDocs`
+  now set `PRAGMA busy_timeout = 5000` (unless the app set one); a write takes the lock first
+  (`db.transaction(…).immediate()`: still a savepoint inside a caller's own transaction), and
+  an undo or redo plans and walks under it; and before a copy is served or written from, the
+  backend asks `PRAGMA data_version`, which moves when another connection commits, and reads
+  every copy again from the tables when it has. A document open in one process is still not
+  told live of another's write: it reads it when it is next opened or written through
+  (`tests/sqlite-processes.test.ts` drives a second `bun` process on the file).
 - **SQLite and Postgres: an included collection whose parent the document does not include
   reads the same on both** (todo #32). A document holds an included collection by its chain of
   parents to the root, walked whether or not it includes the parents on the way. A wedding's

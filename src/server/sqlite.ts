@@ -89,6 +89,7 @@ export function defineCustomDoc<C, I = any>(
 
 /** Generate CREATE TABLE statements from the schema and execute them. */
 export function createTables(db: any, schema: Schema) {
+  waitForLocks(db);
   db.run("PRAGMA journal_mode = WAL");
   createSequences(db);
 
@@ -186,6 +187,7 @@ export function registerDocs(
   customDocs: CustomDocDef<any>[] = [],
   options: RegisterOptions = {},
 ) {
+  waitForLocks(db);
   const ledger = options.ledger ? createLedger(db) : undefined;
   const whoOf = (client: any): string | null => {
     const identity = client?.data?.identity;
@@ -218,6 +220,37 @@ export function registerDocs(
 
   // In-memory doc cache: docName → loaded doc object
   const cache = new Map<string, any>();
+
+  // Several processes on one file (todo #1): a copy read before another
+  // connection committed is stale, and a write merged over one would put back
+  // what the other wrote. `PRAGMA data_version` moves when another connection
+  // commits (never for this one's own writes), so before a copy is served or
+  // written from, every copy is dropped when it has moved, and read again from
+  // the tables. A document open here is not told of another process's write:
+  // it reads it when it is next opened, or written through.
+  const dataVersion = db.query("PRAGMA data_version");
+  let seenVersion = (dataVersion.get() as { data_version: number }).data_version;
+  function heardElsewhere(): boolean {
+    const now = (dataVersion.get() as { data_version: number }).data_version;
+    if (now === seenVersion) return false;
+    seenVersion = now;
+    cache.clear();
+    implied.clear();
+    return true;
+  }
+
+  /**
+   * A handler run under the write lock (BEGIN IMMEDIATE), so what it reads is
+   * what it writes over: no other process commits between (an undo's plan and
+   * its walk). Inside a caller's own transaction, it runs in that.
+   */
+  const underLock = (handler: (msg: any, client: any, respond: (r: any) => void) => void) =>
+    (msg: any, client: any, respond: (r: any) => void) => {
+      if (db.inTransaction) return handler(msg, client, respond);
+      db.run("BEGIN IMMEDIATE");
+      try { handler(msg, client, respond); db.run("COMMIT"); }
+      catch (err) { if (db.inTransaction) db.run("ROLLBACK"); throw err; }
+    };
 
   /** Who a client is, to a recompute document: undefined, as on Postgres without an auth module. */
   const identityOf = (_client: any): unknown => undefined;
@@ -710,6 +743,7 @@ export function registerDocs(
 
   ws.on("open", (msg, client, respond) => {
     const docName = msg.doc as string;
+    if (findCustom(docName) || findDoc(docName)) heardElsewhere();
 
     // Custom doc path first (independent prefix space).
     const customMatch = findCustom(docName);
@@ -818,7 +852,7 @@ export function registerDocs(
       return { error: { code: 400, message: validationErrors.map((e) => `${e.path}: ${e.message}`).join("; ") } };
     }
 
-    const snapshot = structuredClone(doc); // for rollback, and for the inverse
+    let snapshot = structuredClone(doc); // for rollback, and for the inverse
     let written: Written;
     let touched: Touched[] = [];
     try {
@@ -829,14 +863,22 @@ export function registerDocs(
       // post-commit block below must not look like a failed write.
       // an implied document's first write makes its root row -- unless it adds the root itself (an undo of its removal)
       const addsRoot = scope.mode === "single" && ops.some((op) => op.op === "add" && splitPath(op.path).length === 2 && splitPath(op.path)[0] === def.root);
+      // Immediate: the write lock first, waiting for another process's (busy_timeout),
+      // then the reads -- a deferred transaction that read before another committed
+      // could not then write (SQLITE_BUSY). Under it, a copy another wrote past is read again.
       written = db.transaction(() => {
+        if (heardElsewhere()) {
+          reloadEvicted();
+          doc = load(docName, def, docName.slice(def.prefix.length)) ?? rootless(def);
+          snapshot = structuredClone(doc);
+        }
         if (implied.has(docName) && !addsRoot) ensureImpliedRoot(def, doc);
         const done = applyOps(docName, def, doc, ops);
         touched = done.touched;
         const inverse = inverseOf(snapshot, done.applied, ops);
         const recorded = ledger?.record({ doc: docName, ops: done.applied, inverse, ...by });
         return { ops: done.applied, inverse, version: recorded?.version, entry: recorded?.entry };
-      })();
+      }).immediate();
       implied.delete(docName);
     } catch (err: any) {
       if (cache.has(docName)) cache.set(docName, snapshot); // restore in-memory cache (a rootless walk's copy was never in it)
@@ -896,6 +938,7 @@ export function registerDocs(
     const match = findDoc(docName);
     if (!match) return;
 
+    heardElsewhere();
     reloadEvicted();
     const doc = cache.get(docName);
     if (!doc) {
@@ -931,6 +974,7 @@ export function registerDocs(
       if (msg.entry != null && msg.entry !== entry.id) {
         return respond({ error: { code: 409, message: `The cursor's next entry to ${way} is ${entry.id}, not ${msg.entry}` } });
       }
+      heardElsewhere();
       reloadEvicted();   // a walk is a write: its fan-out needs every open doc's copy, as delta's does
       const match = findDoc(entry.doc);
       // a single document whose root is gone (removed through it) is walked from
@@ -954,8 +998,8 @@ export function registerDocs(
         if (!subscriptions.has(entry.doc)) cache.delete(entry.doc); // loaded for this walk only
       }
     };
-    ws.on("undo", walk("undo"));
-    ws.on("redo", walk("redo"));
+    ws.on("undo", underLock(walk("undo")));
+    ws.on("redo", underLock(walk("redo")));
     // A document's recent history: each entry says `mine`, never who wrote it.
     ws.on("history", (msg, client, respond) => {
       if (!findDoc(msg.doc)) return;
@@ -1624,6 +1668,16 @@ function insertRow(db: any, table: ResolvedTable, row: any, ts: string) {
   if (table.temporal) cols.push("valid_from");
   const vals = cols.map((c) => (c === "valid_from" ? ts : encodeValue(table, c, row[c])));
   db.run(`INSERT INTO ${table.name} (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`, vals);
+}
+
+/**
+ * Wait for another connection's lock (up to 5s) rather than fail at once with
+ * SQLITE_BUSY: several processes may share the file (todo #1). A timeout the
+ * app set is kept.
+ */
+function waitForLocks(db: any): void {
+  const set = db.query("PRAGMA busy_timeout").get() as { timeout?: number } | null;
+  if (!set?.timeout) db.run("PRAGMA busy_timeout = 5000");
 }
 
 /** An error the writer is answered with: `code` is its wire code. */
