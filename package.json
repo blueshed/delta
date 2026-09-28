@@ -35,7 +35,7 @@
   ],
   "scripts": {
     "check": "bunx tsc --noEmit",
-    "test": "bun test tests/core.test.ts tests/server.test.ts tests/sqlite.test.ts tests/auth.test.ts tests/railroad-client.test.ts tests/path-json.test.ts tests/path-sqlite.test.ts tests/path-pglite.test.ts tests/client.test.ts tests/codegen.test.ts tests/dom-ops.test.ts tests/install-skills.test.ts tests/kinds.test.ts tests/ledger.test.ts tests/local.test.ts tests/package-exports.test.ts tests/schema.test.ts tests/sqlite-custom.test.ts tests/sqlite-fanout-scope.test.ts tests/sqlite-isolation.test.ts tests/sqlite-processes.test.ts",
+    "test": "bun test tests/core.test.ts tests/server.test.ts tests/sqlite.test.ts tests/auth.test.ts tests/railroad-client.test.ts tests/path-json.test.ts tests/path-sqlite.test.ts tests/path-pglite.test.ts tests/client.test.ts tests/codegen.test.ts tests/dom-ops.test.ts tests/install-skills.test.ts tests/kinds.test.ts tests/ledger.test.ts tests/local.test.ts tests/package-exports.test.ts tests/schema.test.ts tests/sqlite-custom.test.ts tests/sqlite-fanout-scope.test.ts tests/sqlite-isolation.test.ts tests/sqlite-processes.test.ts tests/owns-sqlite.test.ts tests/owns-pglite.test.ts",
     "test:pg": "bun test tests/postgres.test.ts tests/auth-jwt.test.ts",
     "test:all": "bun test tests/",
     "db:up": "docker compose up -d --wait",

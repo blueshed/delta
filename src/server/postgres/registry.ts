@@ -16,7 +16,7 @@
 import type { Pool } from "pg";
 import type { DocDef } from "./schema";
 import type { DeltaOp } from "../../core";
-import type { DeltaAuth } from "../auth";
+import { ownerless, type DeltaAuth } from "../auth";
 
 /** Who is writing, for the ledger: the identity as the ledger has it, and the cursor undo walks. */
 export type Writer = { who: string | null; cursor: string | null; undoable?: boolean; undoes?: number | null };
@@ -92,14 +92,7 @@ const types: DocType[] = [];
 /** The listeners with an `auth` module now running: while there is one, every type must say who owns it. */
 const authed = new Set<object>();
 
-/** Default-deny, as `docTypeFromDef` is: with auth, a document says who owns it. */
-export function ownerless(prefix: string, what = "registerDocType"): Error {
-  return new Error(
-    `${what}("${prefix}"): with auth, say who may open it -- ` +
-    `owns: (identity, docName) => boolean, or shared: true if every signed-in identity may hear every write to it. ` +
-    `A document's name is its broadcast channel: RLS filters what open reads, not what the channel carries.`,
-  );
-}
+export { ownerless };
 
 export function registerDocType(t: DocType): void {
   if (authed.size > 0 && !t.owns && !t.shared) throw ownerless(t.prefix);

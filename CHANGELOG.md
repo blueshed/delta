@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SQLite and the JSON file: auth, a gate and `owns`, as on Postgres** (todo #6). Every socket
+  could open every document of a prefix. `registerDocs(ws, db, schema, docs, customDocs, { auth,
+  owns | shared })` takes the same `DeltaAuth`: every open, delta, open_at, history, undo, redo and
+  close passes `auth.gate` (401 without an identity); `owns(identity, docName)` is asked before
+  open, delta, open_at, history and a walk into the entry's document (404 when it says no, and no
+  subscription); with `auth`, `registerDocs` throws without `owns` or `shared`, and for a custom
+  doc (`defineCustomDoc(prefix, { owns | shared })`) with neither -- `docTypeFromDef`'s and
+  `createDocListener`'s words (`ownerless` now lives in `./auth`). The gate's identity is the
+  ledger's `who` and the cursor's person, and who a custom doc is read as: `recompute(db,
+  criteria, identity)`, and `query(db, criteria, identity)` / `matches(…, identity)`, whose rows
+  are now kept per name and identity, each identity told its own view's changes. `history` also
+  answers 404 for a document that does not open, as on Postgres. There is no RLS on SQLite:
+  `owns` is the whole check (the reference says what that means). One `owns` answers for the
+  documents of a `registerDocs` call, where Postgres takes one per `docTypeFromDef`.
 - **Postgres: implied documents, as on SQLite and the JSON file** (todo #34). A document
   declared `implied: true` opens before its root row is -- the root as its first write will
   make it (its id, each column's default) and each included collection empty -- where Postgres

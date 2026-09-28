@@ -18,6 +18,7 @@
  */
 import type { WsServer } from "./server";
 import { trackSubscribe, trackUnsubscribe, onClientDrop } from "./server";
+import { isAuthError, ownerless, type DeltaAuth } from "./auth";
 import { applyOps as deltaApplyOps, type DeltaOp, splitPath, joinPath } from "../core";
 import { createLogger } from "./logger";
 import { createLedger, planWalk, rowAt, socketCursor } from "./ledger";
@@ -60,10 +61,17 @@ export interface CustomDocDef<C = unknown, I = any> {
   watch: string[];
   /** Parse the portion of docName after prefix into criteria. */
   parse: (docId: string) => C;
-  /** MEMBERSHIP def (flat, per-row fan-out) -- `query` + `matches`. Initial load: the rows this doc exposes, keyed by collection. */
-  query?: (db: any, criteria: C) => Record<string, any[]>;
-  /** True when `row` belongs in a doc opened under `criteria` (membership def). */
-  matches?: (collection: string, row: any, criteria: C) => boolean;
+  /**
+   * MEMBERSHIP def (flat, per-row fan-out) -- `query` + `matches`. Initial
+   * load: the rows this doc exposes, keyed by collection. It runs once per doc
+   * name and identity (the gate's, with `auth`; undefined without), and its
+   * result is kept for the subscribers of that name who are that identity --
+   * never another's, as on Postgres. SQLite has no RLS: check the rows
+   * against the identity here.
+   */
+  query?: (db: any, criteria: C, identity?: I) => Record<string, any[]>;
+  /** True when `row` belongs in a doc opened under `criteria` (membership def), for the subscribers who are `identity`. */
+  matches?: (collection: string, row: any, criteria: C, identity?: I) => boolean;
   /**
    * RECOMPUTE def (whole-doc) -- `recompute` INSTEAD of query/matches, as on
    * Postgres. On open, and on any write to a watched collection, the WHOLE doc
@@ -74,6 +82,14 @@ export interface CustomDocDef<C = unknown, I = any> {
    * write). Synchronous, as `query` is: the `bun:sqlite` handle, no await.
    */
   recompute?: (db: any, criteria: C, identity?: I) => any;
+  /**
+   * With an `auth` module: may `identity` open `docName`? False answers 404,
+   * as on Postgres. With auth, a custom doc needs this or `shared: true`:
+   * `registerDocs` refuses one with neither.
+   */
+  owns?: (identity: I, docName: string) => boolean | Promise<boolean>;
+  /** With an `auth` module: every identity that passes the gate may open every doc of this prefix. */
+  shared?: boolean;
 }
 
 export function defineCustomDoc<C, I = any>(
@@ -166,7 +182,7 @@ function sqlDefault(value: unknown): string {
 const log = createLogger("[delta-sqlite]");
 
 /** Register all doc definitions with the WebSocket server. */
-export interface RegisterOptions {
+export interface RegisterOptions<I = unknown> {
   /**
    * Keep a ledger (`./ledger`): every write recorded with its inverse, its
    * version, who made it and the cursor undo walks; and `undo`, `redo` and
@@ -174,23 +190,60 @@ export interface RegisterOptions {
    */
   ledger?: boolean;
   /** How an identity is written in the ledger. Default: a string or number as it is, anything else as JSON. */
-  who?: (identity: unknown) => string;
+  who?: (identity: I) => string;
   /** Called after every change that committed -- a write, an undo or redo, a walk recorded as skipped: the JSON file saves itself from it. */
   committed?: () => void;
+  /**
+   * An auth module (`DeltaAuth`), as the Postgres listener takes it: every
+   * open, delta, open_at, history, undo, redo and close of these documents
+   * passes `auth.gate(client)` first (401 without an identity), and the
+   * identity it gives is who writes (the ledger's `who`, the cursor) and who a
+   * custom document is read as. SQLite has no RLS: `owns` is the check.
+   */
+  auth?: DeltaAuth<I>;
+  /**
+   * With `auth`: may `identity` open `docName`, write through it and hear what
+   * is written to it? False answers 404 -- asked before open, delta, open_at,
+   * history, and an undo or redo of an entry written through the document, as
+   * `docTypeFromDef`'s `owns`. With auth, this or `shared` is required.
+   */
+  owns?: (identity: I, docName: string) => boolean | Promise<boolean>;
+  /** With `auth`: every identity that passes the gate may open every document registered here, and hear every write to it. */
+  shared?: boolean;
 }
 
-export function registerDocs(
+export function registerDocs<I = unknown>(
   ws: WsServer,
   db: any,
   schema: Schema,
   docs: DocDef[],
-  customDocs: CustomDocDef<any>[] = [],
-  options: RegisterOptions = {},
+  customDocs: CustomDocDef<any, I>[] = [],
+  options: RegisterOptions<I> = {},
 ) {
+  // Default-deny, as docTypeFromDef and createDocListener are: with auth, every
+  // document says who owns it, or that it is shared. A name is the channel its
+  // writes are told on, so whoever has it open hears them.
+  const auth = options.auth;
+  if (auth) {
+    if (docs.length && !options.owns && !options.shared) throw ownerless(docs.map((d) => d.prefix).join(", "), "registerDocs");
+    const unowned = customDocs.find((d) => !d.owns && !d.shared);
+    if (unowned) throw ownerless(unowned.prefix, "defineCustomDoc");
+  }
+  /** The gate's identity (with `auth`), or its refusal. */
+  const gated = (client: any): { identity: I } | { error: { code: number; message: string } } => {
+    const g = auth!.gate(client);
+    return isAuthError(g) ? { error: { code: 401, message: g.error } } : { identity: g };
+  };
+  /** Who is writing: with `auth` the gate's identity, else the one the client carries -- as the Postgres listener's writerOf. */
+  const writerOf = (client: any): I | undefined => {
+    if (!auth) return client?.data?.identity as I | undefined;
+    const g = gated(client);
+    return "identity" in g ? g.identity : undefined;
+  };
   waitForLocks(db);
   const ledger = options.ledger ? createLedger(db) : undefined;
   const whoOf = (client: any): string | null => {
-    const identity = client?.data?.identity;
+    const identity = writerOf(client);
     if (identity === undefined || identity === null) return null;
     if (options.who) return options.who(identity);
     return typeof identity === "string" || typeof identity === "number" ? String(identity) : JSON.stringify(identity);
@@ -207,7 +260,7 @@ export function registerDocs(
   for (const doc of docs) docByPrefix.set(doc.prefix, doc);
 
   // Custom doc lookup: prefix → CustomDocDef
-  const customByPrefix = new Map<string, CustomDocDef<any>>();
+  const customByPrefix = new Map<string, CustomDocDef<any, I>>();
   for (const cd of customDocs) {
     customByPrefix.set(cd.prefix, cd);
   }
@@ -236,6 +289,7 @@ export function registerDocs(
     seenVersion = now;
     cache.clear();
     implied.clear();
+    for (const view of views.values()) view.doc = null;
     return true;
   }
 
@@ -252,8 +306,35 @@ export function registerDocs(
       catch (err) { if (db.inTransaction) db.run("ROLLBACK"); throw err; }
     };
 
-  /** Who a client is, to a recompute document: undefined, as on Postgres without an auth module. */
-  const identityOf = (_client: any): unknown => undefined;
+  /** Who a client is, to a custom document: the gate's identity with `auth`, else undefined -- as on Postgres. */
+  const identityOf = (client: any): I | undefined => (auth ? writerOf(client) : undefined);
+
+  /** An answer that may come later: `go` once `ok` says yes (awaited when it is a promise), else 404 -- not there for this identity. */
+  const whenOwned = (ok: boolean | Promise<boolean>, respond: (r: any) => void, go: () => void): void | Promise<void> => {
+    const no = () => respond({ error: { code: 404, message: "Not found" } });
+    if (typeof (ok as any)?.then !== "function") return ok ? go() : no();
+    return (ok as Promise<boolean>).then((yes) => (yes ? go() : no()), (err: any) => respond({ error: { code: 500, message: String(err?.message ?? err) } }));
+  };
+
+  /**
+   * With `auth`, a handler for one of these documents asks the gate first
+   * (401 without an identity) and then the document's `owns` (404 when it says
+   * no; a shared one has none) -- the Postgres listener's withDoc. `owned:
+   * false` for close: letting go never needs the owner's say. `custom: false`
+   * where a custom document answers without the gate (a write: 403; a close).
+   */
+  const guarded = (handler: (msg: any, client: any, respond: (r: any) => void) => any, { owned = true, custom = true } = {}) =>
+    (msg: any, client: any, respond: (r: any) => void) => {
+      if (!auth) return handler(msg, client, respond);
+      const docName = msg.doc as string;
+      const mine = findCustom(docName);
+      if (mine ? !custom : !findDoc(docName)) return handler(msg, client, respond);   // not gated here, or another backend's
+      const g = gated(client);
+      if ("error" in g) return respond(g);
+      const owns = mine ? mine.def.owns : options.owns;
+      if (!owned || !owns) return handler(msg, client, respond);
+      return whenOwned(owns(g.identity, docName), respond, () => handler(msg, client, respond));
+    };
 
   // Open implied docs whose root row has not been written yet.
   const implied = new Set<string>();
@@ -289,6 +370,31 @@ export function registerDocs(
   // Parsed criteria per open custom doc name (shared across clients of the same name).
   const customCriteria = new Map<string, unknown>();
 
+  // Membership docs: one view per doc name and identity (without auth, per
+  // name) -- its query's rows, and the subscribers who are that identity -- so
+  // one identity's rows are never served to another, as on Postgres. A view
+  // whose rows were dropped (`evict`, another process's write) is queried again.
+  type View = { docName: string; criteria: unknown; identity: I | undefined; doc: Record<string, Record<string, any>> | null; subs: Set<any> };
+  const views = new Map<string, View>();
+  const viewKey = (docName: string, identity: I | undefined): string =>
+    auth ? `${docName}\u0000${auth.asSqlArg && identity !== undefined ? String(auth.asSqlArg(identity)) : JSON.stringify(identity)}` : docName;
+  /** A view's rows, queried as its identity when it has none. */
+  function viewRows(view: View, def: CustomDocDef<any, I>): Record<string, Record<string, any>> {
+    if (!view.doc) {
+      const rowsByColl = def.query!(db, view.criteria, view.identity);
+      const doc: Record<string, Record<string, any>> = {};
+      for (const coll of def.watch) doc[coll] = toMap(rowsByColl[coll] ?? []);
+      view.doc = doc;
+    }
+    return view.doc;
+  }
+  /** Take `client` out of the views of `docName` (every name, when none), dropping a view nobody holds. */
+  function leaveViews(client: any, docName?: string): void {
+    for (const [key, view] of views) {
+      if ((docName === undefined || view.docName === docName) && view.subs.delete(client) && view.subs.size === 0) views.delete(key);
+    }
+  }
+
   // Track which doc names are subscribed (for scoped fan-out)
   const subscriptions = new Map<string, Set<any>>(); // docName → Set<ws clients>
 
@@ -301,7 +407,7 @@ export function registerDocs(
     return found ? { def: found, docId: docName.slice(found.prefix.length) } : null;
   }
 
-  function findCustom(docName: string): { def: CustomDocDef<any>; docId: string } | null {
+  function findCustom(docName: string): { def: CustomDocDef<any, I>; docId: string } | null {
     for (const [prefix, def] of customByPrefix) {
       if (docName.startsWith(prefix)) {
         return { def, docId: docName.slice(prefix.length) };
@@ -316,6 +422,7 @@ export function registerDocs(
   // `subscriptions`, growing the fan-out set monotonically (v0.5.0 review #7).
   // Mirrors the `close`-action eviction below.
   function releaseClient(client: any): void {
+    leaveViews(client);
     for (const [docName, subs] of subscriptions) {
       if (!subs.delete(client)) continue;
       if (subs.size === 0) {
@@ -741,7 +848,7 @@ export function registerDocs(
   // WebSocket handlers
   // ---------------------------------------------------------------------------
 
-  ws.on("open", (msg, client, respond) => {
+  ws.on("open", guarded((msg, client, respond) => {
     const docName = msg.doc as string;
     if (findCustom(docName) || findDoc(docName)) heardElsewhere();
 
@@ -756,7 +863,19 @@ export function registerDocs(
         catch (err: any) { log.error(`open custom ${docName} failed: ${err.message}`); return respond({ error: { code: 500, message: err.message } }); }
         if (doc == null) return respond({ error: { code: 404, message: "Not found" } });
         customCriteria.set(docName, criteria);
-      } else doc = loadCustom(docName, customMatch.def, customMatch.docId);
+      } else {
+        // Membership: this identity's view of the name, queried as it.
+        const identity = identityOf(client);
+        const key = viewKey(docName, identity);
+        let view = views.get(key);
+        if (!view) {
+          const fresh: View = { docName, criteria: customMatch.def.parse(customMatch.docId), identity, doc: null, subs: new Set() };
+          viewRows(fresh, customMatch.def);
+          views.set(key, (view = fresh));
+        }
+        doc = viewRows(view, customMatch.def);
+        view.subs.add(client);
+      }
 
       trackSubscribe(client, docName);
       if (!subscriptions.has(docName)) subscriptions.set(docName, new Set());
@@ -788,21 +907,7 @@ export function registerDocs(
     // so a copy kept from the stream of changes knows where it starts
     respond({ result: ledger ? { ...doc, _v: ledger.version(docName) } : doc });
     log.info(`opened ${docName}`);
-  });
-
-  /** A custom document from the cache, or queried into it. */
-  function loadCustom(docName: string, def: CustomDocDef<any>, docId: string): any {
-    let doc = cache.get(docName);
-    if (!doc) {
-      const criteria = def.parse(docId);
-      const rowsByColl = def.query!(db, criteria);
-      doc = {};
-      for (const coll of def.watch) doc[coll] = toMap(rowsByColl[coll] ?? []);
-      cache.set(docName, doc);
-      customCriteria.set(docName, criteria);
-    }
-    return doc;
-  }
+  }));
 
   /** A document from the cache, or loaded into it: an implied one opens empty, and its first write makes its row. */
   function load(docName: string, def: DocDef, docId: string): any | null {
@@ -833,12 +938,13 @@ export function registerDocs(
    */
   function reloadEvicted(): void {
     for (const [name, subs] of subscriptions) {
-      if (!subs.size || cache.has(name)) continue;
-      const custom = findCustom(name);
-      const match = custom ? null : findDoc(name);
-      if (custom?.def.recompute) continue;   // never cached: read again after each write
-      if (custom) loadCustom(name, custom.def, custom.docId);
-      else if (match) load(name, match.def, match.docId);
+      if (!subs.size || cache.has(name) || findCustom(name)) continue;   // a custom doc's: its views, below (a recompute doc is never kept)
+      const match = findDoc(name);
+      if (match) load(name, match.def, match.docId);
+    }
+    for (const view of views.values()) {
+      const custom = view.subs.size && !view.doc ? findCustom(view.docName) : null;
+      if (custom) viewRows(view, custom.def);
     }
   }
 
@@ -927,7 +1033,7 @@ export function registerDocs(
     else cache.delete(docName);
   }
 
-  ws.on("delta", (msg, client, respond) => {
+  ws.on("delta", guarded((msg, client, respond) => {
     const docName = msg.doc as string;
 
     if (findCustom(docName)) {
@@ -955,7 +1061,7 @@ export function registerDocs(
     // ledger): what delta applied, walked back, read from the document as it
     // was. Opt-in, so a browser writer is not sent rows it never asked for.
     respond({ result: msg.inverse || ledger ? { ack: true, ...out } : { ack: true } });
-  });
+  }, { custom: false }));
 
   if (ledger) {
     /**
@@ -998,17 +1104,40 @@ export function registerDocs(
         if (!subscriptions.has(entry.doc)) cache.delete(entry.doc); // loaded for this walk only
       }
     };
-    ws.on("undo", underLock(walk("undo")));
-    ws.on("redo", underLock(walk("redo")));
-    // A document's recent history: each entry says `mine`, never who wrote it.
-    ws.on("history", (msg, client, respond) => {
-      if (!findDoc(msg.doc)) return;
+    /**
+     * With `auth`, a walk passes the gate (401) and writes to its entry's
+     * document only for one who owns it (404), as on Postgres: asked of the
+     * cursor's next entry, which the walk then takes alone (409 if it has
+     * moved on meanwhile).
+     */
+    const walkAs = (way: "undo" | "redo") => {
+      const walked = underLock(walk(way));
+      return (msg: any, client: any, respond: (r: any) => void) => {
+        if (!auth) return walked(msg, client, respond);
+        const g = gated(client);
+        if ("error" in g) return respond(g);
+        const cursor = cursorOf(msg, client);
+        const entry = cursor === null ? undefined : way === "undo" ? ledger.nextUndo(cursor) : ledger.nextRedo(cursor);
+        if (!entry || !options.owns) return walked(msg, client, respond);
+        return whenOwned(options.owns(g.identity, entry.doc), respond, () => walked(msg.entry == null ? { ...msg, entry: entry.id } : msg, client, respond));
+      };
+    };
+    ws.on("undo", walkAs("undo"));
+    ws.on("redo", walkAs("redo"));
+    // A document's recent history, to whoever may open it: each entry says `mine`, never who wrote it.
+    ws.on("history", guarded((msg, client, respond) => {
+      const match = findDoc(msg.doc);
+      if (!match) return;
+      let there: unknown;
+      try { there = match.def.implied || loadDocFromSql(match.def, resolveScope(match.def, match.docId)); }
+      catch (err: any) { return respond({ error: { code: typeof err.code === "number" ? err.code : 500, message: named(err).message } }); }
+      if (!there) return respond({ error: { code: 404, message: "Not found" } });
       respond({ result: ledger.history(msg.doc, cursorOf(msg, client), msg.limit) });
-    });
+    }));
   }
 
   // A document as it stood at a time (`at`, ISO-8601): its temporal rows as they were then, as on Postgres.
-  ws.on("open_at", (msg, _client, respond) => {
+  ws.on("open_at", guarded((msg, _client, respond) => {
     const match = findDoc(msg.doc as string);
     if (!match) return;
     if (!msg.at) return respond({ error: { code: 400, message: "at is required" } });
@@ -1016,9 +1145,9 @@ export function registerDocs(
     try { doc = loadDocAt(db, schema, match.def, match.docId, String(msg.at)); }
     catch (err: any) { return respond({ error: { code: typeof err.code === "number" ? err.code : 500, message: named(err).message } }); }
     respond(doc ? { result: doc } : { error: { code: 404, message: "Not found" } });
-  });
+  }));
 
-  ws.on("close", (msg, client, respond) => {
+  ws.on("close", guarded((msg, client, respond) => {
     const docName = msg.doc as string;
     const isCustom = findCustom(docName) != null;
     const isStandard = findDoc(docName) != null;
@@ -1026,6 +1155,7 @@ export function registerDocs(
 
     trackUnsubscribe(client, docName);
     subscriptions.get(docName)?.delete(client);
+    if (isCustom) leaveViews(client, docName);
     if (subscriptions.get(docName)?.size === 0) {
       subscriptions.delete(docName);
       cache.delete(docName); // evict when no subscribers
@@ -1035,7 +1165,7 @@ export function registerDocs(
 
     respond({ result: { ack: true } });
     log.debug(`closed ${docName}`);
-  });
+  }, { owned: false, custom: false }));
 
   // ---------------------------------------------------------------------------
   // Custom-doc cross-pollination
@@ -1060,6 +1190,7 @@ export function registerDocs(
         const criteria = customCriteria.get(docName);
         if (criteria === undefined) continue;
         for (const client of subs) {
+          if (auth && "error" in gated(client)) continue;   // signed out since it opened: never read it as nobody
           try {
             const doc = def.recompute(db, criteria, identityOf(client));
             if (doc == null) continue;
@@ -1073,6 +1204,10 @@ export function registerDocs(
       }
     }
 
+
+    // Membership defs: per row, per view.
+    const viewsOf = new Map<string, number>();
+    for (const view of views.values()) if (view.subs.size) viewsOf.set(view.docName, (viewsOf.get(view.docName) ?? 0) + 1);
     for (const op of ops) {
       const parts = splitPath(op.path);
       // A row at whatever path the write told it: /<coll>/<id>, or a single
@@ -1083,25 +1218,16 @@ export function registerDocs(
       const id = parts[1] ?? (row?.id != null ? String(row.id) : undefined);
       if (id === undefined || !watchedCollections.has(coll)) continue;
 
-      // Bucket open docs by custom type.
+      // Each open view of a membership type, as its identity.
       for (const [prefix, def] of customByPrefix) {
         if (!def.matches || !def.watch.includes(coll)) continue;   // recompute defs: above
 
-        // Memoize the membership decision per distinct criteria for this op.
-        const decisionByCriteria = new Map<unknown, boolean>();
-
-        for (const [docName] of subscriptions) {
-          if (!docName.startsWith(prefix)) continue;
-          const criteria = customCriteria.get(docName);
-          if (criteria === undefined) continue;
-          const cached = cache.get(docName);
+        for (const view of views.values()) {
+          if (!view.docName.startsWith(prefix) || !view.subs.size) continue;
+          const cached = view.doc;
           if (!cached) continue;
-
-          let shouldBeIn = decisionByCriteria.get(criteria);
-          if (shouldBeIn === undefined) {
-            shouldBeIn = row == null ? false : def.matches!(coll, row, criteria);
-            decisionByCriteria.set(criteria, shouldBeIn);
-          }
+          const docName = view.docName;
+          const shouldBeIn = row == null ? false : def.matches!(coll, row, view.criteria, view.identity);
 
           const wasIn = cached[coll]?.[id] != null;
           const emitted: DeltaOp[] = [];
@@ -1117,8 +1243,16 @@ export function registerDocs(
             emitted.push({ op: "remove", path: joinPath(coll, id) });
           }
           // else: neither in nor becoming in — ignore.
+          if (!emitted.length) continue;
 
-          if (emitted.length) ws.publish(docName, { doc: docName, ops: emitted });
+          // The only view of its name: its subscribers are the channel's. Else
+          // each view's own subscribers, so one identity's rows reach only it.
+          const change = { doc: docName, ops: emitted };
+          if (viewsOf.get(docName) === 1) ws.publish(docName, change);
+          else {
+            const raw = JSON.stringify(change);
+            for (const c of view.subs) if (c.readyState === undefined || c.readyState === 1) c.send(raw);
+          }
         }
       }
     }
@@ -1133,7 +1267,7 @@ export function registerDocs(
     evict(docName: string) {
       cache.delete(docName);
       implied.delete(docName);
-      customCriteria.delete(docName);
+      for (const view of views.values()) if (view.docName === docName) view.doc = null;
     },
   };
 }

@@ -68,6 +68,19 @@ export interface DeltaAuth<Identity = unknown> {
   asSqlArg?(identity: Identity): string | number;
 }
 
+/**
+ * Default-deny, on every backend: with auth, a document says who owns it --
+ * `docTypeFromDef` and `createDocListener` (Postgres), `registerDocs` (the
+ * JSON file and SQLite), `defineCustomDoc` on each -- or is refused with this.
+ */
+export function ownerless(prefix: string, what = "registerDocType"): Error {
+  return new Error(
+    `${what}("${prefix}"): with auth, say who may open it -- ` +
+    `owns: (identity, docName) => boolean, or shared: true if every signed-in identity may hear every write to it. ` +
+    `A document's name is its broadcast channel: RLS filters what open reads, not what the channel carries.`,
+  );
+}
+
 export type AuthAction<Identity> = (
   params: any,
   client: any,
