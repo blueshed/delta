@@ -59,7 +59,10 @@ $$;
 -- children first, each asked for, so each is its own run, and the runs come back
 -- in reverse: parent first again. Without it (the two-argument form), removes
 -- one after another are taken for one run, right only for a single remove and
--- its cascade.
+-- its cascade. A single document's root written and then removed by the write
+-- is one row at two paths (/root, /root/id): the add that takes back its
+-- removal puts it back as it was before the write, so its replaces before the
+-- removal have no inverse of their own -- a walk would find /root gone.
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION _delta_inverse(p_before JSONB, p_ops JSONB, p_asked JSONB)
@@ -69,6 +72,7 @@ DECLARE
   v_run     JSONB := '[]'::jsonb;
   v_heads   TEXT[] := '{}';   -- the removes asked for, at the path the write tells each (/t/007 at /t/7)
   v_op      JSONB;
+  v_i       BIGINT;
   v_parts   TEXT[];
   v_prior   JSONB;
 BEGIN
@@ -80,8 +84,12 @@ BEGIN
       ELSE v_op->>'path' END;
   END LOOP;
 
-  FOR v_op IN SELECT * FROM jsonb_array_elements(COALESCE(p_ops, '[]'::jsonb)) LOOP
+  FOR v_op, v_i IN SELECT o, i FROM jsonb_array_elements(COALESCE(p_ops, '[]'::jsonb)) WITH ORDINALITY AS t(o, i) LOOP
     v_parts := _delta_split_path(v_op->>'path');
+    CONTINUE WHEN v_op->>'op' = 'replace' AND array_length(v_parts, 1) = 1 AND p_before->v_parts[1]->>'id' IS NOT NULL AND EXISTS (
+      SELECT 1 FROM jsonb_array_elements(p_ops) WITH ORDINALITY AS l(o, i)
+       WHERE l.i > v_i AND l.o->>'op' = 'remove'
+         AND l.o->>'path' = _delta_build_path(v_parts[1], p_before->v_parts[1]->>'id'));
     v_prior := _delta_row_at(p_before, v_parts);
     IF v_prior IS NOT NULL AND jsonb_typeof(v_prior) = 'object' THEN
       v_prior := _delta_strip_temporal(v_prior);

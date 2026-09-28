@@ -206,6 +206,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `replace /weddings/1/name` likewise. Another id is a 404 (`replace /courses/2` was a 400), a
   field that is no column still a 400. `validateOps` reads the segment as Postgres does: digits,
   or the root's own text id, where no column has that name, name the row.
+- **A single document's root written and then removed in one write can be undone, on every
+  backend** (todo #61). `[replace /courses/name, remove /courses/1]` through `course:1` recorded
+  an inverse of the course's add (as it was before the write), its drink's, and a `replace
+  /courses` putting the old name back -- one row at two paths, so the walk found `/courses` gone
+  and answered a conflict: the write could never be undone (SQLite, the JSON file and Postgres
+  alike). A root's replaces before its removal in the same write now have no inverse of their
+  own, since the add puts the root back as it was: the undo adds the course, then its drink,
+  the redo takes them, and the undo after it puts them back. `001g` replaces `_delta_inverse`
+  (`CREATE OR REPLACE`: re-apply the framework, or `bunx @blueshed/delta init`); a write recorded
+  before this keeps its inverse, and its undo still meets the conflict.
 
 ## [0.9.1] - 2026-09-27
 

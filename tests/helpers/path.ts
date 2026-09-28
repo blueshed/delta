@@ -836,6 +836,31 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
+    test("a course renamed and then removed through its own document in one write is undone as it was before the write, then its drink; redone, and undone again", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-course:1", "fo-board:1", "fo-menu:1"]);
+      const removed = await write(b.process, "fo-course:1", [
+        { op: "replace", path: "/courses/name", value: "Gone" },
+        { op: "remove", path: "/courses/1" },
+      ], { cursor: "s1" });
+      expect(removed.ops).toEqual([{ op: "replace", path: "/courses", value: course(1, "Gone") }, { op: "remove", path: "/courses/1" }, { op: "remove", path: "/drinks/1" }]);
+      const back = [{ op: "add", path: "/courses/1", value: course(1, "Soup") }, { op: "add", path: "/drinks/1", value: drink(1, 1, "Sherry") }];
+      const taken = [{ op: "remove", path: "/drinks/1" }, { op: "remove", path: "/courses/1" }];
+      expect(removed.inverse).toEqual(back);
+      const walked = async (way: string) => {
+        const { result } = await b.process.call(way, { cursor: "s1" });
+        return { ops: result.ops, conflict: result.conflict };
+      };
+      expect(await walked("undo")).toEqual({ ops: back, conflict: undefined });
+      expect(content((await b.process.call("open", { doc: "fo-course:1" })).result)).toEqual({ courses: course(1, "Soup"), drinks: { "1": drink(1, 1, "Sherry") } });
+      expect(await walked("redo")).toEqual({ ops: taken, conflict: undefined });
+      expect(await walked("undo")).toEqual({ ops: back, conflict: undefined });
+      const written = [{ op: "replace", path: "/courses/1", value: course(1, "Gone") }, { op: "remove", path: "/courses/1" }, { op: "remove", path: "/drinks/1" }];
+      await expectTold(b, "fo-menu:1", [written, back, taken, back]);
+      await expectTold(b, "fo-board:1", [written, back, taken, back]);
+      await assertCopiesHold(b, copies);
+    });
+
     test("a household removed through its own document is undone: the board and the document hear it come back", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-household:1", "fo-board:1"]);

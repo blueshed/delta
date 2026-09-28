@@ -1042,6 +1042,11 @@ function toldAt(path: string): string {
  * asked for, so each is its own run, and the runs come back in reverse: parent
  * first again. Without `asked`, removes one after another are taken for one
  * run, which is right only for a single remove and its cascade.
+ *
+ * A single document's root written and then removed by the write is one row
+ * at two paths (`/<root>`, `/<root>/<id>`): the add that takes back its
+ * removal puts it back as it was before the write, so its replaces before the
+ * removal have no inverse of their own -- a walk would find `/<root>` gone.
  */
 export function inverseOf(before: any, applied: DeltaOp[], asked?: DeltaOp[]): DeltaOp[] {
   const heads = asked && new Set(asked.filter((op) => op.op === "remove").map((op) => toldAt(op.path)));
@@ -1051,7 +1056,10 @@ export function inverseOf(before: any, applied: DeltaOp[], asked?: DeltaOp[]): D
     inverse.unshift(...run);
     run = [];
   };
-  for (const op of applied) {
+  const rootAt = (coll: string) => (before?.[coll]?.id != null ? joinPath(coll, String(before[coll].id)) : undefined);
+  for (const [i, op] of applied.entries()) {
+    const parts = splitPath(op.path);
+    if (op.op === "replace" && parts.length === 1 && applied.slice(i + 1).some((later) => later.op === "remove" && later.path === rootAt(parts[0]!))) continue;
     const prior = withoutStorage(rowAt(before, op.path)) ?? null;   // null: not there before the write (made by it), as Postgres says it
     if (op.op === "remove") {
       if (heads?.has(op.path)) flush();   // a remove asked for starts its own run; one it cascaded to joins it
