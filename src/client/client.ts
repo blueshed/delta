@@ -93,6 +93,10 @@ function reconnectingWebSocket(url: string): WebSocket {
     closed = true;
     try { ws.close(); } catch { /* already closed */ }
   };
+  // Drop this connection and make the next, as a transport drop would.
+  (proxy as any).reconnect = () => {
+    try { ws.close(); } catch { /* already closed */ }
+  };
 
   Object.defineProperty(proxy, "readyState", {
     get: () => ws.readyState,
@@ -322,6 +326,34 @@ export function connectWs(
       .catch((err: any) => { entry.resyncing = false; docLog.error(`resync ${name}: ${err.message}`); });
   }
 
+  // The server let this socket go of a document it may no longer hear (#17),
+  // and said why. A write of it waiting for its echo has none coming: it
+  // resolves now. A 401 is the socket's session: connect again, so onConnect
+  // signs it in and every document re-opens. Anything else (a 404: taken off
+  // it) is the document's: open it again -- taken, it is the server's copy and
+  // hears on; refused, the copy is let go, null, and onOps told so. It stays
+  // tracked, so the next connect opens it again.
+  function letGoDoc(name: string, entry: OpenDocEntry, error: DeltaError): void {
+    docLog.warn(`${name}: let go by the server (${error.code} ${error.message})`);
+    settleEchoes(entry, true);
+    if (error.code === 401) { (ws as any).reconnect(); return; }
+    sendInternal({ action: "open", doc: name })
+      .then((state) => entry.onOpen(state))
+      .catch((err: any) => {
+        docLog.error(`re-open ${name}: ${err?.message ?? String(err)}`);
+        if (docs.get(name) !== entry || entry.data.peek() === null) return;
+        entry.serverVersion = undefined;
+        for (const handler of entry.opsHandlers) {
+          try { handler([{ op: "replace", path: "", value: null }]); }
+          catch (e: any) { docLog.error(`onOps handler threw: ${e.message}`); }
+        }
+        batch(() => {
+          entry.data.set(null);
+          entry.dataVersion.set(entry.dataVersion.peek() + 1);
+        });
+      });
+  }
+
   ws.addEventListener("open", async () => {
     log.info("connected");
     if (opts?.onConnect) {
@@ -382,6 +414,12 @@ export function connectWs(
         }
       } else {
         log.debug(`notify ${JSON.stringify(msg).slice(0, 80)}`);
+
+        // A document the server let this socket go of, and why.
+        if (msg.doc && msg.error && !msg.ops) {
+          const entry = docs.get(msg.doc);
+          if (entry && entry.opened) letGoDoc(msg.doc, entry, msg.error);
+        }
 
         // Doc op broadcast — dispatch to the matching entry if any.
         if (msg.doc && msg.ops) {

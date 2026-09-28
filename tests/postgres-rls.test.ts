@@ -315,6 +315,8 @@ describe("a socket hears a document while it may open it (todo #17)", () => {
     expect(heard(bob, "rls-mine:2")).toHaveLength(1);
     expect(JSON.stringify(alice.sent)).not.toContain("bob after");
     expect(alice.subscriptions.has("rls-mine:2")).toBe(false);
+    // and she is told so, for the client to open it again (and find it not there) or let it go
+    expect(alice.sent.filter((m: any) => m.doc === "rls-mine:2" && m.error)).toEqual([{ doc: "rls-mine:2", error: { code: 404, message: "Not found" } }]);
     expect((await sendAndAwait(ws, alice, { action: "open", doc: "rls-mine:2" })).error).toEqual({ code: 404, message: "Not found" });
   });
 
@@ -338,6 +340,8 @@ describe("a socket hears a document while it may open it (todo #17)", () => {
     expect(heard(fresh, "rls-mine:1")).toHaveLength(1);
     expect(heard(stale, "rls-mine:1")).toEqual([]);
     expect(stale.subscriptions.has("rls-mine:1")).toBe(false);
+    // told why: a 401, for the client to sign in again (its connection runs onConnect afresh)
+    expect(stale.sent.filter((m: any) => m.error)).toEqual([{ doc: "rls-mine:1", error: { code: 401, message: "Session expired" } }]);
   });
 
   test("a gate that throws for one socket refuses that socket alone: the others still hear every write", async () => {
@@ -361,6 +365,7 @@ describe("a socket hears a document while it may open it (todo #17)", () => {
     expect(heard(tab, "rls-mine:1")).toHaveLength(2);
     expect(heard(broken, "rls-mine:1")).toEqual([]);
     expect(broken.subscriptions.has("rls-mine:1")).toBe(false);
+    expect(broken.sent.filter((m: any) => m.error)).toEqual([{ doc: "rls-mine:1", error: { code: 401, message: "Authentication failed" } }]);
   });
 
   test("a custom document too: taken off a membership view or a recompute one, a socket hears no more of it", async () => {
@@ -389,5 +394,6 @@ describe("a socket hears a document while it may open it (todo #17)", () => {
     expect(heard(alice, "rls-tally:team")).toHaveLength(1);
     expect(alice.subscriptions.has("rls-bag:team")).toBe(false);
     expect(alice.subscriptions.has("rls-tally:team")).toBe(false);
+    expect(alice.sent.filter((m: any) => m.error).map((m: any) => [m.doc, m.error.code]).sort()).toEqual([["rls-bag:team", 404], ["rls-tally:team", 404]]);
   });
 });

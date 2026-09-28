@@ -768,3 +768,100 @@ test("delta's client imports railroad's subpaths, never the root barrel", async 
   expect(src).not.toMatch(/from "@blueshed\/railroad"/);
   expect(src).toMatch(/from "@blueshed\/railroad\/signals"/);
 });
+
+// ---------------------------------------------------------------------------
+// #17: the server lets a socket go of a document it may no longer hear, and
+// tells it so -- `{ doc, error: { code, message } }`, no id. Told nothing, the
+// copy stayed open and stale (no gap in the versions to show it), and a write
+// in flight waited ECHO_WAIT_MS for an echo that never came.
+// ---------------------------------------------------------------------------
+
+describe("a document the server lets go (#17)", () => {
+  function letGoServer() {
+    const subs = new Set<any>();
+    const state = { opens: 0, connects: 0, refuse: false as false | number, snapshot: { items: { "1": { id: 1 } }, _v: 1 } as any };
+    server = Bun.serve({
+      port: 0,
+      fetch(req, s) { return s.upgrade(req) ? undefined as any : new Response("no", { status: 400 }); },
+      websocket: {
+        open(ws) { subs.add(ws); state.connects++; },
+        close(ws) { subs.delete(ws); },
+        message(ws, raw) {
+          const msg = JSON.parse(String(raw));
+          if (msg.action === "open") {
+            state.opens++;
+            ws.send(JSON.stringify(state.refuse
+              ? { id: msg.id, error: { code: state.refuse, message: state.refuse === 404 ? "Not found" : "Session expired" } }
+              : { id: msg.id, result: structuredClone(state.snapshot) }));
+          } else if (msg.action === "delta") {
+            ws.send(JSON.stringify({ id: msg.id, result: { ack: true, version: 2 } }));   // acked; its echo never comes
+          } else if (msg.id != null) {
+            ws.send(JSON.stringify({ id: msg.id, result: { ok: true } }));
+          }
+        },
+      },
+    });
+    const push = (frame: any) => { for (const ws of subs) ws.send(JSON.stringify(frame)); };
+    return { url: `ws://localhost:${server.port}/ws`, state, push };
+  }
+  const until = async (ok: () => boolean, ms = 4000) => { const end = Date.now() + ms; while (!ok() && Date.now() < end) await Bun.sleep(20); };
+
+  test("taken off it (404), the client opens it again: refused, its copy is let go -- null, and onOps told so", async () => {
+    const srv = letGoServer();
+    const client = connectWs(srv.url);
+    const doc = openDoc<any>("items:", client);
+    await doc.ready;
+    const told: DeltaOp[][] = [];
+    doc.onOps((ops) => told.push(ops));
+    srv.state.refuse = 404;
+    srv.push({ doc: "items:", error: { code: 404, message: "Not found" } });
+    await until(() => doc.data.peek() === null);
+    expect(doc.data.peek()).toBeNull();
+    expect(srv.state.opens).toBe(2);
+    expect(told).toEqual([[{ op: "replace", path: "", value: null }]]);
+    client.close();
+  });
+
+  test("put back before it asks, the client's open again is taken: its copy is the server's, and it hears on", async () => {
+    const srv = letGoServer();
+    const client = connectWs(srv.url);
+    const doc = openDoc<any>("items:", client);
+    await doc.ready;
+    srv.state.snapshot = { items: { "1": { id: 1 }, "2": { id: 2 } }, _v: 3 };
+    srv.push({ doc: "items:", error: { code: 404, message: "Not found" } });
+    await until(() => doc.data.peek()?.items?.["2"] !== undefined);
+    expect(doc.data.peek()).toEqual({ items: { "1": { id: 1 }, "2": { id: 2 } } });
+    srv.push({ doc: "items:", ops: [{ op: "add", path: "/items/3", value: { id: 3 } }], v: 4 });
+    await until(() => doc.data.peek()?.items?.["3"] !== undefined);
+    expect(Object.keys(doc.data.peek().items)).toEqual(["1", "2", "3"]);
+    client.close();
+  });
+
+  test("a write in flight when its document is let go resolves then, not after waiting for an echo that never comes", async () => {
+    const srv = letGoServer();
+    const client = connectWs(srv.url);
+    const doc = openDoc<any>("items:", client);
+    await doc.ready;
+    srv.state.refuse = 404;
+    const t0 = Date.now();
+    const sent = doc.send([{ op: "add", path: "/items/-", value: {} }]);
+    await Bun.sleep(50);
+    srv.push({ doc: "items:", error: { code: 404, message: "Not found" } });
+    expect(await sent).toEqual({ ack: true, version: 2 });
+    expect(Date.now() - t0).toBeLessThan(2000);
+    client.close();
+  });
+
+  test("its session over (401), the client connects again: onConnect signs it in, and its documents re-open", async () => {
+    const srv = letGoServer();
+    let signIns = 0;
+    const client = connectWs(srv.url, { onConnect: async (ws) => { signIns++; await ws.send({ action: "call", method: "authenticate", params: {} }); } });
+    const doc = openDoc<any>("items:", client);
+    await doc.ready;
+    srv.state.snapshot = { items: { "9": { id: 9 } }, _v: 5 };
+    srv.push({ doc: "items:", error: { code: 401, message: "Session expired" } });
+    await until(() => doc.data.peek()?.items?.["9"] !== undefined, 6000);
+    expect({ connects: srv.state.connects, signIns, data: doc.data.peek() }).toEqual({ connects: 2, signIns: 2, data: { items: { "9": { id: 9 } } } });
+    client.close();
+  });
+});

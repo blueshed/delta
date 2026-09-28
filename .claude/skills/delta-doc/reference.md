@@ -363,7 +363,7 @@ A single document may remove the root it is named for, on every backend: `remove
 
 **Per-user list isolation** — each user sees only their own rows. The most common multi-tenant shape.
 
-Two parts: (1) scope the generic doc by a user-id carried in the doc name, (2) tell `docTypeFromDef` who owns each name. A document's name is the channel its writes are broadcast on — whoever has it open hears every write made through it, **whatever RLS lets them read** — so the name, not RLS, is what keeps one user's rows off another user's socket. `owns` is that check: the listener asks it before `open`, `delta`, `open_at` and `history`, and before an `undo` or `redo` writes to the entry's document, and answers 404 when it says no. It asks it again, with the gate, before it tells a socket of a change to a document it has open, and lets go of a socket either refuses: one taken off a document hears no more of it, though it asks for nothing, and its next request says why (404, or 401). That is once per identity per change, not per socket, so keep `owns` cheap -- a name check, or a membership the app caches. With `auth`, `docTypeFromDef` throws unless it is given `owns` or `shared: true`, and the listener holds every other document to the same: see *Every document says who owns it*, below.
+Two parts: (1) scope the generic doc by a user-id carried in the doc name, (2) tell `docTypeFromDef` who owns each name. A document's name is the channel its writes are broadcast on — whoever has it open hears every write made through it, **whatever RLS lets them read** — so the name, not RLS, is what keeps one user's rows off another user's socket. `owns` is that check: the listener asks it before `open`, `delta`, `open_at` and `history`, and before an `undo` or `redo` writes to the entry's document, and answers 404 when it says no. It asks it again, with the gate, before it tells a socket of a change to a document it has open, and lets go of a socket either refuses: one taken off a document hears no more of it, though it asks for nothing, and is told so at once: `{ doc, error: { code, message } }`. The client acts on it: a 404, it opens the document again, and when that is refused lets its copy go (`doc.data` null, `onOps` told `replace ""` null; the next connect opens it again); a 401, it connects again, so `onConnect` signs it in and every document re-opens. A write of its own waiting for its echo resolves then. That is once per identity per change, not per socket, so keep `owns` cheap -- a name check, or a membership the app caches. With `auth`, `docTypeFromDef` throws unless it is given `owns` or `shared: true`, and the listener holds every other document to the same: see *Every document says who owns it*, below.
 
 ```ts
 // types.ts
@@ -578,7 +578,7 @@ localStorage.removeItem("token");
 
 The same teardown happens on an identity switch (a fresh `authenticate` after a `logout`): the old subscriptions are gone, so you must re-`openDoc` the docs the new user should see — their streams won't silently carry over from the previous identity.
 
-**A token that runs out.** `jwtAuth` keeps the token's `exp` with the identity. From then the gate refuses the socket and drops its subscriptions, as `logout` does -- asked at a request, or by the listener before it tells the socket of a change, so a socket that asks for nothing still hears nothing past its `exp`. Every request after it answers 401 `Session expired: authenticate again` until the socket signs in again. The socket stays connected, so `onConnect` does not run again: on that 401, `authenticate` with a fresh token and re-open the documents.
+**A token that runs out.** `jwtAuth` keeps the token's `exp` with the identity. From then the gate refuses the socket and drops its subscriptions, as `logout` does -- asked at a request, or by the listener before it tells the socket of a change, so a socket that asks for nothing still hears nothing past its `exp`. Every request after it answers 401 `Session expired: authenticate again` until the socket signs in again. A socket the listener lets go of a document for it is told so (`{ doc, error: { code: 401 } }`), and the client connects again, so `onConnect` runs with a fresh token and its documents re-open. A request's own 401 leaves the socket as it is: on it, `authenticate` with a fresh token and re-open the documents.
 
 ## RLS with `app.user_id`
 
@@ -1111,6 +1111,7 @@ Server-initiated broadcasts (no id):
 | Server → Client | Shape |
 |---|---|
 | Op broadcast | `{ doc, ops: DeltaOp[], v? }` — `v` is the version after the change, where the backend versions |
+| Let go (Postgres, with `auth`) | `{ doc, error: { code, message } }` — the socket may no longer hear `doc` and is unsubscribed from it: 401, its gate refused it (the client connects again); 404, `owns` did (the client opens it again, and lets its copy go if refused) |
 
 Every message is JSON. Clients use `doc.send(ops)` internally; the protocol is only relevant when writing a custom action handler.
 

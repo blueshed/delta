@@ -206,43 +206,54 @@ export async function createDocListener<I = unknown>(
   // gate and the document's `owns`, and so does every request; a change told
   // asks them again of each socket it is told to, and a socket refused is let
   // go of the document -- taken off it, or its session run out, it hears no
-  // more, though it asks for nothing (its next request says why: 401, 404).
+  // more, though it asks for nothing, and is told so (letGo).
   // The gate is asked of each socket (a session is a socket's), and is cheap by
   // contract; `owns` once per identity per change (`asked`), so what a change
   // costs is the identities a document has open, not its sockets -- one name
   // per owner keeps that small, and a shared document asks the gate alone.
   // Without auth nothing is asked, and publishing stays one call per change.
   type Owns = (identity: I, docName: string) => boolean | Promise<boolean>;
-  function mayHear(client: any, docName: string, owns: Owns | undefined, asked: Map<string, Promise<boolean>>, as?: string): Promise<boolean> | boolean {
+  /** Why a socket may no longer hear a document: the gate's refusal (401), or the owner's (404). */
+  type Refusal = { code: number; message: string };
+  const NOT_FOUND: Refusal = { code: 404, message: "Not found" };
+  function mayHear(client: any, docName: string, owns: Owns | undefined, asked: Map<string, Promise<Refusal | null>>, as?: string): Promise<Refusal | null> | Refusal | null {
     const gated = auth!.gate(client);
-    if (isAuthError(gated)) return false;
+    if (isAuthError(gated)) return { code: 401, message: gated.error };
     const key = identityKey(gated as I);
-    if (as !== undefined && key !== as) return false;   // the socket is someone else now: its view is not theirs
-    if (!owns) return true;
+    if (as !== undefined && key !== as) return NOT_FOUND;   // the socket is someone else now: its view is not theirs
+    if (!owns) return null;
     let may = asked.get(key);
     if (!may) {
       may = Promise.resolve()
         .then(() => owns(gated as I, docName))
-        .then((yes) => !!yes, (err) => { log.error(`owns ${docName}: ${errMsg(err)}`); return false; });
+        .then((yes) => (yes ? null : NOT_FOUND), (err) => { log.error(`owns ${docName}: ${errMsg(err)}`); return NOT_FOUND; });
       asked.set(key, may);
     }
     return may;
   }
   /**
-   * Let go of `docName` each of `subs` that may no longer hear it. A gate (or
-   * anything else) that throws for one socket refuses that socket alone: the
-   * change is still told to the rest, and the document's version moves on.
+   * Let go of `docName` each of `subs` that may no longer hear it, and tell it
+   * so -- `{ doc, error: { code, message } }`, which the client acts on (a 401:
+   * it connects again, so `onConnect` signs it in and every document re-opens;
+   * a 404: it opens the document again, and lets it go when that is refused).
+   * Told nothing, its copy would stay open and stale, with no gap in the
+   * versions to show it, and a write of its own in flight would wait for an
+   * echo that never comes. A gate (or anything else) that throws for one
+   * socket refuses that socket alone: the change is still told to the rest,
+   * and the document's version moves on.
    */
   async function letGo(docName: string, subs: Set<any>, owns: Owns | undefined, as?: string): Promise<void> {
-    const asked = new Map<string, Promise<boolean>>();
+    const asked = new Map<string, Promise<Refusal | null>>();
     await Promise.all([...subs].map(async (client) => {
-      let may = false;
-      try { may = await mayHear(client, docName, owns, asked, as); }
-      catch (err) { log.error(`gate for ${docName}: ${errMsg(err)}`); }
-      if (may) return;
+      let refused: Refusal | null;
+      try { refused = await mayHear(client, docName, owns, asked, as); }
+      catch (err) { log.error(`gate for ${docName}: ${errMsg(err)}`); refused = { code: 401, message: "Authentication failed" }; }
+      if (!refused) return;
       subs.delete(client);
       try { trackUnsubscribe(client, docName); } catch { /* the socket may be closing */ }
-      log.info(`let go of ${docName}: it may no longer hear it`);
+      try { if (client.readyState === undefined || client.readyState === 1) client.send(JSON.stringify({ doc: docName, error: refused })); }
+      catch { /* the socket may be closing */ }
+      log.info(`let go of ${docName}: ${refused.code} ${refused.message}`);
     }));
   }
   const ownsOf = (docName: string): Owns | undefined => {
