@@ -602,6 +602,21 @@ export function fanOutCases(backend: () => PathBackend): void {
       await expectTold(b, "fo-title:1", [[renamed], [{ op: "replace", path: "/weddings", value: { id: 1, name: "ours" } }]]);
       await assertCopiesHold(b, copies);
     });
+
+    test("a row that leaves the document in a write is not there for the rest of it (404), and nothing is written: moved to the other wedding and then removed, renamed or given a drink; out of a list's condition, or added outside it, and then written", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-board:2", "fo-course:1", "fo-courses-like:So", "fo-all-courses:"]);
+      const code = async (doc: string, ops: unknown[]) => (await b.process.call("delta", { doc, ops })).error?.code;
+      const moved = { op: "replace", path: "/courses/1/weddings_id", value: 2 };
+      expect(await code("fo-board:1", [moved, { op: "remove", path: "/courses/1" }])).toBe(404);
+      expect(await code("fo-board:1", [moved, { op: "replace", path: "/courses/1/name", value: "X" }])).toBe(404);
+      expect(await code("fo-board:1", [moved, { op: "replace", path: "/drinks/1/name", value: "X" }])).toBe(404); // its drink went with it
+      expect(await code("fo-board:1", [moved, { op: "add", path: "/drinks/-", value: { courses_id: 1, name: "Gin" } }])).toBe(404);
+      expect(await code("fo-courses-like:So", [{ op: "replace", path: "/courses/1/name", value: "Xyz" }, { op: "replace", path: "/courses/1/name", value: "Soup2" }])).toBe(404);
+      expect(await code("fo-courses-like:So", [{ op: "add", path: "/courses/-", value: { weddings_id: 1, name: "Fish" } }, { op: "replace", path: "/courses/3/name", value: "Sole" }])).toBe(404);
+      await expectSilent(b, "fo-board:1", "fo-board:2", "fo-course:1", "fo-courses-like:So", "fo-all-courses:");
+      await assertCopiesHold(b, copies);
+    });
   });
 
   describe("a row one document holds as a map and another as its root", () => {

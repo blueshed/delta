@@ -196,7 +196,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the answer, the ledger's entry and its inverse follow it: the drink's write is told as the
   replace and then the remove to every document that held it, and undone puts the drink back
   as it was. A row the write made is `null` in its inverse (`replace /<coll>/<id>` with
-  `value: null`), as on Postgres, where SQLite left the value out.
+  `value: null`), as on Postgres, where SQLite left the value out. A row that leaves the
+  document earlier in the write -- `replace /courses/1/weddings_id` to another wedding, a name
+  out of a list's condition, an add outside it -- is not the document's to write for the rest of
+  it (404, and nothing is written), as on Postgres: each op asks the document's scope of the
+  tables as they stand at that point, as `_delta_row_in_scope` does, not of the copy it opened
+  with, which let SQLite and the JSON file rename, remove or add under a row the document no
+  longer held.
 - **SQLite: a single document's root named by its id is its root, as on Postgres** (todo #53).
   Through `course:1`, `replace /courses/1 { name }` -- the root by its collection and id, as a
   list document says it -- was a 400 (`Unknown field: 1`) on SQLite and the JSON file, and

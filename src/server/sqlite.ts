@@ -489,6 +489,19 @@ export function registerDocs(
     const touched: Touched[] = [];
 
     /**
+     * The row of `table` the document holds, as the tables stand at this point
+     * in the write -- Postgres's `_delta_row_in_scope`: you may write what you
+     * may read. A row that has left the document earlier in the write (moved
+     * to another parent, out of a list's condition, its parent gone) is not its
+     * to write for the rest of it; null when it is not there or not the document's.
+     * The document's copy is not asked: it is the document as it was opened.
+     */
+    const held = (table: ResolvedTable, id: string | number): any | null => {
+      const row = readRow(table, id);
+      return row && holds(def, scope, table.docKey, row) ? row : null;
+    };
+
+    /**
      * Replace fields of a row the document holds -- the root (`root`), or a row
      * of a map -- as the op says, where it is sent: one close + reinsert
      * (temporal; each write its own `now()`, so two in one batch never share a
@@ -500,8 +513,8 @@ export function registerDocs(
      */
     const replaceRow = (table: ResolvedTable, id: string | number, fields: Record<string, unknown>, root: boolean) => {
       const collKey = table.docKey;
-      const present = root ? doc[collKey] : doc[collKey]?.[id];
-      if (!present) refuse(404, `Row not found: ${collKey}/${id}`);   // not this document's, or removed earlier in this write
+      const present = held(table, id);
+      if (!present) refuse(404, `Row not found: ${collKey}/${id}`);   // not this document's, or gone from it earlier in this write
       const before = holders(collKey, present, docName);
       const ts = now();
       if (table.temporal) closeRow(db, table, id, ts);
@@ -579,9 +592,14 @@ export function registerDocs(
           // A DIRECT child's FK is forced to `rootId` by insertCollectionRow, but a
           // grandchild's comes verbatim from the client. Unchecked, that grafts the
           // new row onto another doc's parent — a cross-doc write. Require the named
-          // parent to be in THIS doc's scope. (The root's own parent is not in the
-          // document: its value names it, as a list's root row's does.)
-          if (!isRoot) assertParentInScope(doc, def, table, row, list);
+          // parent to be in THIS doc's scope, as it stands now. (The root's own
+          // parent is not in the document: its value names it, as a list's root
+          // row's does; a list's included collection is whole.)
+          const parent = table.parent;
+          if (!isRoot && parent && (list ? parent.collection === def.root : parent.collection !== def.root)) {
+            const fk = row[parent.fkColumn];
+            if (fk == null || !held(schema.tables[parent.collection]!, rowId(fk as string | number))) refuse(404, `Row not found: ${parent.collection}/${fk ?? ""}`);
+          }
           const ts = now();
           const fullRow = insertCollectionRow(db, schema, table, id, rootId, def, row, ts, list);
           if (isRoot) doc[collKey] = fullRow;
@@ -591,10 +609,8 @@ export function registerDocs(
         } else if (op.op === "remove") {
           // Remove row + cascades. `removeRow` addresses rows by id ALONE, so
           // without this gate a client could name any id and delete a sibling
-          // doc's row (the field-replace path below has always made the
-          // equivalent check via `doc[collKey]?.[id]`).
-          if (!isRoot) assertRowInScope(doc, collKey, id);
-          else if (!doc[collKey]) refuse(404, `Row not found: ${collKey}/${id}`);   // removed earlier in this write
+          // doc's row -- or one that has left this document earlier in the write.
+          if (!held(table, id)) refuse(404, `Row not found: ${collKey}/${id}`);
           // who holds the row and every row the cascade takes, asked before any is gone
           const befores = new Map(cascadeRows(table, id, def).map(({ table: t, row }) => [`${t.docKey}/${row.id}`, holders(t.docKey, row, docName)]));
           const cascadeOps = removeRow(db, schema, table, collKey, id, doc, def);
@@ -1650,42 +1666,15 @@ function updateRow(db: any, table: ResolvedTable, id: string | number, row: any)
 // Write scoping
 // ---------------------------------------------------------------------------
 //
-// A loaded doc holds EXACTLY the rows its scope admits — that's what
-// `loadDocFromSql` builds. So "is this row in the doc?" IS the scope check,
-// and these two guards make every write path ask it. Reads were always scoped;
-// writes addressed rows by bare id, so a client holding `customer:alice` could
-// name a row of `customer:bob` and reach it. The error message deliberately
-// matches the "not there" case — a distinct "forbidden" would confirm the row
-// exists to someone probing ids.
-
-/** Throw unless `id` is a row this doc actually holds. */
-function assertRowInScope(doc: any, collKey: string, id: string | number): void {
-  if (doc[collKey]?.[id] == null) refuse(404, `Row not found: ${collKey}/${id}`);
-}
-
-/**
- * Throw unless a new row's parent is in scope. Only meaningful for
- * grandchildren-and-deeper: a direct child of the doc root has its FK assigned
- * server-side, and an unparented collection is loaded in full (so every row of
- * it is in scope by construction).
- */
-function assertParentInScope(
-  doc: any,
-  def: DocDef,
-  table: ResolvedTable,
-  row: Record<string, unknown> | undefined,
-  list = false,
-): void {
-  const parent = table.parent;
-  if (!parent) return;
-  // single mode: a direct child's key is the root's; list mode: an included collection is whole
-  if (!list && parent.collection === def.root) return;
-  if (list && parent.collection !== def.root) return;
-  const fk = row?.[parent.fkColumn];
-  if (fk == null || doc[parent.collection]?.[String(fk)] == null) {
-    refuse(404, `Row not found: ${parent.collection}/${fk ?? ""}`);
-  }
-}
+// You may write what you may read. Reads were always scoped; writes addressed
+// rows by bare id, so a client holding `customer:alice` could name a row of
+// `customer:bob` and reach it. Every row-addressed write asks `held` (in
+// applyOps): the row as the tables stand at that point in the write, judged by
+// the rule a document is read by (`holds`), as Postgres asks
+// `_delta_row_in_scope` -- so a row that left the document earlier in the same
+// write is not its to write. The error message deliberately matches the "not
+// there" case: a distinct "forbidden" would confirm the row exists to someone
+// probing ids.
 
 function removeRow(
   db: any,
