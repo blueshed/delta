@@ -302,7 +302,7 @@ BEGIN
     -- asked: an undo of the root's removal puts it back (todo #43), and a
     -- walk of such a document starts from the root absent, guarded by its
     -- plan (_delta_walk_plan), as SQLite's and the JSON file's are.
-    IF NOT v_is_list AND NOT p_walk THEN
+    IF NOT v_is_list AND NOT COALESCE(p_walk, FALSE) THEN   -- a walk not said (null) is none
       EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I WHERE id = $1)', v_root_view) INTO v_exists USING v_doc_id;
       IF NOT v_exists THEN
         RAISE EXCEPTION 'document not found: % (its root, %, is not there)',

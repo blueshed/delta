@@ -181,8 +181,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   An undo or redo is not asked: undoing the removal of a document's own root puts it back (#43),
   and a walk of a document whose root is gone starts from it absent, as on SQLite and the JSON
   file. `delta_apply` gains a three-argument form, `delta_apply(doc, ops, walk)`, which
-  `delta_apply_logged` calls with `walk` for an entry that walks another; the two-argument form
-  is no walk. `validateOps` refuses the add of another root row too, when it knows the document
+  `delta_apply_logged` calls with `walk` for an entry that walks another; the two-argument form,
+  and a `walk` of null, is no walk. `validateOps` refuses the add of another root row too, when it knows the document
   is single (`{ doc }`, or `list: false`); given no mode, a root row's add is taken, as a list's.
 - **`bun.lock` matches `package.json`** (todo #49): it lacked the optional `@electric-sql/pglite`
   peer, so every `bun install` in a fresh checkout changed it.

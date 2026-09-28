@@ -227,6 +227,23 @@ describe("pglite: the log keeps the write as applied only where the writer was t
 });
 
 /**
+ * Only a walk (an undo or redo) writes through a single document whose root is
+ * gone (todo #59, #43): `delta_apply(doc, ops, walk)` with walk true. A walk
+ * that is not said -- false, or null, from a caller composing it -- is none.
+ */
+describe("pglite: only a walk writes through a document whose root is gone", () => {
+  test("delta_apply's walk, false or null, is no walk: a 404 (P0002)", async () => {
+    await pool.query(`SELECT delta_apply('fo-board:1', '[{"op":"remove","path":"/courses/1"}]'::jsonb)`);
+    const drink = JSON.stringify([{ op: "add", path: "/drinks/-", value: { name: "Port" } }]);
+    for (const walk of ["FALSE", "NULL"]) {
+      const code = await pool.query(`SELECT delta_apply('fo-course:1', $1::jsonb, ${walk})`, [drink]).then(() => "taken", (err: any) => err.code);
+      expect({ walk, code }).toEqual({ walk, code: "P0002" });
+    }
+    expect((await pool.query("SELECT count(*)::int AS n FROM fo_drinks WHERE courses_id = 1")).rows).toEqual([{ n: 0 }]);
+  });
+});
+
+/**
  * A listener newer than the framework SQL it runs on -- vendored with `delta
  * init` and not re-applied -- has no `_delta_fetch_log` to read. It reads
  * `delta_fetch_ops` instead, each entry heard as told, and says once that the
