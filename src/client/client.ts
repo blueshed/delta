@@ -28,7 +28,7 @@
  */
 // Subpaths, not the root barrel: the barrel loads railroad's JSX, whose global
 // `JSX` namespace clashes with React's in an app that only wants the socket.
-import { signal, batch, hasActiveDisposeScope, trackDispose } from "@blueshed/railroad/signals";
+import { signal, batch, hasActiveDisposeScope, trackDispose, type ReadonlySignal } from "@blueshed/railroad/signals";
 import { key, inject, tryInject } from "@blueshed/railroad/shared";
 import { createLogger } from "@blueshed/railroad/logger";
 import { applyOps, type DeltaOp } from "../core";
@@ -454,7 +454,13 @@ export function connectWs(
 // ---------------------------------------------------------------------------
 
 export interface Doc<T> {
-  data: ReturnType<typeof signal<T | null>>;
+  /**
+   * The document as the server has it: null until the first open lands, then
+   * kept by the server's broadcasts, your own writes' echoes among them.
+   * Read-only: `doc.send(ops)` changes it, never a `set()` here (an optimistic
+   * update double-applies when the op echoes back).
+   */
+  data: ReadonlySignal<T | null>;
   dataVersion: ReturnType<typeof signal<number>>;
   ready: Promise<void>;
   /**

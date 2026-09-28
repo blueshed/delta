@@ -713,7 +713,7 @@ and threaded through *every* call, including the initial paint.
 
 ## Railroad recipe — `list()` over `applyOpsToCollection`
 
-`@blueshed/railroad` is a peer dependency. `delta/client.ts` imports `signal` from it directly — `doc.data` IS a railroad `Signal<T | null>`, not a wrapper. That means railroad's keyed `list()` already gives the per-row surgical update that `applyOpsToCollection` exists to provide for vanilla DOM.
+`@blueshed/railroad` is a peer dependency. `delta/client.ts` imports `signal` from it directly — `doc.data` IS a railroad signal, not a wrapper, typed `ReadonlySignal<T | null>`: `get`, `peek` and `map`, and no `set` (the echo writes it; see *The write loop*). That means railroad's keyed `list()` already gives the per-row surgical update that `applyOpsToCollection` exists to provide for vanilla DOM.
 
 If the project has railroad in deps, the canonical client recipe changes — drop the `applyOpsToCollection` import and render `doc.data` directly via `list()`:
 

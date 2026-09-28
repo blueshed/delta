@@ -4,7 +4,7 @@
  * touch the network.
  */
 import { describe, test, expect, afterEach } from "bun:test";
-import { connectWs, openDoc, WS, type WsClient } from "../src/client/client";
+import { connectWs, openDoc, WS, type Doc, type WsClient } from "../src/client/client";
 import { provide, clearProviders, signal } from "@blueshed/railroad";
 import type { DeltaOp } from "../src/core";
 
@@ -706,6 +706,29 @@ describe("send resolves after its own echo", () => {
 // URL (wss:// became ws:// from an http page). Run in a fresh process: this
 // file shims `location` for every other test.
 // ---------------------------------------------------------------------------
+
+describe("doc.data is read-only (#10)", () => {
+  test("a write to doc.data is a type error: the echo updates it, never the page (tsc checks this)", () => {
+    // Never called: `bun run check` fails if any @ts-expect-error below is not an error.
+    const typeOnly = (doc: Doc<{ n: number }>) => {
+      // @ts-expect-error -- an optimistic update double-applies when the op echoes back
+      doc.data.set({ n: 1 });
+      // @ts-expect-error
+      doc.data.update((d) => d);
+      // @ts-expect-error
+      doc.data.patch({ n: 1 });
+      // @ts-expect-error
+      doc.data.mutate((d) => void d);
+      // @ts-expect-error
+      doc.data.touch();
+      // reading it is what it is for
+      const n: number | undefined = doc.data.get()?.n;
+      const m = doc.data.peek()?.n;
+      return [n, m, doc.data.map((d) => d?.n)];
+    };
+    expect(typeof typeOnly).toBe("function");
+  });
+});
 
 describe("connectWs outside a browser", () => {
   const CLIENT = new URL("../src/client/client.ts", import.meta.url).pathname;
