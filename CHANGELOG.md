@@ -13,15 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handles a socket's messages side by side, as they arrive, so an `open` or a write sent
   without waiting for `authenticate`'s answer was handled while the token was still being
   checked, and 401'd -- for any client that does not wait (delta's own without `onConnect`,
-  the CLI, a raw socket). A call that changes who the socket is now holds what the socket
-  sends after it until it settles, and that then runs in the order it came, under the new
+  the CLI, a raw socket). A call that changes who the socket is now starts once what the
+  socket sent before it has finished (so an `open` sent before `logout` is answered signed in,
+  and its subscription is let go by the logout, not made after it), and holds what the socket
+  sends after it until it settles; that then runs in the order it came, under the new
   identity. `wireAuth` says it of every auth action (`authenticate`, `login`, `register`,
   `logout`), through `ws.changesIdentity(method)`, which a hand-registered sign-in method
   can call too. Nothing else waits: a slow `registerMethod` or a recompute holds up nothing,
   as before, and a burst of calls runs side by side. A socket that closes with messages
   held runs none of them. **A socket may hold 1000** (`createWs({ maxHeld })`); one more
-  closes it with 1008 (policy violation), running none. A sign-in that never answers holds
-  its socket's later messages until the socket closes. And a message still running when its
+  closes it with 1008 (policy violation), running none. A sign-in that never answers, or a
+  message ahead of one that never finishes, holds its socket's later messages until the
+  socket closes. And a message still running when its
   socket closes has what it registered for the socket let go when it ends: an `open` whose
   read was in flight left the closed socket a subscriber (on Postgres a custom document
   recomputed for it on every write to what it watches), since the close had already run the

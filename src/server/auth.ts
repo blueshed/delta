@@ -80,10 +80,11 @@ export type AuthAction<Identity> = (
 /**
  * Register an auth module's actions with a WebSocket server. Each declared
  * action becomes a `call` handler that delegates to the implementation, and
- * a call that changes who the socket is (`ws.changesIdentity`): while one is
- * in flight, what the socket sends after it waits, then runs under the
- * identity it left -- so an `open` sent straight behind `authenticate`, without
- * waiting for its answer, is handled signed in.
+ * a call that changes who the socket is (`ws.changesIdentity`): it starts once
+ * what the socket sent before it has finished, and what the socket sends after
+ * it waits, then runs under the identity it left -- so an `open` sent straight
+ * behind `authenticate`, without waiting for its answer, is handled signed in,
+ * and one sent before `logout` is handled signed in and let go by the logout.
  *
  * Call this once at server startup, before `createDocListener`.
  */

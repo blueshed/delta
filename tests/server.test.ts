@@ -917,22 +917,30 @@ describe("a call that changes who the socket is holds its later messages (#5)", 
    * A server whose `authenticate` takes as long as `signIn` does (a token
    * checked against a database) and whose `logout` takes a moment; `open`
    * answers a signed-in socket only, and, signed in, keeps it as a subscriber
-   * until the socket is dropped, as a backend does. `late` opens after `lateMayGo`.
+   * until the socket is dropped, as a backend does. `late` opens after `lateMayGo`;
+   * `checks-late` asks the gate after a moment (the listener's custom-doc open
+   * awaits first), and `subscribes-late` subscribes a moment after the gate said
+   * yes (a document read in between). With `logoutAtOnce`, `logout` is
+   * jwtAuth's shape: it clears the identity and drops the socket's
+   * subscriptions without waiting on anything.
    */
-  function serve(opts: { maxHeld?: number; signIn?: Promise<void>; lateMayGo?: Promise<void> } = {}) {
+  function serve(opts: { maxHeld?: number; signIn?: Promise<void>; lateMayGo?: Promise<void>; logoutAtOnce?: boolean } = {}) {
     const ws = createWs({ maxHeld: opts.maxHeld });
     const ran: string[] = [];
     const subscribers = new Set<any>();
+    const signIns: any[] = [];
     const auth: DeltaAuth<{ id: number }> = {
       actions: {
         async authenticate(_params, client) {
+          signIns.push(client);
           await (opts.signIn ?? Bun.sleep(30));
           client.data.identity = { id: 1 };
           return { result: { id: 1 } };
         },
         async logout(_params, client) {
-          await Bun.sleep(30);
+          if (!opts.logoutAtOnce) await Bun.sleep(30);
           delete client.data.identity;
+          dropClientSubscriptions(client);
           return { result: { ack: true } };
         },
       },
@@ -941,9 +949,11 @@ describe("a call that changes who the socket is holds its later messages (#5)", 
     wireAuth(ws, auth);
     ws.on("open", async (msg, client, respond) => {
       if (msg.doc === "late") await opts.lateMayGo;
+      if (msg.doc === "checks-late") await Bun.sleep(20);
       ran.push(`open ${msg.doc}`);
       const who = auth.gate(client);
       if (isAuthError(who)) return respond({ error: { code: 401, message: who.error } });
+      if (msg.doc === "subscribes-late") await Bun.sleep(20);
       subscribers.add(client);
       onClientDrop(client, (c) => subscribers.delete(c));
       respond({ result: { doc: msg.doc, who } });
@@ -953,7 +963,7 @@ describe("a call that changes who the socket is holds its later messages (#5)", 
     const server = Bun.serve({ port: 0, routes: { [ws.path]: ws.upgrade }, websocket: ws.websocket });
     ws.setServer(server);
     servers.push(server);
-    return { port: server.port!, ran, subscribers };
+    return { port: server.port!, ran, subscribers, signIns };
   }
 
   async function connect(port: number) {
@@ -1001,6 +1011,47 @@ describe("a call that changes who the socket is holds its later messages (#5)", 
     expect((await c.answer(5)).error?.code).toBe(401);
     expect(ran).toEqual(["open a", "open b", "open c"]);
     c.sock.close();
+  });
+
+  test("what was held ahead of a logout runs signed in, though it asks the gate late and the logout signs out at once (#5 review)", async () => {
+    const { port } = serve({ logoutAtOnce: true });
+    const c = await connect(port);
+    c.send(1, authenticate);
+    c.send(2, open("checks-late"));   // sent signed in
+    c.send(3, { action: "call", method: "logout" });
+    c.send(4, open("checks-late"));   // sent signed out
+    expect((await c.answer(2)).result?.who).toEqual({ id: 1 });
+    expect((await c.answer(4)).error?.code).toBe(401);
+    c.sock.close();
+  });
+
+  test("an open still running when a logout comes is let go by the logout, not left subscribed after it (#5 review)", async () => {
+    const { port, subscribers } = serve({ logoutAtOnce: true });
+    const c = await connect(port);
+    c.send(1, authenticate);
+    expect((await c.answer(1)).result).toEqual({ id: 1 });
+    c.send(2, open("subscribes-late"));   // past the gate, reading, when the logout arrives
+    c.send(3, { action: "call", method: "logout" });
+    expect((await c.answer(2)).result?.who).toEqual({ id: 1 });
+    expect((await c.answer(3)).result).toEqual({ ack: true });
+    expect(subscribers.size).toBe(0);
+    c.sock.close();
+  });
+
+  test("a sign-in waiting on what came before it does not run when its socket closes meanwhile (#5 review)", async () => {
+    let letLateGo!: () => void;
+    const lateMayGo = new Promise<void>((r) => (letLateGo = r));
+    const { port, signIns } = serve({ lateMayGo });
+    const c = await connect(port);
+    c.send(1, open("late"));        // running: the sign-in waits for it
+    c.send(2, authenticate);
+    await Bun.sleep(20);
+    c.sock.close();
+    await c.closed;
+    await Bun.sleep(20);            // the server has run its close
+    letLateGo();
+    await Bun.sleep(50);
+    expect(signIns).toEqual([]);
   });
 
   test("a slow call that is not a sign-in holds nothing: the socket's next message is answered first", async () => {

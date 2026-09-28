@@ -44,10 +44,11 @@ export interface WsServer {
   origins?: readonly string[] | "*";
   /**
    * Say that a `call` of `method` changes who the socket is (`wireAuth` says
-   * it of every auth action: `authenticate`, `login`, `logout`...). While one
-   * is in flight, the socket's later messages wait for it, then run in the
-   * order they came, under the identity it left. Every other message runs as
-   * it arrives, beside the rest. Optional: `createLocal()` has no socket.
+   * it of every auth action: `authenticate`, `login`, `logout`...). One starts
+   * once what the socket sent before it has finished, under the identity it
+   * was sent under; what the socket sends after it waits for it, then runs in
+   * the order it came, under the identity it left. Every other message runs
+   * as it arrives, beside the rest. Optional: `createLocal()` has no socket.
    */
   changesIdentity?(method: string): void;
   websocket: {
@@ -204,15 +205,34 @@ export function createWs(opts?: WsOptions): WsServer {
   const maxHeld = opts?.maxHeld ?? 1000;
 
   // A socket's messages run side by side, as they arrive: Bun does not wait
-  // for an async handler. Only a call that changes who the socket is holds
-  // what comes after it, so an `open` sent straight behind `authenticate` is
-  // handled signed in, and a slow method holds nothing up. `holding` has a
-  // socket while such a call from it is in flight, with what came meanwhile;
-  // `gone` has the sockets that have closed.
+  // for an async handler. Only a call that changes who the socket is stands
+  // between them: it starts once what the socket sent before it has finished,
+  // and what the socket sends after it waits until it settles. So an `open`
+  // sent straight behind `authenticate` is handled signed in, one sent before
+  // `logout` is handled (and subscribed, and let go) before the logout, and a
+  // slow method holds nothing up. A socket's `line` is what of it is running,
+  // and, while such a call is waiting or in flight, what came after it
+  // (`held`); `gone` has the sockets that have closed. With no such call
+  // registered (no `wireAuth`), nothing is kept: each message just runs.
   type Held = { raw: any; done: () => void };
+  type Line = { running: Set<Promise<void>>; held: Held[] | null };
   const identityCalls = new Set<string>();
-  const holding = new WeakMap<object, Held[]>();
+  const lines = new WeakMap<object, Line>();
   const gone = new WeakSet<object>();
+
+  function lineOf(ws: any): Line {
+    let line = lines.get(ws);
+    if (!line) lines.set(ws, (line = { running: new Set(), held: null }));
+    return line;
+  }
+
+  /** Run one message on its socket's line: it is running until it settles. */
+  function start(ws: any, raw: any, line: Line): Promise<void> {
+    const running = receive(ws, raw, line);
+    line.running.add(running);
+    void running.then(() => line.running.delete(running));
+    return running;
+  }
 
   function upgrade(req: Request, server: any) {
     const refused = refuseOrigin(req, origins);
@@ -223,7 +243,7 @@ export function createWs(opts?: WsOptions): WsServer {
   }
 
   /** One message, answered on its `id`; never rejects. */
-  async function receive(ws: any, raw: any): Promise<void> {
+  async function receive(ws: any, raw: any, line?: Line): Promise<void> {
     // Parse INSIDE the try: this is an async handler, so a non-JSON frame
     // used to reject with nothing to catch it — an unhandled rejection any
     // client could trigger at will, and a remote kill for any process that
@@ -274,10 +294,15 @@ export function createWs(opts?: WsOptions): WsServer {
           );
         return;
       }
-      // Set before the first await, so the socket's next message waits.
-      if (action === "call" && identityCalls.has(msg.method)) {
-        holding.set(ws, []);
+      // A call that changes who the socket is: what comes after it waits
+      // (set before the first await, so the socket's next message sees it),
+      // and it waits for what came before it -- still running under the
+      // identity it was sent under -- to finish.
+      if (line && action === "call" && identityCalls.has(msg.method)) {
+        line.held = [];
         holds = true;
+        if (line.running.size) await Promise.all(line.running);
+        if (gone.has(ws)) return;   // closed meanwhile: no one to change
       }
       let responded = false;
       const respond = (response: any) => {
@@ -308,7 +333,7 @@ export function createWs(opts?: WsOptions): WsServer {
           JSON.stringify({ id, error: { code: typeof err?.code === "number" ? err.code : 500, message: err.message } }),
         );
     } finally {
-      if (holds) release(ws);
+      if (holds) release(ws, line!);
       // The socket closed while this ran: what it registered for the socket
       // meanwhile (a subscriber, a watch) is let go now, as the close would have.
       if (gone.has(ws)) runClientDropHooks(ws);
@@ -316,9 +341,9 @@ export function createWs(opts?: WsOptions): WsServer {
   }
 
   /** A call that changes who `ws` is has settled: what waited on it runs, in the order it came. */
-  function release(ws: any): void {
-    const held = holding.get(ws);
-    holding.delete(ws);
+  function release(ws: any, line: Line): void {
+    const held = line.held;
+    line.held = null;
     if (!held) return;
     for (let i = 0; i < held.length; i++) {
       if (gone.has(ws)) {
@@ -326,9 +351,9 @@ export function createWs(opts?: WsOptions): WsServer {
         return;
       }
       const { raw, done } = held[i]!;
-      void receive(ws, raw).then(done);
+      void start(ws, raw, line).then(done);
       // Another call that changes who it is: the rest wait on that one.
-      const again = holding.get(ws);
+      const again = line.held as Held[] | null;   // start() may have set it
       if (again) {
         for (let j = i + 1; j < held.length; j++) again.push(held[j]!);
         return;
@@ -398,15 +423,17 @@ export function createWs(opts?: WsOptions): WsServer {
       },
       message(ws: any, raw: any) {
         if (gone.has(ws)) return;   // closed, or closing for holding too many: nothing more of it runs
-        const held = holding.get(ws);
-        if (!held) return receive(ws, raw);
+        if (!identityCalls.size) return receive(ws, raw);   // nothing changes who a socket is: nothing waits
+        const line = lineOf(ws);
+        const held = line.held;
+        if (!held) return start(ws, raw, line);
         if (held.length >= maxHeld) return refuseHeld(ws, held);
         return new Promise<void>((done) => held.push({ raw, done }));
       },
       close(ws: any) {
         gone.add(ws);
         // What waited on a call that changes who it is never runs: the socket it came from is gone.
-        const held = holding.get(ws);
+        const held = lines.get(ws)?.held;
         if (held) for (const { done } of held.splice(0)) done();
         const clientId = ws.data?.clientId;
         // Only delete our own mapping — a collision-replaced socket may now
