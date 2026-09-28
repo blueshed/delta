@@ -57,6 +57,23 @@ afterEach(async () => {
 describe("pglite", () => pathCases(() => backend));
 
 /**
+ * A name opened on framework SQL that took it, which the resolver now refuses
+ * (Postgres's own casts took an integer's 1_000 and a real's Infinity): it is
+ * in _delta_versions, so the fan-out asks it of every write beside it. It holds
+ * nothing -- as on SQLite -- and the write goes on.
+ */
+describe("pglite: a name opened before the scope's grammar refused it", () => {
+  test("holds nothing, and every write beside it goes on", async () => {
+    await pool.query("INSERT INTO _delta_versions (doc_name, version) VALUES ('fo-slots-upto:Infinity', 1), ('fo-seats-at:1_000', 1)");
+    const copies = await openAll(backend.process, ["fo-slots-upto:", "fo-seating:1"]);
+    await write(backend.process, "fo-slots-upto:", [{ op: "add", path: "/slots/-", value: { weddings_id: 1, price: 1 } }]);
+    await write(backend.process, "fo-seating:1", [{ op: "add", path: "/seats/-", value: { table_no: 1000, kept: true } }]);
+    await assertCopiesHold(backend, copies);
+    expect({ upto: told(backend.process, "fo-slots-upto:Infinity"), at: told(backend.process, "fo-seats-at:1_000") }).toEqual({ upto: [], at: [] });
+  });
+});
+
+/**
  * The exported validateOps says ahead what delta_apply answers (todo #47):
  * each write it refuses, the database refuses as a mistake (400), and each it
  * takes, the database takes -- or refuses for what only the rows can say (a

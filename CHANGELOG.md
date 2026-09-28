@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A number's name is read by one grammar on every backend** (todo #60). A list document
+  scoped by a `real` (`scope: { price: "<=:max" }`) opened as `slots-upto:Infinity` or
+  `slots-upto:NaN` was a 400 on SQLite and the JSON file and every row on Postgres, which cast
+  the text itself; so was `0x10`, while `1e400` was a 500 there and every row on SQLite (read
+  as Infinity), and an `integer`'s `1_000`, `0x10` or `9007199254740993` a 400 on SQLite and a
+  number on Postgres (18 takes underscores and hex). `_delta_resolve_scope` (`001b`) now holds
+  the name to the grammar SQLite's `scopeValue` reads, before the column casts it: an
+  `integer`'s is digits, signed, up to 2^53 - 1; a `real`'s a finite decimal number a double
+  holds (SQLite now refuses `1e400` and `1e-400` too). Anything else is a 400, opened or
+  written through. A name opened before this that the rule now refuses is still in
+  `_delta_versions`, and the fan-out asks it of every write beside it: it holds nothing, as on
+  SQLite, and the write goes on. `001b` adds a three-argument `_delta_resolve_scope(def, name,
+  refuse)` (with `refuse` false a value refused answers the scope that holds nothing, with
+  `refused` its message) and replaces the two-argument one, which calls it, and
+  `_delta_doc_holds` (`CREATE OR REPLACE`: re-apply the framework, or `delta init`).
 - **Postgres: a custom document hears each write once, as it was applied, as on SQLite and the
   JSON file** (todo #44). The listener ran a membership doc's `matches` on the ops told to each
   document the write reached, one document after another. A write told to two documents was

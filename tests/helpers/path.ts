@@ -40,6 +40,8 @@ export const pathSchema = defineSchema({
   tags: { table: "fo_tags", columns: { label: "text" }, temporal: false },
   notes: { table: "fo_notes", parent: "weddings", columns: { text: "text" }, temporal: true },
   seats: { table: "fo_seats", parent: "weddings", columns: { table_no: "integer", kept: "boolean", wishes: "json?" }, temporal: false },
+  // the time slots of a wedding: the scopes on a real and a parent key
+  slots: { table: "fo_slots", parent: "weddings", columns: { price: "real?" }, temporal: false },
 });
 
 /** Several documents over the same rows, cut different ways. */
@@ -72,6 +74,8 @@ export const pathDocs = [
   defineDoc("fo-seats-at:", { root: "seats", include: [], scope: { table_no: ":table" } }),
   // list mode by a json column: the seats whose wishes are the name read as JSON, which a seat added through it is given
   defineDoc("fo-seats-wished:", { root: "seats", include: [], scope: { wishes: ":wishes" } }),
+  // list mode by a real's range: the slots that cost at most the name
+  defineDoc("fo-slots-upto:", { root: "slots", include: [], scope: { price: "<=:max" } }),
 ];
 
 /**
@@ -332,6 +336,34 @@ export function documentCases(backend: () => PathBackend): void {
       const b = backend();
       const add = [{ op: "add", path: "/seats/-", value: { weddings_id: 1, table_no: 4, kept: true } }];
       for (const doc of ["fo-seats-kept:maybe", "fo-seats-upto:maybe", "fo-seats-at:abc", "fo-seats-at:3.5", "fo-seats-wished:abc"]) {
+        const open = (await b.process.call("open", { doc })).error?.code;
+        const written = (await b.process.call("delta", { doc, ops: add })).error?.code;
+        expect({ doc, open, written }).toEqual({ doc, open: 400, written: 400 });
+      }
+    });
+
+    test("a number's name is read by one grammar, a decimal a double holds: a real's 1.5, .5, 1e0 and 3. are numbers; Infinity, NaN, inf, 0x10, 1e400 and 1e-400 are refused (400), opened or written through, and an integer's 1_000, 0x10 and 2^53 too", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-slots-upto:", "fo-slots-upto:1.5", "fo-slots-upto:1e0"]);
+      await write(b.process, "fo-slots-upto:", [
+        { op: "add", path: "/slots/-", value: { weddings_id: 1, price: 1.5 } },
+        { op: "add", path: "/slots/-", value: { weddings_id: 1, price: 0.25 } },
+        { op: "add", path: "/slots/-", value: { weddings_id: 2, price: 3 } },
+      ]);
+      await assertCopiesHold(b, copies);
+      const slots = async (doc: string) => {
+        const res = await b.process.call("open", { doc });
+        return { doc, slots: res.error ?? Object.keys(res.result.slots).map(Number) };
+      };
+      for (const [name, ids] of [["1.5", [1, 2]], [".5", [2]], ["1e0", [2]], ["3.", [1, 2, 3]], ["+2E-1", []], ["-1", []]] as const) {
+        expect(await slots(`fo-slots-upto:${name}`)).toEqual({ doc: `fo-slots-upto:${name}`, slots: [...ids] });
+      }
+      const add = [{ op: "add", path: "/slots/-", value: { weddings_id: 1, price: 1 } }];
+      const refused = [
+        ...["Infinity", "-Infinity", "NaN", "inf", "0x10", "1e400", "1e-400"].map((name) => `fo-slots-upto:${name}`),
+        ...["1_000", "0x10", "9007199254740992"].map((name) => `fo-seats-at:${name}`),
+      ];
+      for (const doc of refused) {
         const open = (await b.process.call("open", { doc })).error?.code;
         const written = (await b.process.call("delta", { doc, ops: add })).error?.code;
         expect({ doc, open, written }).toEqual({ doc, open: 400, written: 400 });

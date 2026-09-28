@@ -31,14 +31,25 @@ $$ LANGUAGE sql STABLE;
 -- Named params are resolved positionally from the colon-separated doc ID.
 -- Empty resolved values are skipped (no filter applied for that entry).
 --
+-- A value is read as its column takes it, by one grammar on every backend (the
+-- SQLite backend's scopeValue is its twin), and one it cannot take is refused
+-- (22P02, a 400): an integer's is digits, signed, up to 2^53 - 1 (not 1_000 or
+-- 0x10, which Postgres's own cast takes); a real's a finite decimal number (not
+-- Infinity, NaN or 0x10), one a double holds. Other types are left to the
+-- column's cast, which reads them as SQLite does.
+--
 -- Returns JSONB:
 --   { "where":  "SQL WHERE clause",
 --     "values": { equality bindings for ADD ops },
 --     "mode":   "list" | "single",
 --     "at":     "2026-06-01" | null }
+--
+-- With p_refuse false a value refused is not raised: the answer is the scope
+-- that holds nothing ("where" FALSE, list mode), with "refused" its message --
+-- how the fan-out reads a name opened before a rule refused it (_delta_doc_holds).
 -- ---------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION _delta_resolve_scope(p_def _delta_docs, p_doc_name TEXT)
+CREATE OR REPLACE FUNCTION _delta_resolve_scope(p_def _delta_docs, p_doc_name TEXT, p_refuse BOOLEAN)
 RETURNS JSONB AS $$
 DECLARE
   v_doc_id    TEXT;
@@ -54,6 +65,9 @@ DECLARE
   v_at        TEXT := NULL;
   v_mode      TEXT;
   v_param_map JSONB := '{}'::jsonb;
+  v_root_coll RECORD;
+  v_type      TEXT;
+  v_refused   TEXT;
 BEGIN
   v_doc_id := substring(p_doc_name FROM length(p_def.prefix) + 1);
   v_scope  := p_def.scope;
@@ -63,7 +77,6 @@ BEGIN
   -- before they silently produce an always-empty WHERE.
   IF v_scope IS NOT NULL AND v_scope != '{}'::jsonb THEN
     DECLARE
-      v_root_coll      RECORD;
       v_bad_key        TEXT;
       v_valid_keys_txt TEXT;
     BEGIN
@@ -173,6 +186,33 @@ BEGIN
     -- Skip empty resolved values (no filter)
     IF v_resolved IS NULL OR v_resolved = '' THEN CONTINUE; END IF;
 
+    -- The value as its column takes it: one its column cannot take is refused
+    IF v_op NOT IN ('at', 'like') THEN
+      v_type := v_root_coll.columns_def->v_key->>'type';
+      IF v_type = 'integer' THEN
+        -- at most 16 digits past any zeros (2^53 - 1 has 16), so the cast that follows cannot fail
+        IF v_resolved !~ '^\s*[+-]?0*[0-9]{1,16}\s*$' THEN
+          v_refused := format('%s must be an integer, not "%s"', v_key, v_resolved);
+        ELSIF abs(v_resolved::numeric) > 9007199254740991 THEN
+          v_refused := format('%s must be an integer, not "%s"', v_key, v_resolved);
+        END IF;
+      ELSIF v_type = 'real' THEN
+        IF v_resolved !~* '^\s*[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)(e[+-]?[0-9]+)?\s*$' THEN
+          v_refused := format('%s must be a number, not "%s"', v_key, v_resolved);
+        ELSE
+          BEGIN
+            PERFORM v_resolved::float8;
+          EXCEPTION WHEN numeric_value_out_of_range THEN   -- 1e400, 1e-400: past what a double holds
+            v_refused := format('%s must be a number, not "%s"', v_key, v_resolved);
+          END;
+        END IF;
+      END IF;
+      IF v_refused IS NOT NULL THEN
+        IF p_refuse THEN RAISE EXCEPTION '%', v_refused USING ERRCODE = '22P02'; END IF;
+        RETURN jsonb_build_object('where', 'FALSE', 'values', '{}'::jsonb, 'mode', 'list', 'at', NULL, 'refused', v_refused);
+      END IF;
+    END IF;
+
     -- Handle each operator
     CASE v_op
       WHEN 'at' THEN
@@ -207,6 +247,12 @@ BEGIN
   RETURN jsonb_build_object('where', v_where, 'values', v_values, 'mode', v_mode, 'at', v_at);
 END;
 $$ LANGUAGE plpgsql STABLE;
+
+-- The resolver as every caller but the fan-out asks it: a value refused is raised.
+CREATE OR REPLACE FUNCTION _delta_resolve_scope(p_def _delta_docs, p_doc_name TEXT)
+RETURNS JSONB LANGUAGE sql STABLE AS $$
+  SELECT _delta_resolve_scope(p_def, p_doc_name, TRUE);
+$$;
 
 -- ---------------------------------------------------------------------------
 -- _delta_scope_row: the scope's equality values (_delta_resolve_scope's
@@ -371,7 +417,9 @@ BEGIN
      AND NOT (p_coll = ANY(COALESCE(p_def.include, ARRAY[]::text[]))) THEN
     RETURN FALSE;
   END IF;
-  v_scope := _delta_resolve_scope(p_def, p_doc_name);
+  -- a name its root's columns cannot take (one opened before a rule refused it) holds nothing
+  v_scope := _delta_resolve_scope(p_def, p_doc_name, FALSE);
+  IF v_scope ? 'refused' THEN RETURN FALSE; END IF;
   SELECT * INTO v_coll FROM _delta_collections WHERE collection_key = p_coll;
   IF NOT FOUND THEN RETURN FALSE; END IF;
 

@@ -1769,8 +1769,10 @@ function encodeValue(table: ResolvedTable, col: string, value: unknown): any {
  * A scope's value, text from the document's name, as its column takes it -- as
  * Postgres casts the text, for an add's stamping and a condition alike: a
  * boolean as Postgres reads one (true/false, yes/no, on/off and their
- * unambiguous prefixes, 1/0, any case); an integer's digits, signed; a real's
- * number; a json column's text as the JSON it is; a text or a time as the text;
+ * unambiguous prefixes, 1/0, any case); an integer's digits, signed, up to
+ * 2^53 - 1; a real's finite decimal number -- by the grammar Postgres's
+ * resolver holds its casts to (`_delta_resolve_scope`, which refuses 1_000,
+ * 0x10 and Infinity); a json column's text as the JSON it is; a text or a time as the text;
  * an id or a parent key as an id is kept. Text the column cannot take is a 400.
  */
 function scopeValue(table: ResolvedTable, col: string, text: string): unknown {
@@ -1786,9 +1788,12 @@ function scopeValue(table: ResolvedTable, col: string, text: string): unknown {
     case "integer":
       if (/^[+-]?\d+$/.test(t) && Number.isSafeInteger(Number(t))) return Number(t);
       return refuse(400, `${col} must be an integer, not "${text}"`);
-    case "real":
-      if (/^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i.test(t)) return Number(t);
+    case "real": {
+      // a finite decimal number a double holds, as Postgres's resolver reads it: not Infinity, NaN or 0x10, nor 1e400 or 1e-400
+      const n = Number(t);
+      if (/^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i.test(t) && Number.isFinite(n) && (n !== 0 || !/[1-9]/.test(t.replace(/e.*$/i, "")))) return n;
       return refuse(400, `${col} must be a number, not "${text}"`);
+    }
     case "json": try { return JSON.parse(text); } catch { return refuse(400, `${col} must be JSON, not "${text}"`); }
     case "text": case "timestamptz": return text;
     default: return rowId(text);
