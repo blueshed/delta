@@ -362,6 +362,13 @@ BEGIN
       v_new_row := v_row || (v_op->'value') || jsonb_build_object('id', v_doc_id);
 
       IF v_coll.temporal THEN
+        -- One version per write: a version this write made (its valid_from is the
+        -- write's NOW()) gives way to the next, rather than closing at the same
+        -- instant and colliding with it on (id, valid_from).
+        EXECUTE format(
+          'DELETE FROM %I WHERE id = $1 AND valid_to IS NULL AND valid_from = $2',
+          v_coll.table_name
+        ) USING v_doc_id, v_ts;
         EXECUTE format(
           'UPDATE %I SET valid_to = $2 WHERE id = $1 AND valid_to IS NULL',
           v_coll.table_name
@@ -560,6 +567,13 @@ BEGIN
       v_new_row := v_row || (v_op->'value') || jsonb_build_object('id', v_id);
 
       IF v_coll.temporal THEN
+        -- One version per write: a version this write made (its valid_from is the
+        -- write's NOW()) gives way to the next, rather than closing at the same
+        -- instant and colliding with it on (id, valid_from).
+        EXECUTE format(
+          'DELETE FROM %I WHERE id = $1 AND valid_to IS NULL AND valid_from = $2',
+          v_coll.table_name
+        ) USING v_id, v_ts;
         EXECUTE format(
           'UPDATE %I SET valid_to = $2 WHERE id = $1 AND valid_to IS NULL',
           v_coll.table_name

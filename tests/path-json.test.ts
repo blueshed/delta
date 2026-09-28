@@ -25,7 +25,7 @@ function open(): PathBackend & { persisted(): Promise<void> } {
   return {
     process: { call: (action, msg) => local.call(action, msg), heard },
     quiet: async () => {}, // in-process: told before the write answers
-    exportTables: async () => exportTables(file, pathSchema),
+    exportTables: async () => { await store.persisted(); return exportTables(file, pathSchema); }, // the file as the last change left it
     persisted: () => store.persisted(),
   };
 }

@@ -797,6 +797,31 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
+    test("a note written twice in one write, another row between, is one new version: each replace is answered and told, and its history holds the note before the write and after it", async () => {
+      const b = backend();
+      const note = (text: string) => ({ id: 1, weddings_id: 1, text });
+      const copies = await openAll(b.process, ["fo-board:1", "fo-notes:1", "fo-note:1"]);
+      const { ops } = await write(b.process, "fo-board:1", [
+        { op: "replace", path: "/notes/1/text", value: "bring tables" },
+        { op: "replace", path: "/weddings/name", value: "our day" },
+        { op: "replace", path: "/notes/1", value: { text: "bring lights" } },
+      ], { cursor: "s1" });
+      expect(ops).toEqual([
+        { op: "replace", path: "/notes/1", value: note("bring tables") },
+        { op: "replace", path: "/weddings", value: { id: 1, name: "our day" } },
+        { op: "replace", path: "/notes/1", value: note("bring lights") },
+      ]);
+      const versions = async () => (await b.exportTables()).tables.notes!.filter((r: any) => r.id === 1).map((r: any) => ({ text: r.text, live: r.valid_to == null }));
+      expect(await versions()).toEqual([{ text: "bring chairs", live: false }, { text: "bring lights", live: true }]);
+      const undone = await b.process.call("undo", { cursor: "s1" });
+      const back = [{ op: "replace", path: "/notes/1", value: note("bring chairs") }, { op: "replace", path: "/weddings", value: { id: 1, name: "ours" } }];
+      expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: back, conflict: undefined });
+      expect(await versions()).toEqual([{ text: "bring chairs", live: false }, { text: "bring lights", live: false }, { text: "bring chairs", live: true }]);
+      await expectTold(b, "fo-note:1", [[{ op: "replace", path: "/notes", value: note("bring tables") }, { op: "replace", path: "/notes", value: note("bring lights") }], [{ op: "replace", path: "/notes", value: note("bring chairs") }]]);
+      await expectTold(b, "fo-notes:1", [ops, back]);
+      await assertCopiesHold(b, copies);
+    });
+
     test("a note closed through the board (removed: its history kept, no longer current) leaves the notes document", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-notes:1"]);

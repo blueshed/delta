@@ -487,6 +487,11 @@ export function registerDocs(
     const rootId = list ? undefined : rowId(scope.id ?? doc[def.root]?.id);
     const broadcastOps: DeltaOp[] = [];
     const touched: Touched[] = [];
+    // A write is one moment, as a Postgres transaction's NOW() is: every version
+    // it makes or closes is stamped with it, and a temporal row it writes twice
+    // is one new version -- rewritten in place (`made`), not closed a tick later.
+    const ts = now();
+    const made = new Set<string>();
 
     /**
      * The row of `table` the document holds, as the tables stand at this point
@@ -503,28 +508,30 @@ export function registerDocs(
 
     /**
      * Replace fields of a row the document holds -- the root (`root`), or a row
-     * of a map -- as the op says, where it is sent: one close + reinsert
-     * (temporal; each write its own `now()`, so two in one batch never share a
-     * `valid_from`) or one in-place UPDATE (non-temporal: `id` is the whole PK
-     * there, so a reinsert would collide). The row is read back as it is kept
-     * (a parent key's "5" is 5), as Postgres's RETURNING gives it, and told as
-     * it lands. The path names the row, so `id` and the temporal columns in a
-     * value are not taken from it.
+     * of a map -- as the op says, where it is sent: on a temporal table, the
+     * version before the write closed and the write's inserted (or, once the
+     * write has made it, that version rewritten); else one in-place UPDATE (`id`
+     * is the whole PK there, so a reinsert would collide). The row is read back
+     * as it is kept (a parent key's "5" is 5), as Postgres's RETURNING gives it,
+     * and told as it lands. The path names the row, so `id` and the temporal
+     * columns in a value are not taken from it.
      */
     const replaceRow = (table: ResolvedTable, id: string | number, fields: Record<string, unknown>, root: boolean) => {
       const collKey = table.docKey;
       const present = held(table, id);
       if (!present) refuse(404, `Row not found: ${collKey}/${id}`);   // not this document's, or gone from it earlier in this write
       const before = holders(collKey, present, docName);
-      const ts = now();
-      if (table.temporal) closeRow(db, table, id, ts);
       const updated = { ...present };
       for (const [field, value] of Object.entries(fields)) {
         if (field === "id" || field === "valid_from" || field === "valid_to") continue;
         updated[field] = value;
       }
-      if (table.temporal) insertRow(db, table, updated, ts);
-      else updateRow(db, table, id, updated);
+      const key = `${collKey}/${id}`;
+      if (table.temporal && !made.has(key)) {
+        closeRow(db, table, id, ts);
+        insertRow(db, table, updated, ts);
+        made.add(key);
+      } else updateRow(db, table, id, updated);
       const stored = readRow(table, id);
       if (root) doc[collKey] = stored;
       else doc[collKey][id] = stored;
@@ -600,8 +607,8 @@ export function registerDocs(
             const fk = row[parent.fkColumn];
             if (fk == null || !held(schema.tables[parent.collection]!, rowId(fk as string | number))) refuse(404, `Row not found: ${parent.collection}/${fk ?? ""}`);
           }
-          const ts = now();
           const fullRow = insertCollectionRow(db, schema, table, id, rootId, def, row, ts, list);
+          if (table.temporal) made.add(`${collKey}/${id}`);
           if (isRoot) doc[collKey] = fullRow;
           else doc[collKey][id] = fullRow;
           broadcastOps.push({ op: "add", path: joinPath(collKey, String(id)), value: fullRow });
@@ -613,7 +620,7 @@ export function registerDocs(
           if (!held(table, id)) refuse(404, `Row not found: ${collKey}/${id}`);
           // who holds the row and every row the cascade takes, asked before any is gone
           const befores = new Map(cascadeRows(table, id, def).map(({ table: t, row }) => [`${t.docKey}/${row.id}`, holders(t.docKey, row, docName)]));
-          const cascadeOps = removeRow(db, schema, table, collKey, id, doc, def);
+          const cascadeOps = removeRow(db, schema, table, collKey, id, doc, def, ts);
           if (isRoot) doc[collKey] = null;
           broadcastOps.push(...cascadeOps);
           for (const removed of cascadeOps) {
@@ -1636,6 +1643,9 @@ function insertCollectionRow(
     }
   }
 
+  // A version this write made and took back (added, then removed) never was
+  // outside it: an add of the same id again takes its place.
+  if (table.temporal) db.run(`DELETE FROM ${table.name} WHERE id = ? AND valid_from = ? AND valid_to = ?`, [id, ts, ts]);
   insertRow(db, table, fullRow, ts);
 
   // The row read back, as Postgres's RETURNING gives it: as it is kept (a
@@ -1649,9 +1659,10 @@ function insertCollectionRow(
 }
 
 /**
- * Overwrite a NON-temporal row in place.
+ * Overwrite a row in place: a non-temporal row, or the live version of a
+ * temporal one that the write going on made (one version per write).
  *
- * A temporal row is updated by closing the old version and inserting a new one
+ * A temporal row is otherwise updated by closing the old version and inserting a new one
  * — the composite `(id, valid_from)` key keeps both. A non-temporal table has
  * `id` as its whole primary key, so that same insert collides: replaces against
  * one used to fail with `UNIQUE constraint failed`, making non-temporal rows
@@ -1666,7 +1677,8 @@ function updateRow(db: any, table: ResolvedTable, id: string | number, row: any)
 
   const sets = cols.map((c) => `${c} = ?`).join(", ");
   const vals = cols.map((c) => encodeValue(table, c, row[c]));
-  db.run(`UPDATE ${table.name} SET ${sets} WHERE id = ?`, [...vals, id]);
+  // a temporal table's live version alone: the one a write made, rewritten as the write goes on
+  db.run(`UPDATE ${table.name} SET ${sets} WHERE id = ?${table.temporal ? " AND valid_to IS NULL" : ""}`, [...vals, id]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1691,11 +1703,12 @@ function removeRow(
   id: string | number,
   doc: any,
   def: DocDef,
+  ts: string = now(),
 ): DeltaOp[] {
   const ops: DeltaOp[] = [];
 
   if (table.temporal) {
-    closeRow(db, table, id);
+    closeRow(db, table, id, ts);
   } else {
     db.run(`DELETE FROM ${table.name} WHERE id = ?`, [id]);
   }
@@ -1711,7 +1724,7 @@ function removeRow(
     const viewName = childTable.temporal ? `current_${childTable.name}` : childTable.name;
     const childRows = db.query(`SELECT id FROM ${viewName} WHERE ${childTable.parent.fkColumn} = ?`).all(id) as any[];
     for (const row of childRows) {
-      ops.push(...removeRow(db, schema, childTable, childKey, row.id, doc, def));
+      ops.push(...removeRow(db, schema, childTable, childKey, row.id, doc, def, ts));
     }
   }
 
@@ -1724,7 +1737,7 @@ function removeRow(
     const viewName = refTable.temporal ? `current_${refTable.name}` : refTable.name;
     const refRows = db.query(`SELECT id FROM ${viewName} WHERE ${ref.fkColumn} = ?`).all(id) as any[];
     for (const row of refRows) {
-      ops.push(...removeRow(db, schema, refTable, ref.collection, row.id, doc, def));
+      ops.push(...removeRow(db, schema, refTable, ref.collection, row.id, doc, def, ts));
     }
   }
 

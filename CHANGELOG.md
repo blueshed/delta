@@ -222,6 +222,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   told gone is not removed again, nor replaced (`tell` in `src/server/sqlite.ts`, and
   `_delta_tell` in `001d`, `CREATE OR REPLACE`: re-apply the framework, or
   `bunx @blueshed/delta init`).
+- **A temporal row written twice in one write is one new version, on every backend.** On
+  Postgres `[replace /notes/1/text, replace /notes/1/text]` was a 409 (`duplicate key ...
+  fo_notes_pkey`): every version a write makes is stamped with its transaction's `NOW()`, so the
+  second replace closed the first's version at the same instant and collided with it on
+  `(id, valid_from)`. SQLite took it, as a version per op, each a millisecond after the last, so
+  a big write ran `valid_from` past the clock (2000 replaces of one note: 2001 versions, the last
+  2 s ahead, and `open_at` now read a stale text). A write is now one moment on every backend: a
+  version it makes and then writes again gives way to the next (`delta_apply` in `001d`,
+  `CREATE OR REPLACE`; on SQLite the version is rewritten in place, and every version the write
+  makes or closes is stamped with one time). The note's history keeps the version before the
+  write and the write's.
 - **A single document's root written and then removed in one write can be undone, on every
   backend** (todo #61). `[replace /courses/name, remove /courses/1]` through `course:1` recorded
   an inverse of the course's add (as it was before the write), its drink's, and a `replace
