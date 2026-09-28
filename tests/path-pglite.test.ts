@@ -157,7 +157,7 @@ describe("pglite: validateOps answers as delta_apply does", () => {
     }
     expect(answers.filter((a) => a.database === 500)).toEqual([]);
     expect(answers.filter((a) => (a.ahead.length > 0) !== (a.database === 400))).toEqual([]);
-  });
+  }, 30_000);   // many PGlite round trips: past bun's 5s default on a loaded machine
 });
 
 /**
@@ -232,5 +232,5 @@ describe("pglite: a listener on framework SQL older than it", () => {
       for (const l of listeners.splice(0)) await l.destroy();
       await behind.end();
     }
-  });
+  }, 30_000);   // many PGlite round trips: past bun's 5s default on a loaded machine
 });
