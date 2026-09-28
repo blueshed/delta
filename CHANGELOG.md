@@ -127,6 +127,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names the row as the JSON file (`registerDoc`) does, with the same `mintIds`: a uuid in the
   path and in the value's `id`, in what it keeps, answers (`ops`) and broadcasts. `/-` on an array
   still appends. `tests/create-row.test.ts` asks it with the other backends.
+- **CI and the publish workflow run one Bun, pinned** (todo #12). `ci.yml` installed
+  `bun-version: latest` and `publish.yml` named none, so a Bun release could turn the gate red,
+  or a release publish fail, with no change here. Both now pin 1.4.2, the Bun the repo is
+  developed on; CLAUDE.md says how to move it, and `tests/package-exports.test.ts` fails if the
+  two differ or are not an exact version.
 
 ### Changed
 

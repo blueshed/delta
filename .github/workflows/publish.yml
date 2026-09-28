@@ -27,7 +27,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # The same Bun as ci.yml (CLAUDE.md says how to move it).
       - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
 
       - run: bun install --frozen-lockfile
 

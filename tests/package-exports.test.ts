@@ -117,3 +117,21 @@ describe("package exports", () => {
     });
   }
 });
+
+// ---------------------------------------------------------------------------
+// The release gate runs one Bun (todo #12): `bun-version: latest` let a Bun
+// release turn the gate red with no change here. CLAUDE.md says how to move it.
+// ---------------------------------------------------------------------------
+
+describe("the release gate", () => {
+  test("ci.yml and publish.yml set up the same Bun, pinned to an exact version", async () => {
+    const pinned: Record<string, string | undefined> = {};
+    for (const workflow of ["ci.yml", "publish.yml"]) {
+      const yml = await Bun.file(join(repoRoot, ".github", "workflows", workflow)).text();
+      const step = yml.match(/uses: oven-sh\/setup-bun@\S+\n(?:\s+with:\n(?:\s+[\w-]+:.*\n)*)?/)?.[0] ?? "";
+      pinned[workflow] = step.match(/bun-version:\s*"?([^\s"]+)"?/)?.[1];
+    }
+    expect(pinned["ci.yml"]).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(pinned["publish.yml"]).toBe(pinned["ci.yml"]);
+  });
+});

@@ -36,6 +36,12 @@ mapped to **localhost:5433** so it does not clash with a Postgres on 5432. The s
 `bun run db:down` removes the container and its data. GitHub Actions (`.github/workflows/ci.yml`
 on push, `publish.yml` on a published release) runs the same steps.
 
+**CI runs one Bun, pinned**: `bun-version: 1.4.2` in both workflows, the Bun the repo is
+developed on, so a Bun release cannot turn the gate red with no change here. To move it: install
+the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `publish.yml` to
+`bun --version` in one commit (`tests/package-exports.test.ts` fails if the two differ or say
+`latest`).
+
 ## Invariants
 
 - **Three op verbs** (`add`, `replace`, `remove`) on `/<coll>/<id>[/field]` paths. No new verbs.
