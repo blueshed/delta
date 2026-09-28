@@ -474,6 +474,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **railroad 0.15 is accepted** as the peer (`^0.11.0 || … || ^0.15.0`), the devDependency is
+  `^0.15.0`, and the vendored `railroad` and `bun-route` skills are synced to its v0.15.0. delta's
+  client needs no change: it reads its signals in effects and computeds, never in a render body,
+  so 0.15's development warning for a `.get()` there says nothing of it, and its typed JSX props
+  give delta's own code no errors.
+
 - **`doc.data` is typed `ReadonlySignal<T | null>`** (todo #10). It was a writable railroad
   `Signal`, so an optimistic `doc.data.set()` (or `update`, `patch`, `mutate`, `touch`)
   type-checked, though it double-applies when the write's echo lands. It is the same signal at

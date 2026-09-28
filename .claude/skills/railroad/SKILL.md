@@ -1,6 +1,6 @@
 ---
 name: railroad
-version: 0.14.0
+version: 0.15.0
 description: "Railroad — reactive UI for the Bun fullstack runtime. Signals, JSX, hash router, DI, logger. Use when writing JSX with signals, when()/list()/routes(), or any import from @blueshed/railroad. Pair with @blueshed/delta for WebSocket document sync."
 ---
 
@@ -14,7 +14,7 @@ Read `${CLAUDE_SKILL_DIR}/reference.md` for the full manual: setup, the signals/
 
 Bun 1.3 already ships HTML imports, HMR, TSX bundling, `--compile`, and `Bun.WebView`. Railroad adds:
 
-- **Signals** — push-based reactive primitives (Vue/Solid/Preact family; not TC39). Propagation is topologically ordered, so a diamond settles in one consistent pass. The one exception: a computed that switches *which* signals it reads can let an effect run once on half-updated values, then again on the settled ones.
+- **Signals** — push-based reactive primitives (Vue/Solid/Preact family; not TC39). Propagation is topologically ordered, so a diamond settles in one consistent pass, and so does a computed that switches *which* signals it reads: no effect runs on half-updated values.
 - **JSX runtime** — components run once, return real DOM nodes, signals and functions bind to text and attributes automatically; `style` takes a CSS string or an object (static or reactive, custom properties such as `"--accent"` included), and a reactive object style clears keys the next value omits. `<select value>`, `htmlFor` and `className` do what React habits expect, and a child holding `null`, `undefined` or a boolean renders nothing, whether static, a signal or a function. There is no global `JSX` namespace (so React's types can sit beside it): annotate with `import type { JSX } from "@blueshed/railroad"`, where `JSX.Element` is a DOM `Node`.
 - **`when()` / `list()` / `mount()`** — reactive conditionals, keyed lists, and a root scope helper, all with auto-disposal.
 - **Hash router** — `routes(target, table, options)`, `route()` for sub-navigation, reactive `params$` so `/users/1` → `/users/2` updates without remounting (the handler itself runs once per pattern, so read ids through `params$`, or mark the route `keyed`, §9); `navigate()` is current as it returns; supports `options.onError` boundary callback.
@@ -43,7 +43,7 @@ Bun 1.3 already ships HTML imports, HMR, TSX bundling, `--compile`, and `Bun.Web
 
 #1 bug. `{count}` puts the Signal *itself* into JSX, where the runtime registers a reactive text node. `{count.get()}` puts a plain number in, never reactive again.
 
-The same goes for a `.get()` anywhere a render runs: a component body, a `when()` branch, a `list()` row, a route handler. Those run once and **untracked**, so the read is a snapshot and subscribes nothing around it; bind the signal (`class={() => sel.get() === id ? "on" : ""}`) where the value should stay live.
+The same goes for a `.get()` anywhere a render runs: a component body, a `when()` branch, a `list()` row, a route handler, `mount()`'s render. Those run once and **untracked**, so the read is a snapshot and subscribes nothing around it; bind the signal (`class={() => sel.get() === id ? "on" : ""}`) where the value should stay live. In development railroad warns once per render body, naming it (`.get() in a render body (<View>) reads once`, or `(a list() row)`: once for a component however often it renders, once for a row function however many rows); for a one-shot read you mean, use `.peek()`, which doesn't.
 
 A function child must also return **text**, not a Node. `{() => cond ? <A/> : <B/>}` renders the *stringified* element (e.g. `[object SVGElement]`), not the element — railroad warns on the console (dev and prod alike). To render elements conditionally use `when()`; for collections use `list()`.
 
@@ -165,7 +165,7 @@ filter.patch({ color: "blue" });
 
 ### 6. Event handlers are lowercase HTML, not React PascalCase
 
-Railroad is HTML-flavoured JSX — it uses `class`, not `className`; `onclick`, not `onClick`. The runtime accepts PascalCase too (it lowercases anything starting with `on`), but mixing conventions makes diffs noisier and trains the next reader on the wrong style.
+Railroad is HTML-flavoured JSX — it uses `class`, not `className`; `onclick`, not `onClick`; `tabindex`, not `tabIndex`. Each tag's props are typed from the DOM's own element types, so `onClick`, `tabIndex` or a typo (`clas`) doesn't compile ("Did you mean 'onclick'?"); a handler's event and a `ref`'s element are typed (`oninput={(e) => e.currentTarget.value}`). `className` and `htmlFor` compile, for React habits. Any attribute with a hyphen (`data-*`, `aria-*`, `hx-get`) takes any value, and so does every attribute on an SVG tag or a custom element (`<my-widget>`): SVG's element types don't name their attributes.
 
 The value must be a **function** — `onclick={handler}`, never `onclick={handler()}` (that calls it at render) and never a Signal (handlers are not reactive; pass a function that reads the signal). A non-function warns on the console and attaches nothing. `onclick={maybeHandler}` with null/undefined is fine — no handler, no warning.
 
@@ -174,7 +174,7 @@ The value must be a **function** — `onclick={handler}`, never `onclick={handle
 <button onclick={() => count.update(n => n + 1)}>+1</button>
 <div ondragover={onDragOver} ondrop={onDrop} />
 
-// ❌ React-style PascalCase — works, but inconsistent with the rest of railroad
+// ❌ React-style PascalCase — doesn't compile (the runtime would still lowercase it)
 <button onClick={() => count.update(n => n + 1)}>+1</button>
 ```
 
@@ -375,7 +375,7 @@ The `delta-doc` skill (installed with `@blueshed/delta`) has the full API surfac
 
 ## Local development across repos
 
-A page must load **one copy** of railroad. Each copy has its own `Signal` class, tracking, scopes and `provide`/`inject` registry, so two copies can't see each other: delta's `doc.data` renders `[object Object]`, `when(doc.data, …)` never switches, `openDoc()` in a component never auto-closes, and `inject(WS)` finds no provider. Railroad says so on the console when the second copy loads: `A second copy of @blueshed/railroad has loaded (…; the first: …)`.
+A page must load **one copy** of railroad. Each copy has its own `Signal` class, tracking, scopes and `provide`/`inject` registry, so two copies can't see each other, and railroad doesn't try to make them: `openDoc()` in a component never auto-closes, `inject(WS)` finds no provider, and an effect or function child that reads delta's `doc.data` never re-runs. Railroad says so on the console when the second copy loads: `A second copy of @blueshed/railroad has loaded (…; the first: …)`. Rendering the other copy's signal throws: `{doc.data}`, a prop, `when(doc.data, …)` or `list(…)` given it fails with `This Signal was made by another copy of @blueshed/railroad (…)`, naming both copies, rather than showing `[object Object]` or a branch that never switches.
 
 The usual cause is depending on a local checkout: `"@blueshed/delta": "file:../delta"` (or `bun link`) installs the checkout *with its own* `node_modules/@blueshed/railroad`, its dev dependency. Install a packed tarball instead, which carries no `node_modules`, so delta's peer resolves to the app's railroad:
 
@@ -384,7 +384,14 @@ cd ../delta && bun pm pack               # writes blueshed-delta-<version>.tgz
 cd ../app   && bun add ../delta/blueshed-delta-<version>.tgz
 ```
 
-Repeat both lines after each change to the checkout (`bun install` alone keeps the old tarball's contents).
+After each change to the checkout, pack again, then remove the package before adding the tarball:
+
+```sh
+cd ../delta && bun pm pack
+cd ../app   && bun remove @blueshed/delta && bun add ../delta/blueshed-delta-<version>.tgz
+```
+
+`bun add` of the same tarball again keeps the old contents, and so do `bun install --force` and deleting `node_modules/@blueshed/delta`: `bun.lock` pins the first tarball by its integrity hash (Bun 1.4.2). Deleting `bun.lock` works too.
 
 ## Anti-patterns
 

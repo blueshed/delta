@@ -156,11 +156,12 @@ run time (tsc still rejects an expression body that returns a value; use a
 block). `fn` must be synchronous: `effect(async () => …)` logs an error, because its
 Promise is not a cleanup and nothing after its first `await` is tracked.
 
-Writes made inside an effect body reach other listeners **after the body
+Writes made inside an effect body reach other effects **after the body
 returns**, on its first run as on every later one. An effect that writes `a`
-and then reads a computed of `a` sees the old value and re-runs once the
-write settles; an effect that writes its own dependency (a clamp, a default)
-runs again after its current run, never inside it.
+and then reads a computed of `a` it has read before sees the old value and
+re-runs once the write settles (one it reads for the first time during a pass
+is brought up to date); an effect that writes its own dependency (a clamp, a
+default) runs again after its current run, never inside it.
 
 **Each effect/computed run owns what it creates** (0.12+). Anything its body
 creates — computeds (including `.map()`), nested effects, `when()`/`list()`,
@@ -205,8 +206,13 @@ const dispose = mount(document.getElementById("root")!, () => <Greeting />);
 A child that is a signal or a function renders its value as text, and
 `null`, `undefined`, `true` and `false` as nothing, exactly as a static child
 does. A component body runs once and **untracked**: a `.get()` in it (or in a
-`when()` branch, a `list()` row, a route handler) is a one-shot read that
-subscribes nothing, not even the effect that happens to be building it.
+`when()` branch, a `list()` row, a route handler, `mount()`'s render) is a
+one-shot read that subscribes nothing, not even the effect that happens to be
+building it. In development railroad warns about such a read once per render
+body, naming it (`.get() in a render body (<View>) reads once`, or `(a list()
+row)`): once for a component however often it renders, once for a row
+function however many rows. A production build turns the check off. A one-shot read you mean is `.peek()`, or `untrack(() => …)`,
+which don't warn.
 
 ### Props
 
@@ -227,6 +233,20 @@ element) and `on*` (attached as a listener; must be a function).
 
 Props are applied after the element's children, which is what lets a
 `<select value>` find its `<option>`s.
+
+Each tag's props are typed from the DOM's element types
+(`HTMLElementTagNameMap`): an attribute is the element's property
+lowercased, as HTML writes it (`tabindex`, `readonly`, `colspan`,
+`popovertarget`), plus `class`/`className`, `for`/`htmlFor`, and any name
+with a hyphen (`data-*`, `aria-*`, `http-equiv`, a library's `hx-get`); each
+value static, a Signal or a function of a string, number, boolean, `null` or
+`undefined`. An `on*` prop is one of the element's own events, lowercase
+(`onfocusin`, `onfocusout` and `oncomposition*` included), a function of that
+event with `currentTarget` typed; `oninput` gets an `InputEvent`, except on a
+`<select>`. A `ref` gets the element's type. So `onClick`, `tabIndex`, `<div clas>` and `onclick="…"` don't compile.
+An SVG tag or a custom element (a name with a hyphen) takes any attribute,
+with typed handlers and `ref`, since SVG's element types don't name
+attributes.
 
 ### `when(condition, truthy, falsy?)`
 
@@ -495,13 +515,13 @@ import { signal, computed, effect } from "@blueshed/railroad/signals";
 
 ## Sharp edges
 
-- **Propagation is topologically ordered** (0.10+). One write — or one `batch()` of writes — runs each affected computed/effect at most once per settled pass, upstream before downstream, so a diamond (`a → b`, `a → c`, an effect reads both) never observes half-updated state. That holds while each computed reads the same signals every time. A computed that switches what it reads (`flag.get() ? b.get() : a.get() * 2`) can end up deeper than the effects reading it were ordered for; on a later write such an effect can run once on half-updated values and then again on the settled ones. Every write settles consistently, and within the same synchronous pass, so JSX bindings (text, attributes) never paint the half-updated value; only an effect with a side effect per run (a log, a request) sees the extra run. Siblings at the same depth run in subscription order; an effect that *writes* signals re-queues their consumers in the same pass (a true cycle throws).
+- **Propagation is topologically ordered** (0.10+). One write — or one `batch()` of writes — runs each affected computed/effect at most once per settled pass, upstream before downstream, so a diamond (`a → b`, `a → c`, an effect reads both) never observes half-updated state. That holds for a computed that switches what it reads (`flag.get() ? b.get() : a.get() * 2`) too: it moves itself and its readers deeper as it does, and one read before it has settled in the pass is brought up to date first. Siblings at the same depth run in subscription order; an effect that *writes* signals re-queues their consumers in the same pass, and they settle before the next effect runs (a true cycle throws).
 - **Effects own what they create** (0.12+). Anything an `effect()` or `computed()` body creates — computeds, nested effects, `when()`/`list()`, components, `trackDispose()` registrations such as delta's `openDoc()` — is disposed before the next run and when the effect is disposed. Keep long-lived state outside the effect body.
 - **`when()`/`list()` need a dispose scope.** Created outside a component, `routes()` handler, or `mount()`, their internal effects are unreachable — railroad warns on the console. Mount roots via `mount()` or `routes()`.
 - **Routes match in declaration order.** The first pattern that matches wins — declare `/users/new` before `/users/:id`.
 - **Route matching is segment-based only.** No query-string handling (`#/users/42?tab=1` matches `/users/:id` with `id === "42?tab=1"`), and a trailing slash is a real empty segment (`/users/42/` does not match `/users/:id`).
 - **SVG tags get their namespace at creation** (0.10+) — refs fire once and manual listeners survive. Only the four HTML/SVG-ambiguous tags (`a`, `script`, `style`, `title`) still go through adoption when appended inside `<svg>`: on that path a `ref` fires twice (use the last call) and hand-attached listeners don't carry over — use `on*` props. Adoption happens when a node is placed through JSX, `mount()`, `routes()`, or a `when()`/`list()` parent; a `when()`/`list()` fragment appended *by hand* into an `<svg>` (`svg.appendChild(when(…))`) does not adopt those four tags in its first render -- place it through one of those instead.
-- **One copy of railroad per page.** Signals, scopes and providers don't cross copies, so with two (a `file:`-linked checkout that brings its own `node_modules/@blueshed/railroad`) the UI stops updating. The second copy logs `A second copy of @blueshed/railroad has loaded (…)`; SKILL.md › Local development across repos has the fix.
+- **One copy of railroad per page.** Signals, scopes and providers don't cross copies, so with two (a `file:`-linked checkout that brings its own `node_modules/@blueshed/railroad`) the UI stops updating. The second copy logs `A second copy of @blueshed/railroad has loaded (…)`, and the other copy's signal throws where it is rendered (a child, a prop, a `when()` condition, a `list()` source); SKILL.md › Local development across repos has the fix.
 - **An event handler is not a dispose scope.** A `computed()`, `.map()` or `effect()` created in `onclick` lives until you dispose it; derive in the component body.
 - **`provide`/`inject` is a process-global singleton.** Great for client apps and app-wide services; on the server it is shared across all requests, so don't use it for per-request state.
 - **`.mutate()` uses `structuredClone`** — it only works on plain-data signals (no functions, class instances, or DOM nodes in the value).
