@@ -841,11 +841,11 @@ export async function createDocListener<I = unknown>(
             return respond({ error: { code: 404, message: "Not found" } });
           }
         }
-        const args = [cursor, whoOf(writer), way === "undo", msg.dry === true, msg.entry ?? null, change];
-        const { rows } =
-          auth?.asSqlArg && identity !== undefined
-            ? await db.query("SELECT delta_walk_as($1, $2, $3, $4, $5, $6, $7) AS result", [String(auth.asSqlArg(identity)), ...args])
-            : await db.query("SELECT delta_walk($1, $2, $3, $4, $5, $6) AS result", args);
+        // a change named takes 001g's newer forms; none, the ones a database on 0.10.0's SQL has too
+        const args = [cursor, whoOf(writer), way === "undo", msg.dry === true, msg.entry ?? null, ...(change === null ? [] : [change])];
+        const [asUser, sql] = auth?.asSqlArg && identity !== undefined ? [[String(auth.asSqlArg(identity))], "delta_walk_as"] : [[], "delta_walk"];
+        const all = [...asUser, ...args];
+        const { rows } = await db.query(`SELECT ${sql}(${all.map((_, i) => `$${i + 1}`).join(", ")}) AS result`, all);
         await db.query("COMMIT");
         const result = rows[0]?.result ?? null;
         respond({ result: result && { ...result, ...(result.version != null ? { version: Number(result.version) } : {}), entry: result.entry == null ? undefined : Number(result.entry) } });

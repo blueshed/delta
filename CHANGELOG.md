@@ -31,10 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **A named walk that meets a conflict records nothing**, where the cursor's walk records one
     (so the cursor moves past it): nothing has to move past a named one, and the change can be
     walked once the document holds again what it left.
-  - **Postgres: 001g adds `_delta_change_tip`, `delta_walk(cursor, who, back, dry, entry,
-    change)` and `delta_walk_as(…, change)`**, all `CREATE OR REPLACE`. The five-argument
-    `delta_walk` now calls the six, so a database on 0.10.0's 001g takes this one over it; the
-    listener calls the new forms.
+  - **Postgres: a named undo needs 001g applied again** (`applyFramework`, or `bunx
+    @blueshed/delta init` for vendored SQL). It adds `_delta_change_tip`, `delta_walk(cursor, who,
+    back, dry, entry, change)` and `delta_walk_as(…, change)`, all `CREATE OR REPLACE`, and the
+    five-argument `delta_walk` now calls the six, so it applies over 0.10.0's. Until then, a
+    database on 0.10.0's SQL goes on undoing and redoing as it did: the listener calls the new
+    forms only for a walk that names a change, which there is the server's error (500).
 
 ## [0.10.0] - 2026-09-28
 
