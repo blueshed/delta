@@ -28,8 +28,9 @@ afterAll(async () => {
 beforeEach(async () => {
   clearRegistry();
   await resetState(pool);
-  // one list everybody writes to: the tests with an auth module say so (shared), as auth requires
-  registerDocType(docTypeFromDef(defineDoc("items:", { root: "items", include: [] }), pool, { shared: true }));
+  // one list everybody writes to: the tests with an auth module say so (shared), as auth requires --
+  // and shared is said with the auth module it is asked with (without one, docTypeFromDef refuses it)
+  registerDocType(docTypeFromDef(defineDoc("items:", { root: "items", include: [] }), pool, { auth: { gate: (client: any) => client.data.identity ?? { error: "no one" } }, shared: true }));
 });
 
 afterEach(async () => {

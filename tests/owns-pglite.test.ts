@@ -27,8 +27,8 @@ beforeAll(async () => {
 afterAll(async () => { await pool.end(); });
 afterEach(async () => { for (const l of listeners.splice(0)) await l.destroy(); clearRegistry(); });
 
-const custom = (which?: "owned" | "neither"): CustomDocDef<any, Me>[] => [
-  which === "neither" ? postgresInbox : { ...postgresInbox, owns: customOwns.inbox },
+const custom = (which?: "owned" | "neither"): CustomDocDef<any, Me>[] => which === "neither" ? [postgresInbox] : [
+  { ...postgresInbox, owns: customOwns.inbox },
   { ...postgresMenuCard, owns: customOwns.menuCard },
   whoamiDoc(async (_pool: any, _c: string, me?: Me) => ({ me: me?.id ?? null })),
   mineDoc(async (pool: any, _c: string, me?: Me) => ({ households: (await pool.query(`SELECT to_jsonb(h) AS row FROM ${pathSchema.tables.households!.name} h WHERE weddings_id = $1`, [me?.id ?? null])).rows.map((r: any) => r.row) })),
@@ -39,11 +39,12 @@ describe("pglite", () => ownsCases(() => ({
     clearRegistry();
     await pool.query(`TRUNCATE ${tables.join(", ")}, _delta_versions, _delta_ops_log, _delta_ledger RESTART IDENTITY`);
     await importTables(pool, pathSchema, pathSeed);
-    for (const def of pathDocs) registerDocType(docTypeFromDef<Me>(def, pool, { auth, owns: opts.owns, shared: opts.shared }));
+    const withAuth = opts.noAuth ? undefined : auth;
+    for (const def of pathDocs) registerDocType(docTypeFromDef<Me>(def, pool, { auth: withAuth, owns: opts.owns, shared: opts.shared }));
     const local = createLocal();
     const heard: { channel: string; data: any }[] = [];
     local.onPublish((channel, data) => heard.push({ channel, data }));
-    listeners.push(await createDocListener(local.server, pool, { auth, ledger: true, custom: custom(opts.custom) }));
+    listeners.push(await createDocListener(local.server, pool, { auth: withAuth, ledger: true, custom: custom(opts.custom) }));
     return {
       as: (identity?: Me) => (identity ? local.as(identity) : local),
       backend: { process: { call: (action, msg) => local.call(action, msg), heard }, quiet: () => new Promise((r) => setTimeout(r, 100)), exportTables: async () => ({ tables: {} }) },

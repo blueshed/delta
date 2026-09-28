@@ -19,7 +19,7 @@ import type { Pool, PoolClient } from "pg";
 import { resolveDoc, holdAuth, ownerless } from "./registry";
 import type { DocType } from "./registry";
 import type { DeltaAuth } from "../auth";
-import { isAuthError } from "../auth";
+import { authless, isAuthError } from "../auth";
 import { type DeltaOp, splitPath, joinPath } from "../../core";
 import { socketCursor } from "../ledger";
 
@@ -152,6 +152,10 @@ export async function createDocListener<I = unknown>(
     const unowned = (opts?.custom ?? []).find((d) => !d.owns && !d.shared);
     if (unowned) throw ownerless(unowned.prefix, "defineCustomDoc");
     releaseAuth = holdAuth();
+  } else {
+    // a custom doc's owns or shared with no auth module would guard nothing
+    const said = (opts?.custom ?? []).find((d) => d.owns || d.shared);
+    if (said) throw authless(said.prefix, "defineCustomDoc");
   }
   const ledger = !!opts?.ledger;
   const whoOf = (identity: I | undefined): string | null => {

@@ -108,6 +108,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refuse)` (with `refuse` false a value refused answers the scope that holds nothing, with
   `refused` its message) and replaces the two-argument one, which calls it, and
   `_delta_doc_holds` (`CREATE OR REPLACE`: re-apply the framework, or `delta init`).
+- **Every backend: `owns` or `shared` given without an auth module is refused** (todo #6's
+  review). Nothing asks them without one, so `registerDocs(..., { owns })` with no `auth`, or
+  `docTypeFromDef(def, pool, { owns })` on a listener with none, looked guarded while every
+  socket opened every document. `registerDocs` and `docTypeFromDef` now throw when given `owns`
+  or `shared` without `auth`, and `registerDocs` or `createDocListener` without `auth` when a
+  custom doc says either (`authless`, beside `ownerless` in `./auth`). A `docTypeFromDef` that
+  says `shared` for a listener with `auth` passes that `auth` too.
 - **Every backend: a row moved through a document goes only under a parent the document holds**
   (todo #6's review). Writing a parent key checked only its type, so a writer who owned
   `fo-board:1` alone moved its household into wedding 2 (`replace /households/1/weddings_id 2`)

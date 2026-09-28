@@ -18,7 +18,7 @@
  */
 import type { WsServer } from "./server";
 import { trackSubscribe, trackUnsubscribe, onClientDrop } from "./server";
-import { isAuthError, ownerless, type DeltaAuth } from "./auth";
+import { authless, isAuthError, ownerless, type DeltaAuth } from "./auth";
 import { applyOps as deltaApplyOps, type DeltaOp, splitPath, joinPath } from "../core";
 import { createLogger } from "./logger";
 import { createLedger, planWalk, rowAt, socketCursor } from "./ledger";
@@ -228,6 +228,11 @@ export function registerDocs<I = unknown>(
     if (docs.length && !options.owns && !options.shared) throw ownerless(docs.map((d) => d.prefix).join(", "), "registerDocs");
     const unowned = customDocs.find((d) => !d.owns && !d.shared);
     if (unowned) throw ownerless(unowned.prefix, "defineCustomDoc");
+  } else {
+    // and owns or shared with no auth module would guard nothing: every socket opens every document
+    if (options.owns || options.shared) throw authless(docs.map((d) => d.prefix).join(", "), "registerDocs");
+    const said = customDocs.find((d) => d.owns || d.shared);
+    if (said) throw authless(said.prefix, "defineCustomDoc");
   }
   /** The gate's identity (with `auth`), or its refusal. */
   const gated = (client: any): { identity: I } | { error: { code: number; message: string } } => {

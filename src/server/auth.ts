@@ -81,6 +81,18 @@ export function ownerless(prefix: string, what = "registerDocType"): Error {
   );
 }
 
+/**
+ * The other half, on every backend: `owns` and `shared` are asked only with an
+ * auth module, so given without one they would say a document is guarded when
+ * every socket may open it -- refused with this.
+ */
+export function authless(prefix: string, what: string): Error {
+  return new Error(
+    `${what}("${prefix}"): owns and shared are asked only with an auth module -- ` +
+    `pass auth (and wire it: wireAuth, upgradeWithAuth), or leave them out: without auth, every socket may open every document of the prefix.`,
+  );
+}
+
 export type AuthAction<Identity> = (
   params: any,
   client: any,

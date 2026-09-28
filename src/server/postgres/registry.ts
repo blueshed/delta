@@ -16,7 +16,7 @@
 import type { Pool } from "pg";
 import type { DocDef } from "./schema";
 import type { DeltaOp } from "../../core";
-import { ownerless, type DeltaAuth } from "../auth";
+import { authless, ownerless, type DeltaAuth } from "../auth";
 
 /** Who is writing, for the ledger: the identity as the ledger has it, and the cursor undo walks. */
 export type Writer = { who: string | null; cursor: string | null; undoable?: boolean; undoes?: number | null };
@@ -168,6 +168,8 @@ export function docTypeFromDef<I = unknown>(
   // channel carries, so a name several identities may open would hand each of
   // them every row written through it. Say who owns it, or that it is shared.
   if (auth && !opts?.owns && !opts?.shared) throw ownerless(def.prefix, "docTypeFromDef");
+  // owns or shared with no auth module would guard nothing: the listener asks them only with one
+  if (!auth && (opts?.owns || opts?.shared)) throw authless(def.prefix, "docTypeFromDef");
 
   return {
     prefix: def.prefix,

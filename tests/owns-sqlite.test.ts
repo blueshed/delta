@@ -17,8 +17,8 @@ import { auth, customOwns, mineDoc, ownsCases, whoamiDoc, type Me, type OwnsBack
 
 setLogLevel("silent");
 
-const custom = (which?: "owned" | "neither"): CustomDocDef<any, Me>[] => [
-  which === "neither" ? sqliteInbox : { ...sqliteInbox, owns: customOwns.inbox },
+const custom = (which?: "owned" | "neither"): CustomDocDef<any, Me>[] => which === "neither" ? [sqliteInbox] : [
+  { ...sqliteInbox, owns: customOwns.inbox },
   { ...sqliteMenuCard, owns: customOwns.menuCard },
   whoamiDoc((_db: any, _c: string, me?: Me) => ({ me: me?.id ?? null })),
   mineDoc((db: any, _c: string, me?: Me) => ({ households: db.query(`SELECT * FROM ${pathSchema.tables.households!.name} WHERE weddings_id = ?`).all(me?.id ?? null) })),
@@ -43,7 +43,7 @@ describe("sqlite", () => ownsCases(over((local, opts) => {
   const db = new Database(":memory:");
   createTables(db, pathSchema);
   importTables(db, pathSchema, pathSeed);
-  registerDocs(local.server, db, pathSchema, pathDocs, custom(opts.custom), { ledger: true, auth, owns: opts.owns, shared: opts.shared });
+  registerDocs(local.server, db, pathSchema, pathDocs, custom(opts.custom), { ledger: true, auth: opts.noAuth ? undefined : auth, owns: opts.owns, shared: opts.shared });
 })));
 
 const dirs: string[] = [];
@@ -54,7 +54,7 @@ describe("json", () => ownsCases(over((local, opts) => {
   dirs.push(dir);
   const file = join(dir, "data.json");
   json.importTables(file, pathSchema, pathSeed);
-  json.registerDocs(local.server, file, pathSchema, pathDocs, custom(opts.custom), { ledger: true, auth, owns: opts.owns, shared: opts.shared });
+  json.registerDocs(local.server, file, pathSchema, pathDocs, custom(opts.custom), { ledger: true, auth: opts.noAuth ? undefined : auth, owns: opts.owns, shared: opts.shared });
 })));
 
 /**

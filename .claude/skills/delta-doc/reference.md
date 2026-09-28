@@ -414,7 +414,7 @@ An `add /todos/-` on this list-mode doc takes `owner_id` from the scope (the doc
 - **A `DocType` written by hand** — an `owns(identity, docName)` method, or `shared: true` on it. `createDocListener(ws, pool, { auth })` refuses to start while a registered type has neither, and while such a listener runs, `registerDocType` refuses one.
 - **A custom doc** — `owns` or `shared: true` in `defineCustomDoc`; `createDocListener` (or `registerDocs`) refuses one with neither. `owns` is asked on open (a 404, and no subscription, when it says no).
 
-The error names the prefix and says what to add. Without `auth` nothing is asked.
+The error names the prefix and says what to add. Without `auth` nothing is asked -- so `owns` or `shared` given without it (to `registerDocs`, `docTypeFromDef`, or a custom doc on a listener or `registerDocs` with no `auth`) is refused too, on every backend: it would say a document is guarded when every socket may open it.
 
 ### Custom read docs — `defineCustomDoc`
 
@@ -433,7 +433,7 @@ const sitesInBbox = defineCustomDoc<BBox>("sites-in-bbox:", {
   }),
   matches: (_coll, row, c) =>                      // does this changed row still belong?
     row.lng >= c.minLng && row.lng <= c.maxLng && row.lat >= c.minLat && row.lat <= c.maxLat,
-  shared: true,                                    // with auth: every signed-in identity may open every bbox
+  shared: true,                                    // with auth: every signed-in identity may open every bbox (without auth, leave it out)
 });
 ```
 

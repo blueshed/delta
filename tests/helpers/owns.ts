@@ -55,7 +55,7 @@ export interface OwnsBackend {
    * `owns`, or `shared`, or neither (it throws, as registering does); the
    * custom documents with their own owns ("owned") or none ("neither").
    */
-  start(opts: { owns?: (me: Me, docName: string) => boolean | Promise<boolean>; shared?: boolean; custom?: "owned" | "neither" }): Promise<OwnsProcess>;
+  start(opts: { owns?: (me: Me, docName: string) => boolean | Promise<boolean>; shared?: boolean; custom?: "owned" | "neither"; noAuth?: boolean }): Promise<OwnsProcess>;
 }
 
 const ada: Me = { id: 1, email: "a@x" };
@@ -66,6 +66,14 @@ export function ownsCases(backend: () => OwnsBackend): void {
     test("a document registered with neither owns nor shared is refused, and so is a custom document; the error says what to add", async () => {
       await expect(backend().start({})).rejects.toThrow(/with auth, say who may open it -- owns: \(identity, docName\) => boolean, or shared: true/);
       await expect(backend().start({ owns: ownsByName, custom: "neither" })).rejects.toThrow(/defineCustomDoc\("fo-inbox:"\): with auth, say who may open it/);
+    });
+
+    test("owns or shared given with no auth module is refused, as a custom document's: nothing would ask it, and every socket would open every document", async () => {
+      await expect(backend().start({ owns: ownsByName, noAuth: true, custom: "neither" })).rejects.toThrow(/"fo-board:[^"]*"\): owns and shared are asked only with an auth module/);
+      await expect(backend().start({ shared: true, noAuth: true, custom: "neither" })).rejects.toThrow(/"fo-board:[^"]*"\): owns and shared are asked only with an auth module/);
+      await expect(backend().start({ custom: "owned", noAuth: true })).rejects.toThrow(/defineCustomDoc\("fo-inbox:"\): owns and shared are asked only with an auth module/);
+      const open = await backend().start({ noAuth: true, custom: "neither" });   // neither: every socket opens every document, as it says
+      expect((await open.as().call("open", { doc: "fo-board:1" })).error).toBeUndefined();
     });
 
     test("the gate: a caller with no identity is refused (401) opening, writing, reading as it stood, asking the history, walking and closing", async () => {
