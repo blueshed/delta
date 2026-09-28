@@ -125,7 +125,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at once did the same, while `open` showed one of them. `delta_apply` (`001d`, replaced in
   place) now takes a lock on the id, held to commit, for every add to a temporal table, named or
   minted, and checks the live rows under it: the second waits for the first and is refused
-  (409), as a plain table's key refuses it and as SQLite and the JSON file answer. A serial
+  (409), as a plain table's key refuses it and as SQLite and the JSON file answer. Two such
+  writes that add two ids in opposite orders wait on each other; Postgres ends one (SQLSTATE
+  40P01), and the listener now answers it 409, not 500: nothing was written, send it again. A serial
   still does not step past ids clients choose: an `add /<coll>/-` whose next serial a client
   named is a 409 on every backend.
 - **Postgres: a socket hears a document while it may open it** (todo #17). With `auth`, `owns`

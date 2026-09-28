@@ -121,6 +121,28 @@ describe("postgres: what only a database shared by processes has", () => {
     }
   });
 
+  test("two adds of two note ids in opposite orders, at once, deadlock: the one refused is told to send again (409), not a 500 (todo #16's review)", async () => {
+    const other = await pool.connect();
+    try {
+      await other.query("BEGIN");
+      await other.query(`SELECT delta_apply('fo-notes:1', '[{"op":"add","path":"/notes/11","value":{"text":"b"}}]'::jsonb)`);
+      // this write takes note 10's lock, then waits for 11's; the other then waits for 10's
+      const answer = backend.process.call("delta", { doc: "fo-board:1", ops: [
+        { op: "add", path: "/notes/10", value: { text: "a" } },
+        { op: "add", path: "/notes/11", value: { text: "a" } },
+      ] });
+      await new Promise((r) => setTimeout(r, 200));
+      const theirs = other.query(`SELECT delta_apply('fo-notes:1', '[{"op":"add","path":"/notes/10","value":{"text":"b"}}]'::jsonb)`).then(() => "taken", (err: any) => err.code);
+      const [mine, done] = await Promise.all([answer, theirs]);
+      // the first to wait is the first to find the cycle: this write gives way
+      expect({ mine: mine.error?.code, theirs: done }).toEqual({ mine: 409, theirs: "taken" });
+      await other.query("COMMIT");
+    } finally {
+      await other.query("ROLLBACK").catch(() => {});
+      other.release();
+    }
+  }, 15000);
+
   test("a document opened in no process is not told, and costs no version", async () => {
     await openAll(backend.process, ["fo-board:1"]);
     await write(backend.process, "fo-board:1", [{ op: "replace", path: "/courses/1/name", value: "Broth" }]);

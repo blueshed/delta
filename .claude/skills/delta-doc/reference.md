@@ -1122,7 +1122,7 @@ Every message is JSON. Clients use `doc.send(ops)` internally; the protocol is o
 | 401 | not signed in | an `auth` gate said no |
 | 403 | the document is read-only | custom, static and source docs; memory docs over a socket |
 | 404 | not there | the document, a row, a path; a document the identity does not `own` |
-| 409 | already there | `add` of a row id that exists |
+| 409 | already there | `add` of a row id that exists; on Postgres, a write that met another at once and gave way (a deadlock): nothing was written, send it again |
 | 500 | the server's own failure | the message says what |
 
 ## Why delta
