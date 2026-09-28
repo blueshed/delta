@@ -340,6 +340,29 @@ describe("a socket hears a document while it may open it (todo #17)", () => {
     expect(stale.subscriptions.has("rls-mine:1")).toBe(false);
   });
 
+  test("a gate that throws for one socket refuses that socket alone: the others still hear every write", async () => {
+    const fragile: DeltaAuth<Id> = {
+      gate: (c: any) => {
+        if (c.data?.explode) throw new Error("gate exploded");
+        return (c.data?.identity as Id | undefined) ?? { error: "Authentication required" };
+      },
+      asSqlArg: (i) => i.id,
+    };
+    registerDocType(docTypeFromDef(mine, app, { auth: fragile, owns: (who, name) => name === `rls-mine:${who.id}` }));
+    listener = await createDocListener(ws, app, { auth: fragile });
+    const tab = person(1);
+    const broken = person(1);
+    for (const c of [tab, broken]) await sendAndAwait(ws, c, { action: "open", doc: "rls-mine:1" });
+    broken.data.explode = true;
+    for (const name of ["one", "two"]) {
+      await sendAndAwait(ws, tab, { action: "delta", doc: "rls-mine:1", ops: [{ op: "add", path: "/rls_items/-", value: { name } }] });
+      await settle();
+    }
+    expect(heard(tab, "rls-mine:1")).toHaveLength(2);
+    expect(heard(broken, "rls-mine:1")).toEqual([]);
+    expect(broken.subscriptions.has("rls-mine:1")).toBe(false);
+  });
+
   test("a custom document too: taken off a membership view or a recompute one, a socket hears no more of it", async () => {
     const members = new Map([["rls-bag:team", new Set([1])], ["rls-tally:team", new Set([1])]]);
     const owns = (who: Id, name: string) => members.get(name)?.has(who.id) ?? false;

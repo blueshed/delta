@@ -137,7 +137,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   had open until it next asked for something. The listener now asks, before it tells a change,
   what an open asks: each socket's gate, and the document's `owns` (a custom document's too,
   membership or recompute), and lets go of each socket refused -- unsubscribed from that
-  document; its next request says why (404, or 401). The gate is asked per socket (cheap by
+  document; its next request says why (404, or 401). A gate that throws refuses that socket
+  alone, and the change still reaches the rest. The gate is asked per socket (cheap by
   contract); `owns` once per identity per change, so a change costs the identities a document
   has open, not its sockets, and a `shared` document asks the gate alone; without `auth` nothing
   is asked. Asked at the change, not on a timer (late by its interval) or by a hook the app

@@ -228,13 +228,20 @@ export async function createDocListener<I = unknown>(
     }
     return may;
   }
-  /** Let go of `docName` each of `subs` that may no longer hear it. */
+  /**
+   * Let go of `docName` each of `subs` that may no longer hear it. A gate (or
+   * anything else) that throws for one socket refuses that socket alone: the
+   * change is still told to the rest, and the document's version moves on.
+   */
   async function letGo(docName: string, subs: Set<any>, owns: Owns | undefined, as?: string): Promise<void> {
     const asked = new Map<string, Promise<boolean>>();
     await Promise.all([...subs].map(async (client) => {
-      if (await mayHear(client, docName, owns, asked, as)) return;
+      let may = false;
+      try { may = await mayHear(client, docName, owns, asked, as); }
+      catch (err) { log.error(`gate for ${docName}: ${errMsg(err)}`); }
+      if (may) return;
       subs.delete(client);
-      trackUnsubscribe(client, docName);
+      try { trackUnsubscribe(client, docName); } catch { /* the socket may be closing */ }
       log.info(`let go of ${docName}: it may no longer hear it`);
     }));
   }
