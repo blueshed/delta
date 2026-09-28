@@ -73,6 +73,25 @@ describe("pglite: a name opened before the scope's grammar refused it", () => {
   });
 });
 
+/** A date in a name is the instant midnight UTC begins it, as SQLite reads it -- not midnight where the session's TimeZone is. */
+describe("pglite: a date in a name, whatever the session's TimeZone", () => {
+  test("is midnight UTC", async () => {
+    await openAll(backend.process, ["fo-slots-upto:"]);
+    await write(backend.process, "fo-slots-upto:", [
+      { op: "add", path: "/slots/-", value: { weddings_id: 1, starts: "2026-01-01T03:00:00Z" } }, // before midnight in New York
+      { op: "add", path: "/slots/-", value: { weddings_id: 1, starts: "2026-01-01T00:00:00Z" } },
+    ]);
+    await pool.query("SET TimeZone = 'America/New_York'");
+    try {
+      const by = (await backend.process.call("open", { doc: "fo-slots-by:2026-01-01" })).result;
+      const on = (await backend.process.call("open", { doc: "fo-slots-on:2026-01-01" })).result;
+      expect({ by: Object.keys(by.slots).map(Number), on: Object.keys(on.slots).map(Number) }).toEqual({ by: [2], on: [2] });
+    } finally {
+      await pool.query("RESET TimeZone");
+    }
+  });
+});
+
 /**
  * The exported validateOps says ahead what delta_apply answers (todo #47):
  * each write it refuses, the database refuses as a mistake (400), and each it

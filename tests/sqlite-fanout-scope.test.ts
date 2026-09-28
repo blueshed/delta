@@ -234,3 +234,24 @@ describe("an included collection with no parent is loaded in full, on every path
     expect(Object.keys(doc.tags).sort()).toEqual(["t1", "t2"]);
   });
 });
+
+describe("a scope on a time compares instants: a stored time SQLite cannot read meets no condition", () => {
+  test("neither opened nor told, in the SQL and the fan-out alike", async () => {
+    const s = defineSchema({ shows: { columns: { title: "text", starts: "timestamptz?" }, temporal: false } });
+    const db = new Database(":memory:");
+    createTables(db, s);
+    const local = createLocal();
+    const heard: { channel: string; data: any }[] = [];
+    local.onPublish((channel, data) => heard.push({ channel, data }));
+    registerDocs(local.server, db, s, [
+      defineDoc("shows:", { root: "shows", include: [] }),
+      defineDoc("shows-from:", { root: "shows", include: [], scope: { starts: ">=:from" } }),
+    ]);
+    await local.call("open", { doc: "shows:" });
+    // SQLite keeps a time as the text it is given: this one is no time (Postgres would refuse it)
+    await local.call("delta", { doc: "shows:", ops: [{ op: "add", path: "/shows/-", value: { title: "a", starts: "soon" } }] });
+    expect((await local.call("open", { doc: "shows-from:2020-01-01" })).result.shows).toEqual({});
+    await local.call("delta", { doc: "shows:", ops: [{ op: "replace", path: "/shows/1/title", value: "b" }] });
+    expect(heard.filter((h) => h.channel === "shows-from:2020-01-01")).toEqual([]);
+  });
+});

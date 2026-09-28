@@ -36,8 +36,9 @@ $$ LANGUAGE sql STABLE;
 -- (22P02, a 400): an integer's is digits, signed, up to 2^53 - 1 (not 1_000 or
 -- 0x10, which Postgres's own cast takes); a real's a finite decimal number (not
 -- Infinity, NaN or 0x10), one a double holds; an id's or a parent key's a whole
--- number, or text no row here has (below). Other types are left to the
--- column's cast, which reads them as SQLite does.
+-- number, or text no row here has (below); a timestamptz's a date, YYYY-MM-DD,
+-- the instant midnight UTC begins it (the cast's own 22007 would be a 500). Other
+-- types are left to the column's cast, which reads them as SQLite does.
 --
 -- Returns JSONB:
 --   { "where":  "SQL WHERE clause",
@@ -70,6 +71,7 @@ DECLARE
   v_type      TEXT;
   v_refused   TEXT;
   v_cond      TEXT;
+  v_date      TEXT[];
 BEGIN
   v_doc_id := substring(p_doc_name FROM length(p_def.prefix) + 1);
   v_scope  := p_def.scope;
@@ -225,6 +227,22 @@ BEGIN
           EXCEPTION WHEN numeric_value_out_of_range THEN   -- 1e400, 1e-400: past what a double holds
             v_refused := format('%s must be a number, not "%s"', v_key, v_resolved);
           END;
+        END IF;
+      ELSIF v_type = 'timestamptz' THEN
+        -- A date, YYYY-MM-DD (a name's ":" separates its values, so it holds no
+        -- time of day), read as the instant midnight UTC begins it, whatever
+        -- the session's TimeZone -- as SQLite reads it; not now, 20260101 or
+        -- Jan 1 2026, which Postgres's own cast takes. (Each test a statement
+        -- of its own, so make_date is asked only of a month there is.)
+        v_date := regexp_match(v_resolved, '^\s*([0-9]{4})-([0-9]{2})-([0-9]{2})\s*$');
+        IF v_date IS NULL THEN
+          v_refused := format('%s must be a date, YYYY-MM-DD, not "%s"', v_key, v_resolved);
+        ELSIF v_date[1]::int < 1 OR v_date[2]::int NOT BETWEEN 1 AND 12 THEN
+          v_refused := format('%s must be a date, YYYY-MM-DD, not "%s"', v_key, v_resolved);
+        ELSIF v_date[3]::int NOT BETWEEN 1 AND extract(day FROM make_date(v_date[1]::int, v_date[2]::int, 1) + interval '1 month - 1 day')::int THEN
+          v_refused := format('%s must be a date, YYYY-MM-DD, not "%s"', v_key, v_resolved);
+        ELSE
+          v_resolved := format('%s-%s-%s 00:00:00+00', v_date[1], v_date[2], v_date[3]);
         END IF;
       END IF;
       IF v_refused IS NOT NULL THEN

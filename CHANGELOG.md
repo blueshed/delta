@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A time's name is a date, compared as an instant, on every backend** (todo #60). A list
+  document scoped by a `timestamptz` (`scope: { starts: "<=:end" }`) compared the name's text
+  with the row's on SQLite and the JSON file, which keep a time as the text it was given, so
+  `slots-by:2026-01-01` held `2025-12-31T23:30:00-02:00` (01:30 UTC, after midnight) and left
+  out `2026-01-01T00:00:00.000Z` (midnight itself), where Postgres compares instants; and
+  `slots-by:garbage` read rows on SQLite and was a 500 on Postgres (`22007`, the cast's), as
+  was `slots-by:2026-01-01T12:00:00Z`, whose `:` make its value `2026-01-01T12`. A condition
+  on SQLite now compares instants: the column through SQLite's own `strftime` (`YYYY-MM-DD
+  HH:MM:SS.SSS` in UTC, the form it keeps a row's validity in) and the name the same way, in
+  the SQL and in the fan-out alike; a stored time it cannot read meets none. The name's value
+  is a date, `YYYY-MM-DD`, on every backend -- a name's `:` separates its values, so it holds
+  no time of day -- the instant midnight UTC begins it, whatever the session's `TimeZone`; any
+  other text (`garbage`, `2026-02-30`, and `20260101`, `today` or `now`, which Postgres's own
+  cast took) is a 400, opened or written through. An add through the name is given the date
+  (SQLite keeps its text). `_delta_resolve_scope` (`001b`) is replaced in place.
 - **A parent key's name is an id on every backend** (todo #60). A list document scoped by a
   parent key (`scope: { weddings_id: ":wedding" }`) opened as `slots-of:abc` read no rows on
   SQLite and the JSON file and was a 400 on Postgres, whose bigint cast refused the text. SQLite

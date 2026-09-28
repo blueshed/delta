@@ -40,8 +40,8 @@ export const pathSchema = defineSchema({
   tags: { table: "fo_tags", columns: { label: "text" }, temporal: false },
   notes: { table: "fo_notes", parent: "weddings", columns: { text: "text" }, temporal: true },
   seats: { table: "fo_seats", parent: "weddings", columns: { table_no: "integer", kept: "boolean", wishes: "json?" }, temporal: false },
-  // the time slots of a wedding: the scopes on a real and a parent key
-  slots: { table: "fo_slots", parent: "weddings", columns: { price: "real?" }, temporal: false },
+  // the time slots of a wedding: the scopes on a real, a parent key and a time
+  slots: { table: "fo_slots", parent: "weddings", columns: { price: "real?", starts: "timestamptz?" }, temporal: false },
 });
 
 /** Several documents over the same rows, cut different ways. */
@@ -79,6 +79,9 @@ export const pathDocs = [
   // list mode by a parent key: a wedding's slots, and those of the weddings up to one
   defineDoc("fo-slots-of:", { root: "slots", include: [], scope: { weddings_id: ":wedding" } }),
   defineDoc("fo-slots-under:", { root: "slots", include: [], scope: { weddings_id: "<=:most" } }),
+  // list mode by a time: the slots that start by a date, and those that start on its midnight
+  defineDoc("fo-slots-by:", { root: "slots", include: [], scope: { starts: "<=:end" } }),
+  defineDoc("fo-slots-on:", { root: "slots", include: [], scope: { starts: ":on" } }),
 ];
 
 /**
@@ -396,6 +399,46 @@ export function documentCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
       const add = [{ op: "add", path: "/slots/-", value: { weddings_id: 1, price: 1 } }];
       for (const doc of ["fo-slots-of:1.5", "fo-slots-of:1e0", "fo-slots-of:9007199254740992", "fo-slots-under:1.5"]) {
+        const open = (await b.process.call("open", { doc })).error?.code;
+        const written = (await b.process.call("delta", { doc, ops: add })).error?.code;
+        expect({ doc, open, written }).toEqual({ doc, open: 400, written: 400 });
+      }
+    });
+
+    test("a time's name is a date, YYYY-MM-DD, the instant midnight UTC begins it, and a stored time is compared as the instant it names, whatever its form; anything else is refused (400): garbage, 2026-02-30, 20260101, today", async () => {
+      const b = backend();
+      await openAll(b.process, ["fo-slots-upto:"]);
+      const at = (starts: string | null) => ({ op: "add", path: "/slots/-", value: { weddings_id: 1, starts } });
+      await write(b.process, "fo-slots-upto:", [
+        at("2026-01-01T10:00:00.000Z"), // 1: after midnight
+        at("2025-12-31T23:30:00-02:00"), // 2: 01:30 UTC, after midnight, though its text sorts before the date
+        at("2026-01-01T00:00:00.000Z"), // 3: midnight, though its text is not the date's
+        at("2025-12-31T23:59:59.999Z"), // 4: before
+        at("2026-01-01T01:00:00+01:00"), // 5: midnight
+        at(null), // 6: no time
+      ]);
+      const names = ["fo-slots-by:2026-01-01", "fo-slots-by: 2026-01-01", "fo-slots-by:2025-12-31", "fo-slots-by:2026-01-02", "fo-slots-on:2026-01-01", "fo-slots-on:2025-12-31"];
+      const copies = await openAll(b.process, names);
+      expect(names.map((doc) => ({ doc, slots: Object.keys(copies.get(doc).slots).map(Number) }))).toEqual([
+        { doc: "fo-slots-by:2026-01-01", slots: [3, 4, 5] },
+        { doc: "fo-slots-by: 2026-01-01", slots: [3, 4, 5] },
+        { doc: "fo-slots-by:2025-12-31", slots: [] },
+        { doc: "fo-slots-by:2026-01-02", slots: [1, 2, 3, 4, 5] },
+        { doc: "fo-slots-on:2026-01-01", slots: [3, 5] },
+        { doc: "fo-slots-on:2025-12-31", slots: [] },
+      ]);
+      // an add through the name is given its time, and read back by it; rows move across midnight
+      const { ops } = await write(b.process, "fo-slots-on:2026-01-01", [{ op: "add", path: "/slots/-", value: { weddings_id: 1 } }]);
+      expect(ops.map((o: any) => o.path)).toEqual(["/slots/7"]);
+      await write(b.process, "fo-slots-upto:", [
+        { op: "replace", path: "/slots/1/starts", value: "2025-06-01T00:00:00Z" },
+        { op: "replace", path: "/slots/3/starts", value: "2026-01-01T00:00:00.001Z" },
+      ]);
+      await assertCopiesHold(b, copies);
+      expect(Object.keys((await b.process.call("open", { doc: "fo-slots-on:2026-01-01" })).result.slots).map(Number)).toEqual([5, 7]);
+      const add = [{ op: "add", path: "/slots/-", value: { weddings_id: 1, starts: "2026-01-01T00:00:00Z" } }];
+      const refused = ["garbage", "2026-01-01T12:00:00Z", "2026-02-30", "2026-13-01", "0000-01-01", "20260101", "2026-1-1", "today", "now"];
+      for (const doc of [...refused.map((name) => `fo-slots-by:${name}`), "fo-slots-on:garbage"]) {
         const open = (await b.process.call("open", { doc })).error?.code;
         const written = (await b.process.call("delta", { doc, ops: add })).error?.code;
         expect({ doc, open, written }).toEqual({ doc, open: 400, written: 400 });

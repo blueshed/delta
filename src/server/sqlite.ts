@@ -295,7 +295,7 @@ export function registerDocs(
     if (!rootTable) return null;
 
     const viewName = rootTable.temporal ? `current_${rootTable.name}` : rootTable.name;
-    const where = whereOf(scope, keeping(rootTable));
+    const where = whereOf(scope, keeping(db, rootTable));
     const rows = db.query(`SELECT * FROM ${viewName} WHERE ${where.sql}`).all(...(where.params as any[]));
 
     if (scope.mode === "list") {
@@ -416,7 +416,7 @@ export function registerDocs(
     if (coll === def.root) {
       if (scope.mode !== "list" && !sameId(row.id, scope.id)) return false;
       // a name its columns cannot take holds nothing: it is refused (400) when opened or written through
-      try { return meets(scope, row, keeping(schema.tables[coll]!)); }
+      try { return meets(scope, row, keeping(db, schema.tables[coll]!)); }
       catch (err: any) { if (typeof err.code === "number") return false; throw err; }
     }
     if (scope.mode === "list" || !schema.tables[coll]?.parent) return true;   // in full
@@ -872,7 +872,7 @@ export function registerDocs(
     const doc = cache.get(docName);
     if (!doc) {
       // a name its root's columns cannot take is the writer's mistake (400), as on Postgres, before it is a document not open
-      try { whereOf(resolveScope(match.def, match.docId), keeping(schema.tables[match.def.root]!)); }
+      try { whereOf(resolveScope(match.def, match.docId), keeping(db, schema.tables[match.def.root]!)); }
       catch (err: any) { if (typeof err.code === "number") return respond({ error: { code: err.code, message: err.message } }); }
       respond({ error: { code: 404, message: `Doc not loaded: open ${docName} before writing to it` } });
       return;
@@ -1107,7 +1107,7 @@ export function loadDocAt(db: any, schema: Schema, def: DocDef, docId: string, a
   if (!rootTable) return null;
   const when = sqliteTime(at);
   const scope = resolveScope(def, docId);
-  const where = whereOf(scope, keeping(rootTable));
+  const where = whereOf(scope, keeping(db, rootTable));
 
   const rootRows = temporalQuery(db, rootTable, where.sql, where.params as any[], when);
   if (scope.mode === "list") {
@@ -1772,7 +1772,8 @@ function encodeValue(table: ResolvedTable, col: string, value: unknown): any {
  * unambiguous prefixes, 1/0, any case); an integer's digits, signed, up to
  * 2^53 - 1; a real's finite decimal number -- by the grammar Postgres's
  * resolver holds its casts to (`_delta_resolve_scope`, which refuses 1_000,
- * 0x10 and Infinity); a json column's text as the JSON it is; a text or a time as the text;
+ * 0x10 and Infinity); a json column's text as the JSON it is; a text as the
+ * text; a time's a date, YYYY-MM-DD (the instant midnight UTC begins it);
  * an id or a parent key a whole number, or text (an id SQLite keeps as text).
  * Text the column cannot take is a 400.
  */
@@ -1796,7 +1797,16 @@ function scopeValue(table: ResolvedTable, col: string, text: string): unknown {
       return refuse(400, `${col} must be a number, not "${text}"`);
     }
     case "json": try { return JSON.parse(text); } catch { return refuse(400, `${col} must be JSON, not "${text}"`); }
-    case "text": case "timestamptz": return text;
+    case "timestamptz": {
+      // A date, YYYY-MM-DD -- a name's ":" separates its values, so it holds no time of day -- the instant midnight
+      // UTC begins it, as Postgres's resolver reads it; stamped on an add as the text, as a time is stored here.
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(t);
+      const [y, mo, d] = m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [0, 0, 0];
+      const days = [31, y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1];
+      if (y >= 1 && days !== undefined && d >= 1 && d <= days) return t;
+      return refuse(400, `${col} must be a date, YYYY-MM-DD, not "${text}"`);
+    }
+    case "text": return text;
     default:
       // An id or a parent key, as Postgres's resolver reads one: a whole number, signed (+5, 007 and " 5 " are 5), up
       // to 2^53 - 1; a number not whole is no id (1.5, 1e0 -- the column's affinity would compare it as a number);
@@ -1812,13 +1822,29 @@ function scopeValue(table: ResolvedTable, col: string, text: string): unknown {
  * is given it (`scopeValue`), then as the column stores it -- a boolean 1 or 0,
  * json as its text -- and a row's value as the column stores it. So a
  * condition reads by one rule what the add stamps: `fo-seats:yes` reads the
- * rows an add through `fo-seats:true` made.
+ * rows an add through `fo-seats:true` made. A time is stored as the text it was
+ * given, in whatever form, so a condition compares the instant each names, as
+ * Postgres compares a timestamptz: the name's and the row's alike read by
+ * SQLite's own date functions (`instant`), in the SQL and in the fan-out.
  */
-function keeping(table: ResolvedTable): Keep {
+function keeping(db: any, table: ResolvedTable): Keep {
+  const time = (col: string) => Object.hasOwn(table.columns, col) && table.columns[col]!.type === "timestamptz";
   return {
-    text: (col, text) => encodeValue(table, col, scopeValue(table, col, text)),
-    value: (col, value) => encodeValue(table, col, value),
+    text: (col, text) => (time(col) ? instant(db, scopeValue(table, col, text)) : encodeValue(table, col, scopeValue(table, col, text))),
+    value: (col, value) => (time(col) ? instant(db, value) : encodeValue(table, col, value)),
+    column: (col) => (time(col) ? `strftime('%Y-%m-%d %H:%M:%f', ${col})` : col),
   };
+}
+
+/**
+ * A time as SQLite reads it, "YYYY-MM-DD HH:MM:SS.SSS" in UTC -- the sortable
+ * form a row's validity is kept in (`sqliteTime`) -- or null for text it cannot
+ * read: its own strftime, as `keeping`'s column is, so the fan-out and the SQL
+ * read a stored time alike.
+ */
+function instant(db: any, value: unknown): string | null {
+  const text = value instanceof Date ? value.toISOString() : String(value);
+  return (db.query("SELECT strftime('%Y-%m-%d %H:%M:%f', ?) AS t").get(text) as { t: string | null }).t;
 }
 
 function decodeRow(table: ResolvedTable, row: any) {

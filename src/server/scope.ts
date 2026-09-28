@@ -17,7 +17,8 @@
  * named "id" first, the rest alphabetically. An empty value sets no condition.
  * With no scope, the id is the root row's id -- or, empty, every root row.
  * A condition compares its value as the column takes it (`Keep`), as Postgres
- * casts the text: a boolean's "yes" is true; one the column cannot take is a 400.
+ * casts the text: a boolean's "yes" is true, a time the instant it names; one
+ * the column cannot take is a 400.
  */
 import type { DocDef } from "../schema";
 
@@ -86,15 +87,17 @@ export function resolveScope(def: DocDef, docId: string): Scope {
 export interface Keep {
   /** A condition's text, as the column keeps it. */
   text(col: string, text: string): unknown;
-  /** A row's value, as the column keeps it. */
+  /** A row's value, as the column keeps it: null when it holds none a condition can compare (a row with it meets none). */
   value(col: string, value: unknown): unknown;
+  /** The SQL every condition compares for the column, as `value` reads a row's (a time as its instant); the column itself when not given. */
+  column?(col: string): string;
 }
 
 /** The conditions as SQL, for a query on the root's table: each value as its column keeps it (`like` a pattern of the text). */
 export function whereOf(scope: Scope, keep: Keep): { sql: string; params: unknown[] } {
   if (scope.conds.length === 0) return { sql: "1 = 1", params: [] };
   return {
-    sql: scope.conds.map(({ col, op }) => (op === "like" ? `${col} LIKE ?` : `${col} ${op} ?`)).join(" AND "),
+    sql: scope.conds.map(({ col, op }) => `${keep.column?.(col) ?? col} ${op === "like" ? "LIKE" : op} ?`).join(" AND "),
     params: scope.conds.map(({ col, op, value }) => (op === "like" ? `${value}%` : keep.text(col, value))),
   };
 }
@@ -115,6 +118,7 @@ export function meets(scope: Scope, row: Record<string, unknown>, keep: Keep): b
   return scope.conds.every(({ col, op, value }) => {
     if (row[col] === null || row[col] === undefined) return false;
     const v = keep.value(col, row[col]);
+    if (v === null || v === undefined) return false;   // as the SQL's NULL: a stored time SQLite cannot read
     if (op === "like") return String(v).toLowerCase().startsWith(value.toLowerCase());
     const c = compare(v, keep.text(col, value));
     switch (op) {
