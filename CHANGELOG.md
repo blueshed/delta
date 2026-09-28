@@ -186,6 +186,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now a type error: send the ops and let the echo change it (`get`, `peek` and `map` are as
   before, and `list()` and `when()` take it). `tests/client.test.ts` holds the writes as `@ts-expect-error`, which
   `bun run check` checks.
+- **SQLite: a write's ops land in the order sent, as on Postgres** (todo #20, #54). SQLite and the
+  JSON file held back a write's field replaces (and whole-row replaces) and wrote them after its
+  adds and removes, so `[replace /drinks/3/name, remove /drinks/3]` removed the drink first and
+  then answered 404 for the replace, where Postgres writes the name and then removes the drink;
+  and a batch was answered, recorded and told in another order than it was sent (`[replace
+  /weddings/name, add /courses/-]` told the add first; two replaces of one row were told as
+  one). Each op now lands where it is sent, read back as it is kept and told as it lands, and
+  the answer, the ledger's entry and its inverse follow it: the drink's write is told as the
+  replace and then the remove to every document that held it, and undone puts the drink back
+  as it was. A row the write made is `null` in its inverse (`replace /<coll>/<id>` with
+  `value: null`), as on Postgres, where SQLite left the value out.
 
 ## [0.9.1] - 2026-09-27
 

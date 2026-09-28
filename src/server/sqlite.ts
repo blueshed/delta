@@ -488,36 +488,40 @@ export function registerDocs(
     const broadcastOps: DeltaOp[] = [];
     const touched: Touched[] = [];
 
-    // Separate row-field updates for batching
-    const rowFieldBatches = new Map<string, { table: ResolvedTable; id: string | number; fields: Map<string, unknown> }>();
-    // Root-level field updates are batched too: applying them one-at-a-time
-    // did closeRow+insert per op, so two root-field replaces in one delta
-    // collided on the temporal PK (same valid_from). Accumulate and emit one
-    // close+insert for the whole delta.
-    const rootFieldUpdates = new Map<string, unknown>();
-
-    // Apply batched root-field updates as a single close + reinsert (temporal)
-    // or one in-place UPDATE (non-temporal — `id` is the whole PK there, so a
-    // reinsert would collide): after the ops, and before a remove of the root,
-    // so a field written first lands first, as on Postgres.
-    const flushRoot = () => {
-      if (rootFieldUpdates.size === 0) return;
-      if (!doc[def.root]) refuse(404, `Row not found: ${def.root}/${rootId}`);   // removed earlier in this write
-      const rootTable = schema.tables[def.root]!;
-      const before = holders(def.root, doc[def.root], docName);
+    /**
+     * Replace fields of a row the document holds -- the root (`root`), or a row
+     * of a map -- as the op says, where it is sent: one close + reinsert
+     * (temporal; each write its own `now()`, so two in one batch never share a
+     * `valid_from`) or one in-place UPDATE (non-temporal: `id` is the whole PK
+     * there, so a reinsert would collide). The row is read back as it is kept
+     * (a parent key's "5" is 5), as Postgres's RETURNING gives it, and told as
+     * it lands. The path names the row, so `id` and the temporal columns in a
+     * value are not taken from it.
+     */
+    const replaceRow = (table: ResolvedTable, id: string | number, fields: Record<string, unknown>, root: boolean) => {
+      const collKey = table.docKey;
+      const present = root ? doc[collKey] : doc[collKey]?.[id];
+      if (!present) refuse(404, `Row not found: ${collKey}/${id}`);   // not this document's, or removed earlier in this write
+      const before = holders(collKey, present, docName);
       const ts = now();
-      if (rootTable.temporal) closeRow(db, rootTable, rootId!, ts);
-      const updated = { ...doc[def.root] };
-      for (const [field, value] of rootFieldUpdates) updated[field] = value;
-      if (rootTable.temporal) insertRow(db, rootTable, updated, ts);
-      else updateRow(db, rootTable, rootId!, updated);
-      const stored = readRow(rootTable, rootId!);   // as it is kept (a parent key's "5" is 5), as Postgres's RETURNING gives it
-      doc[def.root] = stored;
-      broadcastOps.push({ op: "replace", path: joinPath(def.root), value: stored });
-      touched.push({ coll: def.root, id: rootId!, before, after: stored });
-      rootFieldUpdates.clear();
+      if (table.temporal) closeRow(db, table, id, ts);
+      const updated = { ...present };
+      for (const [field, value] of Object.entries(fields)) {
+        if (field === "id" || field === "valid_from" || field === "valid_to") continue;
+        updated[field] = value;
+      }
+      if (table.temporal) insertRow(db, table, updated, ts);
+      else updateRow(db, table, id, updated);
+      const stored = readRow(table, id);
+      if (root) doc[collKey] = stored;
+      else doc[collKey][id] = stored;
+      broadcastOps.push({ op: "replace", path: root ? joinPath(collKey) : joinPath(collKey, String(id)), value: stored });
+      touched.push({ coll: collKey, id, before, after: stored });
     };
 
+    // Each op lands in the order sent, as on Postgres: a field written and then
+    // its row removed is written first, and a row removed is not there for an
+    // op after it.
     for (const op of ops) {
       const parts = splitPath(op.path);
       const collKey = parts[0]!;
@@ -528,19 +532,15 @@ export function registerDocs(
       // /<root>/fieldName is a field of it (an add or a remove of /<root>/<id> is the row itself, below)...
       if (isRoot && parts.length === 2 && op.op !== "add" && op.op !== "remove") {
         if (op.op !== "replace") throw new Error(`Root fields support replace only`);
-        rootFieldUpdates.set(parts[1]!, (op as any).value);
+        replaceRow(table!, rootId!, { [parts[1]!]: (op as any).value }, true);
         continue;
       }
 
       // ...and /<root> a partial merge into it (Postgres parity: delta_apply
-      // merges over the current row). The path carries the row identity, so
-      // `id` and the temporal columns are ignored rather than trusted from the value.
+      // merges over the current row).
       if (!list && collKey === def.root && parts.length === 1) {
         if (op.op !== "replace") throw new Error(`Root supports replace only`);
-        for (const [field, value] of Object.entries((op as any).value as Record<string, unknown>)) {
-          if (field === "id" || field === "valid_from" || field === "valid_to") continue;
-          rootFieldUpdates.set(field, value);
-        }
+        replaceRow(table!, rootId!, (op as any).value as Record<string, unknown>, true);
         continue;
       }
 
@@ -586,7 +586,6 @@ export function registerDocs(
           // equivalent check via `doc[collKey]?.[id]`).
           if (!isRoot) assertRowInScope(doc, collKey, id);
           else if (!doc[collKey]) refuse(404, `Row not found: ${collKey}/${id}`);   // removed earlier in this write
-          else flushRoot();
           // who holds the row and every row the cascade takes, asked before any is gone
           const befores = new Map(cascadeRows(table, id, def).map(({ table: t, row }) => [`${t.docKey}/${row.id}`, holders(t.docKey, row, docName)]));
           const cascadeOps = removeRow(db, schema, table, collKey, id, doc, def);
@@ -598,57 +597,17 @@ export function registerDocs(
           }
         } else if (op.op === "replace") {
           // Whole-row replace: /<coll>/<id> — a partial merge over the current
-          // row (Postgres parity: delta_apply does `v_row || value`). Rides the
-          // field-batch writer below so it collapses with field-level ops on
-          // the same row and shares the temporal/non-temporal write path.
+          // row (Postgres parity: delta_apply does `v_row || value`).
           // validateOps accepted this shape all along, but it used to fall
           // through here and ack as a silent no-op (v0.5.0 review #3).
-          const key = `${collKey}/${id}`;
-          if (!rowFieldBatches.has(key)) {
-            rowFieldBatches.set(key, { table, id, fields: new Map() });
-          }
-          const fields = rowFieldBatches.get(key)!.fields;
-          for (const [field, value] of Object.entries((op as any).value as Record<string, unknown>)) {
-            if (field === "id" || field === "valid_from" || field === "valid_to") continue;
-            fields.set(field, value);
-          }
+          replaceRow(table, id, (op as any).value as Record<string, unknown>, false);
         }
       } else if (parts.length === 3 && op.op === "replace") {
-        // Field update — batch per row
-        const id = rowId(parts[1]!);
-        const field = parts[2]!;
-        const key = `${collKey}/${id}`;
-        if (!rowFieldBatches.has(key)) {
-          rowFieldBatches.set(key, { table, id, fields: new Map() });
-        }
-        rowFieldBatches.get(key)!.fields.set(field, (op as any).value);
+        // Field update: /<coll>/<id>/<field>
+        replaceRow(table, rowId(parts[1]!), { [parts[2]!]: (op as any).value }, false);
       } else {
         throw new Error(`Invalid op: ${op.op} ${op.path}`);
       }
-    }
-
-    flushRoot();
-
-    // Apply batched field updates
-    for (const [, batch] of rowFieldBatches) {
-      const collKey = batch.table.docKey;
-      const present = doc[collKey]?.[batch.id];
-      if (!present) refuse(404, `Row not found: ${collKey}/${batch.id}`);
-      const before = holders(collKey, present, docName);
-
-      const ts = now();
-      if (batch.table.temporal) closeRow(db, batch.table, batch.id, ts);
-
-      const updated = { ...present };
-      for (const [field, value] of batch.fields) {
-        updated[field] = value;
-      }
-      if (batch.table.temporal) insertRow(db, batch.table, updated, ts);
-      else updateRow(db, batch.table, batch.id, updated);
-      const stored = readRow(batch.table, batch.id);   // as it is kept, as the root's above
-      doc[collKey][batch.id] = stored;
-      broadcastOps.push({ op: "replace", path: joinPath(collKey, String(batch.id)), value: stored });
-      touched.push({ coll: collKey, id: batch.id, before, after: stored });
     }
 
     return { applied: broadcastOps, touched };
@@ -1084,7 +1043,7 @@ export function inverseOf(before: any, applied: DeltaOp[], asked?: DeltaOp[]): D
     run = [];
   };
   for (const op of applied) {
-    const prior = withoutStorage(rowAt(before, op.path));
+    const prior = withoutStorage(rowAt(before, op.path)) ?? null;   // null: not there before the write (made by it), as Postgres says it
     if (op.op === "remove") {
       if (heads?.has(op.path)) flush();   // a remove asked for starts its own run; one it cascaded to joins it
       run.push({ op: "add", path: op.path, value: prior });
