@@ -108,6 +108,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refuse)` (with `refuse` false a value refused answers the scope that holds nothing, with
   `refused` its message) and replaces the two-argument one, which calls it, and
   `_delta_doc_holds` (`CREATE OR REPLACE`: re-apply the framework, or `delta init`).
+- **SQLite: two registrations on one database walk each other's undo** (todo #6's review). With
+  one `owns` per `registerDocs` call, an app with public and private documents registers twice
+  on one database, and both share the ledger; the first registration answered every undo and
+  redo, and one written through the second's document was a 404 ("Not found"). A walk now lets
+  an entry whose document is not its own by, and the registration that holds it walks it (with
+  `auth`, asking its own `owns`). Each registration still tells only its own open documents of
+  a write.
 - **Every backend: `owns` or `shared` given without an auth module is refused** (todo #6's
   review). Nothing asks them without one, so `registerDocs(..., { owns })` with no `auth`, or
   `docTypeFromDef(def, pool, { owns })` on a listener with none, looked guarded while every

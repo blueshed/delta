@@ -13,7 +13,8 @@ import { createWs } from "../src/server/server";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
 import { pathDocs, pathSchema, pathSeed, sqliteInbox, sqliteMenuCard } from "./helpers/path";
-import { auth, customOwns, mineDoc, ownsCases, whoamiDoc, type Me, type OwnsBackend } from "./helpers/owns";
+import { auth, customOwns, mineDoc, ownsByName, ownsCases, whoamiDoc, type Me, type OwnsBackend } from "./helpers/owns";
+import { defineDoc } from "../src/schema";
 
 setLogLevel("silent");
 
@@ -88,4 +89,41 @@ describe("sqlite: two identities on one membership name, over sockets", () => {
     expect(mine(adaSock)).toEqual([[{ op: "add", path: "/households/3", value: { id: 3, weddings_id: 1, email: "c@x" } }]]);
     expect(mine(bobSock)).toEqual([[{ op: "remove", path: "/households/3" }]]);
   });
+});
+
+/**
+ * One database, two registrations -- a public one (shared) and a private one
+ * (owns), as one `owns` per call makes an app with both write -- and one
+ * ledger: an undo or redo is walked by the registration whose document the
+ * entry was written through; the other lets it by (todo #6's review).
+ */
+describe("sqlite: two registrations on one database share the ledger", () => {
+  const setup = (withAuth: boolean) => {
+    const db = new Database(":memory:");
+    createTables(db, pathSchema);
+    importTables(db, pathSchema, pathSeed);
+    const local = createLocal();
+    const pub = [defineDoc("pub-tags:", { root: "tags", include: [] })];
+    registerDocs(local.server, db, pathSchema, pub, [], withAuth ? { ledger: true, auth, shared: true } : { ledger: true });
+    registerDocs(local.server, db, pathSchema, pathDocs, [], withAuth ? { ledger: true, auth, owns: ownsByName } : { ledger: true });
+    return local;
+  };
+
+  for (const withAuth of [false, true]) {
+    test(`an undo and a redo of a write through either registration's document are walked by it${withAuth ? ", with auth, and owns still says who" : ""}`, async () => {
+      const local = setup(withAuth);
+      const ada = withAuth ? local.as({ id: 1 }) : local;
+      const name = async () => (await ada.call("open", { doc: "fo-board:1" })).result.courses["1"].name;
+      expect(await name()).toBe("Soup");
+      expect((await ada.call("delta", { doc: "fo-board:1", ops: [{ op: "replace", path: "/courses/1/name", value: "Broth" }], cursor: "s" })).error).toBeUndefined();
+      expect((await ada.call("undo", { cursor: "s" })).error).toBeUndefined();
+      expect(await name()).toBe("Soup");
+      expect((await ada.call("redo", { cursor: "s" })).error).toBeUndefined();
+      expect(await name()).toBe("Broth");
+      await ada.call("open", { doc: "pub-tags:" });
+      expect((await ada.call("delta", { doc: "pub-tags:", ops: [{ op: "add", path: "/tags/-", value: { label: "x" } }], cursor: "t" })).error).toBeUndefined();
+      expect((await ada.call("undo", { cursor: "t" })).result.ops).toEqual([{ op: "remove", path: "/tags/2" }]);
+      if (withAuth) expect((await local.as({ id: 2 }).call("undo", { cursor: "s" })).error).toEqual({ code: 404, message: "Not found" });
+    });
+  }
 });

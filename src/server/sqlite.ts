@@ -1098,9 +1098,10 @@ export function registerDocs<I = unknown>(
       if (msg.entry != null && msg.entry !== entry.id) {
         return respond({ error: { code: 409, message: `The cursor's next entry to ${way} is ${entry.id}, not ${msg.entry}` } });
       }
+      const match = findDoc(entry.doc);
+      if (!match) return;   // written through another registration's document (one ledger, one database): its walk answers
       heardElsewhere();
       reloadEvicted();   // a walk is a write: its fan-out needs every open doc's copy, as delta's does
-      const match = findDoc(entry.doc);
       // a single document whose root is gone (removed through it) is walked from
       // its root absent, as Postgres reads it: an undo of the removal puts it back
       const doc = match && (load(entry.doc, match.def, match.docId) ?? rootless(match.def));
@@ -1136,7 +1137,7 @@ export function registerDocs<I = unknown>(
         if ("error" in g) return respond(g);
         const cursor = cursorOf(msg, client);
         const entry = cursor === null ? undefined : way === "undo" ? ledger.nextUndo(cursor) : ledger.nextRedo(cursor);
-        if (!entry || !options.owns) return walked(msg, client, respond);
+        if (!entry || !options.owns || !findDoc(entry.doc)) return walked(msg, client, respond);   // another registration's: it asks its own owns
         return whenOwned(options.owns(g.identity, entry.doc), respond, () => walked(msg.entry == null ? { ...msg, entry: entry.id } : msg, client, respond));
       };
     };
