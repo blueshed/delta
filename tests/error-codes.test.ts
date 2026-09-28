@@ -41,6 +41,7 @@ function mistakes(there: string) {
   return {
     "a path without a leading slash": { ops: [{ op: "remove", path: "ec_messages" }], code: 400 },
     "a row that is not there": { ops: [{ op: "replace", path: "/ec_messages/404/text", value: "x" }], code: 404 },
+    "a remove of a row that is not there": { ops: [{ op: "remove", path: "/ec_messages/404" }], code: 404 },
     "an unknown field": { ops: [{ op: "replace", path: `/ec_messages/${there}/nope`, value: "x" }], code: 400 },
     "a field named after Object.prototype": { ops: [{ op: "replace", path: `/ec_messages/${there}/toString`, value: "x" }], code: 400 },
     "an add of a row that is already there": { ops: [{ op: "add", path: `/ec_messages/${there}`, value: { text: "again" } }], code: 409 },
@@ -67,7 +68,7 @@ describe("the same mistake, the same code", () => {
     const ws = createWs();
     await registerDoc(ws, "ec-room:1", { file, empty: { ec_rooms: { id: "1", title: "" }, ec_messages: { m1: { id: "m1", text: "hi" } } } as any });
     const m = mistakes("m1");
-    for (const name of ["a path without a leading slash", "a row that is not there"]) {
+    for (const name of ["a path without a leading slash", "a row that is not there", "a remove of a row that is not there"]) {
       expect([name, await codeOf(ws, m[name]!.ops)]).toEqual([name, m[name]!.code]);
     }
     try { unlinkSync(file); } catch {}

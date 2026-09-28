@@ -390,6 +390,57 @@ describe("version gap detection + resync", () => {
     client.close();
   });
 
+  test("a broadcast that does not apply to the copy (a remove of a row it does not hold) re-opens it, and does not advance its version (#4)", async () => {
+    const srv = startVersionedServer([
+      { result: { items: { "1": { id: 1 } }, _v: 5 } },                  // first open @ v5
+      { result: { items: { "1": { id: 1 }, "2": { id: 2 } }, _v: 7 } },  // resync @ v7
+    ]);
+    const client = connectWs(srv.url);
+    const doc = openDoc<{ items: Record<string, { id: number }> }>("items:", client);
+    await doc.ready;
+    const received: DeltaOp[][] = [];
+    doc.onOps((ops) => received.push(ops));
+
+    // Contiguous (v6), but /items/9 is not in the copy: RFC 6902 fails it.
+    srv.push({ doc: "items:", ops: [{ op: "replace", path: "/items/1", value: { id: 1, seen: true } }, { op: "remove", path: "/items/9" }], v: 6 });
+
+    const deadline = Date.now() + 5000;
+    while (doc.data.peek()?.items["2"] === undefined && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(srv.openCount()).toBe(2);
+    // the copy is the snapshot: nothing of the batch that did not apply is left in it
+    expect(doc.data.peek()).toEqual({ items: { "1": { id: 1 }, "2": { id: 2 } } });
+    // onOps saw the batch as it came, then the re-open's root-replace to reconcile against
+    expect(received).toEqual([
+      [{ op: "replace", path: "/items/1", value: { id: 1, seen: true } }, { op: "remove", path: "/items/9" }],
+      [{ op: "replace", path: "", value: { items: { "1": { id: 1 }, "2": { id: 2 } } } }],
+    ]);
+
+    client.close();
+  });
+
+  test("an unversioned broadcast that does not apply re-opens the doc too (#4)", async () => {
+    const srv = startVersionedServer([
+      { result: { items: { "1": { id: 1 } } } },
+      { result: { items: { "2": { id: 2 } } } },
+    ]);
+    const client = connectWs(srv.url);
+    const doc = openDoc<{ items: Record<string, { id: number }> }>("items:", client);
+    await doc.ready;
+
+    srv.push({ doc: "items:", ops: [{ op: "remove", path: "/items/9" }] });
+
+    const deadline = Date.now() + 5000;
+    while (doc.data.peek()?.items["2"] === undefined && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(srv.openCount()).toBe(2);
+    expect(doc.data.peek()).toEqual({ items: { "2": { id: 2 } } });
+
+    client.close();
+  });
+
   test("drops a broadcast that arrives before the first open response", async () => {
     // Server pushes a broadcast BEFORE answering the open (simulates a write's
     // broadcast overtaking the open response on the same socket).

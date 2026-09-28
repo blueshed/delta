@@ -97,7 +97,8 @@ describe("the ledger", () => {
   test("an implied room removed through its own document opens empty again, as before its first write, and its copy is told so; undone, the room and its messages come back", async () => {
     const { db, local, heard, say, texts } = setup();
     await say(local, "s1", "m1", "hi");
-    const { _v: _opened, ...opened } = (await local.call("open", { doc: "room:a" })).result;
+    // a copy of what it opened: the answer shares its maps with the backend's own copy, which the write changes
+    const { _v: _opened, ...opened } = structuredClone((await local.call("open", { doc: "room:a" })).result);
     heard.length = 0;
     const removed = await local.call("delta", { doc: "room:a", ops: [{ op: "remove", path: "/rooms/a" }], cursor: "s1" });
     expect(removed.result.ops).toEqual([{ op: "remove", path: "/rooms/a" }, { op: "remove", path: "/messages/m1" }]);

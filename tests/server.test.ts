@@ -401,6 +401,32 @@ describe("registerDoc", () => {
     try { unlinkSync(file); } catch {}
   });
 
+  test("a remove or replace of a row that is not there is a 404, as on SQLite and Postgres: nothing acked, nothing broadcast (#4)", async () => {
+    const file = `${tmpFile}.n4`;
+    await Bun.write(file, JSON.stringify({ messages: { m1: { text: "hi" } }, list: ["a", "c"] }));
+    const ws = createWs();
+    const published: any[] = [];
+    ws.setServer({ publish: (_ch: string, raw: string) => published.push(JSON.parse(raw)) });
+    const handle = await registerDoc(ws, "chat:room", { file, empty: { messages: {}, list: [] } as any });
+    const sock = mockSocket();
+    const bad = [
+      { op: "remove", path: "/messages/nope" },
+      { op: "replace", path: "/messages/nope", value: { text: "x" } },
+      { op: "replace", path: "/messages/m1/nope", value: "x" },
+      { op: "remove", path: "/list/2" },
+    ];
+    for (const [i, op] of bad.entries()) {
+      await ws.websocket.message(sock, JSON.stringify({ id: i + 1, action: "delta", doc: "chat:room", ops: [op] }));
+      expect([op.path, sock.sent[i].error?.code]).toEqual([op.path, 404]);
+    }
+    expect(published).toEqual([]);
+    // an add at an index inserts, and is broadcast as sent
+    await ws.websocket.message(sock, JSON.stringify({ id: 9, action: "delta", doc: "chat:room", ops: [{ op: "add", path: "/list/1", value: "b" }] }));
+    expect(handle.getDoc()).toEqual({ messages: { m1: { text: "hi" } }, list: ["a", "b", "c"] });
+    expect(published).toEqual([{ doc: "chat:room", ops: [{ op: "add", path: "/list/1", value: "b" }] }]);
+    try { unlinkSync(file); } catch {}
+  });
+
   test("loads existing file on startup", async () => {
     await Bun.write(tmpFile, JSON.stringify({ items: ["existing"] }));
 

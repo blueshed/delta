@@ -4,10 +4,15 @@
  * Used by every backend (apply + persist) and by the client (apply + render).
  * No dependencies — safe to import anywhere.
  *
- * Delta ops use RFC 6901 JSON Pointer paths:
- *   { op: "replace", path: "/field",    value: "new" }  — set a value at path
+ * Delta ops are RFC 6902's add, replace and remove, on RFC 6901 JSON Pointer paths:
+ *   { op: "add",     path: "/field",    value: "new" }  — set a member, there or not
  *   { op: "add",     path: "/items/-",  value: item }   — append to an array
- *   { op: "remove",  path: "/items/0" }                  — delete by index
+ *   { op: "add",     path: "/items/1",  value: item }   — insert before index 1
+ *   { op: "replace", path: "/field",    value: "new" }  — set a member that is there
+ *   { op: "remove",  path: "/items/0" }                  — delete one that is there
+ *
+ * As RFC 6902 says, `replace` and `remove` need their target there: one that
+ * is not is a 404, as it is on the SQLite and Postgres backends.
  *
  * The grammar, the same in `splitPath`, `applyOps` and the Postgres
  * `_delta_split_path`:
@@ -19,7 +24,8 @@
  *
  * `applyOps` applies a batch whole or not at all: an op that throws undoes the
  * ops before it, in place, and the error is rethrown. Its errors carry a wire
- * `code`: 400 for a malformed or unsafe path, 404 for one that is not there.
+ * `code`: 400 for a malformed or unsafe path, 404 for one that is not there
+ * (a parent on the way, or the target of a replace or remove).
  */
 
 // ---------------------------------------------------------------------------
@@ -151,27 +157,29 @@ function applyOne(doc: any, op: DeltaOp, undo: (() => void)[]): void {
       return;
     }
     const i = keyIn(arr, last, op.path) as number;
-    if (op.op === "remove") {
-      if (i >= arr.length) return;                    // nothing there, as for a missing member
-      const [was] = arr.splice(i, 1);
-      undo.push(() => void arr.splice(i, 0, was));
-      return;
-    }
-    // `add` at an index OVERWRITES (assignment, not an RFC-6902 splice-insert):
-    // the framework keys collections by id-maps and appends with "/-". An index
-    // past the end would leave holes, so it is refused.
-    if (i > arr.length || (op.op === "replace" && i === arr.length)) {
+    // add inserts before an index, up to the end (RFC 6902 4.1); replace and
+    // remove need an element there. Past that, a hole: refused.
+    if (i > arr.length || (op.op !== "add" && i === arr.length)) {
       fail(404, `Path not found: index ${i} is past the end of ${op.path}`);
     }
-    const had = i < arr.length;
-    const was = arr[i];
-    undo.push(() => { if (had) arr[i] = was; else arr.length = i; });
-    arr[i] = op.value;
+    if (op.op === "add") {
+      arr.splice(i, 0, op.value);
+      undo.push(() => void arr.splice(i, 1));
+    } else if (op.op === "remove") {
+      const [was] = arr.splice(i, 1);
+      undo.push(() => void arr.splice(i, 0, was));
+    } else {
+      const was = arr[i];
+      undo.push(() => { arr[i] = was; });
+      arr[i] = op.value;
+    }
     return;
   }
 
   const obj = parent;
   const had = Object.prototype.hasOwnProperty.call(obj, last);
+  // add sets a member, there or not; replace and remove need it there (RFC 6902 4.2, 4.3).
+  if (!had && op.op !== "add") fail(404, `Path not found: ${JSON.stringify(op.path)} is not there to ${op.op}`);
   const was = obj[last];
   undo.push(() => { if (had) obj[last] = was; else delete obj[last]; });
   if (op.op === "remove") delete obj[last];

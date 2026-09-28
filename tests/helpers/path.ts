@@ -349,6 +349,9 @@ export function documentCases(backend: () => PathBackend): void {
       expect(await code([{ op: "replace", path: "/courses/1/nope", value: "x" }])).toBe(400);
       expect(await code([{ op: "add", path: "/courses/1", value: { name: "again" } }])).toBe(409);
       expect(await code([{ op: "remove", path: "/courses/2" }])).toBe(404); // the other wedding's: not in this document
+      // RFC 6902: replace and remove need their target there (the JSON file's applyOps too, #4)
+      expect(await code([{ op: "remove", path: "/courses/99" }])).toBe(404);
+      expect(await code([{ op: "replace", path: "/courses/99", value: { name: "x" } }])).toBe(404);
     });
 
     test("a path's id is the number its digits name, however many there are: /courses/0001000000000000 is /courses/1000000000000, as /courses/007 is /courses/7", async () => {

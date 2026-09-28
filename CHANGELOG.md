@@ -105,6 +105,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   undoes as it did on 0.9.1: the root does not come back. A document with nothing under it (a
   household's) undoes as no ops and no conflict, nobody told; one with rows under it puts back only
   those, under a root that is gone.
+- **`applyOps` follows RFC 6902 for arrays and missing members** (todo #4). It was RFC 6901's
+  pointers with two rules of delta's own: `add /items/1` overwrote element 1, and a `replace` or
+  `remove` of a member that was not there set it or did nothing, so the JSON file
+  (`registerDoc`) acked `remove /messages/nope` and broadcast it where SQLite and Postgres answer
+  404. Now `add` at an index inserts before it (up to the end; `-` still appends), and `replace`
+  or `remove` of a member or index not there fails with 404, the batch undone. This changes what
+  a caller of `applyOps` gets: an `add` at an index shifts the elements after it, and a `replace`
+  that used to create a field (`replace /messages/m1/seen` on a row without `seen`) is a 404 on
+  the JSON file and a memory document (400 there, as its every refusal) -- write it with `add`.
+  The browser client, which applies each broadcast with the same `applyOps`, now takes one that
+  does not apply to its copy (a remove of a row it does not hold) as drift: the copy is left as
+  it was and the document re-opened, as for a version gap, where one that failed (a field of a
+  row it does not hold) threw out of the socket's message handler and left the copy behind. The SQL backends are unchanged; the every-backend copy check
+  (`tests/helpers/path.ts`) now replays what each document is told under the strict rules, and
+  its mistake case asks a remove and a replace of a row not there on every backend.
 
 ## [0.9.1] - 2026-09-27
 

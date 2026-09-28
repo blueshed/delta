@@ -279,7 +279,10 @@ export function connectWs(
 
   // Apply a broadcast's ops: fire onOps subscribers FIRST (so DOM patchers see
   // the op that matches the state change about to land), then patch `data`.
-  function applyBroadcast(entry: OpenDocEntry, ops: DeltaOp[]): void {
+  // False when the ops do not apply to the copy -- a remove or replace of a
+  // row it does not hold (RFC 6902): the copy has drifted from the server's,
+  // so it is left as it was and the doc re-opened, as for a version gap.
+  function applyBroadcast(name: string, entry: OpenDocEntry, ops: DeltaOp[]): boolean {
     for (const handler of entry.opsHandlers) {
       try { handler(ops); }
       catch (err: any) { docLog.error(`onOps handler threw: ${err.message}`); }
@@ -289,7 +292,13 @@ export function connectWs(
       // Mutate in place so captured child refs (e.g. a row object bound into a
       // drag-handler closure) stay valid across echoes. `set(sameRef)` is a
       // no-op under Object.is — `touch()` is the escape hatch that fires subs.
-      applyOps(current, ops);
+      try {
+        applyOps(current, ops);   // whole or not at all
+      } catch (err: any) {
+        docLog.warn(`a broadcast on ${name} does not apply to its copy (${err.message}) — resyncing`);
+        resyncDoc(name, entry);
+        return false;
+      }
       // One consistent flush per broadcast: an effect reading both data and
       // dataVersion runs once, never in a half-updated window between the two.
       batch(() => {
@@ -297,6 +306,7 @@ export function connectWs(
         entry.data.touch();
       });
     }
+    return true;
   }
 
   // A versioned broadcast arrived out of sequence (we missed at least one op).
@@ -397,15 +407,14 @@ export function connectWs(
                 // GAP: at least one op was missed. Don't apply out of order —
                 // re-open to resync from an authoritative snapshot.
                 resyncDoc(msg.doc, entry);
-              } else {
-                // Contiguous (v === sv + 1) — apply and advance.
-                applyBroadcast(entry, msg.ops);
+              } else if (applyBroadcast(msg.doc, entry, msg.ops)) {
+                // Contiguous (v === sv + 1) — applied; advance. (One that did
+                // not apply is re-opening, which sets the version.)
                 entry.serverVersion = v;
                 settleEchoes(entry);
               }
-            } else {
-              // Unversioned backend (or no baseline yet) — apply as-is.
-              applyBroadcast(entry, msg.ops);
+            } else if (applyBroadcast(msg.doc, entry, msg.ops)) {
+              // Unversioned backend (or no baseline yet) — applied as-is.
               if (v != null) entry.serverVersion = v;
               settleEchoes(entry);
             }

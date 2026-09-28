@@ -154,12 +154,12 @@ On every backend: `await doc.send(ops)` resolves once its own echo is applied; a
 
 ```ts
 type DeltaOp =
-  | { op: "replace"; path: string; value: unknown }  // set at path
-  | { op: "add";     path: string; value: unknown }  // set, or append with /-
-  | { op: "remove";  path: string };                 // delete by path
+  | { op: "replace"; path: string; value: unknown }  // set what is there
+  | { op: "add";     path: string; value: unknown }  // set, insert at an index, or append with /-
+  | { op: "remove";  path: string };                 // delete what is there
 ```
 
-Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/field` (field), `/collection/-` (append to an array; on a collection of rows, a new row whose id the server mints). A row keeps the id its path names: an `id` in an add's or a replace's value is the path's, and `id` is not a field. Every path starts with `/`; one that doesn't is an error, never the root. Escape `~` as `~0` and `/` as `~1` in a segment (`joinPath("messages", id)` from `@blueshed/delta/core` does it), so ids containing `/` or `~` round-trip through every backend. A segment is a string unless its parent is an array: `/items/007` is the key `"007"`. The **empty path `""`** on `replace`/`remove` swaps or clears the **whole doc in place** (object↔object, array↔array) — the primitive behind recompute custom docs; `"/"` is the member named `""`, not the root. A batch applies whole or not at all. → `reference.md` → *Custom read docs*.
+Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/field` (field), `/collection/-` (append to an array; on a collection of rows, a new row whose id the server mints). A row keeps the id its path names: an `id` in an add's or a replace's value is the path's, and `id` is not a field. Every path starts with `/`; one that doesn't is an error, never the root. Escape `~` as `~0` and `/` as `~1` in a segment (`joinPath("messages", id)` from `@blueshed/delta/core` does it), so ids containing `/` or `~` round-trip through every backend. A segment is a string unless its parent is an array: `/items/007` is the key `"007"`. The **empty path `""`** on `replace`/`remove` swaps or clears the **whole doc in place** (object↔object, array↔array) — the primitive behind recompute custom docs; `"/"` is the member named `""`, not the root. The verbs are RFC 6902's: `add` at an array index inserts before it, and `replace` or `remove` of something not there is a 404 on every backend. A batch applies whole or not at all. → `reference.md` → *Custom read docs*.
 
 ## Exports
 

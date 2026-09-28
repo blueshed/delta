@@ -890,7 +890,7 @@ Undo walks back what the cursor wrote, newest first, across documents; redo walk
 
 ## One stream of changes — `v` and `_v`
 
-Every change reaches subscribers as `{ doc, ops, v }` on the document's channel: `v` is the document's version after the change. `open` answers with `_v`, the version the snapshot is at, so a copy kept from the stream knows where it starts. The Postgres backend always versions; the SQLite backend versions with a ledger; the memory and source kinds always do. The browser client strips `_v` from `doc.data`, applies a broadcast whose `v` is the next one, ignores one it already has, and re-opens the document when it sees a gap. Broadcasts without `v` (the JSON-file backend, SQLite without a ledger, fan-out onto other documents, custom docs) are applied as they come.
+Every change reaches subscribers as `{ doc, ops, v }` on the document's channel: `v` is the document's version after the change. `open` answers with `_v`, the version the snapshot is at, so a copy kept from the stream knows where it starts. The Postgres backend always versions; the SQLite backend versions with a ledger; the memory and source kinds always do. The browser client strips `_v` from `doc.data`, applies a broadcast whose `v` is the next one, ignores one it already has, and re-opens the document when it sees a gap, or a broadcast that does not apply to its copy (a remove of a row it does not hold: the copy has drifted, and is left as it was). Broadcasts without `v` (the JSON-file backend, SQLite without a ledger, fan-out onto other documents, custom docs) are applied as they come.
 
 In-process, `createLocal().onPublish` is that stream for every channel: a server that renders can redraw from it without subscribing per document.
 

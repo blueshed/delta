@@ -22,8 +22,10 @@ describe("applyOps", () => {
 
   test("'/' is the member named \"\", not the root (RFC 6901)", () => {
     const doc: any = { a: 1 };
-    applyOps(doc, [{ op: "replace", path: "/", value: 2 }]);
+    applyOps(doc, [{ op: "add", path: "/", value: 2 }]);
     expect(doc).toEqual({ a: 1, "": 2 });
+    applyOps(doc, [{ op: "replace", path: "/", value: 3 }]);
+    expect(doc).toEqual({ a: 1, "": 3 });
   });
 
   test("root remove clears the doc in place", () => {
@@ -51,13 +53,41 @@ describe("applyOps", () => {
     expect(doc.items).toEqual([1, 2, 3]);
   });
 
-  test("add at array index OVERWRITES (not an RFC-6902 insert)", () => {
+  test("add at an array index inserts before it, as RFC 6902 says; replace overwrites", () => {
     const doc = { items: ["a", "b", "c"] };
     applyOps(doc, [{ op: "add", path: "/items/1", value: "x" }]);
-    // Assignment semantics: "b" is replaced, length is unchanged (NOT spliced).
-    expect(doc.items[1]).toBe("x");
-    expect(doc.items).toEqual(["a", "x", "c"]);
-    expect(doc.items.length).toBe(3);
+    expect(doc.items).toEqual(["a", "x", "b", "c"]);
+    applyOps(doc, [{ op: "add", path: "/items/0", value: "first" }]);
+    expect(doc.items).toEqual(["first", "a", "x", "b", "c"]);
+    applyOps(doc, [{ op: "replace", path: "/items/2", value: "y" }]);
+    expect(doc.items).toEqual(["first", "a", "y", "b", "c"]);
+  });
+
+  test("replace of a member that is not there fails (404), as RFC 6902 says: add makes one", () => {
+    const doc: any = { name: "alice", rows: { r1: { text: "hi" } } };
+    for (const path of ["/email", "/rows/r2", "/rows/r1/nope"]) {
+      let err: any;
+      try { applyOps(doc, [{ op: "replace", path, value: "x" }]); } catch (e) { err = e; }
+      expect([path, err?.code]).toEqual([path, 404]);
+    }
+    expect(doc).toEqual({ name: "alice", rows: { r1: { text: "hi" } } });
+  });
+
+  test("remove of a member that is not there fails (404), as RFC 6902 says", () => {
+    const doc: any = { rows: { r1: { text: "hi" } }, list: ["a"] };
+    for (const path of ["/nope", "/rows/r2", "/rows/r1/nope", "/list/1", "/list/7"]) {
+      let err: any;
+      try { applyOps(doc, [{ op: "remove", path }]); } catch (e) { err = e; }
+      expect([path, err?.code]).toEqual([path, 404]);
+    }
+    expect(doc).toEqual({ rows: { r1: { text: "hi" } }, list: ["a"] });
+  });
+
+  test("a member there with the value undefined is there: replace and remove take it", () => {
+    const doc: any = { a: undefined, b: undefined };
+    applyOps(doc, [{ op: "replace", path: "/a", value: 1 }, { op: "remove", path: "/b" }]);
+    expect(doc).toEqual({ a: 1 });
+    expect("b" in doc).toBe(false);
   });
 
   test("remove a field", () => {
@@ -264,6 +294,21 @@ describe("a batch applies whole or not at all", () => {
     ).toThrow(/Path not found at segment zz/);
     expect(doc).toEqual({ messages: { m1: { text: "hi" } }, list: [1, 2], title: "t" });
     expect(doc.messages.m1).toBe(row); // restored in place: held references stay live
+  });
+
+  test("a failing op undoes an insert and a remove at an index, in place", () => {
+    const list = ["a", "b", "c"];
+    const doc: any = { list };
+    expect(() =>
+      applyOps(doc, [
+        { op: "add", path: "/list/1", value: "x" },
+        { op: "remove", path: "/list/0" },
+        { op: "add", path: "/list/3", value: "y" },
+        { op: "remove", path: "/missing" },
+      ]),
+    ).toThrow(/not there/);
+    expect(doc.list).toBe(list);
+    expect(list).toEqual(["a", "b", "c"]);
   });
 
   test("a failing op after a root replace puts the old document back", () => {
