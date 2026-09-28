@@ -1208,10 +1208,14 @@ export function registerDocs<I = unknown>(
         if (!docName.startsWith(prefix) || findCustom(docName)?.def !== def) continue;
         const criteria = customCriteria.get(docName);
         if (criteria === undefined) continue;
+        const read = new Map<string, any>();   // once per identity in this write, however many subscribers are it
         for (const client of subs) {
           if (auth && "error" in gated(client)) continue;   // signed out since it opened: never read it as nobody
           try {
-            const doc = def.recompute(db, criteria, identityOf(client));
+            const identity = identityOf(client);
+            const key = viewKey(docName, identity);
+            if (!read.has(key)) read.set(key, def.recompute(db, criteria, identity));
+            const doc = read.get(key);
             if (doc == null) continue;
             if (client.readyState === undefined || client.readyState === 1) {
               client.send(JSON.stringify({ doc: docName, ops: [{ op: "replace", path: "", value: doc }] }));

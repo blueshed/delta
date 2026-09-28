@@ -41,8 +41,12 @@ export const mineDoc = <Q>(query: Q) => ({
   shared: true,
 });
 
-/** A recompute document read as each subscriber: who it was read as. */
-export const whoamiDoc = <R>(read: R) => ({ prefix: "fo-whoami:", watch: ["courses"], parse: (id: string) => id, recompute: read, shared: true });
+/** A recompute document read as each subscriber: who it was read as. `whoamiReads` counts its reads. */
+export const whoamiReads = { n: 0 };
+export const whoamiDoc = <R extends (...args: any[]) => any>(read: R) => ({
+  prefix: "fo-whoami:", watch: ["courses"], parse: (id: string) => id, shared: true,
+  recompute: ((...args: any[]) => { whoamiReads.n++; return read(...args); }) as R,
+});
 
 export interface OwnsProcess {
   as(identity?: Me): { call(action: string, msg: Record<string, unknown>): Promise<any> };
@@ -181,6 +185,18 @@ export function ownsCases(backend: () => OwnsBackend): void {
       expect(sentTo(p, "fo-mine:x").slice(1)).toEqual([[1, { op: "add", path: "/households/3", value: { id: 3, weddings_id: 1, email: "c@x" } }], [2, { op: "remove", path: "/households/3" }]]);
       expect(Object.keys(await rows(ada)).sort()).toEqual(["1", "2", "3"]);
       expect(await rows(bob)).toEqual({});
+    });
+
+    test("a recompute document is read once per identity after a write, however many of its subscribers are that identity; each is told it", async () => {
+      const p = await backend().start({ owns: ownsByName, custom: "owned" });
+      const adaHere = p.as(ada), adaThere = p.as({ id: 1 });   // two callers, one identity (auth.asSqlArg: 1)
+      for (const who of [adaHere, adaThere, p.as(bob)]) expect((await who.call("open", { doc: "fo-whoami:x" })).error).toBeUndefined();
+      await openAll(p.backend.process, []);
+      await adaHere.call("open", { doc: "fo-board:1" });
+      whoamiReads.n = 0;
+      expect((await adaHere.call("delta", { doc: "fo-board:1", ops: [{ op: "add", path: "/courses/-", value: { name: "Fish" } }] })).error).toBeUndefined();
+      await expectTold(p.backend, "fo-whoami:x", [[{ op: "replace", path: "", value: { me: 1 } }], [{ op: "replace", path: "", value: { me: 1 } }], [{ op: "replace", path: "", value: { me: 2 } }]]);
+      expect(whoamiReads.n).toBe(2);
     });
 
     test("a recompute document is read as each subscriber, on open and after a write: each is told its own", async () => {

@@ -451,7 +451,7 @@ const dashboard = defineCustomDoc<{ userId: string }, { id: number }>("dashboard
   watch: ["orders", "invoices"],
   parse: (id) => ({ userId: id }),
   owns: (me, docName) => docName === `dashboard:${me.id}`,   // with auth: whose name it is (anyone else: 404)
-  recompute: async (pool, c, identity) => {         // re-evaluated PER SUBSCRIBER, under their identity
+  recompute: async (pool, c, identity) => {         // re-evaluated PER IDENTITY subscribed, as it
     const me = identity?.id;
     if (me == null || String(me) !== c.userId) return null;  // doc-name id is untrusted — verify it → 404 / skip
     return withAppAuth(pool, me, async (db) => {             // bind app.user_id, so RLS scopes every read below
@@ -464,9 +464,9 @@ const dashboard = defineCustomDoc<{ userId: string }, { id: number }>("dashboard
 ```
 
 - Returns the **whole doc** (any JSON shape, object or array). Return `null` for "doesn't exist": a 404 on open, a silent skip on fan-out.
-- **Re-evaluated once per subscriber, under that client's gated identity** (the third arg). Bind it yourself — `withAppAuth(pool, id, …)` or a `*_as` stored function (see *Composing doc operations from SQL*) — so RLS scopes each subscriber's view. `identity` is `undefined` on an unauthenticated connection; **guard it** (the example returns `null` rather than dereferencing it — a recompute that throws is caught, logged, and silently drops that subscriber's update).
+- **Re-evaluated once per identity among the subscribers, under that gated identity** (the third arg): a write reads it once for each identity, however many of the name's subscribers are that identity (keyed as a membership view is, by `auth.asSqlArg`), and sends each subscriber its identity's. Bind it yourself — `withAppAuth(pool, id, …)` or a `*_as` stored function (see *Composing doc operations from SQL*) — so RLS scopes each subscriber's view. `identity` is `undefined` on an unauthenticated connection; **guard it** (the example returns `null` rather than dereferencing it — a recompute that throws is caught, logged, and silently drops that subscriber's update).
 - **The doc-name id is untrusted.** `parse` reads whatever name the client asked to open, so a raw `WHERE … = c.userId` is a confused-deputy: say whose name it is with `owns` (asked before `recompute`), verify the parsed id against the identity (return `null` → 404), and/or treat RLS as the authoritative tenant guard. Delta is persistence + broadcast, not authorization.
-- **No relevance gate.** Unlike membership's `matches`, recompute re-evaluates on *any* write to *any* watched collection, for *every* subscriber of *every* doc under the prefix — there's no per-doc filter. Cost ≈ (subscribers under the prefix) × (writes to any watched collection); it is **not** cached. Keep `watch` tight and `recompute` cheap.
+- **No relevance gate.** Unlike membership's `matches`, recompute re-evaluates on *any* write to *any* watched collection, for *every* identity subscribed to *every* doc under the prefix — there's no per-doc filter. Cost ≈ (identities subscribed under the prefix) × (writes to any watched collection); it is **not** cached. Keep `watch` tight and `recompute` cheap.
 - The recomputed doc reaches each client as a single **root-replace** op — see below — sent to that client alone (no `v`); in-process, `createLocal().onPublish` hears it on the document's channel, with `to` naming the identity.
 - **On SQLite** (and the JSON file), `recompute(db, criteria, identity)` is synchronous and reads the database handle, as `query` does; it is read again in the write's own turn, so each subscriber is told the document as that write left it. On Postgres it is read when the listener hears the write, as the tables then stand. Without `auth` the identity is `undefined` on both.
 

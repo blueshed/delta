@@ -109,6 +109,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refuse)` (with `refuse` false a value refused answers the scope that holds nothing, with
   `refused` its message) and replaces the two-argument one, which calls it, and
   `_delta_doc_holds` (`CREATE OR REPLACE`: re-apply the framework, or `delta init`).
+- **Every backend: a recompute document is read once per identity after a write** (todo #6's
+  review). It was read once per subscriber, so fifty subscribers of one name, all one identity,
+  cost fifty reads of the same view per write. A write now reads it once for each identity among
+  a name's subscribers (keyed as a membership view is: `auth.asSqlArg`, or the identity; without
+  `auth`, once) and sends each subscriber its identity's.
 - **SQLite: two registrations on one database walk each other's undo** (todo #6's review). With
   one `owns` per `registerDocs` call, an app with public and private documents registers twice
   on one database, and both share the ledger; the first registration answered every undo and

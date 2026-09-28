@@ -381,6 +381,8 @@ export async function createDocListener<I = unknown>(
   // Recompute defs: a write to a watched collection re-evaluates the WHOLE doc per subscriber
   // (under that client's identity, so RLS applies) and republishes it as a root-replace op.
   async function recomputeAndPush(def: CustomDocDef<any>, docName: string, criteria: unknown, subs: Set<any>) {
+    // Once per identity for this write, however many of the subscribers are it.
+    const reads = new Map<string, Promise<any>>();
     for (const client of subs) {
       try {
         let identity: I | undefined;
@@ -391,7 +393,10 @@ export async function createDocListener<I = unknown>(
           if (isAuthError(g)) continue;
           identity = g as I;
         }
-        const doc = await def.recompute!(pool, criteria, identity);
+        const key = viewKey(docName, identity);
+        let read = reads.get(key);
+        if (!read) reads.set(key, (read = def.recompute!(pool, criteria, identity)));
+        const doc = await read;
         if (doc == null) continue;
         if (client.readyState === undefined || client.readyState === 1) {
           client.send(JSON.stringify({ doc: docName, ops: [{ op: "replace", path: "", value: doc }] }));
