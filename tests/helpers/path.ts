@@ -72,6 +72,9 @@ export const pathDocs = [
   defineDoc("fo-seats-at:", { root: "seats", include: [], scope: { table_no: ":table" } }),
   // list mode by a json column: the seats whose wishes are the name read as JSON, which a seat added through it is given
   defineDoc("fo-seats-wished:", { root: "seats", include: [], scope: { wishes: ":wishes" } }),
+  // a temporal row as the root: one note, and every note
+  defineDoc("fo-note:", { root: "notes", include: [] }),
+  defineDoc("fo-all-notes:", { root: "notes", include: [] }),
 ];
 
 /**
@@ -721,6 +724,30 @@ export function fanOutCases(backend: () => PathBackend): void {
       const copies = await openAll(b.process, ["fo-board:1", "fo-notes:1"]);
       await write(b.process, "fo-board:1", [{ op: "replace", path: "/notes/1/text", value: "bring tables" }]);
       await expectTold(b, "fo-notes:1", [[{ op: "replace", path: "/notes/1", value: { id: 1, weddings_id: 1, text: "bring tables" } }]]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a note as a document's root, alone or in a list, is read, written, told, undone and read as it was without its validity", async () => {
+      const b = backend();
+      const note = (id: number, text: string) => ({ id, weddings_id: 1, text });
+      const copies = await openAll(b.process, ["fo-note:1", "fo-all-notes:", "fo-notes:1"]);
+      expect(content(copies.get("fo-note:1"))).toEqual({ notes: note(1, "bring chairs") });
+      expect(content(copies.get("fo-all-notes:"))).toEqual({ notes: { "1": note(1, "bring chairs") } });
+      const changed = await write(b.process, "fo-note:1", [{ op: "replace", path: "/notes/text", value: "bring tables" }], { cursor: "s1" });
+      expect({ ops: changed.ops, inverse: changed.inverse }).toEqual({
+        ops: [{ op: "replace", path: "/notes", value: note(1, "bring tables") }],
+        inverse: [{ op: "replace", path: "/notes", value: note(1, "bring chairs") }],
+      });
+      const added = await write(b.process, "fo-all-notes:", [{ op: "add", path: "/notes/-", value: { weddings_id: 1, text: "bring lights" } }]);
+      expect(added.ops).toEqual([{ op: "add", path: "/notes/2", value: note(2, "bring lights") }]);
+      const undone = await b.process.call("undo", { cursor: "s1" });
+      expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "replace", path: "/notes", value: note(1, "bring chairs") }], conflict: undefined });
+      await expectTold(b, "fo-note:1", [changed.ops, undone.result.ops]);
+      await expectTold(b, "fo-all-notes:", [[{ op: "replace", path: "/notes/1", value: note(1, "bring tables") }], added.ops, [{ op: "replace", path: "/notes/1", value: note(1, "bring chairs") }]]);
+      const then = await b.process.call("open_at", { doc: "fo-note:1", at: "2021-01-01T00:00:00.000Z" });
+      expect(content(then.result)).toEqual({ notes: note(1, "bring chairs") });
+      const history = (await b.process.call("history", { doc: "fo-note:1", cursor: "s1" })).result;
+      expect(JSON.stringify(history)).not.toContain("valid_");
       await assertCopiesHold(b, copies);
     });
 
