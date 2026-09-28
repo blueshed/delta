@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An `open` sent straight after `authenticate` is handled signed in** (todo #5). `createWs`
+  handles a socket's messages side by side, as they arrive, so an `open` or a write sent
+  without waiting for `authenticate`'s answer was handled while the token was still being
+  checked, and 401'd -- for any client that does not wait (delta's own without `onConnect`,
+  the CLI, a raw socket). A call that changes who the socket is now holds what the socket
+  sends after it until it settles, and that then runs in the order it came, under the new
+  identity. `wireAuth` says it of every auth action (`authenticate`, `login`, `register`,
+  `logout`), through `ws.changesIdentity(method)`, which a hand-registered sign-in method
+  can call too. Nothing else waits: a slow `registerMethod` or a recompute holds up nothing,
+  as before, and a burst of calls runs side by side. A socket that closes with messages
+  held runs none of them. **A socket may hold 1000** (`createWs({ maxHeld })`); one more
+  closes it with 1008 (policy violation), running none. A sign-in that never answers holds
+  its socket's later messages until the socket closes. And a message still running when its
+  socket closes has what it registered for the socket let go when it ends: an `open` whose
+  read was in flight left the closed socket a subscriber (on Postgres a custom document
+  recomputed for it on every write to what it watches), since the close had already run the
+  socket's drop hooks.
 - **A time's name is a date, compared as an instant, on every backend** (todo #60). A list
   document scoped by a `timestamptz` (`scope: { starts: "<=:end" }`) compared the name's text
   with the row's on SQLite and the JSON file, which keep a time as the text it was given, so

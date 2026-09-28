@@ -153,8 +153,9 @@ import { connectWs, WS, openDoc, call, DeltaError } from "@blueshed/delta/client
 
 // Sign in on EVERY connect -- the first and each reconnect -- before any doc
 // opens or re-opens. `onConnect` runs first and everything else waits for it.
-// (An `await call("authenticate")` made once is not enough: a reconnect
-// re-opens every doc on a new, unauthenticated socket, they 401 and stop.)
+// (An `await call("authenticate")` made once is not enough: the server holds
+// what follows a sign-in on its socket, but a reconnect re-opens every doc on
+// a new, unauthenticated socket, they 401 and stop.)
 let signedIn!: (user: User) => void;
 const me = new Promise<User>((resolve) => (signedIn = resolve));
 provide(WS, connectWs("/ws", {
@@ -564,6 +565,8 @@ createDocListener(ws, pool, { auth });         // gate every open / delta
 
 1. **Upgrade-time** — cookie / `Authorization` header via `onUpgrade`.
 2. **In-message** — send `{ action: "call", method: "authenticate", params: { token } }` after connecting unauthenticated.
+
+**What a socket sends after a sign-in waits for it.** `createWs` handles a socket's messages side by side, as they arrive, with one exception: a call that changes who the socket is. `wireAuth` says that of every auth action (`authenticate`, `login`, `register`, `logout`), through `ws.changesIdentity(method)` -- call it yourself for a sign-in registered with `registerMethod`. While one is in flight, what the same socket sends after it waits, then runs in the order it came, under the identity the call left: an `open` sent straight after `authenticate`, without waiting for its answer, is handled signed in, and one sent after `logout` is refused. Nothing else waits -- a slow method or a recompute holds up nothing -- and other sockets never wait. A socket that closes runs none of what it held. **A socket may hold 1000 messages** (`createWs({ maxHeld })`); one more closes it with **1008** (policy violation), and none of them runs. A sign-in that never answers holds its socket's later messages until the socket closes. This covers one socket; a reconnect is a new one, so a client still signs in with `onConnect` (above), or its re-opens 401.
 
 **Identity switching on a live socket.** `jwtAuth` ships a `logout` action that clears `client.data.identity`. Logout also **unsubscribes the socket from every doc it currently has open** — the previous user's live streams stop immediately, not just on the next open. Client usage:
 
@@ -1095,6 +1098,8 @@ repos*.
 ## Wire-level protocol
 
 All WebSocket messages have shape `{ id?: number, action: string, ...rest }`. Responses mirror the id.
+
+A socket's messages are handled side by side, as they arrive, except behind a call that changes who it is (`authenticate`, `login`, `register`, `logout`): what the socket sends while one is in flight waits for it, then runs in order under the new identity. More than `maxHeld` (1000) waiting closes the socket with 1008 (*Authentication*).
 
 | Client → Server | Payload | Server → Client |
 |---|---|---|
