@@ -212,6 +212,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `replace /weddings/1/name` likewise. Another id is a 404 (`replace /courses/2` was a 400), a
   field that is no column still a 400. `validateOps` reads the segment as Postgres does: digits,
   or the root's own text id, where no column has that name, name the row.
+- **A row a write touches twice is told gone once, on every backend.** `[replace
+  /drinks/1/name, remove /courses/1]` through `board:1` told the board and the menu `[remove
+  /drinks/1, remove /courses/1, remove /drinks/1]` on SQLite, the JSON file and Postgres: who
+  holds a row is asked after the whole write, so the drink written first was told gone (its
+  course was), and then told gone again with the cascade. Under the RFC 6902 `applyOps` (#4) the
+  second remove throws, the client resyncs, and its copy is not what a fresh open reads. Each
+  document is now told each row from where the telling left it earlier in the same write: a row
+  told gone is not removed again, nor replaced (`tell` in `src/server/sqlite.ts`, and
+  `_delta_tell` in `001d`, `CREATE OR REPLACE`: re-apply the framework, or
+  `bunx @blueshed/delta init`).
 - **A single document's root written and then removed in one write can be undone, on every
   backend** (todo #61). `[replace /courses/name, remove /courses/1]` through `course:1` recorded
   an inverse of the course's add (as it was before the write), its drink's, and a `replace

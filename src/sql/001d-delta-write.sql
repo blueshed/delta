@@ -176,6 +176,8 @@ DECLARE
   v_root    BOOLEAN;
   v_path    TEXT;
   v_version BIGINT;
+  v_has     JSONB;   -- what the target's copy holds, row by row, as told so far
+  v_key     TEXT;
 BEGIN
   -- who holds each row now, and every document concerned
   FOR v_t IN SELECT jsonb_array_elements(p_touched) LOOP
@@ -196,10 +198,15 @@ BEGIN
     CONTINUE WHEN v_def.prefix IS NULL;
     v_single := (_delta_resolve_scope(v_def, v_target)->>'mode') = 'single';
     v_told := '[]'::jsonb;
+    v_has := '{}'::jsonb;
     FOR v_t IN SELECT jsonb_array_elements(v_rows) LOOP
-      v_was := (v_t->'before') ? v_target;
+      -- a row the write touches twice is told from where the first telling left
+      -- it: never removed twice, nor replaced once it is told gone (tell in sqlite.ts)
+      v_key := (v_t->>'coll') || '/' || (v_t->>'id');
+      v_was := CASE WHEN v_has ? v_key THEN (v_has->>v_key)::boolean ELSE (v_t->'before') ? v_target END;
       v_is  := (v_t->'holders') ? v_target;
       CONTINUE WHEN NOT v_was AND NOT v_is;
+      v_has := v_has || jsonb_build_object(v_key, v_is);
       v_root := v_single AND (v_t->>'coll') = v_def.root_collection;
       v_path := CASE WHEN v_root THEN _delta_build_path(v_t->>'coll') ELSE _delta_build_path(v_t->>'coll', v_t->>'id') END;
       IF v_is THEN

@@ -603,6 +603,26 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
+    test("a drink written and then taken with its course, in one write, is told gone once to each document that held it; undone, both come back", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1", "fo-course:1", "fo-all-courses:"]);
+      const { ops } = await write(b.process, "fo-board:1", [
+        { op: "replace", path: "/drinks/1/name", value: "Port" },
+        { op: "remove", path: "/courses/1" },
+      ], { cursor: "s1" });
+      const gone = [{ op: "remove", path: "/drinks/1" }, { op: "remove", path: "/courses/1" }];
+      expect(ops).toEqual([{ op: "replace", path: "/drinks/1", value: drink(1, 1, "Port") }, { op: "remove", path: "/courses/1" }, { op: "remove", path: "/drinks/1" }]);
+      const undone = await b.process.call("undo", { cursor: "s1" });
+      const back = [{ op: "add", path: "/courses/1", value: course(1, "Soup") }, { op: "add", path: "/drinks/1", value: drink(1, 1, "Sherry") }];
+      expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: back, conflict: undefined });
+      await expectTold(b, "fo-board:1", [gone, back]);
+      await expectTold(b, "fo-menu:1", [gone, back]);
+      // the course's own document holds the drink by its key until the course is told gone (null), then hears the drink go
+      await expectTold(b, "fo-course:1", [[ops[0], { op: "replace", path: "/courses", value: null }, gone[0]], [{ op: "replace", path: "/courses", value: course(1, "Soup") }, back[1]]]);
+      await expectTold(b, "fo-all-courses:", [[gone[1]], [back[0]]]);
+      await assertCopiesHold(b, copies);
+    });
+
     test("a row that leaves the document in a write is not there for the rest of it (404), and nothing is written: moved to the other wedding and then removed, renamed or given a drink; out of a list's condition, or added outside it, and then written", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-board:2", "fo-course:1", "fo-courses-like:So", "fo-all-courses:"]);

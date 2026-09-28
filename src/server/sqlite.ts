@@ -655,10 +655,17 @@ export function registerDocs(
       if (!m) continue;
       const single = resolveScope(m.def, m.docId).mode === "single";
       const ops: DeltaOp[] = [];
+      // What the target's copy holds, row by row, as told so far in this write:
+      // a row the write touches twice is told from where the first telling left
+      // it -- never removed twice (a drink written, then taken with its course),
+      // nor replaced once it is told gone. `_delta_tell` keeps the same.
+      const has = new Map<string, boolean>();
       for (const t of rows) {
-        const was = t.before.includes(target);
+        const key = `${t.coll}/${t.id}`;
+        const was = has.get(key) ?? t.before.includes(target);
         const is = t.now.includes(target);
         if (!was && !is) continue;
+        has.set(key, is);
         const root = single && t.coll === m.def.root;
         const path = root ? joinPath(t.coll) : joinPath(t.coll, String(t.id));
         if (is) ops.push({ op: was || root ? "replace" : "add", path, value: t.after });
