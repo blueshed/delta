@@ -70,7 +70,9 @@ export interface DocType<C = any, I = unknown> {
    * them read -- so this is the check that keeps one identity's writes off
    * another's socket. The listener asks it before open, delta, open_at,
    * history, and an undo or redo of an entry written through the document;
-   * false answers 404. With auth, a type needs it or `shared: true`:
+   * false answers 404. It asks it again before it tells a socket of a change,
+   * once per identity per change, and lets go of a socket it refuses -- so keep
+   * it cheap (a name check, or a membership the app caches). With auth, a type needs it or `shared: true`:
    * `registerDocType` and `createDocListener` refuse one with neither.
    */
   owns?(identity: I, docName: string): boolean | Promise<boolean>;

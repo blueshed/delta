@@ -195,6 +195,11 @@ describe("jwtAuth.actions.authenticate", () => {
     await Bun.sleep(1100);
     expect(auth.gate(client)).toEqual({ error: "Session expired: authenticate again" });
     expect(client.data.identity).toBeUndefined();
+    // the listener asks the gate before it tells the socket of a change too (todo #17),
+    // so the request after it still hears why; a logout, or a new sign-in, ends that
+    expect(auth.gate(client)).toEqual({ error: "Session expired: authenticate again" });
+    await auth.actions!.logout({}, client);
+    expect(auth.gate(client)).toEqual({ error: "Authentication required" });
   });
 
   test("missing token → { error }", async () => {

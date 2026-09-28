@@ -184,8 +184,51 @@ export async function createDocListener<I = unknown>(
   // one identity's rows are never served to another from the cache.
   type View = { docName: string; criteria: unknown; identity: I | undefined; doc: Record<string, Record<string, any>>; subs: Set<any> };
   const views = new Map<string, View>();
+  const identityKey = (identity: I | undefined): string =>
+    auth?.asSqlArg && identity !== undefined ? String(auth.asSqlArg(identity)) : JSON.stringify(identity);
   const viewKey = (docName: string, identity: I | undefined): string =>
-    auth ? `${docName}\u0000${auth.asSqlArg && identity !== undefined ? String(auth.asSqlArg(identity)) : JSON.stringify(identity)}` : docName;
+    auth ? `${docName}\u0000${identityKey(identity)}` : docName;
+
+  // A socket hears a document while it may open it (todo #17). An open asks the
+  // gate and the document's `owns`, and so does every request; a change told
+  // asks them again of each socket it is told to, and a socket refused is let
+  // go of the document -- taken off it, or its session run out, it hears no
+  // more, though it asks for nothing (its next request says why: 401, 404).
+  // The gate is asked of each socket (a session is a socket's), and is cheap by
+  // contract; `owns` once per identity per change (`asked`), so what a change
+  // costs is the identities a document has open, not its sockets -- one name
+  // per owner keeps that small, and a shared document asks the gate alone.
+  // Without auth nothing is asked, and publishing stays one call per change.
+  type Owns = (identity: I, docName: string) => boolean | Promise<boolean>;
+  function mayHear(client: any, docName: string, owns: Owns | undefined, asked: Map<string, Promise<boolean>>, as?: string): Promise<boolean> | boolean {
+    const gated = auth!.gate(client);
+    if (isAuthError(gated)) return false;
+    const key = identityKey(gated as I);
+    if (as !== undefined && key !== as) return false;   // the socket is someone else now: its view is not theirs
+    if (!owns) return true;
+    let may = asked.get(key);
+    if (!may) {
+      may = Promise.resolve()
+        .then(() => owns(gated as I, docName))
+        .then((yes) => !!yes, (err) => { log.error(`owns ${docName}: ${errMsg(err)}`); return false; });
+      asked.set(key, may);
+    }
+    return may;
+  }
+  /** Let go of `docName` each of `subs` that may no longer hear it. */
+  async function letGo(docName: string, subs: Set<any>, owns: Owns | undefined, as?: string): Promise<void> {
+    const asked = new Map<string, Promise<boolean>>();
+    await Promise.all([...subs].map(async (client) => {
+      if (await mayHear(client, docName, owns, asked, as)) return;
+      subs.delete(client);
+      trackUnsubscribe(client, docName);
+      log.info(`let go of ${docName}: it may no longer hear it`);
+    }));
+  }
+  const ownsOf = (docName: string): Owns | undefined => {
+    const type = resolveDoc(docName)?.type;
+    return type?.owns ? (identity, name) => type.owns!(identity, name) : undefined;
+  };
   // Recompute docs: evaluated per subscriber, never cached.
   const customCriteria = new Map<string, unknown>();
   const customSubs = new Map<string, Set<any>>();
@@ -344,6 +387,12 @@ export async function createDocListener<I = unknown>(
       while (pageRows >= FETCH_PAGE) {
         const { rows } = await pool.query(fetchSql, [docName, state.version]);
         pageRows = rows.length;
+        // Told to those who may still hear it (todo #17): the document's own
+        // subscribers, and the custom documents' that watch what it changed.
+        if (auth && rows.length > 0) {
+          if (state.subscribers.size > 0) await letGo(docName, state.subscribers, ownsOf(docName));
+          await letGoCustom(rows.flatMap((row: any) => (row.applied ?? row.ops) as DeltaOp[]));
+        }
         for (const row of rows) {
           if (state.subscribers.size > 0) {
             // `v` lets the client validate the per-doc sequence and re-open on
@@ -409,6 +458,30 @@ export async function createDocListener<I = unknown>(
     next.finally(() => {
       if (recomputeChains.get(docName) === next) recomputeChains.delete(docName);
     });
+  }
+
+  /** Before a custom document is told of `ops`: let go each socket that may no longer hear it (todo #17). */
+  async function letGoCustom(ops: DeltaOp[]) {
+    if (customByPrefix.size === 0) return;
+    const touched = new Set<string>();
+    for (const op of ops) { const p = splitPath(op.path); if (p.length >= 1) touched.add(p[0]!); }
+    for (const [prefix, def] of customByPrefix) {
+      if (!def.watch.some((c) => touched.has(c))) continue;
+      const owns: Owns | undefined = def.owns ? (identity, name) => def.owns!(identity, name) : undefined;
+      if (def.recompute) {
+        for (const [docName, subs] of customSubs) {
+          if (!docName.startsWith(prefix)) continue;
+          await letGo(docName, subs, owns);
+          if (subs.size === 0) { customSubs.delete(docName); customCriteria.delete(docName); }
+        }
+        continue;
+      }
+      for (const [key, view] of views) {
+        if (!view.docName.startsWith(prefix)) continue;
+        await letGo(view.docName, view.subs, owns, identityKey(view.identity));
+        if (view.subs.size === 0) views.delete(key);
+      }
+    }
   }
 
   function customFanOut(ops: DeltaOp[]) {

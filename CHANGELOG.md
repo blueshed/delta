@@ -128,6 +128,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (409), as a plain table's key refuses it and as SQLite and the JSON file answer. A serial
   still does not step past ids clients choose: an `add /<coll>/-` whose next serial a client
   named is a 409 on every backend.
+- **Postgres: a socket hears a document while it may open it** (todo #17). With `auth`, `owns`
+  was asked when a socket opened a document and at each request, and `jwtAuth`'s gate checked a
+  token's `exp` at each request; nothing asked either between requests, so a socket taken off
+  a document (its `owns` now false), or whose token ran out, heard every write through what it
+  had open until it next asked for something. The listener now asks, before it tells a change,
+  what an open asks: each socket's gate, and the document's `owns` (a custom document's too,
+  membership or recompute), and lets go of each socket refused -- unsubscribed from that
+  document; its next request says why (404, or 401). The gate is asked per socket (cheap by
+  contract); `owns` once per identity per change, so a change costs the identities a document
+  has open, not its sockets, and a `shared` document asks the gate alone; without `auth` nothing
+  is asked. Asked at the change, not on a timer (late by its interval) or by a hook the app
+  must call (and call in every process): exact, in every process, with nothing new to call.
+  `jwtAuth`'s gate now answers `Session expired: authenticate again` at every request after
+  `exp` until the socket signs in again (the listener may have asked it first), and `logout`
+  forgets the expiry.
 - **`bun.lock` matches `package.json`** (todo #49): it lacked the optional `@electric-sql/pglite`
   peer, so every `bun install` in a fresh checkout changed it.
 - **`bun run test` runs every file that needs no Postgres server** (todo #48): it named 8 of the

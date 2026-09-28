@@ -175,7 +175,7 @@ export function jwtAuth(opts: JwtAuthOpts): DeltaAuth<User> {
 
       async logout(_params, client) {
         const prev = client.data?.identity as User | undefined;
-        if (client.data) delete client.data.identity;
+        if (client.data) { delete client.data.identity; delete client.data.identityExpires; }
         // Tear down the prior identity's live doc subscriptions so its scoped
         // ops stop streaming to this socket immediately.
         dropClientSubscriptions(client);
@@ -185,17 +185,20 @@ export function jwtAuth(opts: JwtAuthOpts): DeltaAuth<User> {
     },
 
     gate(client) {
-      const identity = client.data?.identity as User | undefined;
-      if (!identity) return { error: "Authentication required" };
       // A session lasts as long as its token: once it runs out the socket is
-      // signed out (and its documents let go), as a logout would do.
-      const expires = client.data.identityExpires as number | undefined;
+      // signed out (and its documents let go), as a logout would do, and says
+      // so until it signs in again -- the listener asks the gate before it
+      // tells a socket of a change, too, so that is not always a request.
+      const expires = client.data?.identityExpires as number | undefined;
       if (expires !== undefined && Date.now() >= expires) {
-        delete client.data.identity;
-        delete client.data.identityExpires;
-        dropClientSubscriptions(client);
+        if (client.data.identity !== undefined) {
+          delete client.data.identity;
+          dropClientSubscriptions(client);
+        }
         return { error: "Session expired: authenticate again" };
       }
+      const identity = client.data?.identity as User | undefined;
+      if (!identity) return { error: "Authentication required" };
       return identity;
     },
 

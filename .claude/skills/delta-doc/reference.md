@@ -212,6 +212,7 @@ interface DocType<C = any, I = unknown> {
   openAt?(ctx: C, docName: string, at: string, identity?: I):
     Promise<any | null>;
   // With auth: may this identity open, write through and hear docName? False → 404.
+  // Asked again before each change is told, once per identity: keep it cheap.
   owns?(identity: I, docName: string): boolean | Promise<boolean>;
   // With auth: every identity past the gate may have every name of the prefix.
   // With auth, a type says one or the other: registerDocType / createDocListener refuse it otherwise.
@@ -358,7 +359,7 @@ A single document may remove the root it is named for, on every backend: `remove
 
 **Per-user list isolation** — each user sees only their own rows. The most common multi-tenant shape.
 
-Two parts: (1) scope the generic doc by a user-id carried in the doc name, (2) tell `docTypeFromDef` who owns each name. A document's name is the channel its writes are broadcast on — whoever has it open hears every write made through it, **whatever RLS lets them read** — so the name, not RLS, is what keeps one user's rows off another user's socket. `owns` is that check: the listener asks it before `open`, `delta`, `open_at` and `history`, and before an `undo` or `redo` writes to the entry's document, and answers 404 when it says no. With `auth`, `docTypeFromDef` throws unless it is given `owns` or `shared: true`, and the listener holds every other document to the same: see *Every document says who owns it*, below.
+Two parts: (1) scope the generic doc by a user-id carried in the doc name, (2) tell `docTypeFromDef` who owns each name. A document's name is the channel its writes are broadcast on — whoever has it open hears every write made through it, **whatever RLS lets them read** — so the name, not RLS, is what keeps one user's rows off another user's socket. `owns` is that check: the listener asks it before `open`, `delta`, `open_at` and `history`, and before an `undo` or `redo` writes to the entry's document, and answers 404 when it says no. It asks it again, with the gate, before it tells a socket of a change to a document it has open, and lets go of a socket either refuses: one taken off a document hears no more of it, though it asks for nothing, and its next request says why (404, or 401). That is once per identity per change, not per socket, so keep `owns` cheap -- a name check, or a membership the app caches. With `auth`, `docTypeFromDef` throws unless it is given `owns` or `shared: true`, and the listener holds every other document to the same: see *Every document says who owns it*, below.
 
 ```ts
 // types.ts
@@ -403,7 +404,7 @@ An `add /todos/-` on this list-mode doc takes `owner_id` from the scope (the doc
 
 - **`docTypeFromDef`** — `owns` or `shared: true` in its options; with `auth` it throws without one. Given no `auth` it makes a type with neither, which the listener then refuses.
 - **A `DocType` written by hand** — an `owns(identity, docName)` method, or `shared: true` on it. `createDocListener(ws, pool, { auth })` refuses to start while a registered type has neither, and while such a listener runs, `registerDocType` refuses one.
-- **A custom doc** — `owns` or `shared: true` in `defineCustomDoc`; `createDocListener` refuses one with neither. `owns` is asked on open (a 404, and no subscription, when it says no).
+- **A custom doc** — `owns` or `shared: true` in `defineCustomDoc`; `createDocListener` refuses one with neither. `owns` is asked on open (a 404, and no subscription, when it says no), and again before each change the document is told.
 
 The error names the prefix and says what to add. Without `auth` nothing is asked.
 
@@ -573,7 +574,7 @@ localStorage.removeItem("token");
 
 The same teardown happens on an identity switch (a fresh `authenticate` after a `logout`): the old subscriptions are gone, so you must re-`openDoc` the docs the new user should see — their streams won't silently carry over from the previous identity.
 
-**A token that runs out.** `jwtAuth` keeps the token's `exp` with the identity. At the socket's first request after it, the gate answers 401 `Session expired: authenticate again` and drops the socket's subscriptions, as `logout` does. The socket stays connected, so `onConnect` does not run again: on that 401, `authenticate` with a fresh token and re-open the documents. Until that request the socket still hears the documents it has open (nothing checks the clock between requests).
+**A token that runs out.** `jwtAuth` keeps the token's `exp` with the identity. From then the gate refuses the socket and drops its subscriptions, as `logout` does -- asked at a request, or by the listener before it tells the socket of a change, so a socket that asks for nothing still hears nothing past its `exp`. Every request after it answers 401 `Session expired: authenticate again` until the socket signs in again. The socket stays connected, so `onConnect` does not run again: on that 401, `authenticate` with a fresh token and re-open the documents.
 
 ## RLS with `app.user_id`
 

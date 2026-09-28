@@ -292,3 +292,79 @@ describe("with auth, every document says who owns it (todo #18)", () => {
     expect(heard(alice, "rls-bag:all")).toHaveLength(1);   // once, not once per view
   });
 });
+
+// ---------------------------------------------------------------------------
+// Todo #17: a socket hears a document while it may open it. `owns` and the
+// gate are asked at open and at every request, and again before a change is
+// told: one taken off a document, or whose session ran out, hears no more of
+// it, though it asks for nothing.
+// ---------------------------------------------------------------------------
+
+describe("a socket hears a document while it may open it (todo #17)", () => {
+  test("taken off a document it has open, it hears no more of it, and is let go of it: its next open is a 404", async () => {
+    const members = new Map([["rls-mine:2", new Set([1, 2])]]);
+    registerDocType(docTypeFromDef(mine, app, { auth, owns: (who, name) => members.get(name)?.has(who.id) ?? false }));
+    listener = await createDocListener(ws, app, { auth });
+    const alice = person(1);
+    const bob = person(2);
+    for (const c of [alice, bob]) expect((await sendAndAwait(ws, c, { action: "open", doc: "rls-mine:2" })).result).toBeDefined();
+    members.get("rls-mine:2")!.delete(1);   // Alice is taken off Bob's document
+    const w = await sendAndAwait(ws, bob, { action: "delta", doc: "rls-mine:2", ops: [{ op: "add", path: "/rls_items/-", value: { name: "bob after" } }] });
+    expect(w.error).toBeUndefined();
+    await settle();
+    expect(heard(bob, "rls-mine:2")).toHaveLength(1);
+    expect(JSON.stringify(alice.sent)).not.toContain("bob after");
+    expect(alice.subscriptions.has("rls-mine:2")).toBe(false);
+    expect((await sendAndAwait(ws, alice, { action: "open", doc: "rls-mine:2" })).error).toEqual({ code: 404, message: "Not found" });
+  });
+
+  test("a socket whose session ran out hears nothing more, though it asks for nothing; the same person's other socket still hears", async () => {
+    const expiring: DeltaAuth<Id> = {
+      gate: (c: any) => {
+        const who = c.data?.identity as Id | undefined;
+        if (!who) return { error: "Authentication required" };
+        return c.data.until !== undefined && Date.now() >= c.data.until ? { error: "Session expired" } : who;
+      },
+      asSqlArg: (i) => i.id,
+    };
+    registerDocType(docTypeFromDef(mine, app, { auth: expiring, owns: (who, name) => name === `rls-mine:${who.id}` }));
+    listener = await createDocListener(ws, app, { auth: expiring });
+    const stale = person(1);
+    const fresh = person(1);
+    for (const c of [stale, fresh]) await sendAndAwait(ws, c, { action: "open", doc: "rls-mine:1" });
+    stale.data.until = Date.now() - 1;   // its token ran out
+    await sendAndAwait(ws, fresh, { action: "delta", doc: "rls-mine:1", ops: [{ op: "add", path: "/rls_items/-", value: { name: "alice later" } }] });
+    await settle();
+    expect(heard(fresh, "rls-mine:1")).toHaveLength(1);
+    expect(heard(stale, "rls-mine:1")).toEqual([]);
+    expect(stale.subscriptions.has("rls-mine:1")).toBe(false);
+  });
+
+  test("a custom document too: taken off a membership view or a recompute one, a socket hears no more of it", async () => {
+    const members = new Map([["rls-bag:team", new Set([1])], ["rls-tally:team", new Set([1])]]);
+    const owns = (who: Id, name: string) => members.get(name)?.has(who.id) ?? false;
+    const teamTally = defineCustomDoc<{ tag: string }, Id>("rls-tally:", {
+      watch: ["rls_items"],
+      parse: (tag) => ({ tag }),
+      recompute: async (pool, _c, who) => ({ n: (await rows(pool, who!)).length }),
+      owns,
+    });
+    registerDocType(docTypeFromDef(mine, app, { auth, owns: (who, name) => name === `rls-mine:${who.id}` }));
+    listener = await createDocListener(ws, app, { auth, custom: [bag({ owns }), teamTally] });
+    const alice = person(1);
+    for (const doc of ["rls-bag:team", "rls-tally:team", "rls-mine:1"]) expect((await sendAndAwait(ws, alice, { action: "open", doc })).result).toBeDefined();
+    await sendAndAwait(ws, alice, { action: "delta", doc: "rls-mine:1", ops: [{ op: "add", path: "/rls_items/-", value: { name: "while on" } }] });
+    await settle();
+    expect(heard(alice, "rls-bag:team")).toHaveLength(1);
+    expect(heard(alice, "rls-tally:team")).toHaveLength(1);
+    members.get("rls-bag:team")!.delete(1);
+    members.get("rls-tally:team")!.delete(1);
+    await sendAndAwait(ws, alice, { action: "delta", doc: "rls-mine:1", ops: [{ op: "add", path: "/rls_items/-", value: { name: "once off" } }] });
+    await settle();
+    expect(heard(alice, "rls-mine:1")).toHaveLength(2);
+    expect(heard(alice, "rls-bag:team")).toHaveLength(1);
+    expect(heard(alice, "rls-tally:team")).toHaveLength(1);
+    expect(alice.subscriptions.has("rls-bag:team")).toBe(false);
+    expect(alice.subscriptions.has("rls-tally:team")).toBe(false);
+  });
+});
