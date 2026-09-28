@@ -14,6 +14,7 @@ import {
   type DocDef,
   type ValidationError,
 } from "../../schema";
+import { resolveScope } from "../scope";
 
 export type {
   ColumnType,
@@ -69,13 +70,22 @@ const MAX_ID = 9007199254740991;
  * 404; already there, 409) and a value its column cannot cast (text into an
  * integer), which are the database's. Returns an array of errors (empty = valid).
  *
- * `list`: the document is in list mode (its name has no id); `values`: its
- * scope's equality bindings, which a list-mode add of a root row is given, so
- * they count as given -- the options SQLite's validateOps takes. Without
- * `list`, a document is read as single: `replace /<root>` and
- * `replace /<root>/<field>` write its root row.
+ * `doc`: the document's name, which says its mode and its scope's values, as
+ * `delta_apply` reads them (`_delta_resolve_scope`; `resolveScope` is its
+ * twin) -- the definition alone cannot: `all-courses:` is every course, and
+ * `all-courses:1` course 1 (todo #57). Or say them: `list`, the document is in
+ * list mode; `values`, its scope's equality bindings, which a list-mode add of
+ * a root row is given, so they count as given -- the options SQLite's
+ * validateOps takes, and they win over the name's. Given neither, a document
+ * is read as single: `replace /<root>` and `replace /<root>/<field>` write its
+ * root row.
  */
-export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: { list?: boolean; values?: Record<string, string> } = {}): ValidationError[] {
+export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: { doc?: string; list?: boolean; values?: Record<string, string> } = {}): ValidationError[] {
+  if (opts.doc !== undefined) {
+    if (!opts.doc.startsWith(def.prefix)) throw new Error(`validateOps: ${opts.doc} is not a document of ${def.prefix}`);
+    const scope = resolveScope(def, opts.doc.slice(def.prefix.length));
+    opts = { list: opts.list ?? scope.mode === "list", values: opts.values ?? scope.values };
+  }
   const errors: ValidationError[] = [];
   for (const op of ops) {
     const fail = (message: string, path = op.path) => errors.push({ path: String(path), message });

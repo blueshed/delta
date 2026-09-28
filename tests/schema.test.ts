@@ -316,6 +316,17 @@ describe("validateOps", () => {
       expect(messages(validateOps(wedding, household, [{ op: "replace", path: "/households/id", value: 9 }])).map((m) => m.split(" (")[0])).toEqual(["Unknown field: id"]);
     });
 
+    test("given the document's name, it reads the document's mode and scope's values from it, as delta_apply does (todo #57)", () => {
+      // one definition, two modes: the name says which
+      const all = defineDoc("all:", { root: "households", include: [] });
+      const rootField = [{ op: "replace", path: "/households/email", value: "x" }] as const;
+      expect(messages(validateOps(wedding, all, [...rootField], { doc: "all:" }))).toEqual([expect.stringMatching(/^Row id "email" in \/households\/email is not a number/)]);
+      expect(validateOps(wedding, all, [...rootField], { doc: "all:1" })).toEqual([]);
+      expect(validateOps(wedding, labelled, [{ op: "add", path: "/tags/-", value: {} }], { doc: "labelled:blue" })).toEqual([]);
+      expect(validateOps(wedding, labelled, [{ op: "replace", path: "/tags/label", value: "red" }], { doc: "labelled:red" }).length).toBe(1);
+      expect(() => validateOps(wedding, all, [...rootField], { doc: "household:1" })).toThrow(/household:1.*all:/);
+    });
+
     test("a column that is not nullable is not written null", () => {
       expect(messages(validateOps(wedding, board, [{ op: "replace", path: "/households/1/email", value: null }]))).toEqual(["email cannot be null"]);
       expect(messages(validateOps(wedding, board, [{ op: "add", path: "/households/-", value: { email: null } }]))).toEqual(["email cannot be null"]);

@@ -153,6 +153,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   let go of (a version kept per document would grow with every document written; an entry-id
   mark would drop an entry that committed after a later id). A resync after a lost connection,
   which missed its notifications, still reads to the end.
+- **Postgres: the exported `validateOps` can be given the document's name** (todo #57). Called
+  without `list`, it read a list document as single, and took `replace /courses/name` through
+  `all-courses:`, which the database refuses. The definition alone cannot say the mode --
+  `all-courses:` is every course and `all-courses:1` is course 1, one `defineDoc` -- so it is
+  not inferred from it: `validateOps(schema, def, ops, { doc })` reads the mode and the scope's
+  values from the name, by the rule `delta_apply` reads it (`resolveScope`, the twin of
+  `_delta_resolve_scope`); `list` and `values`, SQLite's options, still work and win over the
+  name's. Given neither, a document is read as single, as before.
+  `tests/path-pglite.test.ts` now asks its 75 writes of it by name.
 - **`bun.lock` matches `package.json`** (todo #49): it lacked the optional `@electric-sql/pglite`
   peer, so every `bun install` in a fresh checkout changed it.
 - **`bun run test` runs every file that needs no Postgres server** (todo #48): it named 8 of the

@@ -8,7 +8,6 @@ import type { Pool } from "pg";
 import {
   applyFramework, applySql, clearRegistry, createDocListener, docTypeFromDef, exportTables, generateSql, importTables, registerDocType, validateOps,
 } from "../src/server/postgres";
-import { resolveScope } from "../src/server/scope";
 import { openPglite } from "../src/server/pglite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
@@ -185,8 +184,7 @@ describe("pglite: validateOps answers as delta_apply does", () => {
       await pool.query(`TRUNCATE ${tables.join(", ")}, _delta_versions, _delta_ops_log RESTART IDENTITY`);
       await importTables(pool, pathSchema, pathSeed);
       const def = pathDocs.find((d) => doc.startsWith(d.prefix))!;
-      const scope = resolveScope(def, doc.slice(def.prefix.length));
-      const ahead = validateOps(pathSchema, def, [op as any], { list: scope.mode === "list", values: scope.values }).map((e) => e.message);
+      const ahead = validateOps(pathSchema, def, [op as any], { doc }).map((e) => e.message);   // the name says its mode and scope (todo #57)
       let database = 200;
       try { await pool.query("SELECT delta_apply($1, $2::jsonb)", [doc, JSON.stringify([op])]); }
       catch (err: any) { database = WIRE[err.code] ?? 500; }
