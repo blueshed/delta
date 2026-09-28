@@ -439,6 +439,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on as it does for Postgres. With no promise to wait on a write is still told before it
   answers; an `owns` that answers with a promise holds that write's telling, and those after
   it, until it has, so each document hears its changes in order.
+- **SQLite and the JSON file: a name is answered by the longest prefix across registrations**
+  (todo #6's review). With two `registerDocs` calls on one server -- a public set and a private
+  one -- the first registered answered every name its prefix matched: a public implied
+  `fo-board` registered first answered `fo-board:1`, the private board's name, as a tags row and
+  with no `owns` asked. Within one call, and on Postgres, the longest prefix answers. Each
+  registration now yields a name to another on the server whose matching prefix is longer,
+  whichever registered first; and a prefix another registration on the server holds already is
+  refused as the second registers (`"fo-board:" is registered already on this server`), since
+  either order would then decide it.
 
 ### Changed
 

@@ -139,6 +139,59 @@ describe("sqlite and json: a socket hears a document while it may open it, over 
 });
 
 /**
+ * Several registrations on one server: a name is answered by the one whose
+ * prefix matching it is longest, as within one registration and on Postgres
+ * -- not by whichever registered first (todo #6's review). A prefix two
+ * registrations both claim is refused as the second registers.
+ */
+describe("sqlite and json: several registrations on one server, one name", () => {
+  const board = defineDoc("fo-board", { root: "tags", include: [], implied: true });   // public, and a prefix of the private names
+  const start = (kind: "sqlite" | "json", order: "public first" | "private first", withAuth: boolean) => {
+    const local = createLocal();
+    const register = (docs: any[], opts: any) => {
+      if (kind === "sqlite") {
+        const db = new Database(":memory:");
+        createTables(db, pathSchema);
+        importTables(db, pathSchema, pathSeed);
+        return registerDocs(local.server, db, pathSchema, docs, [], opts);
+      }
+      const dir = mkdtempSync(join(tmpdir(), "delta-owns-"));
+      dirs.push(dir);
+      json.importTables(join(dir, "data.json"), pathSchema, pathSeed);
+      return json.registerDocs(local.server, join(dir, "data.json"), pathSchema, docs, [], opts);
+    };
+    const pub = () => register([board], withAuth ? { auth, shared: true } : {});
+    const priv = () => register(pathDocs, withAuth ? { auth, owns: ownsByName } : {});
+    if (order === "public first") { pub(); priv(); } else { priv(); pub(); }
+    return local;
+  };
+
+  for (const kind of ["sqlite", "json"] as const) {
+    for (const order of ["public first", "private first"] as const) {
+      test(`${kind}, ${order}: fo-board:1 is the private board, fo-board7 the public one; with auth, owns still says who`, async () => {
+        const local = start(kind, order, false);
+        expect((await local.call("open", { doc: "fo-board:1" })).result.weddings).toEqual({ id: 1, name: "ours" });
+        expect((await local.call("open", { doc: "fo-board7" })).result.tags).toEqual({ id: 7, label: "" });
+        const guarded = start(kind, order, true);
+        expect((await guarded.as({ id: 2 }).call("open", { doc: "fo-board:1" })).error).toEqual({ code: 404, message: "Not found" });
+        expect((await guarded.as({ id: 1 }).call("open", { doc: "fo-board:1" })).result.weddings).toEqual({ id: 1, name: "ours" });
+        expect((await guarded.as({ id: 2 }).call("open", { doc: "fo-board7" })).error).toBeUndefined();
+      });
+    }
+    test(`${kind}: a prefix another registration on the server holds is refused, naming it`, () => {
+      const local = createLocal();
+      const db = new Database(":memory:");
+      createTables(db, pathSchema);
+      registerDocs(local.server, db, pathSchema, pathDocs, [], {});
+      expect(() => kind === "sqlite"
+        ? registerDocs(local.server, db, pathSchema, [defineDoc("fo-board:", { root: "weddings", include: [] })], [], {})
+        : json.registerDocs(local.server, join(mkdtempSync(join(tmpdir(), "delta-owns-")), "data.json"), pathSchema, [defineDoc("fo-board:", { root: "weddings", include: [] })], [], {}),
+      ).toThrow(/"fo-board:" is registered already on this server/);
+    });
+  }
+});
+
+/**
  * One database, two registrations -- a public one (shared) and a private one
  * (owns), as one `owns` per call makes an app with both write -- and one
  * ledger: an undo or redo is walked by the registration whose document the

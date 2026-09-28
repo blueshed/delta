@@ -181,6 +181,16 @@ function sqlDefault(value: unknown): string {
 
 const log = createLogger("[delta-sqlite]");
 
+/**
+ * The prefixes each `registerDocs` on a server answers, by registration. A
+ * name is answered by the registration whose prefix matching it is longest --
+ * as within one registration, and as on Postgres -- whichever registered
+ * first: `fo-board` (a public registration) never answers `fo-board:1` beside
+ * a registration of `fo-board:`. A prefix two registrations both claim would
+ * leave the name to the order they registered in, so the second is refused.
+ */
+const registrations = new WeakMap<object, Map<symbol, string[]>>();
+
 /** Register all doc definitions with the WebSocket server. */
 export interface RegisterOptions<I = unknown> {
   /**
@@ -234,6 +244,24 @@ export function registerDocs<I = unknown>(
     const said = customDocs.find((d) => d.owns || d.shared);
     if (said) throw authless(said.prefix, "defineCustomDoc");
   }
+  // One name, one registration on this server: the longest prefix answers it.
+  const registration = Symbol("registerDocs");
+  const onServer = registrations.get(ws) ?? new Map<symbol, string[]>();
+  const prefixes = [...docs.map((d) => d.prefix), ...customDocs.map((d) => d.prefix)];
+  for (const theirs of onServer.values()) {
+    const both = prefixes.find((p) => theirs.includes(p));
+    if (both !== undefined) throw new Error(`registerDocs: "${both}" is registered already on this server -- a name is answered by one registration: give each its own prefix`);
+  }
+  onServer.set(registration, prefixes);
+  registrations.set(ws, onServer);
+  /** Is `docName` this registration's: is no other registration's prefix matching it longer than `mine`, the length of its own? */
+  const answers = (docName: string, mine: number): boolean => {
+    if (onServer.size === 1) return true;
+    for (const [who, theirs] of onServer) {
+      if (who !== registration && theirs.some((p) => p.length > mine && docName.startsWith(p))) return false;
+    }
+    return true;
+  };
   /** The gate's identity (with `auth`), or its refusal. */
   const gated = (client: any): { identity: I } | { error: { code: number; message: string } } => {
     const g = auth!.gate(client);
@@ -411,13 +439,14 @@ export function registerDocs<I = unknown>(
     for (const [prefix, def] of docByPrefix) {
       if (docName.startsWith(prefix) && (!found || prefix.length > found.prefix.length)) found = def;
     }
-    return found ? { def: found, docId: docName.slice(found.prefix.length) } : null;
+    // another registration on this server with a longer prefix answers it
+    return found && answers(docName, found.prefix.length) ? { def: found, docId: docName.slice(found.prefix.length) } : null;
   }
 
   function findCustom(docName: string): { def: CustomDocDef<any, I>; docId: string } | null {
     for (const [prefix, def] of customByPrefix) {
       if (docName.startsWith(prefix)) {
-        return { def, docId: docName.slice(prefix.length) };
+        return answers(docName, prefix.length) ? { def, docId: docName.slice(prefix.length) } : null;
       }
     }
     return null;
