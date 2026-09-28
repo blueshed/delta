@@ -507,7 +507,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   version it makes and then writes again gives way to the next (`delta_apply` in `001d`,
   `CREATE OR REPLACE`; on SQLite the version is rewritten in place, and every version the write
   makes or closes is stamped with one time). The note's history keeps the version before the
-  write and the write's.
+  write and the write's. A row the write removes and adds back is the same: `[replace
+  /notes/1/text, remove /notes/1, add /notes/1]` through the board or `note:1`, and `[add
+  /notes/7, remove /notes/7, add /notes/7]`, were a 409 on Postgres alone, since the remove
+  closed the write's version at the instant it began and the add collided with it. The add now
+  takes that version's place (`delta_apply`'s add in `001d`, `CREATE OR REPLACE`), as SQLite's
+  does, and each write is undone, redone and undone again to the notes as they were.
 - **A single document's root written and then removed in one write can be undone, on every
   backend** (todo #61). `[replace /courses/name, remove /courses/1]` through `course:1` recorded
   an inverse of the course's add (as it was before the write), its drink's, and a `replace
@@ -516,8 +521,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alike). A root's replaces before its removal in the same write now have no inverse of their
   own, since the add puts the root back as it was: the undo adds the course, then its drink,
   the redo takes them, and the undo after it puts them back. `001g` replaces `_delta_inverse`
-  (`CREATE OR REPLACE`: re-apply the framework, or `bunx @blueshed/delta init`); a write recorded
-  before this keeps its inverse, and its undo still meets the conflict.
+  (`CREATE OR REPLACE`: re-apply the framework, or `bunx @blueshed/delta init`). A write recorded
+  before this keeps the inverse it was recorded with, its `replace /courses` included, and undoes
+  all the same, on every backend: the walk takes a single document's root as one row however the
+  entry names it (above), so the course comes back as it was with its drink, and is redone and
+  undone again.
 
 ## [0.9.1] - 2026-09-27
 
