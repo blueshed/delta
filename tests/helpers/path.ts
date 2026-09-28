@@ -122,6 +122,29 @@ const seatsTable = pathSchema.tables.seats!.name;
 export const sqliteOpenSeats = openSeatsDoc((db: any) => ({ seats: db.query(`SELECT * FROM ${seatsTable} WHERE kept = 0`).all() }));
 export const postgresOpenSeats = openSeatsDoc(async (pool: any) => ({ seats: (await pool.query(`SELECT to_jsonb(s) AS row FROM ${seatsTable} s WHERE NOT kept`)).rows.map((r: any) => r.row) }));
 
+/**
+ * A recompute custom document beside them (todo #35): the wedding's menu card,
+ * its name and its courses' names in order -- a shape no per-row predicate
+ * gives -- read whole on open and again on every write to what it watches,
+ * told as a root replace. Only the read differs by backend.
+ */
+const menuCardDoc = <R>(recompute: R) => ({
+  prefix: "fo-menu-card:",
+  watch: ["weddings", "courses"],
+  parse: (id: string) => Number(id),
+  recompute,
+});
+const weddingsTable = pathSchema.tables.weddings!.name;
+const coursesTable = pathSchema.tables.courses!.name;
+export const sqliteMenuCard = menuCardDoc((db: any, id: number) => {
+  const wedding = db.query(`SELECT name FROM ${weddingsTable} WHERE id = ?`).get(id) as { name: string } | null;
+  if (!wedding) return null;
+  return { wedding: wedding.name, courses: (db.query(`SELECT name FROM ${coursesTable} WHERE weddings_id = ? ORDER BY id`).all(id) as { name: string }[]).map((c) => c.name) };
+});
+export const postgresMenuCard = menuCardDoc(async (pool: any, id: number) => (await pool.query(
+  `SELECT jsonb_build_object('wedding', w.name, 'courses', COALESCE((SELECT jsonb_agg(c.name ORDER BY c.id) FROM ${coursesTable} c WHERE c.weddings_id = w.id), '[]'::jsonb)) AS doc FROM ${weddingsTable} w WHERE w.id = $1`,
+  [id])).rows[0]?.doc ?? null);
+
 /** Rows as every backend is seeded with them: through `importTables`, which sets each sequence past its rows. */
 export interface Snapshot {
   /** Rows by collection key, each with its id (a number) and its parent key. */
@@ -1086,6 +1109,46 @@ export function fanOutCases(backend: () => PathBackend): void {
       await write(b.process, "fo-board:1", [{ op: "remove", path: "/households/1" }]);
       await expectTold(b, "fo-household:1", [[{ op: "replace", path: "/households", value: null }]]);
       await expectTold(b, "fo-inbox:a@x", [[{ op: "remove", path: "/households/1" }]]);
+      await assertCopiesHold(b, copies);
+    });
+  });
+
+  describe("a recompute custom document (todo #35)", () => {
+    test("the menu card is read whole, and again on each write to what it watches -- its own wedding's or another's -- told as a root replace; a write to what it does not watch is not told", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-menu-card:1", "fo-board:1", "fo-board:2"]);
+      expect(copies.get("fo-menu-card:1")).toEqual({ wedding: "ours", courses: ["Soup"] });
+      // each read as the tables stand when it is read: on Postgres, after the write's commit is heard
+      const card = (wedding: string, courses: string[]) => [{ op: "replace", path: "", value: { wedding, courses } }];
+      await write(b.process, "fo-board:1", [{ op: "add", path: "/courses/10", value: { name: "Fish" } }]);
+      await expectTold(b, "fo-menu-card:1", [card("ours", ["Soup", "Fish"])]);
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/weddings/name", value: "our day" }]);
+      await expectTold(b, "fo-menu-card:1", [card("ours", ["Soup", "Fish"]), card("our day", ["Soup", "Fish"])]);
+      await write(b.process, "fo-board:2", [{ op: "replace", path: "/courses/2/name", value: "Slaw" }]);   // no relevance gate: read again, the same
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/email", value: "z@x" }]);   // not watched
+      await expectTold(b, "fo-menu-card:1", [card("ours", ["Soup", "Fish"]), card("our day", ["Soup", "Fish"]), card("our day", ["Soup", "Fish"])]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a menu card whose wedding is not there is not found (404); it is read-only (403); undone, a write is read again", async () => {
+      const b = backend();
+      expect((await b.process.call("open", { doc: "fo-menu-card:9" })).error?.code).toBe(404);
+      const copies = await openAll(b.process, ["fo-menu-card:1", "fo-board:1"]);
+      expect((await b.process.call("delta", { doc: "fo-menu-card:1", ops: [{ op: "replace", path: "/wedding", value: "x" }] })).error?.code).toBe(403);
+      await write(b.process, "fo-board:1", [{ op: "remove", path: "/courses/1" }], { cursor: "s1" });
+      await expectTold(b, "fo-menu-card:1", [[{ op: "replace", path: "", value: { wedding: "ours", courses: [] } }]]);
+      expect((await b.process.call("undo", { cursor: "s1" })).error).toBeUndefined();
+      await expectTold(b, "fo-menu-card:1", [
+        [{ op: "replace", path: "", value: { wedding: "ours", courses: [] } }],
+        [{ op: "replace", path: "", value: { wedding: "ours", courses: ["Soup"] } }],
+      ]);
+      await b.process.call("close", { doc: "fo-menu-card:1" });
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/courses/1/name", value: "Broth" }]);
+      await expectTold(b, "fo-menu-card:1", [
+        [{ op: "replace", path: "", value: { wedding: "ours", courses: [] } }],
+        [{ op: "replace", path: "", value: { wedding: "ours", courses: ["Soup"] } }],
+      ]);   // closed: not read again, not told
+      copies.delete("fo-menu-card:1");
       await assertCopiesHold(b, copies);
     });
   });

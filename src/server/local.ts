@@ -33,7 +33,7 @@ import type { ActionHandler, WsServer } from "./server";
 
 export type LocalAnswer = { result?: any; error?: { code: number; message: string } };
 
-type LocalClient = { data: Record<string, unknown>; subscribe(channel: string): void; unsubscribe(channel: string): void };
+type LocalClient = { data: Record<string, unknown>; subscribe(channel: string): void; unsubscribe(channel: string): void; send(raw: string): void };
 
 export interface Caller {
   /** The client its calls come from: subscriptions are recorded on it, as on a socket. */
@@ -47,7 +47,12 @@ export interface Local extends Caller {
   server: WsServer;
   /** A caller that is `identity`: one client per identity, reused. With no identity, calls are anonymous. */
   as(identity: unknown): Caller;
-  /** Hears every broadcast the backend makes, on every channel, as its own copy; one that throws is logged, and the rest are told. Returns the unsubscribe. */
+  /**
+   * Hears every broadcast the backend makes, on every channel, as its own copy
+   * -- and each message it sends to one caller alone, on its document's channel
+   * (a recompute document's view, which is each subscriber's own); one that
+   * throws is logged, and the rest are told. Returns the unsubscribe.
+   */
   onPublish(fn: (channel: string, data: any) => void): () => void;
 }
 
@@ -103,6 +108,11 @@ export function createLocal(): Local {
     data: identity === undefined ? { local: true } : { local: true, identity },
     subscribe() {},
     unsubscribe() {},
+    // what a socket would be sent alone: heard as the backend's other changes are
+    send(raw) {
+      const data = JSON.parse(raw);
+      for (const fn of listeners) fn(data.doc, data);
+    },
   });
   const client = clientFor();
   const callers = new Map<string, Caller>();

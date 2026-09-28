@@ -142,7 +142,7 @@ What is the same on the JSON file, SQLite and Postgres (in process or a server) 
 - A write is told to every open document holding a row it changed, arriving, staying or leaving (*Fan-out*). Writing a row's parent key moves it.
 - One error-code table; `open_at` reads a document as it stood; with `ledger: true`, undo, redo, history, and a version on every change told.
 
-What differs: a client-chosen id `/<coll>/<id>` must be a number on Postgres (the JSON file and SQLite also keep text ids, as a session's token); versions are always on for Postgres, with `ledger: true` elsewhere; auth, RLS and several processes are Postgres's; `implied: true` is the JSON file's and SQLite's (Postgres ignores it); a `recompute` custom doc is Postgres's. Postgres type-checking needs `bun add pg` and `bun add -d @types/pg`; PGlite needs `bun add @electric-sql/pglite`; keep what `createDocListener` returns and `await listener.destroy()` before `pool.end()`.
+What differs: a client-chosen id `/<coll>/<id>` must be a number on Postgres (the JSON file and SQLite also keep text ids, as a session's token); versions are always on for Postgres, with `ledger: true` elsewhere; auth, RLS and several processes are Postgres's; `implied: true` is the JSON file's and SQLite's (Postgres ignores it). Postgres type-checking needs `bun add pg` and `bun add -d @types/pg`; PGlite needs `bun add @electric-sql/pglite`; keep what `createDocListener` returns and `await listener.destroy()` before `pool.end()`.
 
 On every backend: `await doc.send(ops)` resolves once its own echo is applied; a batch applies whole or not at all; errors have one code table (400 malformed, 401, 403 read-only, 404 not there, 409 already there). **The id rule:** create rows with `add /<coll>/-` and read the id from the echo (`/<coll>/<id>`, and `id` in the row); address a row by its id, never its position.
 
@@ -200,7 +200,7 @@ Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/fi
 - **Compose doc ops from SQL via the `*_as` functions, never raw table access.** A custom `plpgsql` evaluator reads with `delta_open_as` (binds `app.user_id`, so RLS applies to what it reads) and a stored write mutates-and-broadcasts with `delta_apply_as` — a bare `delta_open`/`SELECT` on an RLS table scopes to nothing (and throws on `app.user_id=''`), and a raw `INSERT` won't NOTIFY. `SECURITY DEFINER` bypasses RLS, so such a function must enforce its own guards. → `reference.md` → *Composing doc operations from SQL*.
 - **Scope keys must be real columns of the root collection** — `scope: { "items.id": ":id" }` raises; use `scope: { id: ":id" }` or omit `scope` for single-mode. → `reference.md` → *`scope` syntax*.
 - **`delta_open` raises on config errors** (unknown prefix / root collection). NULL only means "single-mode row doesn't exist yet" — listener maps to 404.
-- **`defineCustomDoc` has two modes — pick by shape.** Flat per-row view → `query` + `matches` (membership; SQLite + Postgres; cached per name, and on Postgres per name and identity: both are given the identity, so bind it for RLS and check rows against it). Nested/joined/identity-dependent view → `recompute` (whole-doc; **Postgres only**; re-evaluated per subscriber under their identity, **not** cached; republished as a root-replace op). Never mix the two field sets. → `reference.md` → *Custom read docs*.
+- **`defineCustomDoc` has two modes — pick by shape.** Flat per-row view → `query` + `matches` (membership; SQLite + Postgres; cached per name, and on Postgres per name and identity: both are given the identity, so bind it for RLS and check rows against it). Nested/joined/identity-dependent view → `recompute` (whole-doc; SQLite + Postgres; re-evaluated per subscriber under their identity, **not** cached; republished as a root-replace op). Never mix the two field sets. → `reference.md` → *Custom read docs*.
 - **Custom `DocType` parses its own prefix** — don't put prefix logic elsewhere in the app.
 - **Doc names are data**: `items:` (list), `venue:42` (single), `venue-at:42:2026-06-16` (temporal scoped), on every backend. Prefix up to `:` owns the handler. A name is also the channel its writes are broadcast on.
 - **Close sockets with `wsClient.close()` in tests/scripts** — `connectWs` reconnects forever otherwise.
@@ -218,7 +218,7 @@ Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/fi
 - *Schema generation* — `defineSchema`, column shorthands, `validateOps`
 - *`scope` syntax* — the colon DSL, operators, footguns
 - *Doc patterns* — list, catalog (list-mode `include`), scoped-single, what a remove takes, per-user isolation, custom DocType
-- *Custom read docs* — `defineCustomDoc` membership (`query`+`matches`) vs recompute (whole-doc, Postgres); root-replace primitive
+- *Custom read docs* — `defineCustomDoc` membership (`query`+`matches`) vs recompute (whole-doc); root-replace primitive
 - *Implied documents* — `implied: true`: open empty, the first write makes the root row (SQLite)
 - *Fan-out* — which other open docs hear a write, and what each is told
 - *In-process* — `createLocal()`, `as(identity)`, `onPublish`, savepoints inside your own transaction

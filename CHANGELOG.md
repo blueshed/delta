@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **SQLite and the JSON file: a `recompute` custom document, as on Postgres** (todo #35).
+  `defineCustomDoc(prefix, { watch, parse, recompute })` from `@blueshed/delta/sqlite` (or
+  passed to `./json`) is read whole on open (null: a 404) and read again on every write to a
+  collection it watches, once per write, for each subscriber, and sent to that subscriber alone
+  as a root replace (`replace ""`), never cached -- the Postgres listener's contract, with
+  `recompute(db, criteria, identity)` synchronous over the `bun:sqlite` handle, as `query` is. An
+  app with one can start on the JSON file or SQLite and move on. `query` and `matches` are now
+  optional in SQLite's `CustomDocDef`, as in Postgres's. `createLocal()`'s callers take a message
+  sent to them alone (`send`), which `onPublish` hears on its document's channel: a recompute
+  document's view, on Postgres too, where in process it was lost (the listener's
+  `client.send` threw on a caller with none).
+
 ### Fixed
 
 - **A time's name is a date, compared as an instant, on every backend** (todo #60). A list

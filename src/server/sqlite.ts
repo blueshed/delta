@@ -53,23 +53,33 @@ export const defineDoc = defineDocShared;
 // Custom doc definition — predicate-based membership over watched collections.
 // ---------------------------------------------------------------------------
 
-export interface CustomDocDef<C = unknown> {
+export interface CustomDocDef<C = unknown, I = any> {
   /** Doc name prefix (e.g. "sites-in-bbox:"). */
   prefix: string;
-  /** Collections the doc watches for cross-pollination. */
+  /** Collections whose writes reach it (per row for a membership def, the whole doc for a recompute def). */
   watch: string[];
   /** Parse the portion of docName after prefix into criteria. */
   parse: (docId: string) => C;
-  /** Initial load. Return the rows this doc should expose, keyed by collection. */
-  query: (db: any, criteria: C) => Record<string, any[]>;
-  /** True when `row` belongs in a doc opened under `criteria`. */
-  matches: (collection: string, row: any, criteria: C) => boolean;
+  /** MEMBERSHIP def (flat, per-row fan-out) -- `query` + `matches`. Initial load: the rows this doc exposes, keyed by collection. */
+  query?: (db: any, criteria: C) => Record<string, any[]>;
+  /** True when `row` belongs in a doc opened under `criteria` (membership def). */
+  matches?: (collection: string, row: any, criteria: C) => boolean;
+  /**
+   * RECOMPUTE def (whole-doc) -- `recompute` INSTEAD of query/matches, as on
+   * Postgres. On open, and on any write to a watched collection, the WHOLE doc
+   * is read again and sent to each subscriber as a root-replace op -- for
+   * nested, joined or aggregated reads a per-row `matches` can't express.
+   * Read again per subscriber, under that client's identity (undefined
+   * without auth), never cached. Null: not found (404 on open; skipped after a
+   * write). Synchronous, as `query` is: the `bun:sqlite` handle, no await.
+   */
+  recompute?: (db: any, criteria: C, identity?: I) => any;
 }
 
-export function defineCustomDoc<C>(
+export function defineCustomDoc<C, I = any>(
   prefix: string,
-  opts: Omit<CustomDocDef<C>, "prefix">,
-): CustomDocDef<C> {
+  opts: Omit<CustomDocDef<C, I>, "prefix">,
+): CustomDocDef<C, I> {
   return { prefix, ...opts };
 }
 
@@ -208,6 +218,9 @@ export function registerDocs(
 
   // In-memory doc cache: docName → loaded doc object
   const cache = new Map<string, any>();
+
+  /** Who a client is, to a recompute document: undefined, as on Postgres without an auth module. */
+  const identityOf = (_client: any): unknown => undefined;
 
   // Open implied docs whose root row has not been written yet.
   const implied = new Set<string>();
@@ -701,7 +714,15 @@ export function registerDocs(
     // Custom doc path first (independent prefix space).
     const customMatch = findCustom(docName);
     if (customMatch) {
-      const doc = loadCustom(docName, customMatch.def, customMatch.docId);
+      let doc: any;
+      if (customMatch.def.recompute) {
+        // Whole-doc: read as this client, never cached, as on Postgres.
+        const criteria = customCriteria.get(docName) ?? customMatch.def.parse(customMatch.docId);
+        try { doc = customMatch.def.recompute(db, criteria, identityOf(client)); }
+        catch (err: any) { log.error(`open custom ${docName} failed: ${err.message}`); return respond({ error: { code: 500, message: err.message } }); }
+        if (doc == null) return respond({ error: { code: 404, message: "Not found" } });
+        customCriteria.set(docName, criteria);
+      } else doc = loadCustom(docName, customMatch.def, customMatch.docId);
 
       trackSubscribe(client, docName);
       if (!subscriptions.has(docName)) subscriptions.set(docName, new Set());
@@ -709,7 +730,7 @@ export function registerDocs(
       onClientDrop(client, releaseClient);
 
       respond({ result: doc });
-      log.info(`opened ${docName} (custom)`);
+      log.info(`opened ${docName} (custom${customMatch.def.recompute ? ", recompute" : ""})`);
       return;
     }
 
@@ -740,7 +761,7 @@ export function registerDocs(
     let doc = cache.get(docName);
     if (!doc) {
       const criteria = def.parse(docId);
-      const rowsByColl = def.query(db, criteria);
+      const rowsByColl = def.query!(db, criteria);
       doc = {};
       for (const coll of def.watch) doc[coll] = toMap(rowsByColl[coll] ?? []);
       cache.set(docName, doc);
@@ -781,6 +802,7 @@ export function registerDocs(
       if (!subs.size || cache.has(name)) continue;
       const custom = findCustom(name);
       const match = custom ? null : findDoc(name);
+      if (custom?.def.recompute) continue;   // never cached: read again after each write
       if (custom) loadCustom(name, custom.def, custom.docId);
       else if (match) load(name, match.def, match.docId);
     }
@@ -983,6 +1005,30 @@ export function registerDocs(
   function customFanOut(ops: DeltaOp[]) {
     if (customByPrefix.size === 0) return;
 
+    // Recompute defs: the whole doc, read again once per write that touched a
+    // watched collection, for each subscriber as it is, and sent it alone as
+    // a root replace -- as the Postgres listener's recomputeAndPush.
+    const touchedColls = new Set(ops.map((op) => splitPath(op.path)[0]));
+    for (const [prefix, def] of customByPrefix) {
+      if (!def.recompute || !def.watch.some((c) => touchedColls.has(c))) continue;
+      for (const [docName, subs] of subscriptions) {
+        if (!docName.startsWith(prefix) || findCustom(docName)?.def !== def) continue;
+        const criteria = customCriteria.get(docName);
+        if (criteria === undefined) continue;
+        for (const client of subs) {
+          try {
+            const doc = def.recompute(db, criteria, identityOf(client));
+            if (doc == null) continue;
+            if (client.readyState === undefined || client.readyState === 1) {
+              client.send(JSON.stringify({ doc: docName, ops: [{ op: "replace", path: "", value: doc }] }));
+            }
+          } catch (err: any) {
+            log.error(`recompute ${docName}: ${err.message}`);
+          }
+        }
+      }
+    }
+
     for (const op of ops) {
       const parts = splitPath(op.path);
       // A row at whatever path the write told it: /<coll>/<id>, or a single
@@ -995,7 +1041,7 @@ export function registerDocs(
 
       // Bucket open docs by custom type.
       for (const [prefix, def] of customByPrefix) {
-        if (!def.watch.includes(coll)) continue;
+        if (!def.matches || !def.watch.includes(coll)) continue;   // recompute defs: above
 
         // Memoize the membership decision per distinct criteria for this op.
         const decisionByCriteria = new Map<unknown, boolean>();
@@ -1009,7 +1055,7 @@ export function registerDocs(
 
           let shouldBeIn = decisionByCriteria.get(criteria);
           if (shouldBeIn === undefined) {
-            shouldBeIn = row == null ? false : def.matches(coll, row, criteria);
+            shouldBeIn = row == null ? false : def.matches!(coll, row, criteria);
             decisionByCriteria.set(criteria, shouldBeIn);
           }
 
