@@ -187,6 +187,36 @@ export function ownsCases(backend: () => OwnsBackend): void {
       expect(await rows(bob)).toEqual({});
     });
 
+    for (const lookup of [false, true]) test(`a socket hears a document while it may open it: taken off it, or signed out since, it is let go at the next change told, and told so (404, 401) -- a membership view too -- and asked no more; put back, it opens again${lookup ? "; owns a lookup (a promise)" : ""} (todo #6's review; #17 on Postgres)`, async () => {
+      const granted = new Set(["2:fo-board:1", "3:fo-board:1"]);
+      const may = (me: Me, name: string) => ownsByName(me, name) || granted.has(`${me.id}:${name}`);
+      const p = await backend().start({ owns: lookup ? async (me, name) => { await new Promise((r) => setTimeout(r, 2)); return may(me, name); } : may, custom: "owned" });
+      const carol: Me = { id: 3 };
+      for (const who of [ada, bob, carol]) expect((await p.as(who).call("open", { doc: "fo-board:1" })).error).toBeUndefined();
+      expect((await p.as(carol).call("open", { doc: "fo-mine:x" })).error).toBeUndefined();
+      await openAll(p.backend.process, []);   // what the writes tell, from here
+      const letGo = () => (p.backend.process.heard as { channel: string; data: any; to?: { identity: any } }[])
+        .filter((h) => h.data.error).map((h) => [h.to?.identity?.id, h.channel, h.data.error.code]).sort();
+      const add = async (email: string) => {
+        expect((await p.as(ada).call("delta", { doc: "fo-board:1", ops: [{ op: "add", path: "/households/-", value: { email } }] })).error).toBeUndefined();
+        await p.backend.quiet();
+        if (lookup) await new Promise((r) => setTimeout(r, 30));   // told once owns has answered
+      };
+      granted.delete("2:fo-board:1");   // bob taken off ada's board
+      await add("secret@x");
+      expect(letGo()).toEqual([[2, "fo-board:1", 404]]);
+      (p.as(carol) as any).client.data.identity = undefined;   // carol signed out, with no request since
+      await add("still@x");
+      expect(letGo()).toEqual([[2, "fo-board:1", 404], [3, "fo-board:1", 401], [3, "fo-mine:x", 401]]);
+      await add("again@x");   // let go, neither is asked again, nor told
+      expect(letGo()).toHaveLength(3);
+      expect((await p.as(bob).call("open", { doc: "fo-board:1" })).error).toEqual({ code: 404, message: "Not found" });
+      granted.add("2:fo-board:1");   // put back
+      expect((await p.as(bob).call("open", { doc: "fo-board:1" })).error).toBeUndefined();
+      await add("back@x");
+      expect(letGo()).toHaveLength(3);
+    });
+
     test("a recompute document is read once per identity after a write, however many of its subscribers are that identity; each is told it", async () => {
       const p = await backend().start({ owns: ownsByName, custom: "owned" });
       const adaHere = p.as(ada), adaThere = p.as({ id: 1 });   // two callers, one identity (auth.asSqlArg: 1)

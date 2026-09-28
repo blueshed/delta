@@ -381,8 +381,10 @@ export function registerDocs<I = unknown>(
   // whose rows were dropped (`evict`, another process's write) is queried again.
   type View = { docName: string; criteria: unknown; identity: I | undefined; doc: Record<string, Record<string, any>> | null; subs: Set<any> };
   const views = new Map<string, View>();
+  const identityKey = (identity: I | undefined): string =>
+    auth?.asSqlArg && identity !== undefined ? String(auth.asSqlArg(identity)) : JSON.stringify(identity);
   const viewKey = (docName: string, identity: I | undefined): string =>
-    auth ? `${docName}\u0000${auth.asSqlArg && identity !== undefined ? String(auth.asSqlArg(identity)) : JSON.stringify(identity)}` : docName;
+    auth ? `${docName}\u0000${identityKey(identity)}` : docName;
   /** A view's rows, queried as its identity when it has none. */
   function viewRows(view: View, def: CustomDocDef<any, I>): Record<string, Record<string, any>> {
     if (!view.doc) {
@@ -437,6 +439,100 @@ export function registerDocs<I = unknown>(
         customCriteria.delete(docName);
       }
     }
+  }
+
+  // A socket hears a document while it may open it, as on Postgres (todo #17,
+  // #6's review). An open asks the gate and the document's `owns`, and so does
+  // every request; a change told asks them again of each socket it is told to,
+  // and a socket refused is let go of the document and told so -- `{ doc,
+  // error: { code, message } }`, 401 from the gate, 404 from owns -- which the
+  // client acts on. Taken off a document, or its session run out, it hears no
+  // more though it asks for nothing. The gate is asked of each socket, `owns`
+  // once per identity per change. Without auth nothing is asked.
+  type Refusal = { code: number; message: string };
+  const NOT_FOUND: Refusal = { code: 404, message: "Not found" };
+  type Owns = (identity: I, docName: string) => boolean | Promise<boolean>;
+  const isPromise = <T>(x: T | Promise<T>): x is Promise<T> => typeof (x as any)?.then === "function";
+
+  /** Why `client` may no longer hear `docName`, or null: what an open asks. `as`: a membership view's identity, which the socket must still be. */
+  function mayHear(client: any, docName: string, owns: Owns | undefined, asked: Map<string, Refusal | null | Promise<Refusal | null>>, as?: string): Refusal | null | Promise<Refusal | null> {
+    let g: { identity: I } | { error: Refusal };
+    try { g = gated(client); }
+    catch (err: any) { log.error(`gate for ${docName}: ${err?.message ?? err}`); return { code: 401, message: "Authentication failed" }; }
+    if ("error" in g) return g.error;
+    const key = identityKey(g.identity);
+    if (as !== undefined && key !== as) return NOT_FOUND;   // the socket is someone else now: the view is not theirs
+    if (!owns) return null;
+    if (!asked.has(key)) {
+      const no = (err: any) => { log.error(`owns ${docName}: ${err?.message ?? err}`); return NOT_FOUND; };
+      let answer: boolean | Promise<boolean>;
+      try { answer = owns(g.identity, docName); } catch (err) { asked.set(key, no(err)); return asked.get(key)!; }
+      asked.set(key, isPromise(answer) ? answer.then((yes) => (yes ? null : NOT_FOUND), no) : answer ? null : NOT_FOUND);
+    }
+    return asked.get(key)!;
+  }
+
+  /** Let go of `docName` each of `subs` that may no longer hear it. At once, unless an `owns` answers with a promise. */
+  function letGo(docName: string, subs: Set<any> | undefined, owns: Owns | undefined, as?: string): void | Promise<void> {
+    if (!subs?.size) return;
+    const asked = new Map<string, Refusal | null | Promise<Refusal | null>>();
+    const waiting: Promise<void>[] = [];
+    for (const client of [...subs]) {
+      const refused = mayHear(client, docName, owns, asked, as);
+      if (isPromise(refused)) waiting.push(refused.then((r) => { if (r) letGoOf(client, docName, r); }));
+      else if (refused) letGoOf(client, docName, refused);
+    }
+    if (waiting.length) return Promise.all(waiting).then(() => {});
+  }
+
+  /** Take `client` off `docName`, as a close does, and tell it why. */
+  function letGoOf(client: any, docName: string, refused: Refusal): void {
+    try { trackUnsubscribe(client, docName); } catch { /* the socket may be closing */ }
+    leaveViews(client, docName);
+    const subs = subscriptions.get(docName);
+    if (subs?.delete(client) && subs.size === 0) {
+      subscriptions.delete(docName);
+      cache.delete(docName);
+      implied.delete(docName);
+      customCriteria.delete(docName);
+    }
+    try { if (client.readyState === undefined || client.readyState === 1) client.send(JSON.stringify({ doc: docName, error: refused })); }
+    catch { /* the socket may be closing */ }
+    log.info(`let go of ${docName}: ${refused.code} ${refused.message}`);
+  }
+
+  /** Before the custom documents watching what `ops` changed are told: let go each socket that may no longer hear one. */
+  function letGoCustom(ops: DeltaOp[]): void | Promise<void> {
+    if (customByPrefix.size === 0) return;
+    const touched = new Set(ops.map((op) => splitPath(op.path)[0]));
+    const waiting: Promise<void>[] = [];
+    for (const def of customByPrefix.values()) {
+      if (!def.watch.some((c) => touched.has(c))) continue;
+      const owns: Owns | undefined = def.owns ? (identity, name) => def.owns!(identity, name) : undefined;
+      const each = def.recompute
+        ? [...subscriptions].filter(([name]) => findCustom(name)?.def === def).map(([name, subs]) => letGo(name, subs, owns))
+        : [...views.values()].filter((view) => findCustom(view.docName)?.def === def).map((view) => letGo(view.docName, view.subs, owns, identityKey(view.identity)));
+      for (const w of each) if (w) waiting.push(w);
+    }
+    if (waiting.length) return Promise.all(waiting).then(() => {});
+  }
+
+  /**
+   * Tellings run in the order their writes committed: one that waits on an
+   * `owns`'s promise holds back those after it. With no promise to wait on,
+   * a write is told before it answers, as it always was.
+   */
+  let telling: Promise<void> | undefined;
+  function inOrder(run: () => void | Promise<void>): void {
+    const failed = (err: any) => log.error(`delta fan-out failed (write committed): ${err?.message ?? err}`);
+    const settle = (p: Promise<void>) => {
+      const mine: Promise<void> = p.then(undefined, failed).then(() => { if (telling === mine) telling = undefined; });
+      telling = mine;
+    };
+    if (telling) return settle(telling.then(run));
+    let r: void | Promise<void>;
+    try { r = run(); } catch (err) { return failed(err); }
+    if (isPromise(r)) settle(r);
   }
 
   // ---------------------------------------------------------------------------
@@ -1073,18 +1169,29 @@ export function registerDocs<I = unknown>(
       // `createLocal().onPublish`, the one stream of changes an in-process
       // caller (eta) redraws from.
       const told = tell(docName, touched);
+      const changes: { name: string; change: Record<string, unknown> }[] = [];
       for (const [name, tOps] of told) {
         if (name === docName) {
-          ws.publish(docName, { doc: docName, ops: tOps, ...(written.version !== undefined ? { v: written.version } : {}) });
+          changes.push({ name, change: { doc: docName, ops: tOps, ...(written.version !== undefined ? { v: written.version } : {}) } });
         } else if (tOps.length > 0) {
-          const v = ledger?.bump(name);
-          ws.publish(name, { doc: name, ops: tOps, ...(v !== undefined ? { v } : {}) });
+          const v = ledger?.bump(name);   // numbered as committed, told in that order
+          changes.push({ name, change: { doc: name, ops: tOps, ...(v !== undefined ? { v } : {}) } });
         }
         // an open copy is read again from the tables: it holds exactly what a fresh open would
         if (cache.has(name) || name === docName) refresh(name);
       }
-      // Custom-doc cross-pollination: predicate-based membership.
-      customFanOut(written.ops);
+      const appliedOps = written.ops;
+      inOrder(() => {
+        // With auth, only to those who may still hear each document (todo #17's rule).
+        const asked = auth ? [...changes.map(({ name }) => letGo(name, subscriptions.get(name), options.owns)), letGoCustom(appliedOps)] : [];
+        const publish = () => {
+          for (const { name, change } of changes) ws.publish(name, change);
+          customFanOut(appliedOps);   // custom-doc cross-pollination: predicate-based membership
+        };
+        const waiting = asked.filter((a): a is Promise<void> => isPromise(a));
+        if (!waiting.length) return publish();
+        return Promise.all(waiting).then(publish);
+      });
       options.committed?.();
     } catch (err: any) {
       log.error(`delta fan-out failed (write committed): ${err.message}`);

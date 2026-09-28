@@ -428,6 +428,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `registerMemory` answered every op that did not land with 400, where the JSON file, SQLite and
   Postgres answer a remove or replace of something not there 404. It now answers with the code
   `applyOps` gives (404 not there, 400 a malformed path), and 400 for anything else.
+- **SQLite and the JSON file: a socket hears a document while it may open it, as on Postgres**
+  (todo #6's review; #17). With `auth`, `registerDocs` asked the gate and `owns` at an open and
+  at each request, and never between: Bob, granted `board:1` and taken off it, still heard Ada's
+  next household; so did a socket whose identity was cleared with no request since. Before a
+  change is told, each subscriber is now asked what an open asks -- the gate, then the
+  document's `owns` (once per identity per change; a custom document's own, a membership view's
+  identity too) -- and one refused is let go of the document and told so,
+  `{ doc, error: { code, message } }` (401 from the gate, 404 from `owns`), which the client acts
+  on as it does for Postgres. With no promise to wait on a write is still told before it
+  answers; an `owns` that answers with a promise holds that write's telling, and those after
+  it, until it has, so each document hears its changes in order.
 
 ### Changed
 

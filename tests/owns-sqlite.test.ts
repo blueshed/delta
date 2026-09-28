@@ -92,6 +92,53 @@ describe("sqlite: two identities on one membership name, over sockets", () => {
 });
 
 /**
+ * Over sockets: a socket taken off a document, or signed out since, hears no
+ * more of it though it asks for nothing -- let go at the next change told, and
+ * told why, as on Postgres (todo #6's review; #17). The JSON file is SQLite's
+ * registration over its file, so both are asked.
+ */
+describe("sqlite and json: a socket hears a document while it may open it, over sockets", () => {
+  for (const kind of ["sqlite", "json"] as const) {
+    test(`${kind}: taken off it, then signed out, a socket is let go and told so, and hears no more`, async () => {
+      const ws = createWs();
+      const sockets: any[] = [];
+      ws.setServer({ publish: (channel: string, raw: string) => { for (const s of sockets) if (s.subs.has(channel)) s.send(raw); } });
+      const granted = new Set(["2:fo-board:1", "3:fo-board:1"]);
+      const opts = { auth, owns: (me: Me, name: string) => name.endsWith(`:${me.id}`) || granted.has(`${me.id}:${name}`) };
+      if (kind === "sqlite") {
+        const db = new Database(":memory:");
+        createTables(db, pathSchema);
+        importTables(db, pathSchema, pathSeed);
+        registerDocs(ws, db, pathSchema, pathDocs, [], opts);
+      } else {
+        const dir = mkdtempSync(join(tmpdir(), "delta-owns-"));
+        dirs.push(dir);
+        json.importTables(join(dir, "data.json"), pathSchema, pathSeed);
+        json.registerDocs(ws, join(dir, "data.json"), pathSchema, pathDocs, [], opts);
+      }
+      const socket = (identity: Me) => {
+        const s = { data: { identity, clientId: `c${identity.id}` } as any, readyState: 1, subs: new Set<string>(), heard: [] as any[],
+          subscribe(ch: string) { this.subs.add(ch); }, unsubscribe(ch: string) { this.subs.delete(ch); }, send(raw: string) { this.heard.push(JSON.parse(raw)); } };
+        sockets.push(s);
+        return s;
+      };
+      const ask = async (s: any, msg: Record<string, unknown>) => { await ws.websocket.message(s, JSON.stringify({ id: 1, ...msg })); return s.heard.pop(); };
+      const [ada, bob, carol] = [socket({ id: 1 }), socket({ id: 2 }), socket({ id: 3 })];
+      for (const s of [ada, bob, carol]) expect((await ask(s, { action: "open", doc: "fo-board:1" })).error).toBeUndefined();
+      const add = async (email: string) => expect((await ask(ada, { action: "delta", doc: "fo-board:1", ops: [{ op: "add", path: "/households/-", value: { email } }] })).error).toBeUndefined();
+      granted.delete("2:fo-board:1");
+      await add("secret@x");
+      expect(bob.heard).toEqual([{ doc: "fo-board:1", error: { code: 404, message: "Not found" } }]);
+      carol.data.identity = undefined;   // its token ran out: no request since
+      await add("still@x");
+      expect(bob.heard).toHaveLength(1);
+      expect(carol.heard.map((m: any) => m.error?.message ?? m.ops[0].value.email)).toEqual(["secret@x", "Authentication required"]);
+      expect(ada.heard.map((m: any) => m.ops[0].value.email)).toEqual(["secret@x", "still@x"]);
+    });
+  }
+});
+
+/**
  * One database, two registrations -- a public one (shared) and a private one
  * (owns), as one `owns` per call makes an app with both write -- and one
  * ledger: an undo or redo is walked by the registration whose document the
