@@ -330,6 +330,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now a type error: send the ops and let the echo change it (`get`, `peek` and `map` are as
   before, and `list()` and `when()` take it). `tests/client.test.ts` holds the writes as `@ts-expect-error`, which
   `bun run check` checks.
+- **SQLite: a write's ops land in the order sent, as on Postgres** (todo #20, #54). SQLite and the
+  JSON file held back a write's field replaces (and whole-row replaces) and wrote them after its
+  adds and removes, so `[replace /drinks/3/name, remove /drinks/3]` removed the drink first and
+  then answered 404 for the replace, where Postgres writes the name and then removes the drink;
+  and a batch was answered, recorded and told in another order than it was sent (`[replace
+  /weddings/name, add /courses/-]` told the add first; a row replaced before and after another
+  op was written once, after it). Each op now lands where it is sent, read back as it is kept and told as it lands, and
+  the answer, the ledger's entry and its inverse follow it: the drink's write is told as the
+  replace and then the remove to every document that held it, and undone puts the drink back
+  as it was. A row the write made is `null` in its inverse (`replace /<coll>/<id>` with
+  `value: null`), as on Postgres, where SQLite left the value out. A row that leaves the
+  document earlier in the write -- `replace /courses/1/weddings_id` to another wedding, a name
+  out of a list's condition, an add outside it -- is not the document's to write for the rest of
+  it (404, and nothing is written), as on Postgres: each op asks the document's scope of the
+  tables as they stand at that point, as `_delta_row_in_scope` does, not of the copy it opened
+  with, which let SQLite and the JSON file rename, remove or add under a row the document no
+  longer held.
+- **SQLite: a single document's root named by its id is its root, as on Postgres** (todo #53).
+  Through `course:1`, `replace /courses/1 { name }` -- the root by its collection and id, as a
+  list document says it -- was a 400 (`Unknown field: 1`) on SQLite and the JSON file, and
+  `replace /courses/1/name` a 404, where Postgres writes the root. Both spellings now write it
+  (`/courses/01` too: the id its digits name), told as `replace /courses` to the document and
+  as the row to every other that holds it, and undone as a root replace; the board's
+  `replace /weddings/1/name` likewise. Another id is a 404 (`replace /courses/2` was a 400), a
+  field that is no column still a 400. `validateOps` reads the segment as Postgres does: digits,
+  or the root's own text id, where no column has that name, name the row.
+- **A single document's root is walked as one row, however the write named it, on every
+  backend.** The root has two paths: `/courses` (a replace of it) and `/courses/1` (its add, its
+  remove), and the walk planned each path on its own. `[remove /courses/1, add /courses/1,
+  replace /courses/name]` through `course:1` -- or with a rename first -- found the root it
+  added changed since, and every undo was a conflict. `[remove /households/1, add
+  /households/1 {...}]` through `household:1` walked back as `replace /households/1`, which
+  Postgres took as the root and SQLite and the JSON file (before #53, on this release) refused, so
+  the write undid on Postgres alone. `planWalk` (`src/server/ledger.ts`) and `_delta_walk_plan`
+  (`001g`, `CREATE OR REPLACE`, with `_delta_walk_key`, new) key the root by `/<root>/<id>`,
+  its id read from the row, and plan a replace of it at `/<root>`: the course comes back as it
+  was with its drink, the household's email is set back at `/households`, and each is redone and
+  undone again. A conflict is still reported at the path the entry first gave the row.
+- **A run of replaces of one row is answered, recorded and told once, as it leaves the row, on
+  every backend.** Replaces of one row one straight after another (`/courses/1/name`, then
+  `/courses/1 { ... }`; a single document's `/courses/name`, `/courses` and `/courses/1/name`)
+  are one answer op, one ledger op and one telling of the row as the run leaves it, and one
+  version of a temporal row; a replace of another row, an add or a remove between them starts a
+  new run, so the ops still land in the order sent. Postgres answered and told each replace:
+  2000 of one course was 2000 ops answered and ledgered and 6000 told, 17 s on PGlite, now one
+  op and 1.9 s. SQLite, which writes such a run once, is back to main's speed with the ops in
+  order (51 ms, now 7 ms). `delta_apply` (`001d`, `CREATE OR REPLACE`) folds a replace into
+  the one before it when that replaced the same row; `_delta_inverse` (`001g`) and
+  `inverseOf` find a root's later removal in one pass.
+- **A row a write touches twice is told gone once, on every backend.** `[replace
+  /drinks/1/name, remove /courses/1]` through `board:1` told the board and the menu `[remove
+  /drinks/1, remove /courses/1, remove /drinks/1]` on SQLite, the JSON file and Postgres: who
+  holds a row is asked after the whole write, so the drink written first was told gone (its
+  course was), and then told gone again with the cascade. Under the RFC 6902 `applyOps` (#4) the
+  second remove throws, the client resyncs, and its copy is not what a fresh open reads. Each
+  document is now told each row from where the telling left it earlier in the same write: a row
+  told gone is not removed again, nor replaced (`tell` in `src/server/sqlite.ts`, and
+  `_delta_tell` in `001d`, `CREATE OR REPLACE`: re-apply the framework, or
+  `bunx @blueshed/delta init`).
+- **A temporal row written twice in one write is one new version, on every backend.** On
+  Postgres `[replace /notes/1/text, replace /notes/1/text]` was a 409 (`duplicate key ...
+  fo_notes_pkey`): every version a write makes is stamped with its transaction's `NOW()`, so the
+  second replace closed the first's version at the same instant and collided with it on
+  `(id, valid_from)`. SQLite took it, as a version per op, each a millisecond after the last, so
+  a big write ran `valid_from` past the clock (2000 replaces of one note: 2001 versions, the last
+  2 s ahead, and `open_at` now read a stale text). A write is now one moment on every backend: a
+  version it makes and then writes again gives way to the next (`delta_apply` in `001d`,
+  `CREATE OR REPLACE`; on SQLite the version is rewritten in place, and every version the write
+  makes or closes is stamped with one time). The note's history keeps the version before the
+  write and the write's.
+- **A single document's root written and then removed in one write can be undone, on every
+  backend** (todo #61). `[replace /courses/name, remove /courses/1]` through `course:1` recorded
+  an inverse of the course's add (as it was before the write), its drink's, and a `replace
+  /courses` putting the old name back -- one row at two paths, so the walk found `/courses` gone
+  and answered a conflict: the write could never be undone (SQLite, the JSON file and Postgres
+  alike). A root's replaces before its removal in the same write now have no inverse of their
+  own, since the add puts the root back as it was: the undo adds the course, then its drink,
+  the redo takes them, and the undo after it puts them back. `001g` replaces `_delta_inverse`
+  (`CREATE OR REPLACE`: re-apply the framework, or `bunx @blueshed/delta init`); a write recorded
+  before this keeps its inverse, and its undo still meets the conflict.
 
 ## [0.9.1] - 2026-09-27
 

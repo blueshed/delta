@@ -144,7 +144,7 @@ What is the same on the JSON file, SQLite and Postgres (in process or a server) 
 
 What differs: a client-chosen id `/<coll>/<id>` must be a number on Postgres (the JSON file and SQLite also keep text ids, as a session's token); versions are always on for Postgres, with `ledger: true` elsewhere; auth, RLS and several processes are Postgres's; `implied: true` is the JSON file's and SQLite's (Postgres ignores it); a `recompute` custom doc is Postgres's. Postgres type-checking needs `bun add pg` and `bun add -d @types/pg`; PGlite needs `bun add @electric-sql/pglite`; keep what `createDocListener` returns and `await listener.destroy()` before `pool.end()`.
 
-On every backend: `await doc.send(ops)` resolves once its own echo is applied; a batch applies whole or not at all; errors have one code table (400 malformed, 401, 403 read-only, 404 not there, 409 already there). **The id rule:** create rows with `add /<coll>/-` and read the id from the echo (`/<coll>/<id>`, and `id` in the row); address a row by its id, never its position.
+On every backend: `await doc.send(ops)` resolves once its own echo is applied; a batch applies whole or not at all, its ops in the order sent; errors have one code table (400 malformed, 401, 403 read-only, 404 not there, 409 already there). **The id rule:** create rows with `add /<coll>/-` and read the id from the echo (`/<coll>/<id>`, and `id` in the row); address a row by its id, never its position.
 
 **Undo** is the ledger's: pass `{ ledger: true }` to SQLite or Postgres and `undo` / `redo` / `history` come with it. → `reference.md` → *The ledger*.
 

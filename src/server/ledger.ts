@@ -26,7 +26,7 @@
  * is still recorded (`skip`: no ops, not walkable), so the cursor moves on to
  * the entry before it instead of meeting the same conflict for ever.
  */
-import { splitPath, type DeltaOp } from "../core";
+import { joinPath, splitPath, type DeltaOp } from "../core";
 
 export type LedgerEntry = {
   id: number;
@@ -99,33 +99,54 @@ export function rowAt(doc: any, path: string): any {
  * `replace` its value; a `remove` none, there was no row), so a row the entry
  * touched twice (made and changed, changed and removed) is walked by its net
  * change. Any guard that fails is a conflict, by path, and then nothing is walked.
+ *
+ * A single document's root is one row at two paths: `/<root>` (a replace of it)
+ * and `/<root>/<id>` (its add, its remove). Both are keyed by the second, the
+ * id read from the row, so the root is walked once, by its net change, however
+ * the entry spelled it -- removed, added back and written is one row, not a
+ * conflict with itself. A replace of the root is planned at `/<root>`, as every
+ * backend takes it; an add or a remove at `/<root>/<id>`. Postgres's
+ * `_delta_walk_plan` (001g) keys it the same.
  */
 export function planWalk(entry: { ops: DeltaOp[]; inverse: DeltaOp[] }, current: any): { ops: DeltaOp[]; conflict: string[] } {
-  const left = new Map<string, any>();   // what the entry left at a path (undefined: it removed it)
-  for (const op of entry.ops) left.set(op.path, op.op === "remove" ? undefined : op.value);
-  const before = new Map<string, any>(); // what a path held before the entry (undefined: nothing), in the inverse's order
+  // a row's key: its path, and a root at /<root> by /<root>/<id> -- its id from the row, or from the document
+  const keyOf = (path: string, value?: any): string => {
+    const [coll, id] = splitPath(path);
+    if (id !== undefined) return path;
+    const own = value?.id ?? current?.[coll!]?.id;
+    return typeof own === "number" || typeof own === "string" ? joinPath(coll!, String(own)) : path;
+  };
+  const left = new Map<string, any>();   // what the entry left at a row (undefined: it removed it)
+  for (const op of entry.ops) left.set(keyOf(op.path, (op as any).value), op.op === "remove" ? undefined : (op as any).value);
+  const before = new Map<string, any>(); // what a row held before the entry (undefined: nothing), in the inverse's order
+  const shown = new Map<string, string>(); // a row's path as the inverse first says it: where a conflict is reported
   for (const inv of entry.inverse) {
     const was = inv.op === "remove" ? undefined : inv.value;
-    if (!before.has(inv.path) || was != null) before.set(inv.path, was);
+    const key = keyOf(inv.path, was);
+    if (!shown.has(key)) shown.set(key, inv.path);
+    if (!before.has(key) || was != null) before.set(key, was);
   }
-  const now = (path: string) => rowAt(current, path);
   const data = (row: any) => Object.keys(row ?? {}).filter((f) => !STORAGE.has(f));
   const ops: DeltaOp[] = [];
   const conflict: string[] = [];
-  for (const [path, was] of before) {
-    const here = now(path);
-    const wrote = left.get(path);
+  for (const [key, was] of before) {
+    const here = rowAt(current, key);
+    const wrote = left.get(key);
+    const [coll] = splitPath(key);
+    const at = shown.get(key)!;
     if (was == null && wrote == null) continue;       // made and removed by the entry: nothing to walk
     if (was == null) {                                // it made the row
-      if (here == null || data(wrote).some((f) => !same(here[f], wrote[f]))) conflict.push(path);
-      else ops.push({ op: "remove", path });
+      if (here == null || data(wrote).some((f) => !same(here[f], wrote[f]))) conflict.push(at);
+      else ops.push({ op: "remove", path: key });
     } else if (wrote == null) {                       // it removed the row
-      if (here != null) conflict.push(path);
-      else ops.push({ op: "add", path, value: was });
+      if (here != null) conflict.push(at);
+      else ops.push({ op: "add", path: key, value: was });
     } else {                                          // it changed the row's fields
       const fields = [...new Set([...data(was), ...data(wrote)])].filter((f) => !same(was[f], wrote[f]));
       if (fields.length === 0) continue;
-      if (here == null || fields.some((f) => !same(here[f], wrote[f]))) conflict.push(path);
+      // the document's root is replaced at /<root>, however the entry spelled it
+      const path = here != null && here === current?.[coll!] ? joinPath(coll!) : key;
+      if (here == null || fields.some((f) => !same(here[f], wrote[f]))) conflict.push(at);
       else ops.push({ op: "replace", path, value: Object.fromEntries(fields.map((f) => [f, was[f] ?? null])) });
     }
   }

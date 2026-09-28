@@ -176,6 +176,8 @@ DECLARE
   v_root    BOOLEAN;
   v_path    TEXT;
   v_version BIGINT;
+  v_has     JSONB;   -- what the target's copy holds, row by row, as told so far
+  v_key     TEXT;
 BEGIN
   -- who holds each row now, and every document concerned
   FOR v_t IN SELECT jsonb_array_elements(p_touched) LOOP
@@ -196,10 +198,15 @@ BEGIN
     CONTINUE WHEN v_def.prefix IS NULL;
     v_single := (_delta_resolve_scope(v_def, v_target)->>'mode') = 'single';
     v_told := '[]'::jsonb;
+    v_has := '{}'::jsonb;
     FOR v_t IN SELECT jsonb_array_elements(v_rows) LOOP
-      v_was := (v_t->'before') ? v_target;
+      -- a row the write touches twice is told from where the first telling left
+      -- it: never removed twice, nor replaced once it is told gone (tell in sqlite.ts)
+      v_key := (v_t->>'coll') || '/' || (v_t->>'id');
+      v_was := CASE WHEN v_has ? v_key THEN (v_has->>v_key)::boolean ELSE (v_t->'before') ? v_target END;
       v_is  := (v_t->'holders') ? v_target;
       CONTINUE WHEN NOT v_was AND NOT v_is;
+      v_has := v_has || jsonb_build_object(v_key, v_is);
       v_root := v_single AND (v_t->>'coll') = v_def.root_collection;
       v_path := CASE WHEN v_root THEN _delta_build_path(v_t->>'coll') ELSE _delta_build_path(v_t->>'coll', v_t->>'id') END;
       IF v_is THEN
@@ -272,6 +279,7 @@ DECLARE
   v_removed       JSONB;
   v_r             JSONB;
   v_rp            TEXT[];
+  v_told_path     TEXT;
 BEGIN
   -- Guard: ops must be a JSON array
   IF p_ops IS NULL OR jsonb_typeof(p_ops) != 'array' THEN
@@ -378,6 +386,13 @@ BEGIN
       v_new_row := v_row || (v_op->'value') || jsonb_build_object('id', v_doc_id);
 
       IF v_coll.temporal THEN
+        -- One version per write: a version this write made (its valid_from is the
+        -- write's NOW()) gives way to the next, rather than closing at the same
+        -- instant and colliding with it on (id, valid_from).
+        EXECUTE format(
+          'DELETE FROM %I WHERE id = $1 AND valid_to IS NULL AND valid_from = $2',
+          v_coll.table_name
+        ) USING v_doc_id, v_ts;
         EXECUTE format(
           'UPDATE %I SET valid_to = $2 WHERE id = $1 AND valid_to IS NULL',
           v_coll.table_name
@@ -399,11 +414,20 @@ BEGIN
         ) INTO v_new_row USING v_new_row;
       END IF;
 
-      v_broadcast_ops := v_broadcast_ops || jsonb_build_array(
-        jsonb_build_object('op', 'replace', 'path', _delta_build_path(v_def.root_collection), 'value', v_new_row)
-      );
-      v_touched := v_touched || jsonb_build_array(jsonb_build_object(
-        'coll', v_coll_key, 'id', v_doc_id, 'before', to_jsonb(v_before), 'after', v_new_row));
+      -- A replace straight after a replace of the same row is one run: answered,
+      -- logged and told once, as the run leaves it (who held it before, the
+      -- run's first). SQLite's applyOps keeps the same rule.
+      v_told_path := _delta_build_path(v_def.root_collection);
+      IF v_broadcast_ops->-1->>'op' = 'replace' AND v_broadcast_ops->-1->>'path' = v_told_path THEN
+        v_broadcast_ops := jsonb_set(v_broadcast_ops, '{-1,value}', v_new_row);
+        v_touched := jsonb_set(v_touched, '{-1,after}', v_new_row);
+      ELSE
+        v_broadcast_ops := v_broadcast_ops || jsonb_build_array(
+          jsonb_build_object('op', 'replace', 'path', v_told_path, 'value', v_new_row)
+        );
+        v_touched := v_touched || jsonb_build_array(jsonb_build_object(
+          'coll', v_coll_key, 'id', v_doc_id, 'before', to_jsonb(v_before), 'after', v_new_row));
+      END IF;
       CONTINUE;
     END IF;
 
@@ -603,6 +627,13 @@ BEGIN
       v_new_row := v_row || (v_op->'value') || jsonb_build_object('id', v_id);
 
       IF v_coll.temporal THEN
+        -- One version per write: a version this write made (its valid_from is the
+        -- write's NOW()) gives way to the next, rather than closing at the same
+        -- instant and colliding with it on (id, valid_from).
+        EXECUTE format(
+          'DELETE FROM %I WHERE id = $1 AND valid_to IS NULL AND valid_from = $2',
+          v_coll.table_name
+        ) USING v_id, v_ts;
         EXECUTE format(
           'UPDATE %I SET valid_to = $2 WHERE id = $1 AND valid_to IS NULL',
           v_coll.table_name
@@ -633,16 +664,21 @@ BEGIN
       -- For single-item docs updating the root entity, broadcast as /collection
       -- so the client replaces the direct object (not a Record entry)
       IF NOT v_is_list AND v_coll_key = v_def.root_collection AND v_id = v_doc_id THEN
-        v_broadcast_ops := v_broadcast_ops || jsonb_build_array(
-          jsonb_build_object('op', 'replace', 'path', _delta_build_path(v_coll_key), 'value', v_new_row)
-        );
+        v_told_path := _delta_build_path(v_coll_key);
+      ELSE
+        v_told_path := _delta_build_path(v_coll_key, v_id::text);
+      END IF;
+      -- a replace straight after a replace of the same row: one run, told once (as the root's, above)
+      IF v_broadcast_ops->-1->>'op' = 'replace' AND v_broadcast_ops->-1->>'path' = v_told_path THEN
+        v_broadcast_ops := jsonb_set(v_broadcast_ops, '{-1,value}', v_new_row);
+        v_touched := jsonb_set(v_touched, '{-1,after}', v_new_row);
       ELSE
         v_broadcast_ops := v_broadcast_ops || jsonb_build_array(
-          jsonb_build_object('op', 'replace', 'path', _delta_build_path(v_coll_key, v_id::text), 'value', v_new_row)
+          jsonb_build_object('op', 'replace', 'path', v_told_path, 'value', v_new_row)
         );
+        v_touched := v_touched || jsonb_build_array(jsonb_build_object(
+          'coll', v_coll_key, 'id', v_id, 'before', to_jsonb(v_before), 'after', v_new_row));
       END IF;
-      v_touched := v_touched || jsonb_build_array(jsonb_build_object(
-        'coll', v_coll_key, 'id', v_id, 'before', to_jsonb(v_before), 'after', v_new_row));
       CONTINUE;
     END IF;
 
