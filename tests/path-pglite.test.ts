@@ -217,11 +217,11 @@ describe("pglite: the log keeps the write as applied only where the writer was t
     expect(await entries()).toEqual([["fo-household:1", null], ["fo-board:1", []]]);
   });
 
-  test("told otherwise -- the row left the writer, a list, by its condition -- its entry carries the write as applied", async () => {
-    await openAll(backend.process, ["fo-courses-like:So"]);
-    const { ops } = await write(backend.process, "fo-courses-like:So", [{ op: "replace", path: "/courses/1/name", value: "Fish" }]);
-    await expectTold(backend, "fo-courses-like:So", [[{ op: "remove", path: "/courses/1" }]]);
-    expect(await entries()).toEqual([["fo-courses-like:So", ops]]);
+  test("told otherwise -- the writer's root removed through it, told as null -- its entry carries the write as applied", async () => {
+    await openAll(backend.process, ["fo-household:1"]);
+    const { ops } = await write(backend.process, "fo-household:1", [{ op: "remove", path: "/households/1" }]);
+    await expectTold(backend, "fo-household:1", [[{ op: "replace", path: "/households", value: null }]]);
+    expect(await entries()).toEqual([["fo-household:1", ops]]);
   });
 });
 

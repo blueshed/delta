@@ -527,6 +527,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entry names it (above), so the course comes back as it was with its drink, and is redone and
   undone again.
 
+### Security
+
+- **A list's root row written through the list stays in its scope** (todo #6's review). Ada,
+  who owns `slots-of:1` (`scope: { weddings_id: ":wedding" }`), added a slot through it -- given
+  `weddings_id` 1 -- and then `replace /slots/1/weddings_id 2`, or the merge
+  `replace /slots/1 { weddings_id: 2 }`, was taken: the slot moved into Bob's `slots-of:2`, and
+  Bob was told it arrived. So on SQLite, the JSON file and PGlite, and on a Postgres server with
+  no RLS `WITH CHECK` to stop it; #6's review had closed it for a single document's rows, not a
+  list's. A replace (a field, a row or a merge) of a list document's root row now asks that the
+  row as written still meets the document's scope, as an add through it is given its bindings:
+  when not, a 404, the write undone and nobody told. `delta_apply` (`001d`, replaced in place)
+  asks it of the row as written, `_delta_row_in_scope`; SQLite and the JSON file, of the run's
+  row, `holds`. A row still leaves a list's condition -- told as a remove -- by a write through
+  another document that holds it (the board renaming a course out of `courses-like:So`).
+
 ## [0.9.1] - 2026-09-27
 
 ### Fixed

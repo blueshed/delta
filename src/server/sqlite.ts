@@ -746,6 +746,13 @@ export function registerDocs<I = unknown>(
         if (field === "id" || field === "valid_from" || field === "valid_to") continue;
         run.row[field] = value;
       }
+      // A list's root row written through the list stays in its scope, as an
+      // add through it is given its bindings: a field, a row or a merge that
+      // takes it out -- into another owner's list by its key, or out of a
+      // condition -- is refused, and the write undone (todo #6's review).
+      if (list && collKey === def.root && !holds(def, scope, collKey, run.row)) {
+        refuse(404, `Row not found: ${collKey}/${id} -- the write would take it out of ${docName}`);
+      }
     };
 
     // Each op lands in the order sent, as on Postgres: a field written and then

@@ -1574,15 +1574,15 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("a seat that leaves the only document open over it (a list's condition), still matching, is not taken for removed: the custom document is told a replace and keeps it", async () => {
+    test("a seat that leaves a list's condition, still matching, is not taken for removed: the list is told it left, the custom document a replace, and keeps it -- written through the seating plan, since the list itself may not write it out (todo #6's review)", async () => {
       const b = backend();
       await b.process.call("open", { doc: "fo-seating:1" });
       await write(b.process, "fo-seating:1", [{ op: "replace", path: "/seats/1/kept", value: false }]);
-      await b.process.call("close", { doc: "fo-seating:1" });
       await b.quiet();
       const copies = await openAll(b.process, ["fo-seats-at:3", "fo-seats-at:open:all"]);
       copies.delete("fo-seats-at:open:all"); // its first read is the backend's own query, not a document's
-      await write(b.process, "fo-seats-at:3", [{ op: "replace", path: "/seats/1/table_no", value: 5 }]);
+      expect((await b.process.call("delta", { doc: "fo-seats-at:3", ops: [{ op: "replace", path: "/seats/1/table_no", value: 5 }] })).error?.code).toBe(404);
+      await write(b.process, "fo-seating:1", [{ op: "replace", path: "/seats/1/table_no", value: 5 }]);
       await expectTold(b, "fo-seats-at:3", [[{ op: "remove", path: "/seats/1" }]]);
       await expectTold(b, "fo-seats-at:open:all", [[{ op: "replace", path: "/seats/1", value: seat(1, 5, false, { veg: true }) }]]);
       await assertCopiesHold(b, copies);
@@ -1753,6 +1753,27 @@ export function fanOutCases(backend: () => PathBackend): void {
       expect(await code("fo-drinks:1", [{ op: "replace", path: "/drinks/1/courses_id", value: 2 }])).toBe(404);   // its courses left out: their chain, from the tables
       expect(await code("fo-board:1", [{ op: "replace", path: "/drinks/1/courses_id", value: 99 }])).toBe(404);   // no such course
       await expectSilent(b, "fo-board:1", "fo-board:2", "fo-menu:1", "fo-drinks:1", "fo-household:1", "fo-course:2");
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a list's root row written through the list stays in its scope: a field, a row or a merge that takes it out -- a slot to another wedding's list, a course out of a name's -- is refused (404), the write undone, and nobody is told (todo #6's review)", async () => {
+      const b = backend();
+      await b.process.call("open", { doc: "fo-slots-of:1" });
+      expect((await write(b.process, "fo-slots-of:1", [{ op: "add", path: "/slots/-", value: { price: 1 } }])).ops[0].value.weddings_id).toBe(1);
+      await b.quiet();
+      const copies = await openAll(b.process, ["fo-slots-of:1", "fo-slots-of:2", "fo-slots-upto:5", "fo-courses-like:So", "fo-courses-like:Fi", "fo-board:1"]);
+      const code = async (doc: string, ops: unknown[]) => (await b.process.call("delta", { doc, ops })).error?.code;
+      expect(await code("fo-slots-of:1", [{ op: "replace", path: "/slots/1/weddings_id", value: 2 }])).toBe(404);
+      expect(await code("fo-slots-of:1", [{ op: "replace", path: "/slots/1", value: { weddings_id: 2 } }])).toBe(404);
+      expect(await code("fo-slots-of:1", [{ op: "replace", path: "/slots/1/price", value: 3 }, { op: "replace", path: "/slots/1/weddings_id", value: 2 }])).toBe(404);   // a run: its first write undone too
+      expect(await code("fo-slots-of:1", [{ op: "replace", path: "/slots/1/weddings_id", value: 2 }, { op: "replace", path: "/slots/1/weddings_id", value: 1 }])).toBe(404);   // out and back: out is out
+      expect(await code("fo-slots-upto:5", [{ op: "replace", path: "/slots/1/price", value: 9 }])).toBe(404);
+      expect(await code("fo-courses-like:So", [{ op: "replace", path: "/courses/1/name", value: "Fish soup" }])).toBe(404);
+      await expectSilent(b, "fo-slots-of:1", "fo-slots-of:2", "fo-slots-upto:5", "fo-courses-like:So", "fo-courses-like:Fi", "fo-board:1");
+      expect(content((await b.process.call("open", { doc: "fo-slots-of:1" })).result).slots).toEqual({ "1": { id: 1, weddings_id: 1, price: 1, starts: null } });
+      // one that stays in the scope is written
+      await write(b.process, "fo-slots-of:1", [{ op: "replace", path: "/slots/1", value: { weddings_id: 1, price: 2 } }]);
+      await write(b.process, "fo-courses-like:So", [{ op: "replace", path: "/courses/1/name", value: "Soup of the day" }]);
       await assertCopiesHold(b, copies);
     });
 
