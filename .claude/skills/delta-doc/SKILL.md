@@ -142,7 +142,7 @@ What is the same on the JSON file, SQLite and Postgres (in process or a server) 
 - A write is told to every open document holding a row it changed, arriving, staying or leaving (*Fan-out*). Writing a row's parent key moves it.
 - One error-code table; `open_at` reads a document as it stood; with `ledger: true`, undo, redo, history, and a version on every change told.
 
-What differs: a client-chosen id `/<coll>/<id>` must be a number on Postgres (the JSON file and SQLite also keep text ids, as a session's token); versions are always on for Postgres, with `ledger: true` elsewhere; auth, RLS and several processes are Postgres's; `implied: true` is the JSON file's and SQLite's (Postgres ignores it). Postgres type-checking needs `bun add pg` and `bun add -d @types/pg`; PGlite needs `bun add @electric-sql/pglite`; keep what `createDocListener` returns and `await listener.destroy()` before `pool.end()`.
+What differs: a client-chosen id `/<coll>/<id>` must be a number on Postgres (the JSON file and SQLite also keep text ids, as a session's token); versions are always on for Postgres, with `ledger: true` elsewhere; auth, RLS and several processes are Postgres's; an implied document named by text (`room:attic`) is the JSON file's and SQLite's -- on Postgres, name it by number (`room:7`). Postgres type-checking needs `bun add pg` and `bun add -d @types/pg`; PGlite needs `bun add @electric-sql/pglite`; keep what `createDocListener` returns and `await listener.destroy()` before `pool.end()`.
 
 On every backend: `await doc.send(ops)` resolves once its own echo is applied; a batch applies whole or not at all; errors have one code table (400 malformed, 401, 403 read-only, 404 not there, 409 already there). **The id rule:** create rows with `add /<coll>/-` and read the id from the echo (`/<coll>/<id>`, and `id` in the row); address a row by its id, never its position.
 
@@ -219,7 +219,7 @@ Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/fi
 - *`scope` syntax* — the colon DSL, operators, footguns
 - *Doc patterns* — list, catalog (list-mode `include`), scoped-single, what a remove takes, per-user isolation, custom DocType
 - *Custom read docs* — `defineCustomDoc` membership (`query`+`matches`) vs recompute (whole-doc); root-replace primitive
-- *Implied documents* — `implied: true`: open empty, the first write makes the root row (SQLite)
+- *Implied documents* — `implied: true`: open empty, the first write makes the root row (every backend; on Postgres, named by number)
 - *Fan-out* — which other open docs hear a write, and what each is told
 - *In-process* — `createLocal()`, `as(identity)`, `onPublish`, savepoints inside your own transaction
 - *The ledger* — `ledger: true`, undo / redo / history, `who` and the cursor, facts, the inverse on request

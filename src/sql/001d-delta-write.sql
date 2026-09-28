@@ -205,8 +205,9 @@ BEGIN
       IF v_is THEN
         v_told := v_told || jsonb_build_array(jsonb_build_object(
           'op', CASE WHEN v_was OR v_root THEN 'replace' ELSE 'add' END, 'path', v_path, 'value', v_t->'after'));
-      ELSIF v_root THEN
-        v_told := v_told || jsonb_build_array(jsonb_build_object('op', 'replace', 'path', v_path, 'value', 'null'::jsonb));
+      ELSIF v_root THEN   -- gone: null, or the empty root an implied document then opens with
+        v_told := v_told || jsonb_build_array(jsonb_build_object('op', 'replace', 'path', v_path, 'value',
+          CASE WHEN COALESCE(v_def.implied, FALSE) THEN _delta_implied_root(v_def, (v_t->>'id')::BIGINT) ELSE 'null'::jsonb END));
       ELSE
         v_told := v_told || jsonb_build_array(jsonb_build_object('op', 'remove', 'path', v_path));
       END IF;
@@ -285,6 +286,9 @@ BEGIN
 
   SELECT * INTO v_root_coll FROM _delta_collections
    WHERE collection_key = v_def.root_collection;
+
+  -- an implied document's first write makes its root row (todo #34)
+  IF NOT v_is_list THEN PERFORM _delta_make_implied(v_def, v_doc_id, p_ops, v_ts); END IF;
 
   FOR v_op IN SELECT jsonb_array_elements(p_ops)
   LOOP

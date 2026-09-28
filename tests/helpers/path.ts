@@ -86,6 +86,8 @@ export const pathDocs = [
   defineDoc("fo-drinks:", { root: "weddings", include: ["drinks"] }),
   // one course and the households, which hang from the wedding: a chain that meets no course, so none of them
   defineDoc("fo-course-guests:", { root: "courses", include: ["households"] }),
+  // a wedding being planned: there before its row is, which its first write makes (implied)
+  defineDoc("fo-plan:", { root: "weddings", include: ["courses", "drinks"], implied: true }),
 ];
 
 /**
@@ -1109,6 +1111,51 @@ export function fanOutCases(backend: () => PathBackend): void {
       await write(b.process, "fo-board:1", [{ op: "remove", path: "/households/1" }]);
       await expectTold(b, "fo-household:1", [[{ op: "replace", path: "/households", value: null }]]);
       await expectTold(b, "fo-inbox:a@x", [[{ op: "remove", path: "/households/1" }]]);
+      await assertCopiesHold(b, copies);
+    });
+  });
+
+  describe("an implied document (todo #34)", () => {
+    test("it opens before its root row is, empty, and makes no row; a first write that fails makes none; the first that lands makes the row, and is told as written", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-plan:7", "fo-plan:8", "fo-all-courses:"]);
+      expect(content(copies.get("fo-plan:7"))).toEqual({ weddings: { id: 7, name: "" }, courses: {}, drinks: {} });
+      expect((await b.process.call("open", { doc: "fo-title:7" })).error?.code).toBe(404);   // no row made
+      expect((await b.process.call("delta", { doc: "fo-plan:7", ops: [{ op: "add", path: "/courses/10", value: {} }] })).error?.code).toBe(400);
+      expect((await b.process.call("open", { doc: "fo-title:7" })).error?.code).toBe(404);   // a failed first write makes none
+      const added = await write(b.process, "fo-plan:7", [{ op: "add", path: "/courses/10", value: { name: "Soup" } }]);
+      expect(added.ops).toEqual([{ op: "add", path: "/courses/10", value: course(10, "Soup", 7) }]);
+      const named = await write(b.process, "fo-plan:8", [{ op: "replace", path: "/weddings/name", value: "the other" }]);
+      expect(named.ops).toEqual([{ op: "replace", path: "/weddings", value: { id: 8, name: "the other" } }]);
+      await expectTold(b, "fo-plan:7", [added.ops]);
+      await expectTold(b, "fo-plan:8", [named.ops]);
+      await expectTold(b, "fo-all-courses:", [added.ops]);
+      expect(content((await b.process.call("open", { doc: "fo-title:7" })).result)).toEqual({ weddings: { id: 7, name: "" } });
+      await assertCopiesHold(b, copies);
+    });
+
+    test("its root removed through it, the row and the rows under it go and it opens empty again: a copy is told that empty root; undone, they come back, root first", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-plan:7", "fo-all-courses:"]);
+      const added = await write(b.process, "fo-plan:7", [
+        { op: "add", path: "/courses/10", value: { name: "Soup" } },
+        { op: "add", path: "/drinks/10", value: { courses_id: 10, name: "Sherry" } },
+      ], { cursor: "s1" });
+      const removed = await write(b.process, "fo-plan:7", [{ op: "remove", path: "/weddings/7" }], { cursor: "s1" });
+      expect(removed.ops).toEqual([{ op: "remove", path: "/weddings/7" }, { op: "remove", path: "/courses/10" }, { op: "remove", path: "/drinks/10" }]);
+      expect(content((await b.process.call("open", { doc: "fo-plan:7" })).result)).toEqual({ weddings: { id: 7, name: "" }, courses: {}, drinks: {} });
+      const undone = await b.process.call("undo", { cursor: "s1" });
+      expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [
+        { op: "add", path: "/weddings/7", value: { id: 7, name: "" } },
+        { op: "add", path: "/courses/10", value: course(10, "Soup", 7) },
+        { op: "add", path: "/drinks/10", value: drink(10, 10, "Sherry") },
+      ], conflict: undefined });
+      await expectTold(b, "fo-plan:7", [
+        added.ops,
+        [{ op: "replace", path: "/weddings", value: { id: 7, name: "" } }, { op: "remove", path: "/courses/10" }, { op: "remove", path: "/drinks/10" }],
+        [{ op: "replace", path: "/weddings", value: { id: 7, name: "" } }, { op: "add", path: "/courses/10", value: course(10, "Soup", 7) }, { op: "add", path: "/drinks/10", value: drink(10, 10, "Sherry") }],
+      ]);
+      await expectTold(b, "fo-all-courses:", [[added.ops[0]], [{ op: "remove", path: "/courses/10" }], [{ op: "add", path: "/courses/10", value: course(10, "Soup", 7) }]]);
       await assertCopiesHold(b, copies);
     });
   });

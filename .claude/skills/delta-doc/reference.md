@@ -230,7 +230,7 @@ interface DocDef {
   include: string[];                 // additional collections in the lens
   scope: Record<string, string>;     // root column → a binding read from the doc name, one rule on every
                                      // backend (`scope` syntax): ":id", "<=:end", "like:prefix"; a plain "name" is ":name", not a literal
-  implied?: boolean;                 // SQLite: opens empty until its first write makes the root row
+  implied?: boolean;                 // opens empty until its first write makes the root row (Postgres: by number)
 }
 
 // DeltaAuth — pluggable authentication; identity is yours.
@@ -356,7 +356,7 @@ defineDoc("venue:", {
 
 **Removing a row** takes the row and, through `parent` and `cascadeOn`, the rows under it in the collections the document includes, and theirs in turn. A document writes what it may read, so it removes only rows it holds: through `venues:` (`root: "venues", include: []`), `remove /venues/42` takes the venue and leaves its areas and sites, their `venues_id` naming a row that is gone. The same on every backend. To take them with it, remove the venue through a document that holds them: `venue:42` itself (below), or a list with `include: ["areas", "sites"]`, which holds every area and site.
 
-A single document may remove the root it is named for, on every backend: `remove /venues/42` through `venue:42` takes the venue and the rows the document holds under it (its areas and sites), and answers their removes, the venue's first. The copy open on `venue:42` is told its root is null (`replace /venues` null, as when the root is removed through another document) and each of those rows removed; every other document that held them is told they left. The document is then not found (404, as for any missing root row) -- an implied one (SQLite) opens empty again, as before its first write. Undo puts the venue back, then its rows, parent first; redo takes them again, children first. `/venues/<id>` names the document's own root: another id is a 404 to remove on every backend; to add, a 400 on the JSON file and SQLite, where Postgres adds that row, which the document then does not hold. (`replace /venues/<field>` is still a field of the root.)
+A single document may remove the root it is named for, on every backend: `remove /venues/42` through `venue:42` takes the venue and the rows the document holds under it (its areas and sites), and answers their removes, the venue's first. The copy open on `venue:42` is told its root is null (`replace /venues` null, as when the root is removed through another document) and each of those rows removed; every other document that held them is told they left. The document is then not found (404, as for any missing root row) -- an implied one opens empty again, as before its first write. Undo puts the venue back, then its rows, parent first; redo takes them again, children first. `/venues/<id>` names the document's own root: another id is a 404 to remove on every backend; to add, a 400 on the JSON file and SQLite, where Postgres adds that row, which the document then does not hold. (`replace /venues/<field>` is still a field of the root.)
 
 **Per-user list isolation** — each user sees only their own rows. The most common multi-tenant shape.
 
@@ -502,17 +502,19 @@ const venueAt: DocType<{ venueId: number; at: string }> = {
 registerDocType(venueAt);
 ```
 
-## Implied documents (SQLite)
+## Implied documents
 
-`defineDoc(prefix, { root, include, implied: true })` declares a document that is there before its root row is. Opening a name whose root row does not exist answers an empty document — the root `{ id: <doc id>, ...column defaults }` and an empty map per included collection — and makes no row. The first write makes the root row, in the same transaction as the write; a failed first write makes none. Its root removed through it (`remove /rooms/attic`), the row and the rows under it go and it opens empty again -- an open copy is told that empty root (`replace /rooms`), not null; an undo makes them again. A chat room, a user's settings, a board keyed by a slug: anything a name can mean before anyone has written to it.
+`defineDoc(prefix, { root, include, implied: true })` declares a document that is there before its root row is. Opening a name whose root row does not exist answers an empty document — the root `{ id: <doc id>, ...column defaults }` and an empty map per included collection — and makes no row. The first write makes the root row, in the same transaction as the write; a failed first write makes none. Its root removed through it (`remove /rooms/attic`), the row and the rows under it go and it opens empty again -- an open copy is told that empty root (`replace /rooms`), not null; an undo makes them again. The same on every backend: the JSON file, SQLite and Postgres (in process or a server). A chat room, a user's settings, a board: anything a name can mean before anyone has written to it.
 
 ```ts
 const room = defineDoc("room:", { root: "rooms", include: ["messages"], implied: true });
 // open "room:attic" → { rooms: { id: "attic", topic: null }, messages: {} }, no row yet
 // delta "room:attic" add /messages/m1 → the rooms row "attic" is made, then the message
+// on Postgres, and on every backend for an app that will move: by number
+// open "room:7" → { rooms: { id: 7, topic: null }, messages: {} }, no row yet
 ```
 
-An implied document is keyed by its root id, so it cannot also declare a `scope` (`defineDoc` throws). A document that is not implied still answers 404 for a missing root row. The Postgres backend ignores `implied` (todo: an implied document keyed by a name, `room:attic`, cannot move to Postgres, whose ids are serials).
+An implied document is keyed by its root id, so it cannot also declare a `scope` (`defineDoc` throws). A document that is not implied still answers 404 for a missing root row. **A name is a number on Postgres**: its ids are serials, so `room:attic` is refused there as a mistake (400), as any text id is. An app that will move along the path names its implied documents by number (`room:7`); keep a name-keyed one (`session:<token>`) to documents that never move. On Postgres the root row is made by `delta_apply` in the write's transaction (`_delta_make_implied`), under the writer's `app.user_id`, so RLS's `WITH CHECK` sees it.
 
 ## Fan-out — which open documents hear a write
 
@@ -941,7 +943,7 @@ Apply `src/sql/001a-001g-*.sql` alphabetically to every database — idempotent.
 
 | Function | Purpose |
 |---|---|
-| `delta_open(doc_name)` | returns `{ ...collections, _version }` |
+| `delta_open(doc_name)` | returns `{ ...collections, _version }`; an implied document with no root row, its empty root and empty collections |
 | `delta_open_at(doc_name, timestamptz)` | same, at a historical instant (temporal docs only) |
 | `delta_apply(doc_name, ops jsonb)` | applies ops, writes `_delta_ops_log`, NOTIFYs `delta_changes` |
 | `delta_fetch_ops(doc_name, since_version)` | returns (version, ops) rows after a base version |

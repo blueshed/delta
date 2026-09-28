@@ -126,8 +126,11 @@ export function generateSql(
   }
   lines.push("");
 
-  // Doc definitions
+  // Doc definitions. `implied` is written when a document is implied (and
+  // then for each, so one that stops being implied is reset): SQL for an app
+  // with none needs no framework SQL newer than it.
   lines.push("-- Doc definitions");
+  const implied = docs.some((d) => d.implied);
   for (const doc of docs) {
     // Build a proper Postgres text[] array literal: each element is wrapped in
     // double quotes with embedded `"` and `\` backslash-escaped, so a comma or
@@ -141,13 +144,13 @@ export function generateSql(
       : "'{}'";
     const scope = lit(JSON.stringify(doc.scope));
     lines.push(
-      `INSERT INTO _delta_docs (prefix, root_collection, include, scope)`,
+      `INSERT INTO _delta_docs (prefix, root_collection, include, scope${implied ? ", implied" : ""})`,
     );
     lines.push(
-      `  VALUES (${lit(doc.prefix)}, ${lit(doc.root)}, ${include}, ${scope})`,
+      `  VALUES (${lit(doc.prefix)}, ${lit(doc.root)}, ${include}, ${scope}${implied ? `, ${!!doc.implied}` : ""})`,
     );
     lines.push(
-      `  ON CONFLICT (prefix) DO UPDATE SET root_collection = EXCLUDED.root_collection, include = EXCLUDED.include, scope = EXCLUDED.scope;`,
+      `  ON CONFLICT (prefix) DO UPDATE SET root_collection = EXCLUDED.root_collection, include = EXCLUDED.include, scope = EXCLUDED.scope${implied ? ", implied = EXCLUDED.implied" : ""};`,
     );
   }
   lines.push("");

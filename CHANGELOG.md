@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Postgres: implied documents, as on SQLite and the JSON file** (todo #34). A document
+  declared `implied: true` opens before its root row is -- the root as its first write will
+  make it (its id, each column's default) and each included collection empty -- where Postgres
+  answered 404; the first write makes the row in its own transaction (a failed one makes
+  none); its root removed through it, an open copy is told that empty root, not null, and it
+  opens empty again; an undo makes the rows again, root first. Ids on Postgres are serials, so
+  an implied document there is named by number (`room:7`): a name-keyed one (`room:attic`) is
+  a 400, as any text id, and stays the JSON file's and SQLite's -- the idiom for documents that
+  never move (a session). The framework SQL changes in place: `001a` adds
+  `_delta_docs.implied` (`ADD COLUMN IF NOT EXISTS`, false); `001c` adds
+  `_delta_implied_root`, `_delta_make_implied` and `_delta_open_held` and replaces `delta_open`;
+  `001d` replaces `delta_apply` (it makes the row) and `_delta_tell` (it tells the empty
+  root); `001g` replaces `_delta_walk_plan` (an absent implied root is null to the walk).
+  `generateSql` writes `implied` for each document when any is implied, so SQL for an app with
+  none still runs on framework SQL older than this; an app with one re-applies the framework
+  (`applyFramework`, or `bunx @blueshed/delta init --upgrade`).
 - **SQLite and the JSON file: a `recompute` custom document, as on Postgres** (todo #35).
   `defineCustomDoc(prefix, { watch, parse, recompute })` from `@blueshed/delta/sqlite` (or
   passed to `./json`) is read whole on open (null: a 404) and read again on every write to a

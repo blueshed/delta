@@ -270,3 +270,16 @@ describe("pglite: a listener on framework SQL older than it", () => {
     }
   }, 30_000);   // many PGlite round trips: past bun's 5s default on a loaded machine
 });
+
+/**
+ * An implied document keyed by a name (room:attic) is the JSON file's and
+ * SQLite's: Postgres keeps serial ids, so the name is a row id it cannot hold
+ * (400, as any text id), and implied there is by number (todo #34).
+ */
+describe("pglite: an implied document named by text", () => {
+  test("is refused as a mistake (400), opened or written through; by number it opens empty", async () => {
+    expect((await backend.process.call("open", { doc: "fo-plan:attic" })).error?.code).toBe(400);
+    expect((await backend.process.call("delta", { doc: "fo-plan:attic", ops: [{ op: "add", path: "/courses/-", value: { name: "Soup" } }] })).error?.code).toBe(400);
+    expect((await backend.process.call("open", { doc: "fo-plan:12" })).result).toMatchObject({ weddings: { id: 12, name: "" }, courses: {}, drinks: {} });
+  });
+});

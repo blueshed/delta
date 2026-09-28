@@ -131,6 +131,17 @@ describe("generateSql", () => {
     expect(sql).toContain(`'{"comments"}'`);
   });
 
+  test("an implied doc is registered as implied (todo #34); SQL with none names no implied column, so it runs on older framework SQL", () => {
+    const schema = defineSchema({ rooms: { columns: { topic: "text?" } } });
+    const room = defineDoc("room:", { root: "rooms", include: [], implied: true });
+    const lobby = defineDoc("lobby:", { root: "rooms", include: [] });
+    const both = generateSql(schema, [room, lobby]);
+    expect(both).toContain("INSERT INTO _delta_docs (prefix, root_collection, include, scope, implied)\n  VALUES ('room:', 'rooms', '{}', '{}', true)");
+    expect(both).toContain("VALUES ('lobby:', 'rooms', '{}', '{}', false)");
+    expect(both).toContain("implied = EXCLUDED.implied;");
+    expect(generateSql(schema, [lobby])).not.toContain("implied");
+  });
+
   test("empty include is an empty array literal", () => {
     const sql = generateSql(
       defineSchema({ x: { columns: { a: "text" }, temporal: false } }),

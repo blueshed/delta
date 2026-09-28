@@ -165,6 +165,78 @@ END;
 $$ LANGUAGE plpgsql STABLE;
 
 -- ---------------------------------------------------------------------------
+-- Implied documents (todo #34): there before their root row is, as on SQLite.
+--
+-- _delta_implied_root: the root row an implied document opens with, and its
+-- first write makes -- its id, and each column's default (or null where it
+-- may be null; else "", 0 or false by its type).
+-- _delta_make_implied: make it, in the write's own transaction, unless it is
+-- there or the write adds it itself (an undo of its removal).
+-- _delta_open_held: the document as a walk guards it -- an implied one whose
+-- root row is not there holds no root.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION _delta_implied_root(p_def _delta_docs, p_id BIGINT)
+RETURNS JSONB LANGUAGE sql STABLE AS $$
+  SELECT jsonb_build_object('id', p_id) || COALESCE((
+    SELECT jsonb_object_agg(k, CASE
+             WHEN COALESCE(d->'default', 'null'::jsonb) <> 'null'::jsonb THEN d->'default'
+             WHEN (d->>'nullable')::boolean THEN 'null'::jsonb
+             WHEN d->>'type' = 'text' THEN '""'::jsonb
+             WHEN d->>'type' IN ('integer', 'real') THEN '0'::jsonb
+             WHEN d->>'type' = 'boolean' THEN 'false'::jsonb
+             ELSE 'null'::jsonb END)
+      FROM _delta_collections c, jsonb_each(c.columns_def) AS x(k, d)
+     WHERE c.collection_key = p_def.root_collection), '{}'::jsonb);
+$$;
+
+CREATE OR REPLACE FUNCTION _delta_make_implied(p_def _delta_docs, p_id BIGINT, p_ops JSONB, p_ts TIMESTAMPTZ)
+RETURNS void AS $$
+DECLARE
+  v_coll   RECORD;
+  v_exists BOOLEAN;
+  v_row    JSONB;
+BEGIN
+  IF NOT COALESCE(p_def.implied, FALSE) OR p_id IS NULL THEN RETURN; END IF;
+  IF EXISTS (SELECT 1 FROM jsonb_array_elements(p_ops) o
+              WHERE o->>'op' = 'add' AND o->>'path' ~ '^/[^/]*/[^/]*$'
+                AND (_delta_split_path(o->>'path'))[1] = p_def.root_collection) THEN
+    RETURN;
+  END IF;
+  SELECT * INTO v_coll FROM _delta_collections WHERE collection_key = p_def.root_collection;
+  IF NOT FOUND THEN RETURN; END IF;
+  EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I WHERE id = $1)', _delta_source_view(v_coll.table_name, v_coll.temporal))
+    INTO v_exists USING p_id;
+  IF v_exists THEN RETURN; END IF;
+  v_row := _delta_implied_root(p_def, p_id);
+  IF v_coll.temporal THEN v_row := v_row || jsonb_build_object('valid_from', p_ts, 'valid_to', NULL); END IF;
+  EXECUTE format('INSERT INTO %I SELECT * FROM jsonb_populate_record(null::%I, $1)', v_coll.table_name, v_coll.table_name)
+    USING v_row;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION _delta_open_held(p_doc_name TEXT)
+RETURNS JSONB AS $$
+DECLARE
+  v_doc    JSONB := COALESCE(delta_open(p_doc_name), '{}'::jsonb);
+  v_def    _delta_docs := _delta_find_doc(p_doc_name);
+  v_scope  JSONB;
+  v_coll   RECORD;
+  v_exists BOOLEAN;
+BEGIN
+  IF NOT COALESCE(v_def.implied, FALSE) THEN RETURN v_doc; END IF;
+  v_scope := _delta_resolve_scope(v_def, p_doc_name);
+  IF (v_scope->>'mode') <> 'single' THEN RETURN v_doc; END IF;
+  SELECT * INTO v_coll FROM _delta_collections WHERE collection_key = v_def.root_collection;
+  IF NOT FOUND THEN RETURN v_doc; END IF;
+  EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I WHERE id = $1)', _delta_source_view(v_coll.table_name, v_coll.temporal))
+    INTO v_exists USING (v_scope->'values'->>'id')::BIGINT;
+  IF v_exists THEN RETURN v_doc; END IF;
+  RETURN v_doc || jsonb_build_object(v_def.root_collection, 'null'::jsonb);
+END;
+$$ LANGUAGE plpgsql;
+
+-- ---------------------------------------------------------------------------
 -- delta_open: load a doc from relational tables, return JSONB + version
 -- ---------------------------------------------------------------------------
 
@@ -245,21 +317,31 @@ BEGIN
     EXECUTE format('SELECT to_jsonb(t) FROM %I t WHERE t.id = $1', v_view)
       INTO v_root_row USING v_doc_id;
 
-    IF v_root_row IS NULL THEN RETURN NULL; END IF;
+    IF v_root_row IS NULL AND NOT COALESCE(v_def.implied, FALSE) THEN RETURN NULL; END IF;
 
-    IF v_root_coll.temporal THEN
-      v_root_row := _delta_strip_temporal(v_root_row);
+    IF v_root_row IS NULL THEN
+      -- Implied: there before its root row is -- the root its first write will
+      -- make, each included collection empty, as on SQLite. No row is made.
+      v_result := jsonb_build_object(v_def.root_collection, _delta_implied_root(v_def, v_doc_id));
+      FOREACH v_coll_key IN ARRAY v_def.include
+      LOOP
+        v_result := v_result || jsonb_build_object(v_coll_key, '{}'::jsonb);
+      END LOOP;
+    ELSE
+      IF v_root_coll.temporal THEN
+        v_root_row := _delta_strip_temporal(v_root_row);
+      END IF;
+
+      v_result := jsonb_build_object(v_def.root_collection, v_root_row);
+
+      FOREACH v_coll_key IN ARRAY v_def.include
+      LOOP
+        v_result := v_result || jsonb_build_object(
+          v_coll_key,
+          _delta_load_collection(v_coll_key, v_def.root_collection, v_doc_id, v_at)
+        );
+      END LOOP;
     END IF;
-
-    v_result := jsonb_build_object(v_def.root_collection, v_root_row);
-
-    FOREACH v_coll_key IN ARRAY v_def.include
-    LOOP
-      v_result := v_result || jsonb_build_object(
-        v_coll_key,
-        _delta_load_collection(v_coll_key, v_def.root_collection, v_doc_id, v_at)
-      );
-    END LOOP;
   END IF;
 
   -- Track version
