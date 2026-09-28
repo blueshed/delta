@@ -567,6 +567,36 @@ export function documentCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
+    test("a single document is its root and what hangs from it: it adds no other root row (400), and once its root is gone it takes no writes (404), as it opens -- but an undo, which may put it back (todo #52, #59)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-course:1", "fo-board:1", "fo-menu:1"]);
+      const code = async (ops: unknown[]) => (await b.process.call("delta", { doc: "fo-course:1", ops })).error?.code;
+      expect(await code([{ op: "add", path: "/courses/7", value: { weddings_id: 1, name: "Seven" } }])).toBe(400);
+      expect(await code([{ op: "add", path: "/courses/-", value: { weddings_id: 1, name: "Dash" } }])).toBe(400);
+      expect(await code([{ op: "add", path: "/courses/1", value: { weddings_id: 1, name: "Soup" } }])).toBe(409); // its own: there already
+      await write(b.process, "fo-board:1", [{ op: "remove", path: "/courses/1" }]);
+      expect(await code([{ op: "add", path: "/drinks/-", value: { name: "Port" } }])).toBe(404);
+      expect(await code([{ op: "add", path: "/courses/1", value: { weddings_id: 1, name: "Soup again" } }])).toBe(404);
+      expect(await code([{ op: "replace", path: "/courses/name", value: "Broth" }])).toBe(404);
+      const board = content((await b.process.call("open", { doc: "fo-board:1" })).result);
+      expect({ courses: board.courses, drinks: board.drinks }).toEqual({ courses: {}, drinks: {} });
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a single document that removed its own root takes no writes (404), but its undo puts the root back, and then it does (todo #59, #43)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-course:1", "fo-menu:1"]);
+      const code = async (ops: unknown[]) => (await b.process.call("delta", { doc: "fo-course:1", ops })).error?.code;
+      await write(b.process, "fo-course:1", [{ op: "remove", path: "/courses/1" }], { cursor: "s1" });
+      expect(await code([{ op: "add", path: "/courses/1", value: { weddings_id: 1, name: "Soup again" } }])).toBe(404);
+      expect(await code([{ op: "add", path: "/drinks/-", value: { name: "Port" } }])).toBe(404);
+      const undone = await b.process.call("undo", { cursor: "s1" });
+      expect({ ops: undone.result.ops.map((o: any) => `${o.op} ${o.path}`), conflict: undone.result.conflict }).toEqual({ ops: ["add /courses/1", "add /drinks/1"], conflict: undefined });
+      await write(b.process, "fo-course:1", [{ op: "replace", path: "/courses/name", value: "Broth" }]);
+      await assertCopiesHold(b, copies);
+      expect(content((await b.process.call("open", { doc: "fo-course:1" })).result)).toEqual({ courses: course(1, "Broth"), drinks: { "1": drink(1, 1, "Sherry") } });
+    });
+
     test("every change a document is told carries its next version, and an open reads the version it is at", async () => {
       const b = backend();
       const before = (await b.process.call("open", { doc: "fo-menu:1" })).result._v as number;

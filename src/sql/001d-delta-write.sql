@@ -234,9 +234,14 @@ RETURNS BIGINT LANGUAGE sql AS $$ SELECT _delta_tell(p_writer, p_touched, NULL);
 --   replace /<collection>/<id>/f → temporal update on collection row field
 --
 -- Returns {version, ops} where ops are the broadcast ops.
+--
+-- `p_walk`: the write is a walk of the ledger, an undo or redo (001g's
+-- delta_apply_logged says so for delta_walk). A single document whose root is
+-- gone takes no writes but a walk, which may put that root back (todo #43,
+-- #59). The two-argument form is no walk.
 -- ---------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION delta_apply(p_doc_name TEXT, p_ops JSONB)
+CREATE OR REPLACE FUNCTION delta_apply(p_doc_name TEXT, p_ops JSONB, p_walk BOOLEAN)
 RETURNS JSONB AS $$
 DECLARE
   v_def           _delta_docs;
@@ -249,6 +254,7 @@ DECLARE
   v_coll_key      TEXT;
   v_coll          RECORD;
   v_view          TEXT;
+  v_root_view     TEXT;
   v_id            BIGINT;
   v_id_text       TEXT;
   v_field         TEXT;
@@ -285,9 +291,26 @@ BEGIN
 
   SELECT * INTO v_root_coll FROM _delta_collections
    WHERE collection_key = v_def.root_collection;
+  v_root_view := _delta_source_view(v_root_coll.table_name, v_root_coll.temporal);
 
   FOR v_op IN SELECT jsonb_array_elements(p_ops)
   LOOP
+    -- A single document is its root row and what hangs from it. One whose
+    -- root is not there -- taken out, through it or another, or never there --
+    -- opens as not found, and takes no writes (todo #59): asked before each
+    -- op, so an add under a root that is gone makes no orphan. A walk is not
+    -- asked: an undo of the root's removal puts it back (todo #43), and a
+    -- walk of such a document starts from the root absent, guarded by its
+    -- plan (_delta_walk_plan), as SQLite's and the JSON file's are.
+    IF NOT v_is_list AND NOT p_walk THEN
+      EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I WHERE id = $1)', v_root_view) INTO v_exists USING v_doc_id;
+      IF NOT v_exists THEN
+        RAISE EXCEPTION 'document not found: % (its root, %, is not there)',
+          p_doc_name, _delta_build_path(v_def.root_collection, v_doc_id::text)
+          USING ERRCODE = 'P0002';
+      END IF;
+    END IF;
+
     v_parts := _delta_split_path(v_op->>'path');
     v_coll_key := v_parts[1];
 
@@ -388,6 +411,16 @@ BEGIN
     -- Add row:  add /<collection>/<id>
     -- ---------------------------------------------------------------
     IF array_length(v_parts, 1) = 2 AND v_op->>'op' = 'add' THEN
+      -- ... and it holds one root row, the one its name names: it adds no
+      -- other (todo #52). A row it could not read would be told to no one.
+      -- Its own it adds only when it is gone, by a walk (above: an undo of its
+      -- removal); there, the live check below answers 409.
+      IF NOT v_is_list AND v_coll_key = v_def.root_collection
+         AND (v_parts[2] !~ '^[0-9]+$' OR v_parts[2]::numeric <> v_doc_id) THEN
+        RAISE EXCEPTION 'invalid op: add % -- document % holds one %, its root: add it through a document that lists them',
+          v_op->>'path', p_doc_name, v_def.root_collection
+          USING ERRCODE = '22023';
+      END IF;
       PERFORM _delta_assert_fields(v_coll_key, v_coll.columns_def, v_coll.parent_fk, v_op->'value');
       v_id_text := v_parts[2];
       -- Auto-generate ID from sequence if path ends with '-'
@@ -616,3 +649,6 @@ BEGIN
   RETURN jsonb_build_object('version', v_version, 'ops', v_broadcast_ops);
 END;
 $$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION delta_apply(p_doc_name TEXT, p_ops JSONB)
+RETURNS JSONB LANGUAGE sql AS $$ SELECT delta_apply(p_doc_name, p_ops, FALSE); $$;

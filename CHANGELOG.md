@@ -170,6 +170,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   document loads), `001d` (`delta_apply` and the row reads it makes), `001e` (`delta_open_at`),
   all replaced in place, and in `exportTables`. The path's households carry a `t` column, so
   every shared case asks it of every backend, and one writes and reads it in each form.
+- **Postgres: a single document writes only what it holds, as on SQLite and the JSON file**
+  (todos #59, #52). Once its root was gone -- a course removed through the board, or never there
+  -- `course:1` still took `add /drinks/-` (a drink under no course, told to no one) and
+  `add /courses/1`; SQLite and the JSON file answer 404, as the document opens. And with its root
+  there it took `add /courses/7`, a row it cannot read; they answer 400. `delta_apply` (`001d`,
+  replaced in place) now asks, before each op of a single document, that its root is there
+  (404 when not, so a batch that takes the root out writes nothing more through it), and refuses
+  an add to the root's collection but of its own root (400; its own, there already, is a 409).
+  An undo or redo is not asked: undoing the removal of a document's own root puts it back (#43),
+  and a walk of a document whose root is gone starts from it absent, as on SQLite and the JSON
+  file. `delta_apply` gains a three-argument form, `delta_apply(doc, ops, walk)`, which
+  `delta_apply_logged` calls with `walk` for an entry that walks another; the two-argument form
+  is no walk. `validateOps` refuses the add of another root row too, when it knows the document
+  is single (`{ doc }`, or `list: false`); given no mode, a root row's add is taken, as a list's.
 - **`bun.lock` matches `package.json`** (todo #49): it lacked the optional `@electric-sql/pglite`
   peer, so every `bun install` in a fresh checkout changed it.
 - **`bun run test` runs every file that needs no Postgres server** (todo #48): it named 8 of the

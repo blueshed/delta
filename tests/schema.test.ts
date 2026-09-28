@@ -327,6 +327,15 @@ describe("validateOps", () => {
       expect(() => validateOps(wedding, all, [...rootField], { doc: "household:1" })).toThrow(/household:1.*all:/);
     });
 
+    test("a single document adds no other root row, only its own back (an undo of its removal); given no mode, a root row's add is a list's, and is taken (todo #52, #43)", () => {
+      const add = (path: string) => [{ op: "add", path, value: { weddings_id: 1, email: "x@x" } }] as const;
+      expect(messages(validateOps(wedding, household, [...add("/households/-")], { doc: "household:1" })).map((m) => m.split(" --")[0])).toEqual(["Invalid op: add /households/-"]);
+      expect(messages(validateOps(wedding, household, [...add("/households/2")], { doc: "household:1" })).map((m) => m.split(" --")[0])).toEqual(["Invalid op: add /households/2"]);
+      expect(validateOps(wedding, household, [...add("/households/1")], { doc: "household:1" })).toEqual([]);
+      expect(validateOps(wedding, household, [...add("/households/-")], { list: false }).length).toBe(1);
+      expect(validateOps(wedding, household, [...add("/households/-")])).toEqual([]);
+    });
+
     test("a column that is not nullable is not written null", () => {
       expect(messages(validateOps(wedding, board, [{ op: "replace", path: "/households/1/email", value: null }]))).toEqual(["email cannot be null"]);
       expect(messages(validateOps(wedding, board, [{ op: "add", path: "/households/-", value: { email: null } }]))).toEqual(["email cannot be null"]);

@@ -76,15 +76,18 @@ const MAX_ID = 9007199254740991;
  * `all-courses:1` course 1 (todo #57). Or say them: `list`, the document is in
  * list mode; `values`, its scope's equality bindings, which a list-mode add of
  * a root row is given, so they count as given -- the options SQLite's
- * validateOps takes, and they win over the name's. Given neither, a document
- * is read as single: `replace /<root>` and `replace /<root>/<field>` write its
- * root row.
+ * validateOps takes, and they win over the name's. Given neither, the mode is
+ * not known, and each shape is taken as the mode that has it takes it:
+ * `replace /<root>` and `replace /<root>/<field>` as a single document's root
+ * row, `add /<root>/-` as a list's new row.
  */
 export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: { doc?: string; list?: boolean; values?: Record<string, string> } = {}): ValidationError[] {
+  let rootId: string | undefined;   // a single document's own root, where its name says it
   if (opts.doc !== undefined) {
     if (!opts.doc.startsWith(def.prefix)) throw new Error(`validateOps: ${opts.doc} is not a document of ${def.prefix}`);
     const scope = resolveScope(def, opts.doc.slice(def.prefix.length));
     opts = { list: opts.list ?? scope.mode === "list", values: opts.values ?? scope.values };
+    rootId = scope.id;
   }
   const errors: ValidationError[] = [];
   for (const op of ops) {
@@ -141,6 +144,11 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
     // A row: add /<coll>/<id or ->, remove /<coll>/<id>, replace /<coll>/<id>[/<field>].
     const rowOp = (op.op === "add" || op.op === "remove") ? parts.length === 2 : op.op === "replace" && (parts.length === 2 || parts.length === 3);
     if (!rowOp) { fail(`Invalid op: ${op.op} ${op.path}`); continue; }
+    // a single document holds one root row, the one its name names: it adds no other (#52) --
+    // when the mode is known; given none, a root row's add is a list's, and is taken. Its own
+    // it may add back, by an undo of its removal (#43): the database says whether it is gone.
+    const other = parts[1] === "-" || (rootId !== undefined && /^[0-9]+$/.test(parts[1]!) && Number(parts[1]) !== Number(rootId));
+    if (op.op === "add" && collKey === def.root && opts.list === false && other) { fail(`Invalid op: add ${op.path} -- a single document holds one ${collKey}, its root`); continue; }
     const idError = op.op === "add" && parts[1] === "-" ? null : idErr(parts[1]!);
     if (idError) { fail(idError); continue; }
     if (op.op === "remove") continue;

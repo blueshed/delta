@@ -279,7 +279,8 @@ const itemsDoc = defineDoc("items:", { root: "items", include: [] });
 // A document's name says its mode, not its definition (`items:` is every item, `items:1` item 1):
 // give Postgres's the name, { doc }, and it reads the mode and scope's values from it as
 // delta_apply does. Each backend's takes { list, values } too: its scope's values count as given.
-// Given neither, a document is read as single.
+// Given neither, the mode is not known: a root field's replace is taken as a single document's,
+// a root row's add as a list's.
 // Postgres's refuses what delta_apply refuses as a mistake (400), and takes what it takes; a row
 // not there (404), one already there (409) and a value its column cannot cast are the database's.
 const errors = validateOps(schema, itemsDoc, [
@@ -358,7 +359,7 @@ defineDoc("venue:", {
 
 **Removing a row** takes the row and, through `parent` and `cascadeOn`, the rows under it in the collections the document includes, and theirs in turn. A document writes what it may read, so it removes only rows it holds: through `venues:` (`root: "venues", include: []`), `remove /venues/42` takes the venue and leaves its areas and sites, their `venues_id` naming a row that is gone. The same on every backend. To take them with it, remove the venue through a document that holds them: `venue:42` itself (below), or a list with `include: ["areas", "sites"]`, which holds every area and site.
 
-A single document may remove the root it is named for, on every backend: `remove /venues/42` through `venue:42` takes the venue and the rows the document holds under it (its areas and sites), and answers their removes, the venue's first. The copy open on `venue:42` is told its root is null (`replace /venues` null, as when the root is removed through another document) and each of those rows removed; every other document that held them is told they left. The document is then not found (404, as for any missing root row) -- an implied one (SQLite) opens empty again, as before its first write. Undo puts the venue back, then its rows, parent first; redo takes them again, children first. `/venues/<id>` names the document's own root: another id is a 404 to remove on every backend; to add, a 400 on the JSON file and SQLite, where Postgres adds that row, which the document then does not hold. (`replace /venues/<field>` is still a field of the root.)
+A single document may remove the root it is named for, on every backend: `remove /venues/42` through `venue:42` takes the venue and the rows the document holds under it (its areas and sites), and answers their removes, the venue's first. The copy open on `venue:42` is told its root is null (`replace /venues` null, as when the root is removed through another document) and each of those rows removed; every other document that held them is told they left. The document is then not found (404, as for any missing root row) -- an implied one (SQLite) opens empty again, as before its first write. Undo puts the venue back, then its rows, parent first; redo takes them again, children first. `/venues/<id>` names the document's own root: another id is a 404 to remove and a 400 to add, on every backend. Until the undo, the document takes no writes (404). (`replace /venues/<field>` is still a field of the root.)
 
 **Per-user list isolation** — each user sees only their own rows. The most common multi-tenant shape.
 
@@ -944,7 +945,7 @@ Apply `src/sql/001a-001g-*.sql` alphabetically to every database — idempotent.
 |---|---|
 | `delta_open(doc_name)` | returns `{ ...collections, _version }` |
 | `delta_open_at(doc_name, timestamptz)` | same, at a historical instant (temporal docs only) |
-| `delta_apply(doc_name, ops jsonb)` | applies ops, writes `_delta_ops_log`, NOTIFYs `delta_changes` |
+| `delta_apply(doc_name, ops jsonb)` | applies ops, writes `_delta_ops_log`, NOTIFYs `delta_changes`; `delta_apply(doc_name, ops, walk)` with `walk` for an undo or redo, which may write through a single document whose root is gone (001d) |
 | `delta_fetch_ops(doc_name, since_version)` | returns (version, ops) rows after a base version |
 | `_delta_fetch_log(doc_name, since_version)` | the listener's: the same rows with `applied`, the write as applied on the writer's entry where it differs from what the writer was told (null where they agree; `[]` on the others), for custom docs. On SQL without it the listener reads `delta_fetch_ops`, each entry heard as told, and warns once |
 | `delta_snapshot(name, at)` | pins a timestamp to a label |

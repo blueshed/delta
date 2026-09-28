@@ -133,7 +133,7 @@ DECLARE
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtext('delta:' || p_doc_name));
   v_before  := COALESCE(delta_open(p_doc_name), '{}'::jsonb);
-  v_result  := delta_apply(p_doc_name, p_ops);
+  v_result  := delta_apply(p_doc_name, p_ops, p_undoes IS NOT NULL);   -- an entry that walks another is a walk
   v_inverse := _delta_inverse(v_before, v_result->'ops', p_ops);
   IF jsonb_array_length(v_result->'ops') > 0 THEN
     INSERT INTO _delta_ledger (doc_name, version, ops, inverse, who, cursor, undoes, undoable)
