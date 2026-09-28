@@ -173,6 +173,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its name's scope: when not, a 404, the write undone and nobody told. `delta_apply` (`001d`,
   replaced in place) asks `_delta_row_in_scope` after each root write; SQLite and the JSON file,
   `holds` of the run's row.
+- **Every backend: an add through a document is one it holds** (0.10.0 review; todo #66).
+  An add through a list is given its scope's equality bindings, and nothing asked the rest:
+  `courses-like:1` took `add /courses/- { weddings_id: 2, name: "Zzz" }`, a course it does not
+  read, under another wedding -- the writer was told `[]`, `all-courses:` an add, and the
+  writer's undo answered a conflict; so for a price past `slots-upto:5`'s bound, and a single
+  document's own root added back outside its name's scope (`seat-of:1:3`'s seat at table 7).
+  A root row added through a document must now be one it holds, as stored -- a list's meeting
+  every condition (`=`, a range, `like`), a single document's its whole scope: when not, a
+  404, the write undone and nobody told. `delta_apply` (`001d`, replaced in place) asks
+  `_delta_row_in_scope` after the insert; SQLite and the JSON file, `holds`. On Postgres the
+  refused `add /<coll>/-` still spends its serial, as any rolled-back `nextval` does.
 
 ### Added
 

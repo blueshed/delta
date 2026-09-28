@@ -965,6 +965,13 @@ export function registerDocs<I = unknown>(
             if (!parentHeld(parent.collection, fk)) refuse(404, `Row not found: ${parent.collection}/${fk ?? ""}`);
           }
           const fullRow = insertCollectionRow(db, schema, table, id, rootId, def, row, ts, list);
+          // A root row added through a document is one it holds: a list's, given
+          // its bindings, meets the rest of its conditions too, and a single
+          // document's own root added back the whole of its name's scope -- else
+          // refused, and the write undone (0.10.0 review, todo #66).
+          if (((list && collKey === def.root) || isRoot) && !holds(def, scope, collKey, fullRow)) {
+            refuse(404, `Row not found: ${collKey}/${id} -- the add is not one ${docName} holds`);
+          }
           if (table.temporal) made.add(`${collKey}/${id}`);
           if (isRoot) doc[collKey] = fullRow;
           else doc[collKey][id] = fullRow;

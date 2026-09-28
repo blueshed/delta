@@ -572,6 +572,19 @@ BEGIN
         v_coll.table_name, v_coll.table_name
       ) INTO v_new_row USING v_new_row;
 
+      -- A root row added through a document is one it holds: a list's, given
+      -- its bindings, must meet the rest of its conditions too (a name like
+      -- `So`, a price up to 5), and a single document's own root added back,
+      -- the whole of its name's scope. Else it would be made where the writer
+      -- cannot read it -- told [] itself, and an add to the lists it does meet
+      -- -- so it is refused, and the write undone (0.10.0 review, todo #66).
+      IF v_coll_key = v_def.root_collection
+         AND NOT _delta_row_in_scope(v_def, p_doc_name, v_coll_key, v_id) THEN
+        RAISE EXCEPTION 'row not found: %/% -- the add is not one % holds',
+          v_coll_key, v_id, p_doc_name
+          USING ERRCODE = 'P0002';
+      END IF;
+
       -- Strip temporal columns from broadcast
       IF v_coll.temporal THEN
         v_new_row := _delta_strip_temporal(v_new_row);

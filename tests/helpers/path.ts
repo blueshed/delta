@@ -1813,6 +1813,22 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
+    test("an add through a document stays in its scope: a list's row that does not meet its condition -- a name not like it, a price past its bound -- or a single document's own root added back outside its name's, is refused (404), the write undone, and nobody is told (0.10.0 review; todo #66)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-courses-like:So", "fo-all-courses:", "fo-board:1", "fo-board:2", "fo-slots-upto:5", "fo-slots-upto:", "fo-seat-of:1:3", "fo-seats-at:7"]);
+      const code = async (doc: string, ops: unknown[]) => (await b.process.call("delta", { doc, ops })).error?.code;
+      expect(await code("fo-courses-like:So", [{ op: "add", path: "/courses/-", value: { weddings_id: 2, name: "Zzz" } }])).toBe(404);
+      expect(await code("fo-courses-like:So", [{ op: "add", path: "/courses/9", value: { weddings_id: 1, name: "Fish" } }])).toBe(404);
+      expect(await code("fo-slots-upto:5", [{ op: "add", path: "/slots/-", value: { weddings_id: 1, price: 9 } }])).toBe(404);
+      expect(await code("fo-seat-of:1:3", [{ op: "remove", path: "/seats/1" }, { op: "add", path: "/seats/1", value: { weddings_id: 1, table_no: 7, kept: true } }])).toBe(404);
+      await expectSilent(b, "fo-courses-like:So", "fo-all-courses:", "fo-board:1", "fo-board:2", "fo-slots-upto:5", "fo-slots-upto:", "fo-seat-of:1:3", "fo-seats-at:7");
+      // within it, each is written
+      expect((await write(b.process, "fo-courses-like:So", [{ op: "add", path: "/courses/-", value: { weddings_id: 1, name: "Sole" } }])).ops.map((o: any) => o.value.name)).toEqual(["Sole"]);   // its id: a Postgres sequence keeps what a refused add took
+      await write(b.process, "fo-slots-upto:5", [{ op: "add", path: "/slots/-", value: { weddings_id: 1, price: 4 } }]);
+      await write(b.process, "fo-seat-of:1:3", [{ op: "remove", path: "/seats/1" }, { op: "add", path: "/seats/1", value: { weddings_id: 1, table_no: 3, kept: false } }]);
+      await assertCopiesHold(b, copies);
+    });
+
     test("a course moved to the other wedding through a list, which holds every course, leaves this board and arrives on that one", async () => {
       const b = backend();
       await b.process.call("open", { doc: "fo-board:1" });
