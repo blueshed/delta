@@ -113,7 +113,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or `remove` of a member or index not there fails with 404, the batch undone. This changes what
   a caller of `applyOps` gets: an `add` at an index shifts the elements after it, and a `replace`
   that used to create a field (`replace /messages/m1/seen` on a row without `seen`) is a 404 on
-  the JSON file and a memory document (400 there, as its every refusal) -- write it with `add`.
+  the JSON file and a memory document -- write it with `add`.
   The browser client, which applies each broadcast with the same `applyOps`, now takes one that
   does not apply to its copy (a remove of a row it does not hold) as drift: the copy is left as
   it was and the document re-opened, as for a version gap, where one that failed (a field of a
@@ -157,6 +157,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the write, and SQLite's custom-document fan-out, and the write was logged as `fan-out failed`.
   Each listener is now called on its own: one that throws is logged
   (`fan-out failed (write committed): a listener on <doc> threw`), and the rest are told.
+- **A memory document refuses with the code every backend gives: 404 for what is not there.**
+  `registerMemory` answered every op that did not land with 400, where the JSON file, SQLite and
+  Postgres answer a remove or replace of something not there 404. It now answers with the code
+  `applyOps` gives (404 not there, 400 a malformed path), and 400 for anything else.
 
 ### Changed
 

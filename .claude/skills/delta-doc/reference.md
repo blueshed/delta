@@ -908,7 +908,7 @@ here.peek("here:general");   // the value now, or undefined
 here.forget("here:general"); // starts again from empty
 ```
 
-An op that does not land is refused (400) and changes nothing. `add /<coll>/-` on a map of rows is a new row the document names, as on the JSON file: a uuid in the path and in the value's `id` (on an array, `/-` appends). Open answers `{ ...value, _v }`; a write answers `{ ack, version, ops }` and broadcasts `{ doc, ops, v }`, the ops as applied.
+An op that does not land is refused and changes nothing, with the code every backend gives it: 404 for what is not there (a remove or replace of a key it does not hold), 400 for a malformed op. `add /<coll>/-` on a map of rows is a new row the document names, as on the JSON file: a uuid in the path and in the value's `id` (on an array, `/-` appends). Open answers `{ ...value, _v }`; a write answers `{ ack, version, ops }` and broadcasts `{ doc, ops, v }`, the ops as applied.
 
 **Source — the truth is outside** (a thermometer, an exchange rate, another API). One reading, shared by every watcher: taken when the first watcher opens the document (two opening at once share one start), then polled every `every` ms or pushed by `subscribe`, and stopped when the last watcher closes or drops.
 

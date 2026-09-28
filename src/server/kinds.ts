@@ -93,7 +93,8 @@ export function registerMemory<T>(ws: WsServer, options: MemoryOptions<T>) {
       ops = mintIds(next, msg.ops as DeltaOp[]); // add /<coll>/- names the row, as the JSON file and SQLite do
       applyOps(next, ops);
     } catch (err: any) {
-      return respond({ error: { code: 400, message: err.message } });
+      // the code applyOps gives it (404 not there, 400 malformed), as every backend answers; else malformed
+      return respond({ error: { code: typeof err?.code === "number" ? err.code : 400, message: err.message } });
     }
     d.value = next;
     d.v += 1;

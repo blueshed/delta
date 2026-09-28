@@ -30,11 +30,25 @@ describe("memory: live documents", () => {
   test("an op that does not land is refused and changes nothing; forget starts it again", async () => {
     const { local } = setup();
     const here = registerMemory(local.server, { prefix: "here:", empty: () => ({ people: {} }) });
-    expect((await local.call("delta", { doc: "here:a", ops: [{ op: "replace", path: "/nobody/x", value: 1 }] })).error?.code).toBe(400);
+    expect((await local.call("delta", { doc: "here:a", ops: [{ op: "replace", path: "/nobody/x", value: 1 }] })).error?.code).toBe(404);
     await local.call("delta", { doc: "here:a", ops: [{ op: "add", path: "/people/p1", value: "Ada" }] });
     here.forget("here:a");
     expect(here.peek("here:a")).toBeUndefined();
     expect((await local.call("close", { doc: "here:a" })).result).toEqual({ ack: true });
+  });
+
+  test("a refusal carries the code the other backends answer with: 404 for what is not there, 400 for a malformed path", async () => {
+    const { local, heard } = setup();
+    const here = registerMemory(local.server, { prefix: "here:", empty: () => ({ people: { p1: "Ada" } as Record<string, string> }) });
+    const code = async (ops: unknown[]) => (await local.call("delta", { doc: "here:a", ops })).error?.code;
+    expect(await code([{ op: "remove", path: "/people/p1" }])).toBeUndefined();   // there: removed
+    expect(await code([{ op: "remove", path: "/people/p1" }])).toBe(404);         // the second remove: not there
+    expect(await code([{ op: "replace", path: "/people/p9", value: "Bo" }])).toBe(404);
+    expect(await code([{ op: "replace", path: "/nobody/x", value: 1 }])).toBe(404);
+    expect(await code([{ op: "remove", path: "people" }])).toBe(400);
+    expect(await code([{ op: "add", path: "/people/__proto__", value: 1 }])).toBe(400);
+    expect(here.peek("here:a")).toEqual({ people: {} });
+    expect(heard).toHaveLength(1);   // only the write that landed
   });
 
   test("add /<coll>/- makes a row the server names, as the JSON file does: answered, heard and kept under its id (#14)", async () => {
