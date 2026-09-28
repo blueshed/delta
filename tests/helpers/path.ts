@@ -94,6 +94,9 @@ export const pathDocs = [
   defineDoc("fo-course-guests:", { root: "courses", include: ["households"] }),
   // a wedding being planned: there before its row is, which its first write makes (implied)
   defineDoc("fo-plan:", { root: "weddings", include: ["courses", "drinks"], implied: true }),
+  // single mode with a second condition: one household by its id and its email, one seat by its id and its table
+  defineDoc("fo-guest:", { root: "households", include: [], scope: { id: ":id", email: ":email" } }),
+  defineDoc("fo-seat-of:", { root: "seats", include: [], scope: { id: ":id", table_no: ":table" } }),
 ];
 
 /**
@@ -653,6 +656,24 @@ export function documentCases(backend: () => PathBackend): void {
       await write(b.process, "fo-course:1", [{ op: "replace", path: "/courses/name", value: "Broth" }]);
       await assertCopiesHold(b, copies);
       expect(content((await b.process.call("open", { doc: "fo-course:1" })).result)).toEqual({ courses: course(1, "Broth"), drinks: { "1": drink(1, 1, "Sherry") } });
+    });
+
+    test("a single document named by its id and another column holds its root only where the row meets both: opened, written, read as it stood and asked its history, another's is not there (404) and nothing is written (0.10.0 review)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-guest:1:a@x", "fo-board:1", "fo-household:1"]);
+      const theirs = "fo-guest:1:z@x";   // household 1 is a@x's
+      const code = async (action: string, msg: Record<string, unknown>) => (await b.process.call(action, { doc: theirs, ...msg })).error?.code;
+      expect(await code("open", {})).toBe(404);
+      expect(await code("delta", { ops: [{ op: "replace", path: "/households/t", value: "taken" }] })).toBe(404);
+      expect(await code("delta", { ops: [{ op: "replace", path: "/households/1", value: { t: "taken" } }] })).toBe(404);
+      expect(await code("delta", { ops: [{ op: "remove", path: "/households/1" }] })).toBe(404);
+      expect(await code("open_at", { at: new Date().toISOString() })).toBe(404);
+      expect(await code("history", {})).toBe(404);
+      await expectSilent(b, "fo-guest:1:a@x", "fo-board:1", "fo-household:1");
+      expect(content((await b.process.call("open", { doc: "fo-guest:1:a@x" })).result)).toEqual({ households: household(1, "a@x") });
+      await write(b.process, "fo-guest:1:a@x", [{ op: "replace", path: "/households/t", value: "hers" }], { cursor: "s1" });
+      expect((await b.process.call("history", { doc: "fo-guest:1:a@x" })).result).toHaveLength(1);
+      await assertCopiesHold(b, copies);
     });
 
     test("a single document that takes its root out in a write writes nothing more through it (404, nothing written) but that root back, and then on through it (todo #59, #61)", async () => {

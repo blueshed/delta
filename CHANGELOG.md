@@ -153,6 +153,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on as it does for Postgres. With no promise to wait on a write is still told before it
   answers; an `owns` that answers with a promise holds that write's telling, and those after
   it, until it has, so each document hears its changes in order.
+- **Postgres: a single document named by its id and another column holds its root only where
+  the row meets both** (0.10.0 review). `defineDoc("guest:", { root: "households", scope: { id:
+  ":id", email: ":email" } })`: Mallory, whose `owns` passes for `guest:1:m@x`, opened household
+  1 -- `a@x`'s -- through it, wrote it (`replace /households/t`), read it as it stood and asked
+  its history. `delta_open` read the root by its id alone, and so did `delta_open_at`,
+  `delta_apply`'s check that the root is there, and `_delta_row_in_scope`; only the fan-out
+  asked the whole scope. SQLite and the JSON file read the whole scope and answered 404. Each
+  now reads the root where it meets the whole of its name's scope -- `delta_open` (`001c`),
+  `delta_open_at` (`001e`), `delta_apply` (`001d`) and `_delta_row_in_scope` (`001b`), each
+  replaced in place -- so such a name whose row does not meet it is not there (404), opened,
+  written through, read as it stood or asked its history.
 
 ### Added
 

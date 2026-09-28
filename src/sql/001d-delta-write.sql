@@ -323,7 +323,8 @@ BEGIN
     -- document starts from the root absent, guarded by its plan
     -- (_delta_walk_plan), as SQLite's and the JSON file's are.
     IF NOT v_is_list AND NOT COALESCE(p_walk, FALSE) THEN   -- a walk not said (null) is none
-      EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I WHERE id = $1)', v_root_view) INTO v_exists USING v_doc_id;
+      -- there, and meeting the whole of its name's scope (a column beside its id), as delta_open reads it
+      EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I t WHERE t.id = $1 AND %s)', v_root_view, v_scope->>'where') INTO v_exists USING v_doc_id;
       v_opened := COALESCE(v_opened, v_exists OR COALESCE(v_def.implied, FALSE));
       v_back := FALSE;
       IF NOT v_exists AND v_opened AND v_op->>'op' = 'add' THEN

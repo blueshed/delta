@@ -376,7 +376,19 @@ BEGIN
     IF v_depth > 32 THEN RETURN FALSE; END IF;   -- malformed / cyclic parent chain
 
     IF v_cur_coll = p_def.root_collection THEN
-      RETURN v_cur_id IS NOT DISTINCT FROM v_root_id;
+      IF v_cur_id IS DISTINCT FROM v_root_id THEN RETURN FALSE; END IF;
+      -- ... and the root meets the rest of its name's scope -- a column beside
+      -- its id, as fo-guest:<id>:<email> names one -- as delta_open reads it
+      -- (0.10.0 review). A scope of the id alone asks nothing more.
+      IF NOT EXISTS (SELECT 1 FROM jsonb_object_keys(COALESCE(p_def.scope, '{}'::jsonb)) k WHERE k <> 'id') THEN
+        RETURN TRUE;
+      END IF;
+      SELECT * INTO v_coll FROM _delta_collections WHERE collection_key = v_cur_coll;
+      IF NOT FOUND THEN RETURN FALSE; END IF;
+      EXECUTE format('SELECT EXISTS(SELECT 1 FROM %I t WHERE t.id = $1 AND %s)',
+        _delta_source_view(v_coll.table_name, v_coll.temporal), COALESCE(v_scope->>'where', 'TRUE'))
+        INTO v_exists USING v_root_id;
+      RETURN v_exists;
     END IF;
 
     SELECT * INTO v_coll FROM _delta_collections

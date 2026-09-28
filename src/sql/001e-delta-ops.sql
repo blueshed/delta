@@ -66,14 +66,16 @@ BEGIN
       USING ERRCODE = 'P0001';
   END IF;
 
+  -- the root as it stood, where it met the whole of its name's scope then
+  -- (a column beside its id), as delta_open reads it now
   IF v_root_coll.temporal THEN
     EXECUTE format(
-      'SELECT to_jsonb(t.*) FROM %I t WHERE t.id = $1 AND %s',
-      v_root_coll.table_name, _delta_temporal_where(p_at)
+      'SELECT to_jsonb(t.*) FROM %I t WHERE t.id = $1 AND %s AND %s',
+      v_root_coll.table_name, _delta_temporal_where(p_at), v_resolved->>'where'
     ) INTO v_root_row USING v_doc_id;
     v_root_row := _delta_strip_temporal(v_root_row);
   ELSE
-    EXECUTE format('SELECT to_jsonb(t.*) FROM %I t WHERE t.id = $1', v_root_coll.table_name)
+    EXECUTE format('SELECT to_jsonb(t.*) FROM %I t WHERE t.id = $1 AND %s', v_root_coll.table_name, v_resolved->>'where')
       INTO v_root_row USING v_doc_id;
   END IF;
 

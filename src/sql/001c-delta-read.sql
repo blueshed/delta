@@ -314,7 +314,9 @@ BEGIN
     -- Single mode: one root row + included collections
     v_doc_id := (v_resolved->'values'->>'id')::BIGINT;
 
-    EXECUTE format('SELECT to_jsonb(t.*) FROM %I t WHERE t.id = $1', v_view)
+    -- the row its name names, where it meets the rest of the name's scope too
+    -- (fo-guest:<id>:<email>: that id with that email), as SQLite reads it
+    EXECUTE format('SELECT to_jsonb(t.*) FROM %I t WHERE t.id = $1 AND %s', v_view, v_where)
       INTO v_root_row USING v_doc_id;
 
     IF v_root_row IS NULL AND NOT COALESCE(v_def.implied, FALSE) THEN RETURN NULL; END IF;
