@@ -121,6 +121,7 @@ the connection, so a browser undoes only what it wrote:
 ```ts
 const ws = connectWs("/ws");
 await ws.send({ action: "undo" });   // or "redo"; answers null when there is nothing to walk
+await ws.send({ action: "undo", change: 7 });   // one change of this cursor's, by its entry, not its last
 ```
 
 On Postgres the ledger is in the database, so a write made in one process can be undone from

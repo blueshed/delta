@@ -898,14 +898,18 @@ await createDocListener(ws, pool, { auth, ledger: true, who: (identity) => Strin
 **The actions.**
 
 ```ts
-{ action: "undo",    cursor?, dry?, entry? }  // → { doc, ops, inverse, version, entry } | { doc, ops: [], conflict, … } | null when there is nothing to undo
-{ action: "redo",    cursor?, dry?, entry? }  // → the same
+{ action: "undo",    cursor?, dry?, entry?, change? }  // → { doc, ops, inverse, version, entry } | { doc, ops: [], conflict, … } | null when there is nothing to undo
+{ action: "redo",    cursor?, dry?, entry?, change? }  // → the same
 { action: "history", doc, cursor?, limit? }  // → [{ id, doc, version, ops, inverse, at, undoable, mine }], newest first, limit 50
 ```
 
 Undo walks back what the cursor wrote, newest first, across documents; redo walks it forward; a fresh write by the cursor ends what could be redone. Each walk is itself a write through the same path — validated, recorded (linked to the entry it walked), broadcast — so every subscriber sees an undo as an ordinary change.
 
 **A walk sets back only what its entry changed, and only where the document still holds what the entry left.** A field someone else has written since is a **conflict**: the walk changes nothing and answers `conflict: [paths]` (a row it made and someone has edited is not removed; a row it removed and someone has put back is not added). Each row is walked once, by the entry's net change: a row one batch made and then changed is removed, one it removed and made again gets its fields back. A single document's root is one row whichever path the write named it by (`/venues`, `/venues/42`): removed, added back and written in one write, it is walked as one row, its fields set back at `/venues`. The walk is recorded all the same — an entry with no ops that is never redone — so the next undo goes on to the entry before it; a walk the document refuses (the row's parent is gone) is recorded the same way. `null` still means nothing to walk.
+
+**A named change.** `change: <entry id>` walks one change instead of the cursor's next: two writers on one cursor -- a person and an assistant in one browser -- each undo their own. The change is the chain that entry is in, a write and every walk of it, so the write's `entry`, its undo's and its redo's all name it. It must be the cursor's own: another cursor's, a fact, or no entry at all is 404 (`Entry 7 is no change of this cursor's`), and an id that is not a whole number from 1 is 400. `undo` walks it back if it stands, `redo` forward if it was undone (a fresh write does not end it: the guard stands in), and `null` when it goes neither way. The guard is the same as any walk's -- a field written since, by anyone or by the cursor itself, is a conflict and nothing is walked -- but a named walk that meets a conflict records nothing: no cursor has to move past it, and the change can be walked once the document holds again what it left. The gate and `owns` are asked as for `undo`. `dry` and `entry` work with it: `entry` is then the change's next.
+
+What the guard does not see: a row the change made that someone has since hung rows under. Undoing the row's creation removes it, and the removal cascades to those rows, as an undo beside someone else's write always has; their own undo then meets a conflict.
 
 **Asking first.** `dry: true` answers what the walk would do — `{ doc, entry, ops, conflict? }` — and walks nothing, so a caller can ask whoever owns the document (a deadline, a permission) before it walks. `entry: <id>` then walks only if that is still the cursor's next entry, and answers 409 if it is not. A removed row comes back under its own id, a cascaded remove comes back parent first (and so does a redo of an undo that took a row and its children), and an undo reaches a document nobody has open (SQLite loads it for the walk and leaves it closed). `history` goes to whoever may open the document (each backend asks the gate, `owns`, and that it opens); each entry says `mine` — whether the asker's cursor wrote it — never who did, never a cursor. With `auth`, `undo` and `redo` pass the gate first (401 without an identity) and walk only into a document the walker `owns` (404); on Postgres they use the `_as` forms so RLS applies.
 
@@ -973,6 +977,7 @@ Apply `src/sql/001a-001g-*.sql` alphabetically to every database — idempotent.
 | `delta_apply_as(user_id, doc_name, ops jsonb)` | 1-RTT variant of `delta_apply` |
 | `delta_apply_logged(doc_name, ops, who, cursor, undoable?, undoes?)` | `delta_apply` with its ledger entry (`_delta_ledger`) in one transaction; returns `{ version, ops, inverse, entry }` (001g) |
 | `delta_walk(cursor, who, back, dry?, entry?)` | the cursor's next entry (`back`: to undo, else to redo), walked by its guarded plan (`_delta_walk_plan`) through `delta_apply_logged`; returns its result with `doc`, `{ doc, ops: [], conflict }` on a conflict, the plan with `dry`, or NULL |
+| `delta_walk(cursor, who, back, dry, entry, change)` | the same for one change of the cursor's, named by any entry of its chain (`_delta_change_tip`; SQLSTATE P0002 when it is none of the cursor's); a conflict records nothing |
 | `delta_undo(cursor, who?)` / `delta_redo(cursor, who?)` | `delta_walk` back / forward |
 | `delta_history(doc_name, cursor, limit?)` | the newest entries, each with `mine`, never who or a cursor |
 | `delta_apply_logged_as` / `delta_walk_as` / `delta_undo_as` / `delta_redo_as` | the same, with `app.user_id` set first for RLS |
@@ -1119,7 +1124,7 @@ A socket's messages are handled side by side, as they arrive, except around a ca
 |---|---|---|
 | `{ action: "open", doc }` | | `{ id, result: <docContents> }` — with `_v` where the backend versions |
 | `{ action: "delta", doc, ops, cursor?, undoable?, inverse? }` | `cursor` in-process only; `undoable: false` for a fact; `inverse: true` (SQLite) | `{ id, result: { ack: true, version? } }`; with a ledger also `ops`, `inverse`, `entry` |
-| `{ action: "undo", cursor? }` / `{ action: "redo", cursor? }` | ledger only | `{ id, result: { doc, ops, inverse, version, entry } \| null }` |
+| `{ action: "undo", cursor?, dry?, entry?, change? }` / `{ action: "redo", … }` | ledger only; `change` names one of the cursor's changes by an entry of it | `{ id, result: { doc, ops, inverse, version, entry } \| null }` |
 | `{ action: "history", doc, cursor?, limit? }` | ledger only | `{ id, result: [{ id, doc, version, ops, inverse, at, undoable, mine }] }` |
 | `{ action: "open_at", doc, at }` | | `{ id, result: <snapshot> }` |
 | `{ action: "close", doc }` | | `{ id, result: { ack: true } }` |

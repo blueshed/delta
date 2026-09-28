@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Undo or redo a named change, not only the cursor's last** (eta n99). `undo` and `redo` take
+  `change: <entry id>`: the change is the chain that entry is in -- a write and every walk of it,
+  so its write, an undo or a redo each name it -- and it must be the cursor's own (404 otherwise:
+  another cursor's, a fact, none; 400 for an id that is not a whole number from 1). Undo walks it
+  back if it stands, redo forward if it was undone, `null` when it goes neither way. A person and
+  an assistant writing on one cursor (one browser) each undo their own. On every backend, with the
+  same guard as any walk (a field written since by anyone, the cursor itself too, is a conflict:
+  nothing is walked) and the same gate and `owns` as `undo`. `dry` answers the plan and the entry
+  it would walk; `entry` then walks it only if that is still the change's next (409). A named
+  redo is not ended by a fresh write, since the guard stands in for it.
+  - **A named walk that meets a conflict records nothing**, where the cursor's walk records one
+    (so the cursor moves past it): nothing has to move past a named one, and the change can be
+    walked once the document holds again what it left.
+  - **Postgres: 001g adds `_delta_change_tip`, `delta_walk(cursor, who, back, dry, entry,
+    change)` and `delta_walk_as(…, change)`**, all `CREATE OR REPLACE`. The five-argument
+    `delta_walk` now calls the six, so a database on 0.10.0's 001g takes this one over it; the
+    listener calls the new forms.
+
 ## [0.10.0] - 2026-09-28
 
 ### Breaking

@@ -87,8 +87,10 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
   follows on.
 - **A walk is guarded, the same on both backends**: `planWalk` (`src/server/ledger.ts`) and
   `_delta_walk_plan` (`001g`) set back only what an entry changed, where the document still
-  holds what it left; a conflict walks nothing and is recorded as walked. Change them together
-  (`tests/ledger.test.ts`, `tests/postgres-ledger.test.ts`, "undo beside someone else").
+  holds what it left; a conflict walks nothing and is recorded as walked -- but for a walk of a
+  named change (`change`: `changeTip` / `_delta_change_tip`), which records nothing. Change them
+  together (`tests/ledger.test.ts`, `tests/postgres-ledger.test.ts`, "undo beside someone else";
+  `tests/helpers/path.ts`, "a change named by its entry").
 - **The cursor**: named by an in-process caller (`client.data.local`); over a socket the
   connection's `clientId`, and signed in, the person with it (`socketCursor` in
   `src/server/ledger.ts`). A socket client never names another's.
