@@ -190,9 +190,9 @@ const openSeatsDoc = <Q>(query: Q) => ({
   matches: (_coll: string, row: any) => row.kept === false,
 });
 const seatsTable = pathSchema.tables.seats!.name;
-// each row as a document reads it: SQLite keeps a boolean as 0 or 1, and json as its text
+// each row as a document reads it: SQLite keeps a boolean as 0 or 1 and json as its text
 export const sqliteOpenSeats = openSeatsDoc((db: any) => ({
-  seats: db.query(`SELECT * FROM ${seatsTable} WHERE kept = 0`).all().map((r: any) => ({ ...r, kept: !!r.kept, wishes: r.wishes == null ? null : JSON.parse(r.wishes) })),
+  seats: db.query(`SELECT * FROM ${seatsTable} WHERE kept = 0`).all().map((r: any) => ({ ...r, kept: r.kept === 1, wishes: r.wishes === null ? null : JSON.parse(r.wishes) })),
 }));
 export const postgresOpenSeats = openSeatsDoc(async (pool: any) => ({ seats: (await pool.query(`SELECT to_jsonb(s) AS row FROM ${seatsTable} s WHERE NOT kept`)).rows.map((r: any) => r.row) }));
 
@@ -2286,7 +2286,6 @@ export function fanOutCases(backend: () => PathBackend): void {
       await write(b.process, "fo-seating:1", [{ op: "replace", path: "/seats/1/kept", value: false }]);
       await b.quiet();
       const copies = await openAll(b.process, ["fo-seats-at:3", "fo-seats-at:open:all"]);
-      copies.delete("fo-seats-at:open:all"); // its first read is the backend's own query, not a document's
       expect((await b.process.call("delta", { doc: "fo-seats-at:3", ops: [{ op: "replace", path: "/seats/1/table_no", value: 5 }] })).error?.code).toBe(404);
       await write(b.process, "fo-seating:1", [{ op: "replace", path: "/seats/1/table_no", value: 5 }]);
       await expectTold(b, "fo-seats-at:3", [[{ op: "remove", path: "/seats/1" }]]);
@@ -2300,6 +2299,15 @@ export function fanOutCases(backend: () => PathBackend): void {
       await write(b.process, "fo-board:1", [{ op: "remove", path: "/households/1" }]);
       await expectTold(b, "fo-household:1", [[{ op: "replace", path: "/households", value: null }]]);
       await expectTold(b, "fo-inbox:a@x", [[{ op: "remove", path: "/households/1" }]]);
+      await assertCopiesHold(b, copies);
+    });
+    test("a wedding removed through the board takes its households out of the inboxes by its cascade; undone, redone and undone again, each inbox holds the law (todo #27)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-inbox:a@x", "fo-inbox:b@x", "fo-inbox:c@x"]);
+      await write(b.process, "fo-board:1", [{ op: "remove", path: "/weddings/1" }], { cursor: "s1" });
+      await expectTold(b, "fo-inbox:a@x", [[{ op: "remove", path: "/households/1" }]]);
+      for (const way of ["undo", "redo", "undo"]) expect((await b.process.call(way, { cursor: "s1" })).result.conflict).toBeUndefined();
+      await expectSilent(b, "fo-inbox:c@x");
       await assertCopiesHold(b, copies);
     });
   });
@@ -2363,6 +2371,25 @@ export function fanOutCases(backend: () => PathBackend): void {
       await expectTold(b, "fo-all-courses:", [[added.ops[0]], [{ op: "remove", path: "/courses/10" }], [{ op: "add", path: "/courses/10", value: course(10, "Soup", 7) }]]);
       await assertCopiesHold(b, copies);
     });
+    test("a course of the plan moved to another wedding through a list leaves it, its drink with it; undone, redone and undone again, the plan holds the law (todo #27)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-plan:7", "fo-plan:8", "fo-all-courses:"]);
+      await write(b.process, "fo-plan:7", [
+        { op: "add", path: "/courses/10", value: { name: "Soup" } },
+        { op: "add", path: "/drinks/10", value: { courses_id: 10, name: "Sherry" } },
+      ]);
+      await write(b.process, "fo-plan:8", [{ op: "replace", path: "/weddings/name", value: "the other" }]);
+      await write(b.process, "fo-all-courses:", [{ op: "replace", path: "/courses/10/weddings_id", value: 8 }], { cursor: "s1" });
+      for (const way of ["undo", "redo", "undo"]) expect((await b.process.call(way, { cursor: "s1" })).result.conflict).toBeUndefined();
+      await expectTold(b, "fo-plan:8", [
+        [{ op: "replace", path: "/weddings", value: { id: 8, name: "the other" } }],
+        [{ op: "add", path: "/courses/10", value: course(10, "Soup", 8) }, { op: "add", path: "/drinks/10", value: drink(10, 10, "Sherry") }],
+        [{ op: "remove", path: "/courses/10" }, { op: "remove", path: "/drinks/10" }],
+        [{ op: "add", path: "/courses/10", value: course(10, "Soup", 8) }, { op: "add", path: "/drinks/10", value: drink(10, 10, "Sherry") }],
+        [{ op: "remove", path: "/courses/10" }, { op: "remove", path: "/drinks/10" }],
+      ]);
+      await assertCopiesHold(b, copies);
+    });
   });
 
   describe("a recompute custom document (todo #35)", () => {
@@ -2401,6 +2428,15 @@ export function fanOutCases(backend: () => PathBackend): void {
         [{ op: "replace", path: "", value: { wedding: "ours", courses: ["Soup"] } }],
       ]);   // closed: not read again, not told
       copies.delete("fo-menu-card:1");
+      await assertCopiesHold(b, copies);
+    });
+    test("the menu cards, open across a move, a cascade that takes the wedding, an undo and a redo, each hold the law: read again and told as a root replace, or null once the wedding is gone (todo #27)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-menu-card:1", "fo-menu-card:2", "fo-all-courses:"]);
+      await write(b.process, "fo-all-courses:", [{ op: "replace", path: "/courses/1/weddings_id", value: 2 }], { cursor: "s1" });
+      await b.process.call("open", { doc: "fo-board:1" });
+      await write(b.process, "fo-board:1", [{ op: "remove", path: "/weddings/1" }], { cursor: "s1" });
+      for (const way of ["undo", "undo", "redo"]) expect((await b.process.call(way, { cursor: "s1" })).result.conflict).toBeUndefined();
       await assertCopiesHold(b, copies);
     });
   });
@@ -2458,7 +2494,6 @@ export function fanOutCases(backend: () => PathBackend): void {
     test("fo-seats-at:open:all is not taken for the list fo-seats-at: named \"open\": seats written beside it are told as ever, and it hears the one that is not kept", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-seats-at:open:all", "fo-seating:1", "fo-seats-at:3", "fo-seats-at:5"]);
-      copies.delete("fo-seats-at:open:all"); // its first read is the backend's own query, not a document's
       const moved = await write(b.process, "fo-seating:1", [{ op: "replace", path: "/seats/1/table_no", value: 5 }]);
       const added = await write(b.process, "fo-seats-at:5", [{ op: "add", path: "/seats/-", value: { weddings_id: 1, kept: false } }]);
       expect(added.ops).toEqual([{ op: "add", path: "/seats/2", value: seat(2, 5, false) }]);
@@ -2481,6 +2516,20 @@ export function fanOutCases(backend: () => PathBackend): void {
       await expectTold(b, "fo-board-on:1:2021-01-01", [[named("renamed")]]);
       await expectTold(b, "fo-board-on:1:2999-01-01", [[note("bring tables"), named("renamed")]]);
       await expectTold(b, "fo-notes-on:", [[note("bring tables")]]);
+      await expectSilent(b, "fo-notes-on:2021-01-01");
+      await assertCopiesHold(b, copies);
+    });
+
+    test("open across every kind of write -- an add, a field, a remove, a cascade, a move, an undo and a redo -- each holds the law: told what its time does not keep, nothing of what it does (todo #27)", async () => {
+      const b = backend();
+      const docs = ["fo-board:1", "fo-all-courses:", "fo-board-on:1:2021-01-01", "fo-courses-noted-on:2021-01-01", "fo-notes-on:2021-01-01", "fo-board-on:1:2999-01-01", "fo-courses-noted-on:"];
+      const copies = await openAll(b.process, docs);
+      await write(b.process, "fo-board:1", [{ op: "add", path: "/courses/-", value: { name: "Fish" } }, { op: "add", path: "/notes/-", value: { text: "new" } }], { cursor: "s1" });
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/notes/1/text", value: "bring tables" }, { op: "replace", path: "/weddings/name", value: "renamed" }], { cursor: "s1" });
+      await write(b.process, "fo-board:1", [{ op: "remove", path: "/notes/1" }], { cursor: "s1" });
+      await write(b.process, "fo-board:1", [{ op: "remove", path: "/courses/1" }], { cursor: "s1" });   // its drink with it
+      await write(b.process, "fo-all-courses:", [{ op: "replace", path: "/courses/3/weddings_id", value: 2 }], { cursor: "s1" });
+      for (const way of ["undo", "undo", "undo", "redo"]) expect((await b.process.call(way, { cursor: "s1" })).result.conflict).toBeUndefined();
       await expectSilent(b, "fo-notes-on:2021-01-01");
       await assertCopiesHold(b, copies);
     });
