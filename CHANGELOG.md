@@ -84,6 +84,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `open` of a temporal document handed a `NOSUPERUSER` role every row its policy hides. The view
   is now `WITH (security_invoker = true)` (Postgres 15+): apply the generated SQL again
   (`CREATE OR REPLACE VIEW` sets it on a view there already).
+- **An empty write changes nothing, on every backend.** On Postgres `delta []` moved the document's
+  version and told nobody, so an open client saw a gap and read the document again; SQLite and the
+  JSON file made no version but told the writer an empty change. Now neither: the answer carries
+  the version the document is at, and nothing is told. `_delta_bump_and_notify` (`001c`,
+  `CREATE OR REPLACE`: re-apply the framework, or `bunx @blueshed/delta init --upgrade`).
 - **A time in a document's name (`at:`) reads the whole document as it stood then, on every
   backend.** On Postgres `delta_open` read the included collections at that time but the root as it
   is now; SQLite and the JSON file ignored the time and read it all as it is now. Now each reads

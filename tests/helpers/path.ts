@@ -808,6 +808,20 @@ export function documentCases(backend: () => PathBackend): void {
       expect((await b.process.call("open", { doc: "fo-menu:1" })).result._v).toBe(before + 2);
     });
 
+    test("an empty write changes nothing: no next version, nothing told, nothing in the history", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1"]);
+      const before = copies.get("fo-board:1")._v as number;
+      const empty = await write(b.process, "fo-board:1", [], { cursor: "s1" });
+      expect({ version: empty.version, ops: empty.ops ?? [] }).toEqual({ version: before, ops: [] });
+      await expectSilent(b, "fo-board:1");
+      expect((await b.process.call("history", { doc: "fo-board:1", cursor: "s1" })).result).toEqual([]);
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/weddings/name", value: "our day" }]);
+      await expectTold(b, "fo-board:1", [[{ op: "replace", path: "/weddings", value: { id: 1, name: "our day" } }]]);
+      expect(b.process.heard.filter((h) => h.channel === "fo-board:1").map((h) => h.data.v)).toEqual([before + 1]);
+      await assertCopiesHold(b, copies);
+    });
+
     test("history says what was written through a document, newest first, and whose it was", async () => {
       const b = backend();
       await openAll(b.process, ["fo-board:1"]);

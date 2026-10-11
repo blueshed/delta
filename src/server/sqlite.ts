@@ -940,7 +940,8 @@ export function registerDocs<I = unknown>(
       const changes: { name: string; change: Record<string, unknown> }[] = [];
       for (const [name, tOps] of told) {
         if (name === docName) {
-          changes.push({ name, change: { doc: docName, ops: tOps, ...(written.version !== undefined ? { v: written.version } : {}) } });
+          // a write that changed nothing tells nothing, and made no version (as on Postgres)
+          if (written.ops.length > 0) changes.push({ name, change: { doc: docName, ops: tOps, ...(written.version !== undefined ? { v: written.version } : {}) } });
         } else if (tOps.length > 0) {
           const v = ledger?.bump(name);   // numbered as committed, told in that order
           changes.push({ name, change: { doc: name, ops: tOps, ...(v !== undefined ? { v } : {}) } });

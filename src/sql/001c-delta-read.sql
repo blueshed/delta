@@ -6,12 +6,19 @@
 -- _delta_bump_and_notify: bump version, log ops, fire NOTIFY — one place.
 -- `p_applied` is the write as applied, for custom documents (the log's
 -- `applied`, 001a); the two-argument form logs none, and is heard as told.
+-- Nothing to tell anyone (no ops, none applied): no version, as on SQLite --
+-- the version it is at.
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION _delta_bump_and_notify(p_doc TEXT, p_ops JSONB, p_applied JSONB)
 RETURNS BIGINT AS $$
 DECLARE v_version BIGINT;
 BEGIN
+  IF jsonb_array_length(p_ops) = 0 AND COALESCE(jsonb_array_length(p_applied), 0) = 0 THEN
+    SELECT version INTO v_version FROM _delta_versions WHERE doc_name = p_doc;
+    RETURN COALESCE(v_version, 0);
+  END IF;
+
   INSERT INTO _delta_versions (doc_name, version) VALUES (p_doc, 1)
     ON CONFLICT (doc_name) DO UPDATE SET version = _delta_versions.version + 1
     RETURNING version INTO v_version;
