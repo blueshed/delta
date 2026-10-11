@@ -4,7 +4,7 @@
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { Pool } from "pg";
-import { createDocListener, defineDoc, docTypeFromDef } from "../src/server/postgres";
+import { createDocListener, defineDoc, docTypeFromDef, type DocType } from "../src/server/postgres";
 import { createWs } from "../src/server/server";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
@@ -221,7 +221,7 @@ describe("the Postgres ledger", () => {
 
   test("without the ledger, the answer's version is a number, as with it -- from a DocType that reads it as pg gives a BIGINT, a string", async () => {
     const items = docTypeFromDef(defineDoc("items:", { root: "items", include: [] }), pool);
-    registerDocType({
+    const textual: DocType = {
       ...items,
       prefix: "items-text:",
       parse: () => ({}),
@@ -230,8 +230,8 @@ describe("the Postgres ledger", () => {
         await items.apply(ctx, "items:", ops, identity, by);
         return { version: (await pool.query("SELECT version FROM _delta_versions WHERE doc_name = 'items:'")).rows[0].version };
       },
-    });
-    const ws = await process({});
+    };
+    const ws = await process({ types: [textual] });
     const c = mockClient({ local: true });
     await sendAndAwait(ws, c, { action: "open", doc: "items-text:" });
     const answer = await sendAndAwait(ws, c, { action: "delta", doc: "items-text:", ops: [{ op: "add", path: "/items/-", value: { name: "one" } }] });

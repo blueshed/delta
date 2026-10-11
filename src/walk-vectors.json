@@ -71,10 +71,8 @@
     "ops": [
      {
       "op": "replace",
-      "path": "/lists/1",
-      "value": {
-       "title": "one"
-      }
+      "path": "/lists/1/title",
+      "value": "one"
      }
     ]
    }
@@ -120,10 +118,8 @@
     "ops": [
      {
       "op": "replace",
-      "path": "/lists/1",
-      "value": {
-       "title": "one"
-      }
+      "path": "/lists/1/title",
+      "value": "one"
      }
     ]
    }
@@ -611,7 +607,7 @@
    }
   },
   {
-   "name": "a single document's root is set back at /<root>",
+   "name": "a single document's root is set back at /<root>/<field>",
    "doc": "walk-list:1",
    "current": {
     "lists": {
@@ -649,10 +645,8 @@
     "ops": [
      {
       "op": "replace",
-      "path": "/lists",
-      "value": {
-       "title": "uno"
-      }
+      "path": "/lists/title",
+      "value": "uno"
      }
     ]
    }
@@ -756,10 +750,8 @@
     "ops": [
      {
       "op": "replace",
-      "path": "/lists",
-      "value": {
-       "title": "uno"
-      }
+      "path": "/lists/title",
+      "value": "uno"
      }
     ]
    }

@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { defineSchema, defineDoc, createTables, registerDocs } from "../src/server/sqlite";
 import { createWs, registerDoc, registerMethod } from "../src/server/server";
 import { wireAuth, type DeltaAuth } from "../src/server/auth";
-import { applyFramework, applySql, clearRegistry, createDocListener, docTypeFromDef, generateSql, registerDocType } from "../src/server/postgres";
+import { applyFramework, applySql, createDocListener, docTypeFromDef, generateSql } from "../src/server/postgres";
 import { openPglite } from "../src/server/pglite";
 import { setLogLevel } from "../src/server/logger";
 
@@ -292,8 +292,7 @@ describe("Postgres with no ledger (in process, PGlite)", () => {
     await applyFramework(pool);
     await applySql(pool, generateSql(schema, [items]));
     const ws = createWs();
-    registerDocType(docTypeFromDef(items, pool));
-    const listener = await createDocListener(ws, pool);
+    const listener = await createDocListener(ws, pool, { types: [docTypeFromDef(items, pool)] });
     const server = Bun.serve({ port: 0, routes: { [ws.path]: ws.upgrade }, websocket: ws.websocket });
     ws.setServer(server);
     try {
@@ -304,7 +303,6 @@ describe("Postgres with no ledger (in process, PGlite)", () => {
     } finally {
       server.stop(true);
       await listener.destroy();
-      clearRegistry();
       await pool.end();
     }
   });
