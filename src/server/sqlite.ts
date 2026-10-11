@@ -342,9 +342,8 @@ export function registerDocs<I = unknown>(
 
   function ensureImpliedRoot(def: DocDef, doc: any): void {
     const rootTable = schema.tables[def.root]!;
-    const viewName = rootTable.temporal ? `current_${rootTable.name}` : rootTable.name;
     const root = doc[def.root];
-    if (db.query(`SELECT 1 FROM ${viewName} WHERE id = ?`).get(root.id)) return;
+    if (db.query(`SELECT 1 FROM ${current(rootTable)} WHERE id = ?`).get(root.id)) return;
     const ts = now();
     if (rootTable.temporal) { root.valid_from = ts; root.valid_to = null; }
     insertRow(db, rootTable, root, ts);
@@ -1746,8 +1745,7 @@ function insertCollectionRow(
   // An add names a new row. On a temporal table the key is (id, valid_from),
   // so an add of a live id would insert a second live version of it (and on a
   // plain table fail UNIQUE as a 500): refuse it, in any document's scope.
-  const live = table.temporal ? `current_${table.name}` : table.name;
-  if (db.query(`SELECT 1 FROM ${live} WHERE id = ?`).get(id)) {
+  if (db.query(`SELECT 1 FROM ${current(table)} WHERE id = ?`).get(id)) {
     refuse(409, `Row already exists: ${joinPath(table.docKey, String(id))} -- replace it, or add to ${joinPath(table.docKey, "-")} for a new id`);
   }
   const fullRow: any = { id, ...row };
@@ -1780,7 +1778,7 @@ function insertCollectionRow(
   // so a row told of an add, the ledger's entry, and the same row read again
   // (by an undo's guard and inverse, a redo, a reopen) are the same row, keys,
   // values and all.
-  const read = db.query(`SELECT * FROM ${live} WHERE id = ?`).get(id);
+  const read = db.query(`SELECT * FROM ${current(table)} WHERE id = ?`).get(id);
   decodeRow(table, read);
   return read;
 }

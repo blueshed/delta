@@ -22,7 +22,7 @@ import type { DeltaAuth } from "../auth";
 import { isAuthError } from "../auth";
 import type { DeltaOp } from "../../core";
 import { isEntryId, ledgerWho, socketCursor } from "../ledger";
-import { assertOwned, createCustomDocs, NOT_FOUND, type CustomDoc, type Owns } from "../custom";
+import { assertOwned, createCustomDocs, NOT_FOUND, type CustomDoc, type Owns, type Refusal } from "../custom";
 
 const log = createLogger("[doc]");
 
@@ -152,6 +152,12 @@ export async function createDocListener<I = unknown>(
   // (`createLocal().as(identity)`, or one set at upgrade) -- as the SQLite backend reads it.
   const writerOf = (identity: I | undefined, client: any): I | undefined =>
     auth ? identity : (client?.data?.identity as I | undefined);
+  /** The gate's identity (undefined without auth), or the 401 for a socket without one. */
+  const gate = (client: any): { identity: I | undefined } | { error: Refusal } => {
+    if (!auth) return { identity: undefined };
+    const gated = auth.gate(client);
+    return isAuthError(gated) ? { error: { code: 401, message: gated.error } } : { identity: gated };
+  };
   const tracked = new Map<string, DocState>();
 
   // The custom documents (../custom): who holds each, who may hear it, what a
@@ -379,14 +385,9 @@ export async function createDocListener<I = unknown>(
   // `owned: false` for close alone: letting go of a document never needs the owner's say.
   function withDoc(label: string, fn: (dc: DocCtx) => Promise<void> | void, { owned = true } = {}) {
     return async (msg: any, client: any, respond: (r: any) => void) => {
-      let identity: I | undefined;
-      if (auth) {
-        const gated = auth.gate(client);
-        if (isAuthError(gated)) {
-          return respond({ error: { code: 401, message: gated.error } });
-        }
-        identity = gated as I;
-      }
+      const g = gate(client);
+      if ("error" in g) return respond(g);
+      const { identity } = g;
       const docName = msg.doc as string;
       if (!docName) {
         return respond({ error: { code: 400, message: "doc is required" } });
@@ -399,7 +400,7 @@ export async function createDocListener<I = unknown>(
         // The document's name is its channel: one this identity does not own is
         // not there for it (404, as a missing one), so it never subscribes.
         if (owned && auth && found.type.owns && !(await found.type.owns(identity as I, docName))) {
-          return respond({ error: { code: 404, message: "Not found" } });
+          return respond({ error: NOT_FOUND });
         }
         await fn({ docName, type: found.type, ctx: found.ctx, msg, client, respond, identity });
       } catch (err) {
@@ -424,14 +425,9 @@ export async function createDocListener<I = unknown>(
       // Gate custom docs exactly like standard docs (withDoc). Without this the
       // custom open handler — which registers before and short-circuits the
       // standard gated handler — let an unauthenticated client read scoped data.
-      let identity: I | undefined;
-      if (auth) {
-        const gated = auth.gate(client);
-        if (isAuthError(gated)) {
-          return respond({ error: { code: 401, message: gated.error } });
-        }
-        identity = gated as I;
-      }
+      const g = gate(client);
+      if ("error" in g) return respond(g);
+      const { identity } = g;
 
       try {
         // As withDoc asks a type's owns: a name this identity does not own is not there for it.
@@ -468,7 +464,7 @@ export async function createDocListener<I = unknown>(
 
   ws.on("open", withDoc("open", async ({ docName, type, ctx, msg, client, respond, identity }) => {
     const result = await type.open(ctx, docName, msg, identity);
-    if (!result) return respond({ error: { code: 404, message: "Not found" } });
+    if (!result) return respond({ error: NOT_FOUND });
 
     pruneDoc(docName);
     let state = tracked.get(docName);
@@ -507,12 +503,9 @@ export async function createDocListener<I = unknown>(
     const walk = (way: "undo" | "redo") => async (msg: any, client: any, respond: (r: any) => void) => {
       const change = msg.change ?? null;
       if (change !== null && !isEntryId(change)) return respond({ error: { code: 400, message: "change must be an entry's id: a whole number from 1" } });
-      let identity: I | undefined;
-      if (auth) {
-        const gated = auth.gate(client);
-        if (isAuthError(gated)) return respond({ error: { code: 401, message: gated.error } });
-        identity = gated as I;
-      }
+      const g = gate(client);
+      if ("error" in g) return respond(g);
+      const { identity } = g;
       const db = await pool.connect();
       try {
         const writer = writerOf(identity, client);
@@ -529,7 +522,7 @@ export async function createDocListener<I = unknown>(
           const found = tip ? resolveDoc(tip) : null;
           if (found?.type.owns && !(await found.type.owns(identity as I, tip))) {
             await db.query("ROLLBACK");
-            return respond({ error: { code: 404, message: "Not found" } });
+            return respond({ error: NOT_FOUND });
           }
         }
         // a change named takes 001g's newer forms; none, the ones a database on 0.10.0's SQL has too
@@ -549,7 +542,7 @@ export async function createDocListener<I = unknown>(
     ws.on("redo", walk("redo"));
     // A document's recent history, to whoever may open it: each entry says `mine`, never who wrote it.
     ws.on("history", withDoc("history", async ({ docName, type, ctx, msg, client, respond, identity }) => {
-      if (!(await type.open(ctx, docName, msg, identity))) return respond({ error: { code: 404, message: "Not found" } });
+      if (!(await type.open(ctx, docName, msg, identity))) return respond({ error: NOT_FOUND });
       const { rows } = await pool.query("SELECT delta_history($1, $2, $3) AS entries", [docName, cursorOf(msg, client, writerOf(identity, client)), msg.limit ?? 50]);
       respond({ result: rows[0]?.entries ?? [] });
     }));
@@ -562,7 +555,7 @@ export async function createDocListener<I = unknown>(
       return respond({ error: { code: 400, message: `open_at not supported for ${docName}` } });
     }
     const doc = await type.openAt(ctx, docName, at, identity);
-    if (!doc) return respond({ error: { code: 404, message: "Not found" } });
+    if (!doc) return respond({ error: NOT_FOUND });
     respond({ result: doc });
     log.info(`open_at ${docName} @ ${at}`);
   }));
