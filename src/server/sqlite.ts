@@ -268,13 +268,25 @@ export function registerDocs<I = unknown>(
   /** A single document whose root row is not there: the root absent, each included collection empty. */
   const rootless = (def: DocDef, docId: string): any => ({ ...emptyDoc(def, docId), [def.root]: null });
 
-  function ensureImpliedRoot(def: DocDef, doc: any): void {
+  /**
+   * An implied document's root row, made by its first write -- told as a row
+   * carried in (`Touched`): an add to a list of those roots (a cafe's kitchen),
+   * nothing to the implied documents, which showed it already. Undefined when
+   * the row was there.
+   */
+  function ensureImpliedRoot(def: DocDef, doc: any, writer: string): Touched | undefined {
     const rootTable = schema.tables[def.root]!;
     const root = doc[def.root];
     if (db.query(`SELECT 1 FROM ${current(rootTable)} WHERE id = ?`).get(root.id)) return;
     const ts = now();
     if (rootTable.temporal) { root.valid_from = ts; root.valid_to = null; }
     insertRow(db, rootTable, root, ts);
+    const row = readRow(rootTable, root.id);
+    const showed = holders(def.root, row, writer).filter((name) => {
+      const m = findDoc(name);
+      return !!m?.def.implied && resolveScope(m.def, m.docId).mode === "single";
+    });
+    return { coll: def.root, id: row.id, before: showed, after: row, carried: true };
   }
 
   // Who has each of these documents open, by name (for scoped fan-out)
@@ -896,9 +908,9 @@ export function registerDocs<I = unknown>(
           doc = load(docName, def, docName.slice(def.prefix.length)) ?? rootless(def, docName.slice(def.prefix.length));
           snapshot = structuredClone(doc);
         }
-        if (implied.has(docName) && !addsRoot) ensureImpliedRoot(def, doc);
+        const made = implied.has(docName) && !addsRoot ? ensureImpliedRoot(def, doc, docName) : undefined;
         const done = applyOps(docName, def, doc, ops, by.undoes !== undefined);
-        touched = done.touched;
+        touched = made ? [made, ...done.touched] : done.touched;
         const inverse = inverseOf(besides(snapshot, done.beyond), done.applied, ops);
         const recorded = ledger?.record({ doc: docName, ops: done.applied, inverse, ...by });
         return { ops: done.applied, inverse, version: recorded?.version, entry: recorded?.entry };

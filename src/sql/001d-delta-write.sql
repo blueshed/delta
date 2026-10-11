@@ -390,8 +390,22 @@ BEGIN
    WHERE collection_key = v_def.root_collection;
   v_root_view := _delta_source_view(v_root_coll.table_name, v_root_coll.temporal);
 
-  -- an implied document's first write makes its root row (todo #34)
-  IF NOT v_is_list THEN PERFORM _delta_make_implied(v_def, v_doc_id, p_ops, v_ts); END IF;
+  -- an implied document's first write makes its root row (todo #34), told as a
+  -- row carried in: an add to a list of those roots, nothing to the implied
+  -- documents, which showed it already (ensureImpliedRoot in sqlite.ts)
+  IF NOT v_is_list AND COALESCE(v_def.implied, FALSE) THEN
+    EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I WHERE id = $1)', v_root_view) INTO v_exists USING v_doc_id;
+    PERFORM _delta_make_implied(v_def, v_doc_id, p_ops, v_ts);
+    IF NOT v_exists THEN
+      EXECUTE format('SELECT _delta_strip_temporal(to_jsonb(t.*)) FROM %I t WHERE t.id = $1', v_root_view) INTO v_row USING v_doc_id;
+      IF v_row IS NOT NULL THEN
+        v_touched := jsonb_build_array(jsonb_build_object('coll', v_def.root_collection, 'id', v_doc_id, 'after', v_row, 'carried', TRUE,
+          'before', COALESCE((SELECT jsonb_agg(n) FROM unnest(_delta_holders(v_def.root_collection, v_row, p_doc_name)) AS n
+                               WHERE COALESCE((_delta_find_doc(n)).implied, FALSE)
+                                 AND _delta_resolve_scope(_delta_find_doc(n), n)->>'mode' = 'single'), '[]'::jsonb)));
+      END IF;
+    END IF;
+  END IF;
 
   FOR v_op IN SELECT jsonb_array_elements(p_ops)
   LOOP

@@ -99,6 +99,8 @@ export const pathDocs = [
   defineDoc("fo-course-guests:", { root: "courses", include: ["households"] }),
   // a wedding being planned: there before its row is, which its first write makes (implied)
   defineDoc("fo-plan:", { root: "weddings", include: ["courses", "drinks"], implied: true }),
+  // list mode: every wedding and its courses -- the kitchen's view, which a plan's first write adds a wedding to
+  defineDoc("fo-weddings:", { root: "weddings", include: ["courses"] }),
   // single mode with a second condition: one household by its id and its email, one seat by its id and its table
   defineDoc("fo-guest:", { root: "households", include: [], scope: { id: ":id", email: ":email" } }),
   defineDoc("fo-seat-of:", { root: "seats", include: [], scope: { id: ":id", table_no: ":table" } }),
@@ -1912,6 +1914,21 @@ export function fanOutCases(backend: () => PathBackend): void {
       await expectTold(b, "fo-plan:8", [named.ops]);
       await expectTold(b, "fo-all-courses:", [added.ops]);
       expect(content((await b.process.call("open", { doc: "fo-title:7" })).result)).toEqual({ weddings: { id: 7, name: "" } });
+      await assertCopiesHold(b, copies);
+    });
+
+    test("the root its first write makes arrives in a list of those roots, before what the write put under it; the implied documents, which showed it, are told the write as written (the cafe's kitchen)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-plan:7", "fo-plan:8", "fo-weddings:"]);
+      const added = await write(b.process, "fo-plan:7", [{ op: "add", path: "/courses/10", value: { name: "Soup" } }]);
+      const named = await write(b.process, "fo-plan:8", [{ op: "replace", path: "/weddings/name", value: "the other" }]);
+      await expectTold(b, "fo-plan:7", [added.ops]);
+      await expectTold(b, "fo-plan:8", [named.ops]);
+      await expectTold(b, "fo-weddings:", [
+        [{ op: "add", path: "/weddings/7", value: { id: 7, name: "" } }, ...added.ops],
+        [{ op: "add", path: "/weddings/8", value: { id: 8, name: "" } }, { op: "replace", path: "/weddings/8", value: { id: 8, name: "the other" } }],
+      ]);
+      await write(b.process, "fo-weddings:", [{ op: "replace", path: "/weddings/7/name", value: "ours too" }]);   // the list's copy holds it to write
       await assertCopiesHold(b, copies);
     });
 

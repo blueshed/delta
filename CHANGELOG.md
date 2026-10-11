@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`_delta_cascade_rows` and `_delta_cascade_remove` lose their `include` argument: the old
   forms are dropped) and `001g` (`delta_apply_logged`, `_delta_walk_plan`, a new
   `_delta_beside`): apply both again.
+- **The root row an implied document's first write makes is told to a list of those roots.** A
+  cafe's `order:1` (implied, with its lines) and `kitchen:` (every order, with lines): the first
+  `add /lines/-` through `order:1` made order 1, and the kitchen was told the line but never
+  `add /orders/1`, so its copy held a line with no order and a later `replace /orders/1/status`
+  could not apply. On every backend the made root is now told where it arrives, before the
+  write's own ops; the implied documents, which showed it already, hear the write as written.
+  In `write()` (`sqlite.ts`) and `delta_apply` (`001d`, replaced in place: apply it again).
 
 ## [0.12.0] - 2026-10-11
 
