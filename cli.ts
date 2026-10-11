@@ -1,14 +1,5 @@
 #!/usr/bin/env bun
-/**
- * @blueshed/delta CLI: the commands are listed in `usage()`.
- *
- * - `sql` regenerates a tables SQL file from a TypeScript schema module; it
- *   will not overwrite an --out file it did not write unless --force.
- * - `init` copies the framework SQL into <dir> (typically init_db/), each file
- *   stamped with this package's version, so `diff -u` against a later
- *   `init --upgrade` (which keeps a .bak) shows what changed. --with-auth adds
- *   the reference auth-jwt.sql.
- */
+/** @blueshed/delta CLI: the commands are listed in `usage()`. */
 import { parseArgs } from "node:util";
 import { resolve, basename, join, dirname } from "node:path";
 import { homedir } from "node:os";
@@ -192,8 +183,9 @@ async function cmdCall(
 }
 
 // ---------------------------------------------------------------------------
-// Header handling — identifies files written by delta init so upgrades can
-// read them back and avoid clobbering user-owned SQL.
+// Header handling — identifies files written by delta init (stamped with this
+// package's version) so upgrades can read them back and avoid clobbering
+// user-owned SQL, and a `diff -u` against a later `init --upgrade` shows what changed.
 // ---------------------------------------------------------------------------
 
 const HEADER_RE = /^-- @blueshed\/delta ([a-z0-9-]+) v(\d+\.\d+\.\d+)/;

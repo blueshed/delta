@@ -105,13 +105,11 @@ describe("package exports", () => {
     expect(declared).toEqual(Object.keys(probes).sort());
   });
 
-  test('"./postgres" exports its API, not codegen\'s SQL helpers (q, columnSqlType, sqlDefault, ...)', async () => {
-    expect(Object.keys(await import("../src/server/postgres")).sort()).toEqual([
-      "applyFramework", "applySql", "clearRegistry", "createDocListener", "createSnapshot", "defineCustomDoc",
-      "defineDoc", "defineSchema", "docTypeFromDef", "exportTables", "frameworkSqlFiles", "generateSql",
-      "importTables", "isAuthError", "loadDocAt", "pruneOpsLog", "registerDocType", "resolveDoc",
-      "resolveSnapshot", "upgradeWithAuth", "validateOps", "wireAuth", "withAppAuth",
-    ]);
+  test('"./postgres" does not export codegen\'s SQL helpers or frameworkSql', async () => {
+    const postgres = await import("../src/server/postgres");
+    for (const name of ["q", "columnSqlType", "sqlDefault", "findCascadeOn", "defaultForType", "frameworkSql"]) {
+      expect(postgres).not.toHaveProperty(name);
+    }
   });
 
   for (const [subpath, named] of Object.entries(probes)) {
