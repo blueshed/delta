@@ -8,7 +8,7 @@ import { Database } from "bun:sqlite";
 import { createTables, exportTables, importTables, registerDocs } from "../src/server/sqlite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
-import { pathCases, pathDocs, pathSchema, pathSeed, sqliteInbox, sqliteMenuCard, sqliteOpenSeats, type PathBackend } from "./helpers/path";
+import { listAtCases, pathCases, pathDocs, pathSchema, pathSeed, sqliteInbox, sqliteMenuCard, sqliteOpenSeats, type PathBackend } from "./helpers/path";
 
 setLogLevel("silent");
 
@@ -30,3 +30,4 @@ beforeEach(() => {
 });
 
 describe("sqlite", () => pathCases(() => backend));
+describe("sqlite", () => listAtCases(() => backend));

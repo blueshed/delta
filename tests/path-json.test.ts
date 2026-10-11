@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { exportTables, importTables, registerDocs } from "../src/server/json";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
-import { course, pathCases, pathDocs, pathSchema, pathSeed, readAll, sqliteInbox, sqliteMenuCard, sqliteOpenSeats, write, type PathBackend } from "./helpers/path";
+import { course, listAtCases, pathCases, pathDocs, pathSchema, pathSeed, readAll, sqliteInbox, sqliteMenuCard, sqliteOpenSeats, write, type PathBackend } from "./helpers/path";
 
 setLogLevel("silent");
 
@@ -41,6 +41,7 @@ afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 describe("json", () => {
   pathCases(() => backend);
+  listAtCases(() => backend);
 
   test("the file is the truth: a write is in it, readable, and a process started on it reads what the last one left", async () => {
     await backend.process.call("open", { doc: "fo-board:1" });

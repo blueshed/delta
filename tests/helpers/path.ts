@@ -68,6 +68,8 @@ export const pathDocs = [
   defineDoc("fo-all-courses:", { root: "courses", include: [] }),
   // list mode with an include: every course, and every drink
   defineDoc("fo-catalog:", { root: "courses", include: ["drinks"] }),
+  // list mode with a temporal include: every course, and every note
+  defineDoc("fo-courses-noted:", { root: "courses", include: ["notes"] }),
   defineDoc("fo-courses-like:", { root: "courses", include: [], scope: { name: "like:start" } }),
   // list mode by an equality: the tags of one label, which a tag added through it is given
   defineDoc("fo-tags-labelled:", { root: "tags", include: [], scope: { label: ":label" } }),
@@ -316,6 +318,25 @@ export function serialCases(backend: () => PathBackend): void {
       expect(ops.map((o: any) => o.path)).toEqual(["/courses/5", "/courses/6"]);
       const { sequences } = await b.exportTables();
       expect(sequences?.courses).toBe(6);
+    });
+  });
+}
+
+/**
+ * A list document read as it stood. SQLite and the JSON file read it; Postgres's
+ * delta_open_at answers a list with null (404), so the Postgres backends do not
+ * ask these cases.
+ */
+export function listAtCases(backend: () => PathBackend): void {
+  describe("a list document read as it stood", () => {
+    test("a list read as it stood reads its included collections as they stood too", async () => {
+      const b = backend();
+      await openAll(b.process, ["fo-board:1"]);
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/notes/1/text", value: "bring tables" }, { op: "add", path: "/notes/-", value: { text: "new" } }]);
+      const then = await b.process.call("open_at", { doc: "fo-courses-noted:", at: "2021-01-01T00:00:00.000Z" });
+      expect(content(then.result).notes).toEqual({ "1": { id: 1, weddings_id: 1, text: "bring chairs" } });
+      const before = await b.process.call("open_at", { doc: "fo-courses-noted:", at: "2019-01-01T00:00:00.000Z" });
+      expect(content(before.result).notes).toEqual({});
     });
   });
 }
