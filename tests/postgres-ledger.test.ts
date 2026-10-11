@@ -191,6 +191,18 @@ describe("the Postgres ledger", () => {
     expect(JSON.stringify(entries)).not.toContain("bob");
   });
 
+  test("an empty write records nothing; history answers the newest 50 unless asked for more", async () => {
+    const ws = await process();
+    const eta = mockClient({ local: true });
+    for (let i = 1; i <= 55; i++) await sendAndAwait(ws, eta, add(`n${i}`, "s1"));
+    expect((await sendAndAwait(ws, eta, { action: "delta", doc: "items:", ops: [], cursor: "s1" })).error).toBeUndefined();
+    expect((await pool.query("SELECT count(*)::int AS n FROM _delta_ledger")).rows).toEqual([{ n: 55 }]);
+    const fifty = (await sendAndAwait(ws, eta, { action: "history", doc: "items:", cursor: "s1" })).result;
+    expect(fifty).toHaveLength(50);
+    expect(Number(fifty[0].version)).toBe(55);   // newest first
+    expect((await sendAndAwait(ws, eta, { action: "history", doc: "items:", cursor: "s1", limit: 200 })).result).toHaveLength(55);
+  });
+
   test("without the ledger, a write is not recorded and there is no undo", async () => {
     const ws = await process({});
     const eta = mockClient({ local: true });

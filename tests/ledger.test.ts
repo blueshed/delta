@@ -142,6 +142,23 @@ describe("the ledger", () => {
     expect((await local.call("history", { doc: "elsewhere:1" })).error).toBeDefined(); // not a document this backend has
   });
 
+  test("an empty write records nothing", async () => {
+    const { db, local, say } = setup();
+    await say(local, "s1", "m1", "one");
+    expect((await local.call("delta", { doc: "room:a", ops: [], cursor: "s1" })).error).toBeUndefined();
+    expect(db.query("SELECT count(*) AS n FROM delta_ledger").get()).toEqual({ n: 1 });
+    expect((await local.call("history", { doc: "room:a", cursor: "s1" })).result).toHaveLength(1);
+  });
+
+  test("history answers the newest 50 unless asked for more", async () => {
+    const { local, say } = setup();
+    for (let i = 1; i <= 55; i++) await say(local, "s1", `m${i}`, `n${i}`);
+    const fifty = (await local.call("history", { doc: "room:a", cursor: "s1" })).result;
+    expect(fifty).toHaveLength(50);
+    expect(fifty[0].version).toBe(55);   // newest first
+    expect((await local.call("history", { doc: "room:a", cursor: "s1", limit: 200 })).result).toHaveLength(55);
+  });
+
   test("without the ledger, nothing is recorded and the actions are not there", async () => {
     const { db, local, say } = setup({});
     expect((await say(local, "s1", "m1", "one")).result).toEqual({ ack: true });

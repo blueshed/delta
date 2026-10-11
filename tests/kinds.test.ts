@@ -123,6 +123,18 @@ describe("source: the truth is outside", () => {
     reactor.stopAll();
   });
 
+  test("a reading equal to the last only moves at", async () => {
+    const { local, heard } = setup();
+    let clock = 1000;
+    let push!: (reading: { c: number }) => void;
+    registerSource(local.server, { prefix: "reactor:", read: () => ({ c: 300 }), subscribe: (_id, p) => ((push = p), () => {}), now: () => clock });
+    await local.call("open", { doc: "reactor:1" });
+    clock = 2000;
+    push({ c: 300 });
+    expect(heard).toEqual([{ doc: "reactor:1", ops: [{ op: "replace", path: "/at", value: 2000 }], v: 1 }]);
+    expect((await local.call("open", { doc: "reactor:1" })).result).toEqual({ reading: { c: 300 }, at: 2000, stale: false, _v: 1 });
+  });
+
   test("a source that goes quiet makes its document stale; the next reading makes it fresh", async () => {
     const { local, heard } = setup();
     let push: (r: number) => void = () => {};
