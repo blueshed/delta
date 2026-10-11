@@ -9,14 +9,22 @@ import { Pool } from "pg";
 import { SignJWT } from "jose";
 import { jwtAuth } from "../src/server/auth-jwt";
 import {
+  clearRegistry,
+  createDocListener,
   docTypeFromDef,
   defineDoc,
+  registerDocType,
 } from "../src/server/postgres";
+import { createWs } from "../src/server/server";
+import { wireAuth } from "../src/server/auth";
 import {
   newPool,
   applyFramework,
   applyAuthJwt,
+  applyItemsFixture,
+  mockClient as socket,
   resetState,
+  sendAndAwait,
 } from "./setup";
 import { setLogLevel } from "../src/server/logger";
 
@@ -317,5 +325,58 @@ describe("withAppAuth + identity plumbing", () => {
       return rows[0].v;
     });
     expect(observed).toBe(String(user.id));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Logout, and an identity switch, leave the socket subscribed to nothing
+// (reference.md: "Logout also unsubscribes the socket from every doc").
+// ---------------------------------------------------------------------------
+
+describe("jwtAuth on a socket: logout and a switch let go of every document", () => {
+  test("signed in, two documents open; logged out, none; signed in again, none until opened; another person, none", async () => {
+    await applyItemsFixture(pool);   // items:, and a second name for the same rows
+    await pool.query("INSERT INTO _delta_docs (prefix, root_collection, include, scope) VALUES ('all-items:', 'items', '{}', '{}') ON CONFLICT (prefix) DO NOTHING");
+    clearRegistry();
+    const auth = jwtAuth({ pool, secret: SECRET });
+    for (const prefix of ["items:", "all-items:"]) registerDocType(docTypeFromDef(defineDoc(prefix, { root: "items", include: [] }), pool, { auth, shared: true }));
+    const ws = createWs();
+    wireAuth(ws, auth);
+    const listener = await createDocListener(ws, pool, { auth });
+    try {
+      const token = async (email: string) => {
+        const r = await auth.actions!.register({ name: email, email, password: "pw" }, mockClient());
+        if (!("result" in r)) throw new Error("register failed");
+        return r.result.token as string;
+      };
+      const ada = await token("ada@example.com");
+      const bo = await token("bo@example.com");
+      const client = socket({ clientId: "c1" });
+      const call = (method: string, params: object = {}) => sendAndAwait(ws, client, { action: "call", method, params });
+      const openBoth = async () => {
+        for (const doc of ["items:", "all-items:"]) expect((await sendAndAwait(ws, client, { action: "open", doc })).error).toBeUndefined();
+      };
+      const held = () => [...client.subscriptions].sort();
+
+      expect((await call("authenticate", { token: ada })).result).toBeDefined();
+      await openBoth();
+      expect(held()).toEqual(["all-items:", "items:"]);
+
+      expect((await call("logout")).result).toEqual({ ack: true });
+      expect(held()).toEqual([]);
+      expect([...((client.data.channels as Set<string>) ?? [])]).toEqual([]);
+
+      expect((await call("authenticate", { token: ada })).result).toBeDefined();
+      expect(held()).toEqual([]);   // nothing carried over: open again
+      await openBoth();
+      expect(held()).toEqual(["all-items:", "items:"]);
+
+      expect((await call("authenticate", { token: bo })).result).toBeDefined();   // a switch, with no logout
+      expect(held()).toEqual([]);
+    } finally {
+      await listener.destroy();
+      clearRegistry();
+      await pool.query("DELETE FROM _delta_docs WHERE prefix = 'all-items:'");
+    }
   });
 });
