@@ -85,8 +85,9 @@ type Rows = Record<string, Record<string, any>>;
 
 /**
  * The custom documents of one registration, over `handle`, and the rule a
- * socket hears any document by. `answers`: may this registration answer a
- * name by a prefix this long (SQLite: another registration's longer one may).
+ * socket hears any document by. `answers`: may a custom doc answer a name by a
+ * prefix this long (not where a longer one, a table document's or another
+ * registration's, matches it).
  */
 export function createCustomDocs<I, H>(opts: {
   defs: CustomDoc<any, I, H>[];

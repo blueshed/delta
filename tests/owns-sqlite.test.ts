@@ -170,6 +170,21 @@ describe("sqlite and json: several registrations on one server, one name", () =>
       expect(() => register([...pathDocs, defineDoc("fo-board:", { root: "weddings", include: ["tags"] })], [])).toThrow(/"fo-board:" names two documents/);
       register(pathDocs, [sqliteInbox]);   // none of the refused held a prefix
     });
+    test(`${kind}: the longest prefix answers, a custom document's or a table document's: a shorter custom one never answers for a table one`, async () => {
+      const local = createLocal();
+      const db = new Database(":memory:");
+      createTables(db, pathSchema);
+      importTables(db, pathSchema, pathSeed);
+      const short = { ...sqliteInbox, prefix: "fo-b" };
+      if (kind === "sqlite") registerDocs(local.server, db, pathSchema, pathDocs, [short], {});
+      else {
+        const file = join(mkdtempSync(join(tmpdir(), "delta-owns-")), "data.json");
+        json.importTables(file, pathSchema, pathSeed);
+        json.registerDocs(local.server, file, pathSchema, pathDocs, [short], {});
+      }
+      expect((await local.call("open", { doc: "fo-board:1" })).result.weddings).toEqual({ id: 1, name: "ours" });
+      expect((await local.call("open", { doc: "fo-bnobody" })).result.households).toEqual({});
+    });
   }
 });
 

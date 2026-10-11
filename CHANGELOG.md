@@ -74,6 +74,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refused registration holds no prefix. A `registerDocType` of a prefix registered already replaces
   the earlier type, where it was kept beside it and the earlier went on answering: a server module
   run again in one process (`bun --hot`) registers the latest code.
+- **The longest prefix answers a name, a custom document's or a table document's, on every
+  backend.** Custom documents are asked first, so a shorter custom prefix answered for a longer
+  table one: a custom `fo-b` opened `fo-board:1`. A custom document now answers only where no
+  longer prefix matches the name (SQLite and the JSON file: any of the server's registrations;
+  Postgres: a registered type).
 - **A time in a document's name (`at:`) reads the whole document as it stood then, on every
   backend.** On Postgres `delta_open` read the included collections at that time but the root as it
   is now; SQLite and the JSON file ignored the time and read it all as it is now. Now each reads

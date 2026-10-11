@@ -62,6 +62,16 @@ describe("pglite: one prefix, one document (#76)", () => {
     await expect(listen([{ ...postgresInbox, prefix: "fo-board:" }])).rejects.toThrow(/"fo-board:" names two documents/);
   });
 
+  test("the longest prefix answers, a custom document's or a table document's: a shorter custom one never answers for a table one", async () => {
+    await pool.query(`TRUNCATE ${tables.join(", ")} RESTART IDENTITY`);
+    await importTables(pool, pathSchema, pathSeed);
+    for (const def of pathDocs) registerDocType(docTypeFromDef(def, pool));
+    const local = createLocal();
+    listeners.push(await createDocListener(local.server, pool, { custom: [{ ...postgresInbox, prefix: "fo-b" }] }));
+    expect((await local.call("open", { doc: "fo-board:1" })).result.weddings).toEqual({ id: 1, name: "ours" });
+    expect((await local.call("open", { doc: "fo-bnobody" })).result.households).toEqual({});
+  });
+
   test("a document type registered again (a hot reload) replaces the earlier: the latest answers", async () => {
     registerDocType(docTypeFromDef(pathDocs[0]!, pool));
     const again = { ...docTypeFromDef(pathDocs[0]!, pool), open: async () => ({ result: { again: true }, version: 0 }) };

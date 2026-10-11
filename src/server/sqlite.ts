@@ -90,8 +90,10 @@ const registrations = new WeakMap<object, Map<symbol, string[]>>();
 
 /**
  * Claim `prefixes` on `ws` for one registration (refused if one comes twice, or
- * another registration holds one of them), and answer whether a name is this registration's: whether no other
- * registration's prefix matching it is longer than `mine`, the length of its own.
+ * another registration holds one of them), and answer whether a document of
+ * prefix length `mine` answers a name: whether no prefix on the server matching
+ * it is longer -- another registration's, or this one's other kind (a custom
+ * document's or a table document's).
  */
 function claim(ws: object, prefixes: string[]): (docName: string, mine: number) => boolean {
   assertOnePrefix(prefixes);
@@ -104,10 +106,7 @@ function claim(ws: object, prefixes: string[]): (docName: string, mine: number) 
   onServer.set(registration, prefixes);
   registrations.set(ws, onServer);
   return (docName, mine) => {
-    if (onServer.size === 1) return true;
-    for (const [who, theirs] of onServer) {
-      if (who !== registration && theirs.some((p) => p.length > mine && docName.startsWith(p))) return false;
-    }
+    for (const theirs of onServer.values()) if (theirs.some((p) => p.length > mine && docName.startsWith(p))) return false;
     return true;
   };
 }

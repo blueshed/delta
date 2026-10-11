@@ -166,8 +166,12 @@ export async function createDocListener<I = unknown>(
   // write tells it -- and who may still hear any document (todo #17): a change
   // told asks the gate and `owns` again of each socket it is told to (`owns`
   // once per identity per change), so what a change costs is the identities a
-  // document has open, not its sockets. Without auth nothing is asked.
-  const custom = createCustomDocs<I, Pool>({ defs: opts?.custom ?? [], handle: pool, auth, publish: (channel, data) => ws.publish(channel, data), log });
+  // document has open, not its sockets. Without auth nothing is asked. The
+  // longest prefix answers a name: a type's longer than a custom doc's wins.
+  const custom = createCustomDocs<I, Pool>({
+    defs: opts?.custom ?? [], handle: pool, auth, publish: (channel, data) => ws.publish(channel, data), log,
+    answers: (docName, length) => (resolveDoc(docName)?.type.prefix.length ?? 0) <= length,
+  });
   const ownsOf = (docName: string): Owns<I> | undefined => {
     const type = resolveDoc(docName)?.type;
     return type?.owns ? (identity, name) => type.owns!(identity, name) : undefined;
