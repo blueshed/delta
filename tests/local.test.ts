@@ -148,14 +148,6 @@ describe("in process, an answer is the caller's own, as over the socket", () => 
     expect(JSON.stringify((await local.call("open", { doc: "here:a" })).result)).not.toContain("MUTATED");
   });
 
-  test("SQLite, the cached copy", async () => {
-    const { local } = setup();
-    await local.call("open", { doc: "room:a" });
-    await local.call("delta", { doc: "room:a", ops: [{ op: "add", path: "/messages/m1", value: { text: "hi" } }, { op: "add", path: "/messages/m2", value: { text: "yo" } }] });
-    await ownAnswer(local, "room:a", [{ op: "replace", path: "/messages/m1/text", value: "edited" }, { op: "remove", path: "/messages/m2" }],
-      (kept) => { kept.messages.m1.text = "MUTATED"; kept.rooms.topic = "MUTATED"; });
-  });
-
   test("the copy keeps what is not plain data as it is: an own __proto__ stays a key, a Date a Date, a function handed over", async () => {
     const local = createLocal();
     const fn = () => 1;

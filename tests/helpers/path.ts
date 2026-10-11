@@ -18,7 +18,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { applyOps } from "../../src/core";
-import { defineDoc, defineSchema } from "../../src/schema";
+import { defineDoc, defineSchema, type Snapshot } from "../../src/schema";
 import { waitFor } from "../setup";
 
 // ---------------------------------------------------------------------------
@@ -158,15 +158,7 @@ export const postgresMenuCard = menuCardDoc(async (pool: any, id: number) => (aw
   `SELECT jsonb_build_object('wedding', w.name, 'courses', COALESCE((SELECT jsonb_agg(c.name ORDER BY c.id) FROM ${coursesTable} c WHERE c.weddings_id = w.id), '[]'::jsonb)) AS doc FROM ${weddingsTable} w WHERE w.id = $1`,
   [id])).rows[0]?.doc ?? null);
 
-/** Rows as every backend is seeded with them: through `importTables`, which sets each sequence past its rows. */
-export interface Snapshot {
-  /** Rows by collection key, each with its id (a number) and its parent key. */
-  tables: Record<string, Record<string, unknown>[]>;
-  /** The last id each collection has minted; missing, the largest id among its rows. */
-  sequences?: Record<string, number>;
-}
-
-/** Wedding 2 is the bystander. The temporal note began long ago. */
+/** Rows as every backend is seeded with them, through `importTables`. Wedding 2 is the bystander. The temporal note began long ago. */
 export const pathSeed: Snapshot = {
   tables: {
     weddings: [{ id: 1, name: "ours" }, { id: 2, name: "theirs" }],

@@ -138,6 +138,15 @@ function runClientDropHooks(client: any): void {
   }
 }
 
+/**
+ * What a failed request is answered with: an error that carries its wire code
+ * (a refusal: 400, 404...) with it, anything else as the server's own (500).
+ * @internal
+ */
+export function failure(err: any): { code: number; message: string } {
+  return { code: typeof err?.code === "number" ? err.code : 500, message: String(err?.message ?? err) };
+}
+
 // ---------------------------------------------------------------------------
 // WebSocket server
 // ---------------------------------------------------------------------------
@@ -229,16 +238,6 @@ export function createWs(opts?: WsOptions): WsServer {
   const identityCalls = new Set<string>();
   const lines = new WeakMap<object, Line>();
   const gone = new WeakSet<object>();
-
-  function lineOf(ws: any): Line {
-    let line = lines.get(ws);
-    if (!line) lines.set(ws, (line = { running: new Set(), held: null, bytes: 0 }));
-    return line;
-  }
-
-  /** A frame's size on the wire, as Bun's `maxPayloadLength` counts it. */
-  const sizeOf = (raw: any): number =>
-    typeof raw === "string" ? Buffer.byteLength(raw) : (raw?.byteLength ?? 0);
 
   /** Run one message on its socket's line: it is running until it settles. */
   function start(ws: any, raw: any, line: Line): Promise<void> {
@@ -344,7 +343,7 @@ export function createWs(opts?: WsOptions): WsServer {
       // answered with it; anything else is the server's own (500).
       if (id)
         ws.send(
-          JSON.stringify({ id, error: { code: typeof err?.code === "number" ? err.code : 500, message: err.message } }),
+          JSON.stringify({ id, error: failure(err) }),
         );
     } finally {
       if (holds) release(ws, line!);
@@ -440,11 +439,12 @@ export function createWs(opts?: WsOptions): WsServer {
       message(ws: any, raw: any) {
         if (gone.has(ws)) return;   // closed, or closing for holding too many: nothing more of it runs
         if (!identityCalls.size) return receive(ws, raw);   // nothing changes who a socket is: nothing waits
-        const line = lineOf(ws);
+        let line = lines.get(ws);
+        if (!line) lines.set(ws, (line = { running: new Set(), held: null, bytes: 0 }));
         const held = line.held;
         if (!held) return start(ws, raw, line);
         if (held.length >= maxHeld) return refuseHeld(ws, line, `${maxHeld} messages`);
-        const size = sizeOf(raw);
+        const size = typeof raw === "string" ? Buffer.byteLength(raw) : (raw?.byteLength ?? 0);   // as Bun's maxPayloadLength counts it
         if (line.bytes + size > maxHeldBytes) return refuseHeld(ws, line, `${maxHeldBytes} bytes`);
         line.bytes += size;
         return new Promise<void>((done) => held.push({ raw, size, done }));

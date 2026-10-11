@@ -38,6 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`remove /items/1/text`, `add /tasks/t1/done/extra`). `validateOps` took them, and the write
   then threw, so the writer was answered 500.
 
+### Internal
+
+- A simplicity pass over the core (todo #68): dead branches and duplicated tests gone, one
+  `failure(err)` answer, `db.transaction().immediate()` for the write lock.
+
 ## [0.11.0] - 2026-09-28
 
 ### Changed

@@ -17,7 +17,7 @@
  * the backend is a JSON file or SQLite.
  */
 import type { WsServer } from "./server";
-import { trackSubscribe, trackUnsubscribe, onClientDrop } from "./server";
+import { trackSubscribe, trackUnsubscribe, onClientDrop, failure } from "./server";
 import { authless, isAuthError, ownerless, type DeltaAuth } from "./auth";
 import { applyOps as deltaApplyOps, type DeltaOp, splitPath, joinPath } from "../core";
 import { createLogger } from "./logger";
@@ -332,21 +332,16 @@ export function registerDocs<I = unknown>(
    * its walk). Inside a caller's own transaction, it runs in that.
    */
   const underLock = (handler: (msg: any, client: any, respond: (r: any) => void) => void) =>
-    (msg: any, client: any, respond: (r: any) => void) => {
-      if (db.inTransaction) return handler(msg, client, respond);
-      db.run("BEGIN IMMEDIATE");
-      try { handler(msg, client, respond); db.run("COMMIT"); }
-      catch (err) { if (db.inTransaction) db.run("ROLLBACK"); throw err; }
-    };
+    (msg: any, client: any, respond: (r: any) => void) => db.transaction(() => handler(msg, client, respond)).immediate();
 
   /** Who a client is, to a custom document: the gate's identity with `auth`, else undefined -- as on Postgres. */
   const identityOf = (client: any): I | undefined => (auth ? writerOf(client) : undefined);
 
   /** An answer that may come later: `go` once `ok` says yes (awaited when it is a promise), else 404 -- not there for this identity. */
   const whenOwned = (ok: boolean | Promise<boolean>, respond: (r: any) => void, go: () => void): void | Promise<void> => {
-    const no = () => respond({ error: { code: 404, message: "Not found" } });
-    if (typeof (ok as any)?.then !== "function") return ok ? go() : no();
-    return (ok as Promise<boolean>).then((yes) => (yes ? go() : no()), (err: any) => respond({ error: { code: 500, message: String(err?.message ?? err) } }));
+    const no = () => respond({ error: NOT_FOUND });
+    if (!isPromise(ok)) return ok ? go() : no();
+    return ok.then((yes) => (yes ? go() : no()), (err: any) => respond({ error: failure(err) }));
   };
 
   /**
@@ -384,11 +379,7 @@ export function registerDocs<I = unknown>(
   }
 
   /** A single document whose root row is not there: the root absent, each included collection empty. */
-  function rootless(def: DocDef): any {
-    const doc: any = { [def.root]: null };
-    for (const coll of def.include) doc[coll] = {};
-    return doc;
-  }
+  const rootless = (def: DocDef, docId: string): any => ({ ...emptyDoc(def, docId), [def.root]: null });
 
   function ensureImpliedRoot(def: DocDef, doc: any): void {
     const rootTable = schema.tables[def.root]!;
@@ -537,10 +528,9 @@ export function registerDocs<I = unknown>(
     const waiting: Promise<void>[] = [];
     for (const def of customByPrefix.values()) {
       if (!def.watch.some((c) => touched.has(c))) continue;
-      const owns: Owns | undefined = def.owns ? (identity, name) => def.owns!(identity, name) : undefined;
       const each = def.recompute
-        ? [...subscriptions].filter(([name]) => findCustom(name)?.def === def).map(([name, subs]) => letGo(name, subs, owns))
-        : [...views.values()].filter((view) => findCustom(view.docName)?.def === def).map((view) => letGo(view.docName, view.subs, owns, identityKey(view.identity)));
+        ? [...subscriptions].filter(([name]) => findCustom(name)?.def === def).map(([name, subs]) => letGo(name, subs, def.owns))
+        : [...views.values()].filter((view) => findCustom(view.docName)?.def === def).map((view) => letGo(view.docName, view.subs, def.owns, identityKey(view.identity)));
       for (const w of each) if (w) waiting.push(w);
     }
     if (waiting.length) return Promise.all(waiting).then(() => {});
@@ -855,8 +845,6 @@ export function registerDocs<I = unknown>(
         const present = held(table, id);
         if (!present) refuse(404, `Row not found: ${collKey}/${id}`);   // not this document's, or gone from it earlier in this write
         run = { table, id, root, key, before: holders(collKey, present, docName), row: { ...present } };
-      } else if (!holds(def, scope, collKey, run.row)) {
-        refuse(404, `Row not found: ${collKey}/${id}`);   // the run moved it out of the document: as held() would read it
       }
       // A parent key written moves the row, and only under a parent this
       // document holds, as an add names one: through it, a row is never moved
@@ -1076,7 +1064,7 @@ export function registerDocs<I = unknown>(
         const criteria = customCriteria.get(docName) ?? customMatch.def.parse(customMatch.docId);
         try { doc = customMatch.def.recompute(db, criteria, identityOf(client)); }
         catch (err: any) { log.error(`open custom ${docName} failed: ${err.message}`); return respond({ error: { code: 500, message: err.message } }); }
-        if (doc == null) return respond({ error: { code: 404, message: "Not found" } });
+        if (doc == null) return respond({ error: NOT_FOUND });
         customCriteria.set(docName, criteria);
       } else {
         // Membership: this identity's view of the name, queried as it.
@@ -1107,7 +1095,7 @@ export function registerDocs<I = unknown>(
 
     let doc: any;
     try { doc = load(docName, match.def, match.docId); }
-    catch (err: any) { return respond({ error: { code: typeof err.code === "number" ? err.code : 500, message: named(err).message } }); }
+    catch (err: any) { return respond({ error: failure(named(err)) }); }
     if (!doc) {
       respond({ error: { code: 404, message: `Not found: no ${match.def.root} row ${match.docId}. Make the row first, or declare the document implied: true` } });
       return;
@@ -1190,7 +1178,7 @@ export function registerDocs<I = unknown>(
       written = db.transaction(() => {
         if (heardElsewhere()) {
           reloadEvicted();
-          doc = load(docName, def, docName.slice(def.prefix.length)) ?? rootless(def);
+          doc = load(docName, def, docName.slice(def.prefix.length)) ?? rootless(def, docName.slice(def.prefix.length));
           snapshot = structuredClone(doc);
         }
         if (implied.has(docName) && !addsRoot) ensureImpliedRoot(def, doc);
@@ -1206,7 +1194,7 @@ export function registerDocs<I = unknown>(
       named(err);
       log.error(`delta failed: ${err.message}`);
       // A refusal carries its wire code (`refuse`); anything else is the server's.
-      return { error: { code: typeof err.code === "number" ? err.code : 500, message: err.message } };
+      return { error: failure(err) };
     }
 
     // Committed. The telling is a post-commit side effect: a failure here must
@@ -1335,8 +1323,7 @@ export function registerDocs<I = unknown>(
       reloadEvicted();   // a walk is a write: its fan-out needs every open doc's copy, as delta's does
       // a single document whose root is gone (removed through it) is walked from
       // its root absent, as Postgres reads it: an undo of the removal puts it back
-      const doc = match && (load(entry.doc, match.def, match.docId) ?? rootless(match.def));
-      if (!match || !doc) return respond({ error: { code: 404, message: `Not found: ${entry.doc}` } });
+      const doc = load(entry.doc, match.def, match.docId) ?? rootless(match.def, match.docId);
       try {
         // an implied document whose root row is not written yet holds no root to guard
         // what removing a row would take with it: the rows its cascade reaches in this document
@@ -1389,8 +1376,8 @@ export function registerDocs<I = unknown>(
       if (!match) return;
       let there: unknown;
       try { there = match.def.implied || loadDocFromSql(match.def, resolveScope(match.def, match.docId)); }
-      catch (err: any) { return respond({ error: { code: typeof err.code === "number" ? err.code : 500, message: named(err).message } }); }
-      if (!there) return respond({ error: { code: 404, message: "Not found" } });
+      catch (err: any) { return respond({ error: failure(named(err)) }); }
+      if (!there) return respond({ error: NOT_FOUND });
       respond({ result: ledger.history(msg.doc, cursorOf(msg, client), msg.limit) });
     }));
   }
@@ -1402,8 +1389,8 @@ export function registerDocs<I = unknown>(
     if (!msg.at) return respond({ error: { code: 400, message: "at is required" } });
     let doc: any;
     try { doc = loadDocAt(db, schema, match.def, match.docId, String(msg.at)); }
-    catch (err: any) { return respond({ error: { code: typeof err.code === "number" ? err.code : 500, message: named(err).message } }); }
-    respond(doc ? { result: doc } : { error: { code: 404, message: "Not found" } });
+    catch (err: any) { return respond({ error: failure(named(err)) }); }
+    respond(doc ? { result: doc } : { error: NOT_FOUND });
   }));
 
   ws.on("close", guarded((msg, client, respond) => {
@@ -2221,7 +2208,7 @@ function removeRow(
   id: string | number,
   doc: any,
   def: DocDef,
-  ts: string = now(),
+  ts: string,
 ): DeltaOp[] {
   const ops: DeltaOp[] = [];
 

@@ -112,8 +112,7 @@ export function createLocal(): Local {
   function deliver(channel: string, data: any, to?: { identity: unknown }): void {
     for (const fn of listeners) {
       try {
-        if (to) fn(channel, own(data), to);
-        else fn(channel, own(data));
+        fn(channel, own(data), to);
       } catch (err: any) {
         log.error(`fan-out failed (write committed): a listener on ${channel} threw: ${err?.message ?? String(err)}`);
       }

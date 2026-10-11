@@ -355,16 +355,7 @@ export function connectWs(
       .then((state) => entry.onOpen(state))
       .catch((err: any) => {
         docLog.error(`re-open ${name}: ${err?.message ?? String(err)}`);
-        if (docs.get(name) !== entry || entry.data.peek() === null) return;
-        entry.serverVersion = undefined;
-        for (const handler of entry.opsHandlers) {
-          try { handler([{ op: "replace", path: "", value: null }]); }
-          catch (e: any) { docLog.error(`onOps handler threw: ${e.message}`); }
-        }
-        batch(() => {
-          entry.data.set(null);
-          entry.dataVersion.set(entry.dataVersion.peek() + 1);
-        });
+        if (docs.get(name) === entry && entry.data.peek() !== null) entry.onOpen(null);
       });
   }
 

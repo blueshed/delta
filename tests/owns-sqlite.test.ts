@@ -12,7 +12,7 @@ import * as json from "../src/server/json";
 import { createWs } from "../src/server/server";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
-import { household, pathDocs, pathSchema, pathSeed, sqliteInbox, sqliteMenuCard } from "./helpers/path";
+import { pathDocs, pathSchema, pathSeed, sqliteInbox, sqliteMenuCard } from "./helpers/path";
 import { auth, customOwns, mineDoc, ownsByName, ownsCases, whoamiDoc, type Me, type OwnsBackend } from "./helpers/owns";
 import { defineDoc } from "../src/schema";
 
@@ -57,39 +57,6 @@ describe("json", () => ownsCases(over((local, opts) => {
   json.importTables(file, pathSchema, pathSeed);
   json.registerDocs(local.server, file, pathSchema, pathDocs, custom(opts.custom), { ledger: true, auth: opts.noAuth ? undefined : auth, owns: opts.owns, shared: opts.shared });
 })));
-
-/**
- * Over sockets, where a broadcast reaches every socket subscribed to the name:
- * two identities on one membership name each hear only their own view's
- * changes -- one view's rows never reach the other's socket.
- */
-describe("sqlite: two identities on one membership name, over sockets", () => {
-  test("each socket hears its own view's change, and not the other's", async () => {
-    const db = new Database(":memory:");
-    createTables(db, pathSchema);
-    importTables(db, pathSchema, pathSeed);
-    const ws = createWs();
-    const sockets: any[] = [];
-    ws.setServer({ publish: (channel: string, raw: string) => { for (const s of sockets) if (s.subs.has(channel)) s.send(raw); } });
-    registerDocs(ws, db, pathSchema, pathDocs, custom("owned"), { ledger: true, auth, owns: (me: Me, name: string) => name.endsWith(`:${me.id}`) || (me.id === 2 && name === "fo-all-households:") });
-    const socket = (identity: Me) => {
-      const s = { data: { identity, clientId: `c${identity.id}` }, readyState: 1, subs: new Set<string>(), heard: [] as any[],
-        subscribe(ch: string) { this.subs.add(ch); }, unsubscribe(ch: string) { this.subs.delete(ch); }, send(raw: string) { this.heard.push(JSON.parse(raw)); } };
-      sockets.push(s);
-      return s;
-    };
-    const ask = async (s: any, msg: Record<string, unknown>) => { await ws.websocket.message(s, JSON.stringify({ id: 1, ...msg })); return s.heard.pop(); };
-    const adaSock = socket({ id: 1 });
-    const bobSock = socket({ id: 2 });
-    expect(Object.keys((await ask(adaSock, { action: "open", doc: "fo-mine:x" })).result.households)).toEqual(["1", "2"]);
-    expect(Object.keys((await ask(bobSock, { action: "open", doc: "fo-mine:x" })).result.households)).toEqual(["3"]);
-    expect((await ask(bobSock, { action: "open", doc: "fo-all-households:" })).error).toBeUndefined();
-    expect((await ask(bobSock, { action: "delta", doc: "fo-all-households:", ops: [{ op: "replace", path: "/households/3/weddings_id", value: 1 }] })).error).toBeUndefined();
-    const mine = (s: any) => s.heard.filter((m: any) => m.doc === "fo-mine:x").map((m: any) => m.ops);
-    expect(mine(adaSock)).toEqual([[{ op: "add", path: "/households/3", value: household(3, "c@x") }]]);
-    expect(mine(bobSock)).toEqual([[{ op: "remove", path: "/households/3" }]]);
-  });
-});
 
 /**
  * Over sockets: a socket taken off a document, or signed out since, hears no
