@@ -2132,6 +2132,35 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
+    test("a course moved and renamed in one run of replaces is told once, as the run leaves it, and carries its drink as it is (todo #62)", async () => {
+      const b = backend();
+      const docs = ["fo-board:1", "fo-board:2", "fo-drinks:1", "fo-drinks:2", "fo-catalog:"];
+      const copies = await openAll(b.process, docs);
+      await write(b.process, "fo-catalog:", [
+        { op: "replace", path: "/courses/1/weddings_id", value: 2 },
+        { op: "replace", path: "/courses/1/name", value: "Broth" },
+      ]);
+      const moved = course(1, "Broth", 2);
+      await expectTold(b, "fo-catalog:", [[{ op: "replace", path: "/courses/1", value: moved }]]);
+      await expectTold(b, "fo-board:1", [[{ op: "remove", path: "/courses/1" }, { op: "remove", path: "/drinks/1" }]]);
+      await expectTold(b, "fo-board:2", [[{ op: "add", path: "/courses/1", value: moved }, { op: "add", path: "/drinks/1", value: drink(1, 1, "Sherry") }]]);
+      await expectTold(b, "fo-drinks:2", [[{ op: "add", path: "/drinks/1", value: drink(1, 1, "Sherry") }]]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a course moved and moved back in one run of replaces goes nowhere: the other wedding's documents hear nothing (todo #62)", async () => {
+      const b = backend();
+      const docs = ["fo-board:1", "fo-board:2", "fo-drinks:1", "fo-drinks:2", "fo-catalog:"];
+      const copies = await openAll(b.process, docs);
+      await write(b.process, "fo-catalog:", [
+        { op: "replace", path: "/courses/1/weddings_id", value: 2 },
+        { op: "replace", path: "/courses/1/weddings_id", value: 1 },
+      ]);
+      await expectTold(b, "fo-board:1", [[{ op: "replace", path: "/courses/1", value: course(1, "Soup") }]]);
+      await expectSilent(b, "fo-board:2", "fo-drinks:1", "fo-drinks:2");
+      await assertCopiesHold(b, copies);
+    });
+
     test("a single document's root is not moved through it to a parent it does not hold -- a field, the root merged, or the row by its id -- (404, the write undone, nobody told), as its other rows are not; written as it is, it is no move (0.10.0 review)", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-household:1", "fo-board:1", "fo-board:2", "fo-course:1", "fo-all-households:"]);
