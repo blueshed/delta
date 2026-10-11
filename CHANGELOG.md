@@ -23,9 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ledger: undo history starts fresh on the next backend. The broadcasts without `v` are the
   free-form document's, SQLite's and the JSON file's without a ledger, and custom documents'
   (fan-out carries `v` wherever the backend versions). README no longer says the package fits
-  in one sitting. New tests run README's "Try it" as written, the skill's recipe over two
-  sockets, `examples/shared-state`, a memory document beside a Postgres one, and `jwtAuth`'s
-  logout and identity switch.
+  in one sitting. New tests run README's "Try it" as written and compare its output; run
+  the skill's three files as written (its server, and two browsers in happy-dom: one sends, the
+  other's page shows it); start `examples/shared-state` and pass a message between two sockets;
+  and check a memory document beside a Postgres one, and `jwtAuth`'s logout and identity switch.
 
 ### Fixed
 

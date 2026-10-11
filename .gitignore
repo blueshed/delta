@@ -44,3 +44,4 @@ examples/shared-state/chat-room.json
 
 # A README example a test writes and runs (tests/readme.test.ts)
 tests/.try-readme-*.ts
+tests/.recipe-*/
