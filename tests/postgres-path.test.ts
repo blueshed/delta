@@ -137,10 +137,10 @@ describe("postgres: what only a database shared by processes has", () => {
       await new Promise((r) => setTimeout(r, 200));
       const theirs = other.query(`SELECT delta_apply('fo-notes:1', '[{"op":"add","path":"/notes/11","value":{"text":"b"}}]'::jsonb)`).then(() => "taken", (err: any) => err.code);
       const [mine, done] = await Promise.all([answer, theirs]);
-      // the first to wait is the first to find the cycle: this write gives way. The
-      // other then finds note 11 spent -- the serial passed it for this write, and
-      // a serial does not roll back -- and is refused as already there (#71)
-      expect({ mine: mine.error?.code, deadlock: /deadlock/i.test(mine.error?.message), theirs: done }).toEqual({ mine: 409, deadlock: true, theirs: "23505" });
+      // the first to wait is the first to find the cycle: this write gives way. It
+      // named note 11 but passed no serial (that comes once a write is done), so the
+      // other finds 11 new and takes it (#71)
+      expect({ mine: mine.error?.code, deadlock: /deadlock/i.test(mine.error?.message), theirs: done }).toEqual({ mine: 409, deadlock: true, theirs: "taken" });
       await other.query("COMMIT");
     } finally {
       await other.query("ROLLBACK").catch(() => {});
