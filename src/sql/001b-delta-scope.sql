@@ -514,6 +514,16 @@ $$ LANGUAGE plpgsql STABLE;
 -- an open of that prefix holds its name and waits for it (_delta_hold), so a
 -- name held from now is seen here, and a write that asked before is read by
 -- the open. VOLATILE, so the question is asked after the lock.
+--
+-- SECURITY DEFINER (todo #33): who holds a row is worked out as the functions'
+-- owner, not the writer, so a parent row the writer's RLS hides (another's
+-- list, under another's board) does not hide the document that holds it. It
+-- answers document names, never a row; each document is told only what it
+-- holds (a caller may ask it of a row it makes up, and learn which open
+-- documents would hold it). It sees past RLS where its owner does: the role
+-- that applied the framework, owning the tables without FORCE ROW LEVEL
+-- SECURITY, or with BYPASSRLS; applied as the app's own role, it sees what
+-- the writer sees, as before.
 CREATE OR REPLACE FUNCTION _delta_holders(p_coll TEXT, p_row JSONB, p_writer TEXT)
 RETURNS TEXT[] AS $$
 DECLARE
@@ -552,7 +562,7 @@ BEGIN
   END LOOP;
   RETURN v_names;
 END;
-$$ LANGUAGE plpgsql VOLATILE;
+$$ LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path FROM CURRENT;
 
 -- ---------------------------------------------------------------------------
 -- _delta_strip_temporal: remove valid_from/valid_to/override from a JSONB row

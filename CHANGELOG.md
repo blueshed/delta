@@ -41,6 +41,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Postgres: who is told of a write does not depend on what the writer may read (todo #33).**
+  The documents that hold a changed row were worked out as the writer, so a parent row the
+  writer's RLS hid -- Alice's list, under Alice's board -- hid the document that holds it: Bob's
+  card on her list was never told to her open board. `_delta_holders` (`001b`) is now `SECURITY
+  DEFINER`: it runs as the role that applied the framework, answers document names, never rows,
+  and each document is still told only what it holds. It sees past RLS where that role does (the
+  tables' owner without `FORCE ROW LEVEL SECURITY`, or `BYPASSRLS`); applied as the app's own
+  role, nothing changes. Apply the framework SQL again.
 - **Postgres: a write costs what is open, not every name ever opened (todo #73, #33's cost).**
   `_delta_holders` asked every name in `_delta_versions` -- a row for each document name ever
   opened, never pruned -- so a write through a scoped document with 10 open and 100,000 opened

@@ -22,6 +22,7 @@ import {
 import type { DeltaAuth } from "../src/server/auth";
 import { createWs, type WsServer } from "../src/server/server";
 import { setLogLevel } from "../src/server/logger";
+import { applyOps } from "../src/core";
 import { PG_URL, newPool, applyFramework, mockClient, sendAndAwait, type MockClient } from "./setup";
 
 setLogLevel("silent");
@@ -37,10 +38,19 @@ const auth: DeltaAuth<Id> = {
 const schema = defineSchema({
   rls_items: { columns: { owner_id: "integer", name: "text" }, temporal: false },
   rls_notes: { columns: { owner_id: "integer", text: "text" }, temporal: true },
+  // a board, its lists, and the cards on them: anyone may put a card on a list, which its board's owner then reads
+  rls_boards: { columns: { owner_id: "integer" }, temporal: false },
+  rls_lists: { parent: "rls_boards", columns: { owner_id: "integer" }, temporal: false },
+  rls_cards: { parent: "rls_lists", columns: { author_id: "integer", text: "text" }, temporal: false },
 });
 const everyone = defineDoc("rls-all:", { root: "rls_items", include: [] });
 const mine = defineDoc("rls-mine:", { root: "rls_items", include: [], scope: { owner_id: ":id" } });
 const notes = defineDoc("rls-notes:", { root: "rls_notes", include: [] });
+const board = defineDoc("rls-board:", { root: "rls_boards", include: ["rls_lists", "rls_cards"] });
+const cardsBy = defineDoc("rls-cards-by:", { root: "rls_cards", include: [], scope: { author_id: ":id" } });
+
+const TABLES = "rls_items, rls_notes, rls_boards, rls_lists, rls_cards";
+const SEQUENCES = "seq_rls_items, seq_rls_notes, seq_rls_boards, seq_rls_lists, seq_rls_cards";
 
 let admin: Pool;
 let app: Pool;
@@ -52,8 +62,8 @@ beforeAll(async () => {
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${ROLE}') THEN
       CREATE ROLE ${ROLE} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '${ROLE}';
     END IF; END $$;`);
-  await admin.query("DROP TABLE IF EXISTS rls_items, rls_notes CASCADE; DROP SEQUENCE IF EXISTS seq_rls_items, seq_rls_notes;");
-  await applySql(admin, generateSql(schema, [everyone, mine, notes]));
+  await admin.query(`DROP TABLE IF EXISTS ${TABLES} CASCADE; DROP SEQUENCE IF EXISTS ${SEQUENCES};`);
+  await applySql(admin, generateSql(schema, [everyone, mine, notes, board, cardsBy]));
   await admin.query(`
     ALTER TABLE rls_items ENABLE ROW LEVEL SECURITY;
     ALTER TABLE rls_items FORCE ROW LEVEL SECURITY;
@@ -67,6 +77,23 @@ beforeAll(async () => {
     CREATE POLICY rls_notes_owner ON rls_notes FOR ALL
       USING (owner_id = NULLIF(current_setting('app.user_id', true), '')::bigint)
       WITH CHECK (owner_id = NULLIF(current_setting('app.user_id', true), '')::bigint);
+    ALTER TABLE rls_boards ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE rls_boards FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS rls_boards_owner ON rls_boards;
+    CREATE POLICY rls_boards_owner ON rls_boards FOR ALL
+      USING (owner_id = NULLIF(current_setting('app.user_id', true), '')::bigint);
+    ALTER TABLE rls_lists ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE rls_lists FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS rls_lists_owner ON rls_lists;
+    CREATE POLICY rls_lists_owner ON rls_lists FOR ALL
+      USING (owner_id = NULLIF(current_setting('app.user_id', true), '')::bigint);
+    ALTER TABLE rls_cards ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE rls_cards FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS rls_cards_seen ON rls_cards;
+    CREATE POLICY rls_cards_seen ON rls_cards FOR ALL
+      USING (author_id = NULLIF(current_setting('app.user_id', true), '')::bigint
+             OR EXISTS (SELECT 1 FROM rls_lists l WHERE l.id = rls_lists_id))
+      WITH CHECK (author_id = NULLIF(current_setting('app.user_id', true), '')::bigint);
     GRANT USAGE ON SCHEMA public TO ${ROLE};
     GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${ROLE};
     GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ${ROLE};
@@ -79,8 +106,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app.end();
-  await admin.query("DROP TABLE IF EXISTS rls_items, rls_notes CASCADE; DROP SEQUENCE IF EXISTS seq_rls_items, seq_rls_notes;");
-  await admin.query("DELETE FROM _delta_docs WHERE prefix IN ('rls-all:', 'rls-mine:', 'rls-notes:')");
+  await admin.query(`DROP TABLE IF EXISTS ${TABLES} CASCADE; DROP SEQUENCE IF EXISTS ${SEQUENCES};`);
+  await admin.query("DELETE FROM _delta_docs WHERE prefix IN ('rls-all:', 'rls-mine:', 'rls-notes:', 'rls-board:', 'rls-cards-by:')");
   await admin.end();
 });
 
@@ -404,5 +431,35 @@ describe("a socket hears a document while it may open it (todo #17)", () => {
     expect(alice.subscriptions.has("rls-bag:team")).toBe(false);
     expect(alice.subscriptions.has("rls-tally:team")).toBe(false);
     expect(alice.sent.filter((m: any) => m.error).map((m: any) => [m.doc, m.error.code]).sort()).toEqual([["rls-bag:team", 404], ["rls-tally:team", 404]]);
+  });
+});
+
+describe("who is told is worked out whatever the writer may read (todo #33)", () => {
+  test("bob's card on alice's list is told to alice's board, though bob cannot see the list; his card on his own list is not", async () => {
+    await admin.query(`TRUNCATE rls_boards, rls_lists, rls_cards RESTART IDENTITY;
+      INSERT INTO rls_boards (id, owner_id) VALUES (1, 1), (2, 2);
+      INSERT INTO rls_lists (id, rls_boards_id, owner_id) VALUES (1, 1, 1), (2, 2, 2);`);
+    listener = await createDocListener(ws, app, { auth, types: [
+      docTypeFromDef(board, app, { auth, owns: (who, name) => name === `rls-board:${who.id}` }),
+      docTypeFromDef(cardsBy, app, { auth, owns: (who, name) => name === `rls-cards-by:${who.id}` }),
+    ] });
+    const alice = person(1);
+    const bob = person(2);
+    const open = async () => {
+      const { _v, ...doc } = (await sendAndAwait(ws, alice, { action: "open", doc: "rls-board:1" })).result;
+      return doc;
+    };
+    const copy = await open();
+    for (const [list, text] of [[1, "for alice"], [2, "bob's own"]] as const) {
+      const w = await sendAndAwait(ws, bob, { action: "delta", doc: "rls-cards-by:2", ops: [{ op: "add", path: "/rls_cards/-", value: { rls_lists_id: list, text } }] });
+      expect(w.error).toBeUndefined();
+    }
+    await settle();
+    // her copy, with what she was told, is what she reads afresh: bob's card on her list, and nothing she cannot read
+    for (const m of heard(alice, "rls-board:1")) applyOps(copy, m.ops);
+    const fresh = await open();
+    expect(copy).toEqual(fresh);
+    expect(Object.values(fresh.rls_cards).map((c: any) => c.text)).toEqual(["for alice"]);
+    expect(JSON.stringify(alice.sent)).not.toContain("bob's own");
   });
 });
