@@ -22,7 +22,7 @@ import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
 import { applyFramework, newPool, waitFor } from "./setup";
 import {
-  assertCopiesHold, course, expectTold, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresInbox, postgresMenuCard, postgresOpenSeats, readAll, told, write,
+  assertCopiesHold, course, expectTold, field, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresInbox, postgresMenuCard, postgresOpenSeats, readAll, told, write,
   type PathBackend, type PathProcess,
 } from "./helpers/path";
 
@@ -64,6 +64,11 @@ beforeEach(async () => {
     // LISTEN/NOTIFY over the wire: the write answers at its commit; what it notified is fetched and published after.
     quiet: () => new Promise((r) => setTimeout(r, 300)),
     exportTables: () => exportTables(pool, pathSchema),
+    storeSetsT: async () => {
+      await pool.query("CREATE FUNCTION fo_t() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.t := upper(NEW.email); RETURN NEW; END $$");
+      await pool.query("CREATE TRIGGER fo_t BEFORE INSERT OR UPDATE ON fo_households FOR EACH ROW EXECUTE FUNCTION fo_t()");
+      return async () => void await pool.query("DROP FUNCTION fo_t() CASCADE");
+    },
   };
 });
 
@@ -83,8 +88,8 @@ describe("postgres: what only a database shared by processes has", () => {
       { op: "replace", path: "/courses/1/name", value: "Broth" },
       { op: "replace", path: "/households/1/email", value: "new@x" },
     ]);
-    await expectTold(there, "fo-menu:1", [[{ op: "replace", path: "/courses/1", value: course(1, "Broth") }]]);
-    await expectTold(there, "fo-household:1", [[{ op: "replace", path: "/households", value: household(1, "new@x") }]]);
+    await expectTold(there, "fo-menu:1", [[field("/courses/1/name", "Broth")]]);
+    await expectTold(there, "fo-household:1", [[field("/households/email", "new@x")]]);
     await assertCopiesHold(backend, copies);
     await assertCopiesHold(there, theirs);
   });
@@ -93,7 +98,7 @@ describe("postgres: what only a database shared by processes has", () => {
     const before = (await backend.process.call("open", { doc: "fo-menu:1" })).result._v as number;
     await openAll(backend.process, ["fo-board:1", "fo-menu:1"]);
     await write(backend.process, "fo-board:1", [{ op: "replace", path: "/courses/1/name", value: "Broth" }]);
-    await expectTold(backend, "fo-menu:1", [[{ op: "replace", path: "/courses/1", value: course(1, "Broth") }]]);
+    await expectTold(backend, "fo-menu:1", [[field("/courses/1/name", "Broth")]]);
     const { rows } = await pool.query("SELECT version, ops FROM delta_fetch_ops($1, $2)", ["fo-menu:1", before]);
     expect(rows.map((r: any) => ({ v: Number(r.version), ops: r.ops }))).toEqual([{ v: before + 1, ops: told(backend.process, "fo-menu:1")[0] }]);
   });

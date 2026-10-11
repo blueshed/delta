@@ -190,6 +190,25 @@ function applyOne(doc: any, op: DeltaOp, undo: (() => void)[]): void {
   else obj[last] = op.value;
 }
 
+/** Deep equality of JSON values. */
+function same(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== "object" || typeof b !== "object" || Array.isArray(a) !== Array.isArray(b)) return false;
+  const ka = Object.keys(a);
+  return ka.length === Object.keys(b).length && ka.every((k) => same((a as any)[k], (b as any)[k]));
+}
+
+/**
+ * What a holder of a row is told when the row stays in its document: a replace
+ * of each field (`path` is the row's) whose value is not what it was, in field
+ * order by name -- set by the write, a default or a trigger alike. None when
+ * nothing changed. Every backend tells a row that stays so (todo #69).
+ */
+export function changedFields(path: string, was: Record<string, unknown>, now: Record<string, unknown>): DeltaOp[] {
+  return Object.keys(now).toSorted().filter((f) => !same(was[f], now[f]))
+    .map((f) => ({ op: "replace", path: path + joinPath(f), value: now[f] }));
+}
+
 /** Apply delta ops to a document in place: the whole batch, or (when an op throws) none of it. */
 export function applyOps(doc: any, ops: DeltaOp[]): void {
   const undo: (() => void)[] = [];

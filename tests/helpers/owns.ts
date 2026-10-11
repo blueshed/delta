@@ -8,7 +8,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { DeltaAuth } from "../../src/server/auth";
-import { expectTold, household, openAll, type PathBackend } from "./path";
+import { expectTold, field, household, openAll, type PathBackend } from "./path";
 
 export type Me = { id: number; email?: string };
 
@@ -206,7 +206,7 @@ export function ownsCases(backend: () => OwnsBackend): void {
       await me.call("open", { doc: "fo-board:1" });
       await openAll(p.backend.process, []);   // what the write tells, from here
       expect((await me.call("delta", { doc: "fo-board:1", ops: [{ op: "replace", path: "/households/2/email", value: "q@x" }] })).error).toBeUndefined();
-      await expectTold(p.backend, "fo-in:every", [[{ op: "replace", path: "/households/2", value: household(2, "q@x") }]]);
+      await expectTold(p.backend, "fo-in:every", [[field("/households/2/email", "q@x")]]);
       expect(p.backend.process.heard.filter((h) => h.channel === "fo-inbox:a@x")).toEqual([]);   // neither told a row nor let go
     });
 
@@ -219,11 +219,11 @@ export function ownsCases(backend: () => OwnsBackend): void {
       await p.as(ada).call("open", { doc: "fo-board:1" });
       await p.as(bob).call("open", { doc: "fo-board:2" });
       expect((await p.as(ada).call("delta", { doc: "fo-board:1", ops: [{ op: "replace", path: "/households/1/email", value: "z@x" }] })).error).toBeUndefined();
-      await expectTold(p.backend, "fo-mine:x", [[{ op: "replace", path: "/households/1", value: household(1, "z@x") }]]);
+      await expectTold(p.backend, "fo-mine:x", [[field("/households/1/email", "z@x")]]);
       await p.as(bob).call("open", { doc: "fo-all-households:" });
       expect((await p.as(bob).call("delta", { doc: "fo-all-households:", ops: [{ op: "replace", path: "/households/3/weddings_id", value: 1 }] })).error).toBeUndefined();   // moved through a list: it holds both weddings' households
       await expectTold(p.backend, "fo-mine:x", [
-        [{ op: "replace", path: "/households/1", value: household(1, "z@x") }],
+        [field("/households/1/email", "z@x")],
         [{ op: "add", path: "/households/3", value: household(3, "c@x") }],   // ada's
         [{ op: "remove", path: "/households/3" }],                                                // bob's
       ]);

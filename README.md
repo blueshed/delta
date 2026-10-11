@@ -72,8 +72,8 @@ Run `bun try.ts`:
 
 ```
 list:1 v1 [{"op":"add","path":"/items/1","value":{"id":1,"lists_id":1,"text":"milk","done":false}}]
-list:1 v2 [{"op":"replace","path":"/items/1","value":{"id":1,"lists_id":1,"text":"milk","done":true}}]
-list:1 v3 [{"op":"replace","path":"/items/1","value":{"id":1,"lists_id":1,"text":"milk","done":false}}]
+list:1 v2 [{"op":"replace","path":"/items/1/done","value":true}]
+list:1 v3 [{"op":"replace","path":"/items/1/done","value":false}]
 {
   "1": {
     id: 1,
@@ -84,7 +84,8 @@ list:1 v3 [{"op":"replace","path":"/items/1","value":{"id":1,"lists_id":1,"text"
 }
 ```
 
-Three writes, each heard as a change with its version. The server named the new row `1`: ids are
+Three writes, each heard as a change with its version, saying what changed: a row that arrives
+whole, a field that changes by itself. The server named the new row `1`: ids are
 serial numbers on every table backend (the JSON file, SQLite, PGlite and Postgres); a free-form
 document and a memory document name a new row with a uuid. The last change is the undo, which the ledger worked out for
 itself. The document did not exist until its first write made it (`implied: true`).

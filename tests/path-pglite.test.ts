@@ -12,7 +12,7 @@ import { openPglite } from "../src/server/pglite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
 import {
-  assertCopiesHold, expectTold, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresInbox, postgresMenuCard, postgresOpenSeats, told, write, type PathBackend,
+  assertCopiesHold, expectTold, field, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresInbox, postgresMenuCard, postgresOpenSeats, told, write, type PathBackend,
 } from "./helpers/path";
 import { waitFor } from "./setup";
 
@@ -45,6 +45,11 @@ beforeEach(async () => {
     // NOTIFY is heard after the write's commit, and fetched then: a beat.
     quiet: () => new Promise((r) => setTimeout(r, 100)),
     exportTables: () => exportTables(pool, pathSchema),
+    storeSetsT: async () => {
+      await pool.query("CREATE FUNCTION fo_t() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.t := upper(NEW.email); RETURN NEW; END $$");
+      await pool.query("CREATE TRIGGER fo_t BEFORE INSERT OR UPDATE ON fo_households FOR EACH ROW EXECUTE FUNCTION fo_t()");
+      return async () => void await pool.query("DROP FUNCTION fo_t() CASCADE");
+    },
   };
 });
 
@@ -229,11 +234,19 @@ describe("pglite: the log keeps the write as applied only where the writer was t
   const entries = async () =>
     (await pool.query("SELECT doc_name, ops, applied FROM _delta_ops_log ORDER BY id")).rows.map((r: any) => [r.doc_name, r.applied]);
 
-  test("told as applied: the writer's entry carries none; the other told document's, []", async () => {
+  test("told as applied -- a row added -- the writer's entry carries none; the other told document's, []", async () => {
+    await openAll(backend.process, ["fo-board:1", "fo-party:1", "fo-inbox:new@x"]);
+    await write(backend.process, "fo-board:1", [{ op: "add", path: "/households/10", value: { email: "new@x" } }]);
+    await expectTold(backend, "fo-inbox:new@x", [[{ op: "add", path: "/households/10", value: household(10, "new@x") }]]);
+    expect(await entries()).toEqual([["fo-board:1", null], ["fo-party:1", []]]);
+  });
+
+  test("told otherwise -- a field written, told as the field that changed (todo #69) -- the writer's entry carries the row as applied, which the custom document hears", async () => {
     await openAll(backend.process, ["fo-household:1", "fo-board:1", "fo-inbox:new@x"]);
-    await write(backend.process, "fo-household:1", [{ op: "replace", path: "/households/email", value: "new@x" }]);
+    const { ops } = await write(backend.process, "fo-household:1", [{ op: "replace", path: "/households/email", value: "new@x" }]);
+    await expectTold(backend, "fo-household:1", [[field("/households/email", "new@x")]]);
     await expectTold(backend, "fo-inbox:new@x", [[{ op: "add", path: "/households/1", value: household(1, "new@x") }]]);
-    expect(await entries()).toEqual([["fo-household:1", null], ["fo-board:1", []]]);
+    expect(await entries()).toEqual([["fo-household:1", ops], ["fo-board:1", []]]);
   });
 
   test("told otherwise -- the writer's root removed through it, told as null -- its entry carries the write as applied", async () => {
@@ -288,14 +301,17 @@ describe("pglite: a listener on framework SQL older than it", () => {
         exportTables: () => exportTables(behind, pathSchema),
       };
       const copies = await openAll(b.process, ["fo-household:1", "fo-board:1", "fo-inbox:a@x", "fo-inbox:new@x"]);
-      await write(b.process, "fo-household:1", [{ op: "replace", path: "/households/email", value: "new@x" }]);
-      await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/2/email", value: "new@x" }]);
-      await expectTold(b, "fo-household:1", [[{ op: "replace", path: "/households", value: household(1, "new@x") }]]);
+      // rows added and removed, told as applied: SQL this old tells a replace whole too, which
+      // its custom documents hear; this framework's own tell says a replace by its fields (todo #69)
+      await write(b.process, "fo-board:1", [{ op: "add", path: "/households/10", value: { email: "new@x" } }]);
+      await write(b.process, "fo-household:1", [{ op: "remove", path: "/households/1" }]);
+      await expectTold(b, "fo-household:1", [[{ op: "replace", path: "/households", value: null }]]);
       await expectTold(b, "fo-board:1", [
-        [{ op: "replace", path: "/households/1", value: household(1, "new@x") }],
-        [{ op: "replace", path: "/households/2", value: household(2, "new@x") }],
+        [{ op: "add", path: "/households/10", value: household(10, "new@x") }],
+        [{ op: "remove", path: "/households/1" }],
       ]);
       await expectTold(b, "fo-inbox:a@x", [[{ op: "remove", path: "/households/1" }]]);
+      await expectTold(b, "fo-inbox:new@x", [[{ op: "add", path: "/households/10", value: household(10, "new@x") }]]);
       await assertCopiesHold(b, copies);
       expect(warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("older than this listener"))).toHaveLength(1);
     } finally {
@@ -366,9 +382,9 @@ describe("pglite: a listener hears each entry once, however late its notificatio
     const other: PathBackend = { ...backend, process: { call: (action, msg) => local.call(action, msg), heard } };
     const copies = await openAll(other.process, ["fo-menu:1"]);
     errors.at(-1)!(new Error("connection lost"));   // it reconnects after a second, and resyncs
-    const { ops } = await write(backend.process, "fo-board:1", [{ op: "replace", path: "/courses/1/name", value: "Broth" }]);
+    await write(backend.process, "fo-board:1", [{ op: "replace", path: "/courses/1/name", value: "Broth" }]);
     await waitFor(() => told(other.process, "fo-menu:1").length > 0, { timeout: 4000 });
-    await expectTold(other, "fo-menu:1", [ops]);
+    await expectTold(other, "fo-menu:1", [[field("/courses/1/name", "Broth")]]);
     await assertCopiesHold(other, copies);
   });
 });

@@ -107,9 +107,9 @@ describe("openDoc per-client state", () => {
   });
 });
 
-describe("echoed ops preserve reference identity", () => {
-  test("captured child refs see updates without re-reading doc.data", async () => {
-    const url = startFakeDeltaServer({ shapes: { s1: { x: 0, y: 0 } } });
+describe("a broadcast leaves what changed fresh, and the rest as it was", () => {
+  test("the document keeps its reference; the row a field lands in, and the map that holds it, are new objects; a row left alone is the same (todo #69)", async () => {
+    const url = startFakeDeltaServer({ shapes: { s1: { x: 0, y: 0 }, s2: { x: 1, y: 1 } } });
     const client = connectWs(url);
     const doc = openDoc<{ shapes: Record<string, { x: number; y: number }> }>(
       "shapes:",
@@ -117,19 +117,20 @@ describe("echoed ops preserve reference identity", () => {
     );
     await doc.ready;
 
-    const rootBefore   = doc.data.peek()!;
-    const shapesBefore = doc.data.peek()!.shapes;
-    const shapeBefore  = doc.data.peek()!.shapes.s1;
-    expect(shapeBefore.x).toBe(0);
+    const rootBefore = doc.data.peek()!;
+    const { shapes } = rootBefore;
+    const { s1, s2 } = shapes;
 
     await doc.send([{ op: "replace", path: "/shapes/s1/x", value: 42 }]);
     await new Promise((r) => setTimeout(r, 50));
 
-    // Mutation lands on the SAME refs — the whole raison d'être of the fix.
+    // the document is held by reference; what changed is fresh, so a keyed list() sees it under Object.is
     expect(doc.data.peek()).toBe(rootBefore);
-    expect(doc.data.peek()!.shapes).toBe(shapesBefore);
-    expect(doc.data.peek()!.shapes.s1).toBe(shapeBefore);
-    expect(shapeBefore.x).toBe(42);
+    expect(doc.data.peek()!.shapes).not.toBe(shapes);
+    expect(doc.data.peek()!.shapes.s1).not.toBe(s1);
+    expect(doc.data.peek()!.shapes.s1).toEqual({ x: 42, y: 0 });
+    expect(s1.x).toBe(0);   // a reference taken before is the row as it was
+    expect(doc.data.peek()!.shapes.s2).toBe(s2);
 
     client.close();
   });

@@ -7,7 +7,7 @@
  * promise, so each step takes either (`after`): on SQLite it all runs at once,
  * and a write is told before it answers.
  */
-import { joinPath, splitPath, type DeltaOp } from "../core";
+import { changedFields, joinPath, splitPath, type DeltaOp } from "../core";
 import { authless, isAuthError, ownerless, type DeltaAuth } from "./auth";
 import type { createLogger } from "./logger";
 import { trackUnsubscribe } from "./server";
@@ -284,7 +284,7 @@ export function createCustomDocs<I, H>(opts: {
     return last;
   }
 
-  /** Each membership view, per row of `ops`: a row that arrives is an add, one that stays a replace, one that leaves a remove. */
+  /** Each membership view, per row of `ops`: a row that arrives is an add, one that stays a replace of each field that changed, one that leaves a remove. */
   function tellRows(ops: DeltaOp[]): void {
     const viewsOf = new Map<string, number>();
     for (const view of views.values()) if (view.subs.size) viewsOf.set(view.docName, (viewsOf.get(view.docName) ?? 0) + 1);
@@ -298,18 +298,19 @@ export function createCustomDocs<I, H>(opts: {
       for (const view of views.values()) {
         const { def, doc } = view;
         if (!def.matches || !def.watch.includes(coll) || !view.subs.size || !doc) continue;
-        const wasIn = doc[coll]![id] != null;
-        let told: DeltaOp;
+        const was = doc[coll]![id];
+        let told: DeltaOp[];
         if (row != null && def.matches(coll, row, view.criteria, view.identity)) {
           doc[coll]![id] = row;
-          told = { op: wasIn ? "replace" : "add", path: joinPath(coll, id), value: row };
-        } else if (wasIn) {
+          told = was != null ? changedFields(joinPath(coll, id), was, row) : [{ op: "add", path: joinPath(coll, id), value: row }];
+          if (!told.length) continue;
+        } else if (was != null) {
           delete doc[coll]![id];
-          told = { op: "remove", path: joinPath(coll, id) };
+          told = [{ op: "remove", path: joinPath(coll, id) }];
         } else continue;
         // The only view of its name: its subscribers are the channel's. Else
         // each view's own subscribers, so one identity's rows reach only it.
-        const change = { doc: view.docName, ops: [told] };
+        const change = { doc: view.docName, ops: told };
         if (viewsOf.get(view.docName) === 1) opts.publish(view.docName, change);
         else {
           const raw = JSON.stringify(change);

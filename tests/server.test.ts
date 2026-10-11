@@ -255,7 +255,7 @@ describe("normalizeForBroadcast", () => {
     ]);
   });
 
-  test("registerDoc broadcasts the normalized ops on the wire", async () => {
+  test("registerDoc broadcasts the ops as applied: what changed, a field by itself (todo #69)", async () => {
     const tmpFile = `/tmp/railroad-test-normalize-${Date.now()}.json`;
     const ws = createWs();
     const published: any[] = [];
@@ -273,7 +273,7 @@ describe("normalizeForBroadcast", () => {
 
     expect(handle.getDoc().cards["5"]!.title).toBe("after");
     expect(published[0].ops).toEqual([
-      { op: "replace", path: "/cards/5", value: { id: 5, title: "after" } },
+      { op: "replace", path: "/cards/5/title", value: "after" },
     ]);
     try { unlinkSync(tmpFile); } catch {}
   });

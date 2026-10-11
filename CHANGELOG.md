@@ -15,6 +15,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking for anyone reading broadcasts as whole rows: a holder is told what changed, not
+  the row (todo #69).** A row that stays in a document is told as a `replace` of each field
+  whose value changed, `/<coll>/<id>/<field>` (a single document's root, `/<root>/<field>`), in
+  field order -- found by comparing the row before the write with the row after it, so a value
+  the store set (a column default, a trigger on SQLite or Postgres) is told too, and a field
+  written as it was is told nothing. Arrived and left stay a whole-row `add` / `remove`; a root
+  that arrives or leaves, `replace /<root>` with the row or null. On the JSON file, SQLite,
+  PGlite and Postgres (`_delta_tell`, `001d`, replaced in place: apply it with `bunx
+  @blueshed/delta init`), a membership custom document, and the free-form document (`registerDoc`
+  tells its ops as applied: `normalizeForBroadcast` is no longer called, and stays exported). A
+  write's answer and ledger entry keep whole rows: they are its record, not a telling. The
+  client gives what an op changes inside a fresh reference (the row, the map), so a keyed
+  `list()` still sees the row change under its default equality; `applyOpsToCollection`
+  patches the row's node for a field op (its `update` is given the whole row, the field
+  changed), where it skipped field ops. The café's "the kitchen starts cooking" write told its
+  two holders 168 bytes of ops; it now tells 122. **Migration:** apply broadcasts with `applyOps`
+  (`@blueshed/delta/core`) or `applyOpsToCollection`; don't assume a `replace` carries the
+  whole row. `changedFields` (core) is what a row that stays is told.
 - **The docs promise only what is so, and tests prove it.** Serial ids are the four table
   backends' (the JSON file via `./json`, SQLite, PGlite, Postgres); `registerDoc` is called "a
   free-form document" everywhere (uuid ids, no schema, not on the moving-on path), never "the

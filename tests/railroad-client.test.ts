@@ -7,8 +7,8 @@
  *     ⇅ mount / when / list (railroad real-DOM JSX runtime, happy-dom)
  *
  * Pins the seams that unit tests on either side cannot see:
- *   - a FIELD-LEVEL op edits a keyed list() row (whole-row broadcast
- *     normalization → fresh row reference → default Object.is notifies)
+ *   - a FIELD-LEVEL op edits a keyed list() row (told as the field; the
+ *     client freshens the row it lands in → default Object.is notifies)
  *   - one flush per broadcast (batch() around data + dataVersion)
  *   - openDoc dedupe/refcount and doc.close() unregistration
  *   - scope-aware auto-close inside a railroad dispose scope, an effect run included
@@ -118,10 +118,9 @@ describe("railroad ↔ delta", () => {
     handle.applyAndBroadcast([{ op: "add", path: "/cards/5", value: { id: 5, title: "first" } }]);
     await until(() => root.textContent === "first");
 
-    // THE headline seam: a field-level op. normalizeForBroadcast turns it into
-    // a whole-row replace on the wire, the client's applyOps assigns a fresh
-    // row object, and keyed list() sees the new reference under its DEFAULT
-    // equality — the row's DOM updates. (Pre-fix this stayed "first".)
+    // THE headline seam: a field-level op, told as the field. The client gives
+    // the row it lands in a fresh reference, and keyed list() sees it under
+    // its DEFAULT equality — the row's DOM updates.
     handle.applyAndBroadcast([{ op: "replace", path: "/cards/5/title", value: "edited" }]);
     await until(() => root.textContent === "edited");
 

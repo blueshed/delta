@@ -371,12 +371,12 @@ describe("fan-out onto a document whose root is the row", () => {
     return { local, heard };
   }
 
-  test("a row written in the map arrives as the household's root, replaced whole", async () => {
+  test("a row written in the map arrives as the field of the household's root that changed", async () => {
     const { local, heard } = setupBoth();
     await local.call("open", { doc: "board:w1" });
     await local.call("open", { doc: "household:h1" });
     await local.call("delta", { doc: "board:w1", ops: [{ op: "replace", path: "/households/h1/email", value: "new@x" }, { op: "replace", path: "/households/h2/email", value: "other@x" }] });
-    expect(heard.filter((h) => h.channel === "household:h1").map((h) => h.data.ops)).toEqual([[{ op: "replace", path: "/households", value: { id: "h1", weddings_id: "w1", email: "new@x" } }]]);
+    expect(heard.filter((h) => h.channel === "household:h1").map((h) => h.data.ops)).toEqual([[{ op: "replace", path: "/households/email", value: "new@x" }]]);
     expect((await local.call("open", { doc: "household:h1" })).result).toEqual({ households: { id: "h1", weddings_id: "w1", email: "new@x" } });
   });
 

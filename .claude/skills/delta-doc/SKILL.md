@@ -166,7 +166,7 @@ Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/fi
 
 | Subpath | Runs | Purpose |
 |---|---|---|
-| `@blueshed/delta/core` | anywhere | `applyOps`, `DeltaOp`, `splitPath`, `joinPath`, `escapeSegment` |
+| `@blueshed/delta/core` | anywhere | `applyOps`, `DeltaOp`, `splitPath`, `joinPath`, `escapeSegment`, `changedFields` |
 | `@blueshed/delta/client` | browser, Bun | `connectWs(url, { clientId?, onConnect? })` (with `close()`), `openDoc`, `call`, `WS`, `DeltaError` |
 | `@blueshed/delta/dom-ops` | browser | `applyOpsToCollection` — keyed-DOM op routing |
 | `@blueshed/delta/server` | Bun | `createWs({ path?, origins?, maxHeld?, maxHeldBytes? })` (with `changesIdentity(method)`), `registerDoc` (a free-form document), `registerMethod`, `refuseOrigin` |
@@ -192,7 +192,7 @@ Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/fi
 - **Never edit framework SQL** (`001a-001g-*.sql`). They are the stored-function contract.
 - **Regenerate `003-tables.sql` with the CLI**: `bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql` (always the scoped name: the unscoped `delta` on npm is someone else's package). Framework SQL is `001a–001g`, auth-jwt is `002`, your tables are `003`.
 - **Don't hand-roll an undo stack.** Turn on the ledger (`{ ledger: true }`) and send `undo` / `redo`: a walk sets back only what its write changed, and one that meets a later write by someone else answers `conflict` and changes nothing. Over a socket the cursor is the connection, so each browser undoes only its own writes; in-process, name it (`cursor: session`). `undoable: false` for a fact, `dry: true` to ask first, `change: <entry>` for one change rather than the last. → `reference.md` → *The ledger*.
-- **A write is told to every open document that holds a row it changed**, on every backend: an add where a row arrives, a replace where it stays, a remove where it leaves (a root: replaced, or null). → `reference.md` → *Fan-out*.
+- **A write is told to every open document that holds a row it changed**, on every backend: an add where a row arrives, a replace of each field that changed where it stays (a field the store set too; nothing for a field written as it was), a remove where it leaves (a root: replaced, or null). Apply broadcasts with `applyOps`; never assume a replace carries a whole row. → `reference.md` → *Fan-out*.
 - **Memory docs are written by the server, not the browser** (`delta` over a socket is refused unless `writable: "any"`); source and static docs refuse every write. The browser opens them like any doc.
 - **`createLocal()` calls are async** — `await local.call(...)`, for every backend.
 - **A browser on another origin is refused (403) at the upgrade.** The server's own origin and a request with no `Origin` (the CLI, a test) get in; a page served from elsewhere needs `createWs({ origins: ["https://app.example.com"] })`. → `reference.md` → *Origins*.

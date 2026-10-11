@@ -20,8 +20,10 @@
  *   const status = await call<Status>("status");
  *
  * Rendering collections: with railroad in the project, its keyed `list()`
- * over `doc.data` is the idiom — per-row surgical updates come free (all
- * backends broadcast row-level ops). `doc.onOps(handler)` +
+ * over `doc.data` is the idiom — per-row surgical updates come free: a
+ * broadcast tells what changed (a row that arrives whole, a field that
+ * changes by itself), and the row it lands in is a fresh object
+ * (`freshen`), so the default equality sees it. `doc.onOps(handler)` +
  * `applyOpsToCollection` (see `@blueshed/delta/dom-ops`) is the vanilla-DOM
  * equivalent for projects without a keyed reactive list primitive; pick one
  * per project.
@@ -31,7 +33,7 @@
 import { signal, batch, hasActiveDisposeScope, trackDispose, type ReadonlySignal } from "@blueshed/railroad/signals";
 import { key, inject, tryInject } from "@blueshed/railroad/shared";
 import { createLogger } from "@blueshed/railroad/logger";
-import { applyOps, type DeltaOp } from "../core";
+import { applyOps, splitPath, type DeltaOp } from "../core";
 
 export type { DeltaOp } from "../core";
 
@@ -54,6 +56,31 @@ export const DeltaError = {
     );
   },
 };
+
+/**
+ * Copy, once a broadcast, each object an op changes something inside -- the
+ * row a field op lands in, the map a row is added to -- below the document
+ * itself, which is held by reference. Anything that compares rows by
+ * reference (railroad's keyed `list()`, a `computed`) then sees the row that
+ * changed as changed, and the rows that did not as they were.
+ */
+function freshen(doc: any, ops: DeltaOp[]): void {
+  const fresh = new Set<object>();
+  for (const op of ops) {
+    let parent = doc;
+    let segments: string[];
+    try { segments = splitPath(op.path); } catch { return; }   // applyOps refuses it
+    for (const seg of segments.slice(0, -1)) {
+      const child = Object.hasOwn(parent, seg) ? parent[seg] : undefined;
+      if (child === null || typeof child !== "object") break;
+      if (!fresh.has(child)) {
+        parent[seg] = Array.isArray(child) ? [...child] : { ...child };
+        fresh.add(parent[seg]);
+      }
+      parent = parent[seg];
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Reconnecting WebSocket
@@ -307,10 +334,12 @@ export function connectWs(
     }
     const current = entry.data.peek();
     if (current) {
-      // Mutate in place so captured child refs (e.g. a row object bound into a
-      // drag-handler closure) stay valid across echoes. `set(sameRef)` is a
+      // The document is changed in place, and what changed under it is fresh
+      // (`freshen`): a row the broadcast leaves alone keeps its reference (one
+      // bound into a drag-handler closure stays valid). `set(sameRef)` is a
       // no-op under Object.is — `touch()` is the escape hatch that fires subs.
       try {
+        freshen(current, ops);
         applyOps(current, ops);   // whole or not at all
       } catch (err: any) {
         docLog.warn(`a broadcast on ${name} does not apply to its copy (${err.message}) — resyncing`);

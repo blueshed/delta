@@ -67,8 +67,12 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
   only idempotently (`CREATE OR REPLACE`, `IF NOT EXISTS`) and say so in the changelog.
 - **You may write what you may read.** Every row-addressed write is gated on the same scope as
   the read, on both backends.
-- **Broadcasts are row-level**: a field write goes out as the whole row, on every table backend
-  and the free-form document. A memory document broadcasts its ops as applied (field paths too).
+- **A holder is told what changed**: a row that arrives whole (`add`), one that leaves
+  (`remove`), and one that stays as a `replace` of each field whose value changed -- the write's,
+  a default's, a trigger's -- compared row before and after (`changedFields` in `core.ts`;
+  `_delta_tell` in `001d`; a membership view in `custom.ts`). A memory or free-form document
+  tells its ops as applied. The client freshens what an op changes inside, so a keyed `list()`
+  sees the row as new. A write's answer and ledger entry keep whole rows: they are its record.
 - **Opt-in stays opt-in.** Without `ledger: true` / `inverse: true`, answers and broadcasts
   keep their 0.5 shapes.
 - **One app, every backend.** The JSON file (`./json`), SQLite, Postgres in process (`./pglite`)
@@ -79,7 +83,7 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
   `tests/postgres-path.test.ts`, which also carries one app's data through all four). A
   backend that answers differently is wrong: change both sides together.
 - **Fan-out is the same on every backend.** A write is told to every document that held or
-  holds a row it changed, each what changed for it (arrived: add; stayed: replace; left:
+  holds a row it changed, each what changed for it (arrived: add; stayed: its changed fields; left:
   remove; the root: replaced, or null). On Postgres it is worked out in `delta_apply`
   (`_delta_holders`, `_delta_tell`, `001b`/`001d`) over the names open now (`_delta_held`, each
   listener's), so every process hears it; on SQLite and
@@ -108,8 +112,8 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
 
 ## Where the contracts live
 
-- `src/core.ts`: `applyOps`, `DeltaOp`, `splitPath`, `joinPath`, `escapeSegment` (no
-  dependencies).
+- `src/core.ts`: `applyOps`, `DeltaOp`, `splitPath`, `joinPath`, `escapeSegment`,
+  `changedFields` (no dependencies).
 - `src/client/`: `client.ts` (reconnecting socket with `onConnect`, reactive `openDoc`,
   version-gap resync, `send` after its echo), `dom-ops.ts` (`applyOpsToCollection`). It
   imports railroad's subpaths, never the root barrel.

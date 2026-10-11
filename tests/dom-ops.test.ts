@@ -147,6 +147,35 @@ describe("applyOpsToCollection", () => {
     expect((nodes.get("2") as unknown as MockNode).payload.name).toBe("new");
   });
 
+  test("a field told by itself (/coll/id/field) updates the row's node with the whole row, that field changed (todo #69)", () => {
+    const parent = new MockNode();
+    const updates: string[] = [];
+    const col = makeCollection(updates);
+    const nodes = applyOpsToCollection<Row>(parent as unknown as Node, "todos", [{ op: "add", path: "/todos/1", value: { id: 1, name: "first", done: false } }], col);
+    const node = nodes.get("1") as unknown as MockNode;
+    applyOpsToCollection<Row>(parent as unknown as Node, "todos", [
+      { op: "replace", path: "/todos/1/done", value: true },
+      { op: "replace", path: "/todos/1/name", value: "renamed" },
+    ], col, nodes);
+    expect(nodes.get("1")).toBe(node as unknown as Node);
+    expect(node.payload).toEqual({ id: 1, name: "renamed", done: true });
+    expect(updates).toEqual(["1", "1"]);
+  });
+
+  test("a field told by itself, with no update hook, rebuilds the node from the whole row; one of a row never made is skipped", () => {
+    const parent = new MockNode();
+    const col: DomCollection<Row> = { key: (r) => String(r.id), create: (r) => Object.assign(new MockNode(), { payload: { ...r } }) as unknown as Node };
+    const nodes = applyOpsToCollection<Row>(parent as unknown as Node, "todos", [{ op: "add", path: "/todos/2", value: { id: 2, name: "old" } }], col);
+    const first = nodes.get("2");
+    applyOpsToCollection<Row>(parent as unknown as Node, "todos", [
+      { op: "replace", path: "/todos/2/name", value: "new" },
+      { op: "replace", path: "/todos/9/name", value: "nobody" },
+    ], col, nodes);
+    expect(nodes.get("2")).not.toBe(first);
+    expect(parent.children.map((n) => n.payload)).toEqual([{ id: 2, name: "new" }]);
+    expect(nodes.has("9")).toBe(false);
+  });
+
   test("remove /coll/id calls col.remove and drops the node", () => {
     const parent = new MockNode();
     const removes: string[] = [];

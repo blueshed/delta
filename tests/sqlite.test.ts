@@ -1706,7 +1706,7 @@ describe("SQLite path escaping TDD", () => {
     const send = (id: number, ops: any[]) => ws.websocket.message(sock, JSON.stringify({ id, action: "delta", doc: "project:p1", ops }));
     await send(2, [{ op: "add", path: "/tasks/a~1b~0c", value: { title: "odd id", done: false } }]);
     await send(3, [{ op: "replace", path: "/tasks/a~1b~0c/done", value: true }]);
-    expect(published.map((m) => m.ops[0].path)).toEqual(["/tasks/a~1b~0c", "/tasks/a~1b~0c"]);
+    expect(published.map((m) => m.ops[0].path)).toEqual(["/tasks/a~1b~0c", "/tasks/a~1b~0c/done"]);
     for (const m of published) applyOps(peer, m.ops);
     expect(Object.keys(peer.tasks)).toEqual(["a/b~c"]);
     expect(peer.tasks["a/b~c"].done).toBe(true);

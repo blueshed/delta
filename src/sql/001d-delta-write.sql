@@ -199,7 +199,10 @@ $$ LANGUAGE plpgsql STABLE;
 --
 -- `p_touched` is the write's rows in order, each {coll, id, before, after}:
 -- `before` the documents that held it before that touch (_delta_holders, asked
--- then), `after` the row as the touch left it (null when it is gone); a
+-- then), `after` the row as the touch left it (null when it is gone), and a
+-- replace's `was`, the row as it was before (a document that holds the row
+-- either way is told only the fields that changed: set by the write, a
+-- default or a trigger -- each a replace of its field, in field order); a
 -- `carried` row hangs under one the write moved, and is told only where it
 -- arrives or leaves (todo #62). Each
 -- touch is told in turn: the documents that hold the row after it are those
@@ -207,9 +210,9 @@ $$ LANGUAGE plpgsql STABLE;
 -- once the write is done -- so a row made and then taken out (a drink, with its
 -- course) is told its add wherever its remove is told (todo #75; tell in
 -- sqlite.ts). For each document that held it before or holds it after: a row
--- that arrives is an add, one that stays a replace, one that leaves a remove --
--- and where the row is the document's root, a replace of the root (null when
--- it leaves). The
+-- that arrives is an add, one that stays a replace of each field that changed,
+-- one that leaves a remove -- and where the row is the document's root, a
+-- replace of the root when it arrives (null when it leaves). The
 -- writer's document is always told, and told first; each other document is
 -- told only what concerns it, with a version of its own, one per write.
 -- `p_applied`, the write as applied, is logged once, on the writer's entry,
@@ -270,9 +273,12 @@ BEGIN
       CONTINUE WHEN v_was AND v_is AND (v_t ? 'carried');   -- carried along, and held either way: unchanged for it
       v_root := v_single AND (v_t->>'coll') = v_def.root_collection;
       v_path := CASE WHEN v_root THEN _delta_build_path(v_t->>'coll') ELSE _delta_build_path(v_t->>'coll', v_t->>'id') END;
-      IF v_is THEN
+      IF v_was AND v_is THEN   -- stayed: what changed
+        v_told := v_told || COALESCE((SELECT jsonb_agg(jsonb_build_object('op', 'replace', 'path', v_path || _delta_build_path(f), 'value', v) ORDER BY f COLLATE "C")
+                                        FROM jsonb_each(v_t->'after') AS e(f, v) WHERE v IS DISTINCT FROM v_t->'was'->f), '[]'::jsonb);
+      ELSIF v_is THEN
         v_told := v_told || jsonb_build_array(jsonb_build_object(
-          'op', CASE WHEN v_was OR v_root THEN 'replace' ELSE 'add' END, 'path', v_path, 'value', v_t->'after'));
+          'op', CASE WHEN v_root THEN 'replace' ELSE 'add' END, 'path', v_path, 'value', v_t->'after'));
       ELSIF v_root THEN   -- gone: null, or the empty root an implied document then opens with
         v_told := v_told || jsonb_build_array(jsonb_build_object('op', 'replace', 'path', v_path, 'value',
           CASE WHEN COALESCE(v_def.implied, FALSE) THEN _delta_implied_root(v_def, (v_t->>'id')::BIGINT) ELSE 'null'::jsonb END));
@@ -581,7 +587,7 @@ BEGIN
           jsonb_build_object('op', 'replace', 'path', v_told_path, 'value', v_new_row)
         );
         v_touched := v_touched || jsonb_build_array(jsonb_build_object(
-          'coll', v_coll_key, 'id', v_doc_id, 'before', to_jsonb(v_before), 'after', v_new_row));
+          'coll', v_coll_key, 'id', v_doc_id, 'before', to_jsonb(v_before), 'after', v_new_row, 'was', CASE WHEN v_coll.temporal THEN _delta_strip_temporal(v_row) ELSE v_row END));
         v_run_at := jsonb_array_length(v_touched) - 1;
         v_run_carried := FALSE;
       END IF;
@@ -902,7 +908,7 @@ BEGIN
           jsonb_build_object('op', 'replace', 'path', v_told_path, 'value', v_new_row)
         );
         v_touched := v_touched || jsonb_build_array(jsonb_build_object(
-          'coll', v_coll_key, 'id', v_id, 'before', to_jsonb(v_before), 'after', v_new_row));
+          'coll', v_coll_key, 'id', v_id, 'before', to_jsonb(v_before), 'after', v_new_row, 'was', CASE WHEN v_coll.temporal THEN _delta_strip_temporal(v_row) ELSE v_row END));
         v_run_at := jsonb_array_length(v_touched) - 1;
       END IF;
       v_run_carried := v_run_carried OR jsonb_array_length(v_hung) > 0;

@@ -35,7 +35,7 @@
  *   render([{ op: "replace", path: "", value: doc.data.get() }]);   // initial paint
  *   doc.onOps(render);                                             // live + reconnect
  */
-import { splitPath, type DeltaOp } from "../core";
+import { applyOps, joinPath, splitPath, type DeltaOp } from "../core";
 
 export interface DomCollection<T> {
   /** Stable id for a row value — usually `(v) => String(v.id)`. */
@@ -43,9 +43,10 @@ export interface DomCollection<T> {
   /** Build the node for a new row. Called on `add` ops and on first sight of a row. */
   create: (value: T) => Node;
   /**
-   * Optional patcher for `replace` ops. If omitted, a replace at the row
-   * level rebuilds the node via `create`. Define for in-place updates that
-   * preserve focus / CSS transitions.
+   * Optional patcher for a row that changed -- replaced whole, or a field of
+   * it (`/<collection>/<id>/<field>`), which it is given as the whole row with
+   * the field changed. If omitted, the node is rebuilt via `create`. Define
+   * for in-place updates that preserve focus / CSS transitions.
    */
   update?: (node: Node, value: T) => void;
   /**
@@ -66,6 +67,9 @@ export interface DomCollection<T> {
  * correct on its own. A `WeakMap` so nodes die with their parent.
  */
 const defaultNodeMaps = new WeakMap<Node, Map<string, Map<string, Node>>>();
+
+/** The row each node was last made or updated from: what a field op changes. */
+const rowOf = new WeakMap<Node, unknown>();
 
 function defaultNodesFor(parent: Node, collection: string): Map<string, Node> {
   let byCollection = defaultNodeMaps.get(parent);
@@ -101,6 +105,23 @@ export function applyOpsToCollection<T>(
   col: DomCollection<T>,
   nodes: Map<string, Node> = defaultNodesFor(parent, collection),
 ): Map<string, Node> {
+  const make = (value: T): Node => {
+    const node = col.create(value);
+    rowOf.set(node, value);
+    return node;
+  };
+  // the row's node brought up to `value`: patched in place, or made again
+  const renew = (id: string, node: Node, value: T): void => {
+    if (col.update) {
+      col.update(node, value);
+      rowOf.set(node, value);
+    } else {
+      const fresh = make(value);
+      if (node.parentNode) node.parentNode.replaceChild(fresh, node);
+      else parent.appendChild(fresh);
+      nodes.set(id, fresh);
+    }
+  };
   for (const op of ops) {
     // Whole-doc root replace (path "") — emitted on reconnect so onOps
     // consumers can RECONCILE against the authoritative snapshot. Treat
@@ -127,16 +148,9 @@ export function applyOpsToCollection<T>(
         if (row == null) continue;
         const id = col.key(row);
         const existing = nodes.get(id);
-        if (existing) {
-          if (col.update) col.update(existing, row);
-          else {
-            const fresh = col.create(row);
-            if (existing.parentNode) existing.parentNode.replaceChild(fresh, existing);
-            else parent.appendChild(fresh);
-            nodes.set(id, fresh);
-          }
-        } else {
-          const node = col.create(row);
+        if (existing) renew(id, existing, row);
+        else {
+          const node = make(row);
           nodes.set(id, node);
           parent.appendChild(node);
         }
@@ -156,7 +170,7 @@ export function applyOpsToCollection<T>(
       if (!value) continue;
       const id = col.key(value);
       if (nodes.has(id)) continue;  // idempotent on replay
-      const node = col.create(value);
+      const node = make(value);
       nodes.set(id, node);
       parent.appendChild(node);
       continue;
@@ -164,13 +178,25 @@ export function applyOpsToCollection<T>(
 
     if (!idPart) continue;
 
+    // A field of a row (`/<collection>/<id>/<field>...`), any verb: the row as
+    // the node was last given it, with the op applied to a copy, is the row now.
+    if (isField) {
+      const node = nodes.get(idPart);
+      const row = node && rowOf.get(node);
+      if (!node || row == null) continue;   // a row it never made: nothing to patch
+      const next = structuredClone(row) as T;
+      applyOps(next, [{ ...op, path: joinPath(...segments.slice(2)) } as DeltaOp]);
+      renew(idPart, node, next);
+      continue;
+    }
+
     switch (op.op) {
       case "add": {
         // `/coll/<id>` add — an explicit upsert (e.g. after backend id assignment).
         const value = (op as any).value as T | undefined;
         if (value == null) break;  // symmetric with the /- append guard above
         if (nodes.has(idPart)) break;  // row already mounted
-        const node = col.create(value);
+        const node = make(value);
         nodes.set(idPart, node);
         parent.appendChild(node);
         break;
@@ -180,29 +206,12 @@ export function applyOpsToCollection<T>(
         const value = (op as any).value as T;
         if (!node) {
           // Row wasn't previously mounted — treat like an add for resilience.
-          const fresh = col.create(value);
+          const fresh = make(value);
           nodes.set(idPart, fresh);
           parent.appendChild(fresh);
           break;
         }
-        if (!isField) {
-          // Whole-row replace.
-          if (col.update) col.update(node, value);
-          else {
-            const fresh = col.create(value);
-            parent.replaceChild(fresh, node);
-            nodes.set(idPart, fresh);
-          }
-        }
-        // Field-level replace (`/coll/<id>/<field>`) is intentionally NOT
-        // applied here: the op carries only the field value, not the whole-row
-        // shape that `col.create`/`col.update` expect. The table backends
-        // and the free-form document send a field write as a whole-row replace;
-        // a memory document sends its ops as applied, field paths included, and
-        // so may a custom stream -- and there the
-        // full-state `doc.data` path applies the change correctly. Callers who
-        // need DOM-level handling of field ops should inspect `op.path` in
-        // their own `doc.onOps` handler.
+        renew(idPart, node, value);   // the whole row replaced
         break;
       }
       case "remove": {

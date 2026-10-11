@@ -20,7 +20,7 @@ import type { WsServer } from "./server";
 import { trackSubscribe, trackUnsubscribe, onClientDrop, failure } from "./server";
 import { authless, isAuthError, ownerless, type DeltaAuth } from "./auth";
 import { assertOnePrefix, assertOwned, createCustomDocs, isPromise, NOT_FOUND, type CustomDoc } from "./custom";
-import { type DeltaOp, splitPath, joinPath } from "../core";
+import { type DeltaOp, splitPath, joinPath, changedFields } from "../core";
 import { createLogger } from "./logger";
 import { createLedger, isEntryId, ledgerWho, planWalk, rowAt, socketCursor } from "./ledger";
 import { assertScopeKeys, meets, resolveScope, rowId, sameId, whereOf, type Scope } from "./scope";
@@ -345,10 +345,12 @@ export function registerDocs<I = unknown>(
 
   /**
    * A row of the write, for the telling: who held it before, and what it is now
-   * (null: gone). A `carried` row is one the write did not change but moved, under
-   * a parent it moved: it is told only where it arrives or leaves (todo #62).
+   * (null: gone); a replace's, what it was (`was`), so a document that holds it
+   * either way is told only the fields that changed. A `carried` row is one the
+   * write did not change but moved, under a parent it moved: it is told only
+   * where it arrives or leaves (todo #62).
    */
-  type Touched = { coll: string; id: string | number; before: string[]; after: any | null; carried?: boolean };
+  type Touched = { coll: string; id: string | number; before: string[]; after: any | null; was?: any; carried?: boolean };
 
   /** A row outside a document -- of a collection it does not include -- that a write through it reaches (a cascade). */
   type Beyond = { coll: string; row: any };
@@ -531,7 +533,7 @@ export function registerDocs<I = unknown>(
      * between them could see the row part-way. Postgres's `delta_apply` answers
      * such a run once too.
      */
-    let run: { table: ResolvedTable; id: string | number; root: boolean; key: string; before: string[]; row: any } | undefined;
+    let run: { table: ResolvedTable; id: string | number; root: boolean; key: string; before: string[]; was: any; row: any } | undefined;
 
     /**
      * Write the run's row: on a temporal table, the version before the write
@@ -542,7 +544,7 @@ export function registerDocs<I = unknown>(
      */
     const endRun = () => {
       if (!run) return;
-      const { table, id, root, key, before, row } = run;
+      const { table, id, root, key, before, was, row } = run;
       run = undefined;
       // a row moved to another parent takes the rows under it along: who holds each, asked before it moves
       const fk = table.parent?.fkColumn;
@@ -558,7 +560,7 @@ export function registerDocs<I = unknown>(
       if (root) doc[collKey] = stored;
       else doc[collKey][id] = stored;
       broadcastOps.push({ op: "replace", path: root ? joinPath(collKey) : joinPath(collKey, String(id)), value: stored });
-      touched.push({ coll: collKey, id, before, after: stored });
+      touched.push({ coll: collKey, id, before, after: stored, was });
       touched.push(...carried);   // after the row they hang from, unchanged
     };
 
@@ -588,7 +590,7 @@ export function registerDocs<I = unknown>(
       if (!run) {
         const present = held(table, id);
         if (!present) refuse(404, `Row not found: ${collKey}/${id}`);   // not this document's, or gone from it earlier in this write
-        run = { table, id, root, key, before: holders(collKey, present, docName), row: { ...present } };
+        run = { table, id, root, key, before: holders(collKey, present, docName), was: present, row: { ...present } };
       }
       // A parent key written moves the row, and only under a parent this
       // document holds, as an add names one: through it, a row is never moved
@@ -761,9 +763,11 @@ export function registerDocs<I = unknown>(
   /**
    * What each document that held or holds a row the write changed is told, the
    * writer's first -- Postgres's `_delta_tell`: a row that arrives is an add,
-   * one that stays a replace, one that leaves a remove; where the row is the
-   * document's root, a replace of the root (null when it leaves -- or, for an
-   * implied document, the empty root it then opens with).
+   * one that stays a replace of each field that changed (none: nothing), one
+   * that leaves a remove; where the row is the document's root, a replace of the
+   * root when it arrives (null when it leaves -- or, for an implied document,
+   * the empty root it then opens with). A holder is told what changed, never
+   * the whole row again.
    *
    * Each touch is told in turn, so a copy is told every step of a row the write
    * touches twice: who holds the row after a touch is who held it at its next,
@@ -793,7 +797,8 @@ export function registerDocs<I = unknown>(
         if ((!was && !is) || (t.carried && was && is)) continue;
         const root = single && t.coll === m.def.root;
         const path = root ? joinPath(t.coll) : joinPath(t.coll, String(t.id));
-        if (is) ops.push({ op: was || root ? "replace" : "add", path, value: t.after });
+        if (was && is) ops.push(...changedFields(path, t.was, t.after));
+        else if (is) ops.push({ op: root ? "replace" : "add", path, value: t.after });
         else ops.push(root ? { op: "replace", path, value: m.def.implied ? emptyDoc(m.def, m.docId)[m.def.root] : null } : { op: "remove", path });
       }
       told.set(target, ops);

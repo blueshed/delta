@@ -145,7 +145,10 @@ const openSeatsDoc = <Q>(query: Q) => ({
   matches: (_coll: string, row: any) => row.kept === false,
 });
 const seatsTable = pathSchema.tables.seats!.name;
-export const sqliteOpenSeats = openSeatsDoc((db: any) => ({ seats: db.query(`SELECT * FROM ${seatsTable} WHERE kept = 0`).all() }));
+// each row as a document reads it: SQLite keeps a boolean as 0 or 1, and json as its text
+export const sqliteOpenSeats = openSeatsDoc((db: any) => ({
+  seats: db.query(`SELECT * FROM ${seatsTable} WHERE kept = 0`).all().map((r: any) => ({ ...r, kept: !!r.kept, wishes: r.wishes == null ? null : JSON.parse(r.wishes) })),
+}));
 export const postgresOpenSeats = openSeatsDoc(async (pool: any) => ({ seats: (await pool.query(`SELECT to_jsonb(s) AS row FROM ${seatsTable} s WHERE NOT kept`)).rows.map((r: any) => r.row) }));
 
 /**
@@ -190,6 +193,8 @@ export const course = (id: number, name: string, wedding = 1) => ({ id, weddings
 export const drink = (id: number, courseId: number, name: string) => ({ id, courses_id: courseId, name });
 export const household = (id: number, email: string, wedding = 1, t: string | null = null) => ({ id, weddings_id: wedding, email, t });
 export const seat = (id: number, tableNo: number, kept: boolean, wishes: unknown = null, wedding = 1) => ({ id, weddings_id: wedding, table_no: tableNo, kept, wishes });
+/** A field as a holder is told it changed: a replace of the field alone (todo #69). */
+export const field = (path: string, value: unknown) => ({ op: "replace", path, value });
 
 // ---------------------------------------------------------------------------
 // The adapter a backend supplies
@@ -208,6 +213,12 @@ export interface PathBackend {
   quiet(): Promise<void>;
   /** Every row the backend holds, as `importTables` takes them: what carries to the next backend. */
   exportTables(): Promise<Snapshot>;
+  /**
+   * The store itself sets a household's t to its email in capitals whenever
+   * the row is written (a trigger), until the answer is called. A backend no
+   * SQL reaches -- the JSON file, whose SQLite is its own -- leaves it out.
+   */
+  storeSetsT?(): Promise<() => Promise<void>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -800,10 +811,7 @@ export function documentCases(backend: () => PathBackend): void {
       await openAll(b.process, ["fo-board:1", "fo-menu:1"]);
       await write(b.process, "fo-board:1", [{ op: "replace", path: "/courses/1/name", value: "Broth" }]);
       await write(b.process, "fo-menu:1", [{ op: "replace", path: "/courses/1/name", value: "Bisque" }]);
-      await expectTold(b, "fo-menu:1", [
-        [{ op: "replace", path: "/courses/1", value: course(1, "Broth") }],
-        [{ op: "replace", path: "/courses/1", value: course(1, "Bisque") }],
-      ]);
+      await expectTold(b, "fo-menu:1", [[field("/courses/1/name", "Broth")], [field("/courses/1/name", "Bisque")]]);
       expect(b.process.heard.filter((h) => h.channel === "fo-menu:1").map((h) => h.data.v)).toEqual([before + 1, before + 2]);
       expect((await b.process.call("open", { doc: "fo-menu:1" })).result._v).toBe(before + 2);
     });
@@ -817,7 +825,7 @@ export function documentCases(backend: () => PathBackend): void {
       await expectSilent(b, "fo-board:1");
       expect((await b.process.call("history", { doc: "fo-board:1", cursor: "s1" })).result).toEqual([]);
       await write(b.process, "fo-board:1", [{ op: "replace", path: "/weddings/name", value: "our day" }]);
-      await expectTold(b, "fo-board:1", [[{ op: "replace", path: "/weddings", value: { id: 1, name: "our day" } }]]);
+      await expectTold(b, "fo-board:1", [[field("/weddings/name", "our day")]]);
       expect(b.process.heard.filter((h) => h.channel === "fo-board:1").map((h) => h.data.v)).toEqual([before + 1]);
       await assertCopiesHold(b, copies);
     });
@@ -882,13 +890,51 @@ export function documentCases(backend: () => PathBackend): void {
 
 /** A write reaches every other open document that holds a row it changed -- and none that do not (todo #28). */
 export function fanOutCases(backend: () => PathBackend): void {
+  describe("a holder is told what changed (todo #69)", () => {
+    test("one field written is told as that field alone, to every holder -- the writer's own, a map, a root -- never the row again", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-household:1", "fo-all-households:"]);
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/email", value: "new@x" }]);
+      await expectTold(b, "fo-board:1", [[field("/households/1/email", "new@x")]]);
+      await expectTold(b, "fo-all-households:", [[field("/households/1/email", "new@x")]]);
+      await expectTold(b, "fo-household:1", [[field("/households/email", "new@x")]]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a field written as it is is told nothing: the rest of the write is told; a write that changes nothing tells the others nothing", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1", "fo-seating:1"]);
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/courses/1/name", value: "Soup" }, { op: "replace", path: "/drinks/1/name", value: "Port" }]);
+      await expectTold(b, "fo-menu:1", [[field("/drinks/1/name", "Port")]]);
+      await write(b.process, "fo-seating:1", [{ op: "replace", path: "/seats/1/wishes", value: { veg: true } }, { op: "replace", path: "/seats/1/kept", value: true }]);
+      await expectTold(b, "fo-seating:1", [[]]);   // the writer's version moves on: its write is recorded, and changed nothing
+      await expectTold(b, "fo-board:1", [[field("/drinks/1/name", "Port")]]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a field the store sets itself as the row is written -- a trigger -- is told beside the field written", async () => {
+      const b = backend();
+      if (!b.storeSetsT) return;   // the JSON file: no SQL reaches its store
+      const undo = await b.storeSetsT();
+      try {
+        const copies = await openAll(b.process, ["fo-board:1", "fo-household:1"]);
+        await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/email", value: "new@x" }]);
+        await expectTold(b, "fo-board:1", [[field("/households/1/email", "new@x"), field("/households/1/t", "NEW@X")]]);
+        await expectTold(b, "fo-household:1", [[field("/households/email", "new@x"), field("/households/t", "NEW@X")]]);
+        await assertCopiesHold(b, copies);
+      } finally {
+        await undo();
+      }
+    });
+  });
+
   describe("a row two documents hold as a map", () => {
-    test("a field written through the board reaches the menu as the whole row, and the course's own document as its root", async () => {
+    test("a field written through the board reaches the menu as that field of the row, and the course's own document as that field of its root (todo #69)", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1", "fo-course:1"]);
       await write(b.process, "fo-board:1", [{ op: "replace", path: "/courses/1/name", value: "Consommé" }]);
-      await expectTold(b, "fo-menu:1", [[{ op: "replace", path: "/courses/1", value: course(1, "Consommé") }]]);
-      await expectTold(b, "fo-course:1", [[{ op: "replace", path: "/courses", value: course(1, "Consommé") }]]);
+      await expectTold(b, "fo-menu:1", [[field("/courses/1/name", "Consommé")]]);
+      await expectTold(b, "fo-course:1", [[field("/courses/name", "Consommé")]]);
       await assertCopiesHold(b, copies);
     });
 
@@ -957,8 +1003,8 @@ export function fanOutCases(backend: () => PathBackend): void {
       const b = backend();
       const copies = await openAll(b.process, ["fo-course:1", "fo-board:1", "fo-menu:1"]);
       await write(b.process, "fo-course:1", [{ op: "replace", path: "/drinks/1/name", value: "Madeira" }]);
-      await expectTold(b, "fo-board:1", [[{ op: "replace", path: "/drinks/1", value: drink(1, 1, "Madeira") }]]);
-      await expectTold(b, "fo-menu:1", [[{ op: "replace", path: "/drinks/1", value: drink(1, 1, "Madeira") }]]);
+      await expectTold(b, "fo-board:1", [[field("/drinks/1/name", "Madeira")]]);
+      await expectTold(b, "fo-menu:1", [[field("/drinks/1/name", "Madeira")]]);
       await assertCopiesHold(b, copies);
     });
   });
@@ -978,7 +1024,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       expect(inverse).toEqual([back, { op: "replace", path: "/drinks/1", value: drink(1, 1, "Sherry") }]);
       const undone = await b.process.call("undo", { cursor: "s1" });
       expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [back], conflict: undefined });
-      for (const doc of ["fo-board:1", "fo-menu:1", "fo-course:1"]) await expectTold(b, doc, [[changed, removed], [back]]);
+      for (const doc of ["fo-board:1", "fo-menu:1", "fo-course:1"]) await expectTold(b, doc, [[field("/drinks/1/name", "Port"), removed], [back]]);
       await assertCopiesHold(b, copies);
     });
 
@@ -1005,8 +1051,8 @@ export function fanOutCases(backend: () => PathBackend): void {
       const undone = await b.process.call("undo", { cursor: "s1" });
       const taken = [{ op: "remove", path: "/courses/3" }, { op: "replace", path: "/weddings", value: { name: "ours" } }];
       expect({ ops: undone.result.ops.map((o: any) => o.op === "remove" ? o : { ...o, value: { name: o.value.name } }), conflict: undone.result.conflict }).toEqual({ ops: taken, conflict: undefined });
-      await expectTold(b, "fo-menu:1", [ops, undone.result.ops]);
-      await expectTold(b, "fo-title:1", [[renamed], [{ op: "replace", path: "/weddings", value: { id: 1, name: "ours" } }]]);
+      await expectTold(b, "fo-menu:1", [[field("/weddings/name", "our day"), ops[1], field("/courses/3/name", "Hake")], [taken[0], field("/weddings/name", "ours")]]);
+      await expectTold(b, "fo-title:1", [[field("/weddings/name", "our day")], [field("/weddings/name", "ours")]]);
       await assertCopiesHold(b, copies);
     });
 
@@ -1033,10 +1079,13 @@ export function fanOutCases(backend: () => PathBackend): void {
       ]);
       const undone = await b.process.call("undo", { cursor: "s1" });
       expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "replace", path: "/courses", value: course(1, "Soup") }, { op: "replace", path: "/drinks/1", value: drink(1, 1, "Sherry") }], conflict: undefined });
-      const inMap = (o: any) => (o.path === "/courses" ? { ...o, path: "/courses/1" } : o);
-      await expectTold(b, "fo-course:1", [ops, undone.result.ops]);
-      await expectTold(b, "fo-board:1", [ops.map(inMap), undone.result.ops.map(inMap)]);
-      await expectTold(b, "fo-menu:1", [ops.map(inMap), undone.result.ops.map(inMap)]);
+      const told = (course: string) => [
+        [field(`${course}/name`, "C"), field("/drinks/1/name", "Madeira"), field(`${course}/name`, "D")],
+        [field(`${course}/name`, "Soup"), field("/drinks/1/name", "Sherry")],
+      ];
+      await expectTold(b, "fo-course:1", told("/courses"));
+      await expectTold(b, "fo-board:1", told("/courses/1"));
+      await expectTold(b, "fo-menu:1", told("/courses/1"));
       await assertCopiesHold(b, copies);
     });
 
@@ -1052,10 +1101,11 @@ export function fanOutCases(backend: () => PathBackend): void {
       const undone = await b.process.call("undo", { cursor: "s1" });
       const back = [{ op: "add", path: "/courses/1", value: course(1, "Soup") }, { op: "add", path: "/drinks/1", value: drink(1, 1, "Sherry") }];
       expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: back, conflict: undefined });
-      await expectTold(b, "fo-board:1", [ops, back]);
-      await expectTold(b, "fo-menu:1", [ops, back]);
+      const port = field("/drinks/1/name", "Port");
+      await expectTold(b, "fo-board:1", [[port, ...ops.slice(1)], back]);
+      await expectTold(b, "fo-menu:1", [[port, ...ops.slice(1)], back]);
       // the course's own document holds the drink by its key until the course is told gone (null), then hears the drink go
-      await expectTold(b, "fo-course:1", [[ops[0], { op: "replace", path: "/courses", value: null }, gone[0]], [{ op: "replace", path: "/courses", value: course(1, "Soup") }, back[1]]]);
+      await expectTold(b, "fo-course:1", [[port, { op: "replace", path: "/courses", value: null }, gone[0]], [{ op: "replace", path: "/courses", value: course(1, "Soup") }, back[1]]]);
       await expectTold(b, "fo-all-courses:", [[gone[1]], [back[0]]]);
       await assertCopiesHold(b, copies);
     });
@@ -1067,6 +1117,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       const madeCourse = { op: "add", path: "/courses/9", value: course(9, "Fish") };
       const madeDrink = { op: "add", path: "/drinks/5", value: drink(5, 9, "Chablis") };
       const named = { op: "replace", path: "/drinks/5", value: drink(5, 9, "Muscadet") };
+      const namedTold = field("/drinks/5/name", "Muscadet");
       const goneCourse = { op: "remove", path: "/courses/9" };
       const goneDrink = { op: "remove", path: "/drinks/5" };
       const made = await write(b.process, "fo-board:1", [
@@ -1082,8 +1133,8 @@ export function fanOutCases(backend: () => PathBackend): void {
         { op: "remove", path: "/courses/9" },
       ]);
       expect(renamed.ops).toEqual([madeCourse, madeDrink, named, goneCourse, goneDrink]);
-      for (const doc of ["fo-board:1", "fo-menu:1", "fo-catalog:"]) await expectTold(b, doc, [made.ops, renamed.ops]);
-      await expectTold(b, "fo-drinks:1", [[madeDrink, goneDrink], [madeDrink, named, goneDrink]]);
+      for (const doc of ["fo-board:1", "fo-menu:1", "fo-catalog:"]) await expectTold(b, doc, [made.ops, [madeCourse, madeDrink, namedTold, goneCourse, goneDrink]]);
+      await expectTold(b, "fo-drinks:1", [[madeDrink, goneDrink], [madeDrink, namedTold, goneDrink]]);
       await expectTold(b, "fo-all-courses:", [[madeCourse, goneCourse], [madeCourse, goneCourse]]);
       await assertCopiesHold(b, copies);
     });
@@ -1105,21 +1156,21 @@ export function fanOutCases(backend: () => PathBackend): void {
   });
 
   describe("a row one document holds as a map and another as its root", () => {
-    test("written in the board's map, it reaches the household's own document as its root, replaced whole; the other household hears nothing", async () => {
+    test("written in the board's map, it reaches the household's own document as that field of its root; the other household hears nothing", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-household:1", "fo-household:2"]);
       await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/email", value: "new@x" }]);
-      await expectTold(b, "fo-household:1", [[{ op: "replace", path: "/households", value: household(1, "new@x") }]]);
+      await expectTold(b, "fo-household:1", [[field("/households/email", "new@x")]]);
       await expectSilent(b, "fo-household:2");
       await assertCopiesHold(b, copies);
     });
 
-    test("written through the household's own document, it reaches the board's map as the keyed row", async () => {
+    test("written through the household's own document, it reaches the board's map as that field of the keyed row", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-household:1", "fo-board:1"]);
       await write(b.process, "fo-household:1", [{ op: "replace", path: "/households/email", value: "mine@x" }]);
-      await expectTold(b, "fo-household:1", [[{ op: "replace", path: "/households", value: household(1, "mine@x") }]]);
-      await expectTold(b, "fo-board:1", [[{ op: "replace", path: "/households/1", value: household(1, "mine@x") }]]);
+      await expectTold(b, "fo-household:1", [[field("/households/email", "mine@x")]]);
+      await expectTold(b, "fo-board:1", [[field("/households/1/email", "mine@x")]]);
       await assertCopiesHold(b, copies);
     });
 
@@ -1161,8 +1212,8 @@ export function fanOutCases(backend: () => PathBackend): void {
       ]);
       // its favour, which cascades on it, goes with it (the board holds no favours)
       expect(ops).toEqual([{ op: "replace", path: "/households", value: household(1, "gone@x") }, { op: "remove", path: "/households/1" }, { op: "remove", path: "/favours/1" }]);
-      await expectTold(b, "fo-household:1", [[{ op: "replace", path: "/households", value: household(1, "gone@x") }, { op: "replace", path: "/households", value: null }]]);
-      await expectTold(b, "fo-board:1", [[{ op: "replace", path: "/households/1", value: household(1, "gone@x") }, { op: "remove", path: "/households/1" }]]);
+      await expectTold(b, "fo-household:1", [[field("/households/email", "gone@x"), { op: "replace", path: "/households", value: null }]]);
+      await expectTold(b, "fo-board:1", [[field("/households/1/email", "gone@x"), { op: "remove", path: "/households/1" }]]);
       await expectSilent(b, "fo-household:2");
       await assertCopiesHold(b, copies);
     });
@@ -1187,10 +1238,11 @@ export function fanOutCases(backend: () => PathBackend): void {
       expect(titled.ops).toEqual([{ op: "replace", path: "/weddings", value: { id: 1, name: "our day" } }]);
       const undone = await b.process.call("undo", { cursor: "s1" });
       expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "replace", path: "/courses", value: course(1, "Soup") }], conflict: undefined });
-      const renamed = (name: string) => ({ op: "replace", path: "/courses/1", value: course(1, name) });
-      await expectTold(b, "fo-menu:1", [[renamed("Broth")], titled.ops, [renamed("Soup")]]);
+      const renamed = (name: string) => field("/courses/1/name", name);
+      const titledTold = [field("/weddings/name", "our day")];
+      await expectTold(b, "fo-menu:1", [[renamed("Broth")], titledTold, [renamed("Soup")]]);
       await expectTold(b, "fo-all-courses:", [[renamed("Broth")], [renamed("Soup")]]);
-      await expectTold(b, "fo-title:1", [titled.ops]);
+      await expectTold(b, "fo-title:1", [titledTold]);
       await assertCopiesHold(b, copies);
     });
 
@@ -1201,19 +1253,19 @@ export function fanOutCases(backend: () => PathBackend): void {
         { op: "replace", path: "/households/1/email", value: "one@x" },
         { op: "replace", path: "/households/2/email", value: "two@x" },
       ]);
-      await expectTold(b, "fo-household:1", [[{ op: "replace", path: "/households", value: household(1, "one@x") }]]);
-      await expectTold(b, "fo-household:2", [[{ op: "replace", path: "/households", value: household(2, "two@x") }]]);
+      await expectTold(b, "fo-household:1", [[field("/households/email", "one@x")]]);
+      await expectTold(b, "fo-household:2", [[field("/households/email", "two@x")]]);
       await assertCopiesHold(b, copies);
     });
   });
 
   describe("a root two documents share", () => {
-    test("the wedding renamed through the board reaches the menu and the title, each as its root", async () => {
+    test("the wedding renamed through the board reaches the menu and the title, each as the field of its root", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1", "fo-title:1"]);
       await write(b.process, "fo-board:1", [{ op: "replace", path: "/weddings/name", value: "our day" }]);
-      await expectTold(b, "fo-menu:1", [[{ op: "replace", path: "/weddings", value: { id: 1, name: "our day" } }]]);
-      await expectTold(b, "fo-title:1", [[{ op: "replace", path: "/weddings", value: { id: 1, name: "our day" } }]]);
+      await expectTold(b, "fo-menu:1", [[field("/weddings/name", "our day")]]);
+      await expectTold(b, "fo-title:1", [[field("/weddings/name", "our day")]]);
       await assertCopiesHold(b, copies);
     });
   });
@@ -1240,8 +1292,8 @@ export function fanOutCases(backend: () => PathBackend): void {
       const added = await write(b.process, "fo-drinks:1", [{ op: "add", path: "/drinks/10", value: { courses_id: 1, name: "Port" } }]);
       expect(added.ops).toEqual([{ op: "add", path: "/drinks/10", value: drink(10, 1, "Port") }]);
       const renamed = await write(b.process, "fo-board:1", [{ op: "replace", path: "/drinks/1/name", value: "Madeira" }]);
-      await expectTold(b, "fo-drinks:1", [added.ops, renamed.ops]);
-      await expectTold(b, "fo-board:1", [added.ops, renamed.ops]);
+      await expectTold(b, "fo-drinks:1", [added.ops, [field("/drinks/1/name", "Madeira")]]);
+      await expectTold(b, "fo-board:1", [added.ops, [field("/drinks/1/name", "Madeira")]]);
       await expectSilent(b, "fo-drinks:2");
       const then = await b.process.call("open_at", { doc: "fo-drinks:1", at: new Date().toISOString() });
       expect(content(then.result).drinks).toEqual({ "1": drink(1, 1, "Madeira"), "10": drink(10, 1, "Port") });
@@ -1265,11 +1317,11 @@ export function fanOutCases(backend: () => PathBackend): void {
   });
 
   describe("a temporal collection", () => {
-    test("a note changed through the board reaches the notes document as the row, without its validity", async () => {
+    test("a note changed through the board reaches the notes document as the field that changed: its validity, a new version's, is not told", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-notes:1"]);
       await write(b.process, "fo-board:1", [{ op: "replace", path: "/notes/1/text", value: "bring tables" }]);
-      await expectTold(b, "fo-notes:1", [[{ op: "replace", path: "/notes/1", value: { id: 1, weddings_id: 1, text: "bring tables" } }]]);
+      await expectTold(b, "fo-notes:1", [[field("/notes/1/text", "bring tables")]]);
       await assertCopiesHold(b, copies);
     });
 
@@ -1288,8 +1340,8 @@ export function fanOutCases(backend: () => PathBackend): void {
       expect(added.ops).toEqual([{ op: "add", path: "/notes/2", value: note(2, "bring lights") }]);
       const undone = await b.process.call("undo", { cursor: "s1" });
       expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "replace", path: "/notes", value: note(1, "bring chairs") }], conflict: undefined });
-      await expectTold(b, "fo-note:1", [changed.ops, undone.result.ops]);
-      await expectTold(b, "fo-all-notes:", [[{ op: "replace", path: "/notes/1", value: note(1, "bring tables") }], added.ops, [{ op: "replace", path: "/notes/1", value: note(1, "bring chairs") }]]);
+      await expectTold(b, "fo-note:1", [[field("/notes/text", "bring tables")], [field("/notes/text", "bring chairs")]]);
+      await expectTold(b, "fo-all-notes:", [[field("/notes/1/text", "bring tables")], added.ops, [field("/notes/1/text", "bring chairs")]]);
       const then = await b.process.call("open_at", { doc: "fo-note:1", at: "2021-01-01T00:00:00.000Z" });
       expect(content(then.result)).toEqual({ notes: note(1, "bring chairs") });
       const history = (await b.process.call("history", { doc: "fo-note:1", cursor: "s1" })).result;
@@ -1317,8 +1369,11 @@ export function fanOutCases(backend: () => PathBackend): void {
       const back = [{ op: "replace", path: "/notes/1", value: note("bring chairs") }, { op: "replace", path: "/weddings", value: { id: 1, name: "ours" } }];
       expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: back, conflict: undefined });
       expect(await versions()).toEqual([{ text: "bring chairs", live: false }, { text: "bring lights", live: false }, { text: "bring chairs", live: true }]);
-      await expectTold(b, "fo-note:1", [[{ op: "replace", path: "/notes", value: note("bring tables") }, { op: "replace", path: "/notes", value: note("bring lights") }], [{ op: "replace", path: "/notes", value: note("bring chairs") }]]);
-      await expectTold(b, "fo-notes:1", [ops, back]);
+      await expectTold(b, "fo-note:1", [[field("/notes/text", "bring tables"), field("/notes/text", "bring lights")], [field("/notes/text", "bring chairs")]]);
+      await expectTold(b, "fo-notes:1", [
+        [field("/notes/1/text", "bring tables"), field("/weddings/name", "our day"), field("/notes/1/text", "bring lights")],
+        [field("/notes/1/text", "bring chairs"), field("/weddings/name", "ours")],
+      ]);
       await assertCopiesHold(b, copies);
     });
 
@@ -1369,7 +1424,8 @@ export function fanOutCases(backend: () => PathBackend): void {
         7: [was("bring lights"), was("bring lights")],
       });
       expect(content((await b.process.call("open", { doc: "fo-notes:1" })).result)).toEqual({ weddings: { id: 1, name: "ours" }, notes: { "1": note(1, "bring chairs") } });
-      await expectTold(b, "fo-notes:1", [rewritten.ops, readded.ops, as("bring chairs"), as("bring lights"), as("bring chairs"), taken, made, taken]);
+      const text = (t: string) => [field("/notes/1/text", t)];
+      await expectTold(b, "fo-notes:1", [[...text("bring tables"), ...rewritten.ops.slice(1)], readded.ops, text("bring chairs"), text("bring lights"), text("bring chairs"), taken, made, taken]);
       await assertCopiesHold(b, copies);
     });
 
@@ -1399,9 +1455,10 @@ export function fanOutCases(backend: () => PathBackend): void {
       expect(await walked("undo")).toEqual({ ops: as("bring chairs"), conflict: undefined });
       const was = (text: string, live = false) => ({ text, live });
       expect(await versions()).toEqual([was("bring chairs"), was("bring lights"), was("bring chairs"), was("bring lights"), was("bring chairs", true)]);
+      const text = (t: string) => [field("/notes/text", t)];
       await expectTold(b, "fo-note:1", [
-        [...as("bring tables"), { op: "replace", path: "/notes", value: null }, ...as("bring lights")],
-        as("bring chairs"), as("bring lights"), as("bring chairs"),
+        [...text("bring tables"), { op: "replace", path: "/notes", value: null }, ...as("bring lights")],
+        text("bring chairs"), text("bring lights"), text("bring chairs"),
       ]);
       await assertCopiesHold(b, copies);
     });
@@ -1572,7 +1629,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       expect(content((await b.process.call("open", { doc: "fo-course:1" })).result)).toEqual({ courses: course(1, "Soup"), drinks: { "1": drink(1, 1, "Sherry") } });
       expect(await walked("redo")).toEqual({ ops: taken, conflict: undefined });
       expect(await walked("undo")).toEqual({ ops: back, conflict: undefined });
-      const written = [{ op: "replace", path: "/courses/1", value: course(1, "Gone") }, { op: "remove", path: "/courses/1" }, { op: "remove", path: "/drinks/1" }];
+      const written = [field("/courses/1/name", "Gone"), { op: "remove", path: "/courses/1" }, { op: "remove", path: "/drinks/1" }];
       await expectTold(b, "fo-menu:1", [written, back, taken, back]);
       await expectTold(b, "fo-board:1", [written, back, taken, back]);
       await assertCopiesHold(b, copies);
@@ -1600,8 +1657,9 @@ export function fanOutCases(backend: () => PathBackend): void {
       expect(await walked("undo")).toEqual({ ops: [...as("a@x"), favourBack], conflict: undefined });
       expect(await walked("redo")).toEqual({ ops: [favourGone, ...as("z@x")], conflict: undefined });
       expect(await walked("undo")).toEqual({ ops: [...as("a@x"), favourBack], conflict: undefined });
-      const inBoard = (email: string) => [{ op: "replace", path: "/households/1", value: household(1, email) }];
-      await expectTold(b, "fo-household:1", [[{ op: "replace", path: "/households", value: null }, as("z@x")[0]], as("a@x"), as("z@x"), as("a@x")]);
+      const inBoard = (email: string) => [field("/households/1/email", email)];
+      const told = (email: string) => [field("/households/email", email)];
+      await expectTold(b, "fo-household:1", [[{ op: "replace", path: "/households", value: null }, as("z@x")[0]], told("a@x"), told("z@x"), told("a@x")]);
       await expectTold(b, "fo-board:1", [[written.ops[0], written.ops[2]], inBoard("a@x"), inBoard("z@x"), inBoard("a@x")]);
       await assertCopiesHold(b, copies);
     });
@@ -1850,8 +1908,8 @@ export function fanOutCases(backend: () => PathBackend): void {
       const next = await b.process.call("undo", { cursor: "s1" });
       expect(walked(next)).toEqual({ doc: "fo-board:1", ops: [{ op: "replace", path: "/weddings", value: { id: 1, name: "ours" } }], conflict: undefined, error: undefined });
       expect((await b.process.call("undo", { cursor: "s1" })).result).toBeNull();
-      await expectTold(b, "fo-menu:1", [older.ops, later.ops, undone.result.ops, next.result.ops]);
-      await expectTold(b, "fo-title:1", [later.ops, next.result.ops]);
+      await expectTold(b, "fo-menu:1", [[field("/courses/1/name", "Broth")], [field("/weddings/name", "the big day")], [field("/courses/1/name", "Soup")], [field("/weddings/name", "ours")]]);
+      await expectTold(b, "fo-title:1", [[field("/weddings/name", "the big day")], [field("/weddings/name", "ours")]]);
       await assertCopiesHold(b, copies);
     });
 
@@ -1869,7 +1927,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       expect((await b.process.call("redo", { cursor: "s1", change: made.entry })).result).toBeNull();
       const again = await b.process.call("undo", { cursor: "s1", change: redone.result.entry });
       expect(walked(again)).toEqual({ doc: "fo-board:1", ops: [{ op: "replace", path: "/courses/1", value: course(1, "Soup") }], conflict: undefined, error: undefined });
-      await expectTold(b, "fo-menu:1", [made.ops, undone.result.ops, redone.result.ops, again.result.ops]);
+      await expectTold(b, "fo-menu:1", ["Broth", "Soup", "Broth", "Soup"].map((name) => [field("/courses/1/name", name)]));
       await assertCopiesHold(b, copies);
     });
 
@@ -1956,16 +2014,16 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("a household moved to the other wedding through a list, its own document and both boards open, still matches: the inbox is told one replace and keeps it", async () => {
+    test("a household moved to the other wedding through a list, its own document and both boards open, still matches: the inbox is told the one field that changed, and keeps it", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-household:1", "fo-board:1", "fo-board:2", "fo-inbox:a@x", "fo-all-households:"]);
       await write(b.process, "fo-all-households:", [{ op: "replace", path: "/households/1/weddings_id", value: 2 }]);
       await expectTold(b, "fo-board:1", [[{ op: "remove", path: "/households/1" }]]);
-      await expectTold(b, "fo-inbox:a@x", [[{ op: "replace", path: "/households/1", value: household(1, "a@x", 2) }]]);
+      await expectTold(b, "fo-inbox:a@x", [[field("/households/1/weddings_id", 2)]]);
       await assertCopiesHold(b, copies);
     });
 
-    test("a seat that leaves a list's condition, still matching, is not taken for removed: the list is told it left, the custom document a replace, and keeps it -- written through the seating plan, since the list itself may not write it out (todo #6's review)", async () => {
+    test("a seat that leaves a list's condition, still matching, is not taken for removed: the list is told it left, the custom document the field that changed, and keeps it -- written through the seating plan, since the list itself may not write it out (todo #6's review)", async () => {
       const b = backend();
       await b.process.call("open", { doc: "fo-seating:1" });
       await write(b.process, "fo-seating:1", [{ op: "replace", path: "/seats/1/kept", value: false }]);
@@ -1975,7 +2033,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       expect((await b.process.call("delta", { doc: "fo-seats-at:3", ops: [{ op: "replace", path: "/seats/1/table_no", value: 5 }] })).error?.code).toBe(404);
       await write(b.process, "fo-seating:1", [{ op: "replace", path: "/seats/1/table_no", value: 5 }]);
       await expectTold(b, "fo-seats-at:3", [[{ op: "remove", path: "/seats/1" }]]);
-      await expectTold(b, "fo-seats-at:open:all", [[{ op: "replace", path: "/seats/1", value: seat(1, 5, false, { veg: true }) }]]);
+      await expectTold(b, "fo-seats-at:open:all", [[field("/seats/1/table_no", 5)]]);
       await assertCopiesHold(b, copies);
     });
 
@@ -2002,7 +2060,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       const named = await write(b.process, "fo-plan:8", [{ op: "replace", path: "/weddings/name", value: "the other" }]);
       expect(named.ops).toEqual([{ op: "replace", path: "/weddings", value: { id: 8, name: "the other" } }]);
       await expectTold(b, "fo-plan:7", [added.ops]);
-      await expectTold(b, "fo-plan:8", [named.ops]);
+      await expectTold(b, "fo-plan:8", [[field("/weddings/name", "the other")]]);
       await expectTold(b, "fo-all-courses:", [added.ops]);
       expect(content((await b.process.call("open", { doc: "fo-title:7" })).result)).toEqual({ weddings: { id: 7, name: "" } });
       await assertCopiesHold(b, copies);
@@ -2013,11 +2071,12 @@ export function fanOutCases(backend: () => PathBackend): void {
       const copies = await openAll(b.process, ["fo-plan:7", "fo-plan:8", "fo-weddings:"]);
       const added = await write(b.process, "fo-plan:7", [{ op: "add", path: "/courses/10", value: { name: "Soup" } }]);
       const named = await write(b.process, "fo-plan:8", [{ op: "replace", path: "/weddings/name", value: "the other" }]);
+      expect(named.ops).toEqual([{ op: "replace", path: "/weddings", value: { id: 8, name: "the other" } }]);
       await expectTold(b, "fo-plan:7", [added.ops]);
-      await expectTold(b, "fo-plan:8", [named.ops]);
+      await expectTold(b, "fo-plan:8", [[field("/weddings/name", "the other")]]);
       await expectTold(b, "fo-weddings:", [
         [{ op: "add", path: "/weddings/7", value: { id: 7, name: "" } }, ...added.ops],
-        [{ op: "add", path: "/weddings/8", value: { id: 8, name: "" } }, { op: "replace", path: "/weddings/8", value: { id: 8, name: "the other" } }],
+        [{ op: "add", path: "/weddings/8", value: { id: 8, name: "" } }, field("/weddings/8/name", "the other")],
       ]);
       await write(b.process, "fo-weddings:", [{ op: "replace", path: "/weddings/7/name", value: "ours too" }]);   // the list's copy holds it to write
       await assertCopiesHold(b, copies);
@@ -2097,7 +2156,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       const moved = await write(b.process, "fo-seating:1", [{ op: "replace", path: "/seats/1/table_no", value: 5 }]);
       const added = await write(b.process, "fo-seats-at:5", [{ op: "add", path: "/seats/-", value: { weddings_id: 1, kept: false } }]);
       expect(added.ops).toEqual([{ op: "add", path: "/seats/2", value: seat(2, 5, false) }]);
-      await expectTold(b, "fo-seating:1", [moved.ops, added.ops]);
+      await expectTold(b, "fo-seating:1", [[field("/seats/1/table_no", 5)], added.ops]);
       await expectTold(b, "fo-seats-at:3", [[{ op: "remove", path: "/seats/1" }]]);
       await expectTold(b, "fo-seats-at:5", [[{ op: "add", path: "/seats/1", value: seat(1, 5, true, { veg: true }) }], added.ops]);
       await expectTold(b, "fo-seats-at:open:all", [added.ops]);
@@ -2106,8 +2165,8 @@ export function fanOutCases(backend: () => PathBackend): void {
   });
 
   describe("a document named with a time (at:) reads the past", () => {
-    const note = (text: string) => ({ op: "replace", path: "/notes/1", value: { id: 1, weddings_id: 1, text } });
-    const named = (name: string) => ({ op: "replace", path: "/weddings", value: { id: 1, name } });
+    const note = (text: string) => field("/notes/1/text", text);
+    const named = (name: string) => field("/weddings/name", name);
 
     test("open across a write, it is told only what its time does not keep -- the wedding's name, which keeps no history, not the note written since; a time to come reads as now, and hears both", async () => {
       const b = backend();
@@ -2150,7 +2209,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1"]);
       await write(b.process, "fo-board:1", [{ op: "replace", path: "/courses/1/name", value: "Broth" }]);
-      await expectTold(b, "fo-board:1", [[{ op: "replace", path: "/courses/1", value: course(1, "Broth") }]]);
+      await expectTold(b, "fo-board:1", [[field("/courses/1/name", "Broth")]]);
       await assertCopiesHold(b, copies);
     });
 
@@ -2263,7 +2322,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       await write(b.process, "fo-all-courses:", [{ op: "replace", path: "/courses/10/weddings_id", value: 2 }]);
       await expectTold(b, "fo-board:1", [[{ op: "remove", path: "/courses/10" }]]);
       await expectTold(b, "fo-board:2", [[{ op: "add", path: "/courses/10", value: course(10, "Fish", 2) }]]);
-      await expectTold(b, "fo-course:10", [[{ op: "replace", path: "/courses", value: course(10, "Fish", 2) }]]);
+      await expectTold(b, "fo-course:10", [[field("/courses/weddings_id", 2)]]);
       await assertCopiesHold(b, copies);
     });
 
@@ -2279,8 +2338,8 @@ export function fanOutCases(backend: () => PathBackend): void {
       for (const doc of ["fo-board:2", "fo-menu:2"]) await expectTold(b, doc, [arrived]);
       await expectTold(b, "fo-drinks:1", [[left[1]]]);
       await expectTold(b, "fo-drinks:2", [[arrived[1]]]);
-      await expectTold(b, "fo-course:1", [[{ op: "replace", path: "/courses", value: moved }]]);
-      for (const doc of ["fo-catalog:", "fo-all-courses:"]) await expectTold(b, doc, [[{ op: "replace", path: "/courses/1", value: moved }]]);
+      await expectTold(b, "fo-course:1", [[field("/courses/weddings_id", 2)]]);
+      for (const doc of ["fo-catalog:", "fo-all-courses:"]) await expectTold(b, doc, [[field("/courses/1/weddings_id", 2)]]);
       await assertCopiesHold(b, copies);
     });
 
@@ -2296,16 +2355,17 @@ export function fanOutCases(backend: () => PathBackend): void {
       const port = { op: "replace", path: "/drinks/1", value: drink(1, 1, "Port") };
       const home = { op: "replace", path: "/courses/1", value: course(1, "Soup") };
       expect(ops).toEqual([away, port, home]);
-      await expectTold(b, "fo-catalog:", [ops]);
+      const named = field("/drinks/1/name", "Port");
+      await expectTold(b, "fo-catalog:", [[field("/courses/1/weddings_id", 2), named, field("/courses/1/weddings_id", 1)]]);
       await expectTold(b, "fo-board:2", [[
         { op: "add", path: "/courses/1", value: away.value }, { op: "add", path: "/drinks/1", value: drink(1, 1, "Sherry") },
-        port, { op: "remove", path: "/courses/1" }, { op: "remove", path: "/drinks/1" },
+        named, { op: "remove", path: "/courses/1" }, { op: "remove", path: "/drinks/1" },
       ]]);
       await expectTold(b, "fo-board:1", [[
         { op: "remove", path: "/courses/1" }, { op: "remove", path: "/drinks/1" },
         { op: "add", path: "/courses/1", value: home.value }, { op: "add", path: "/drinks/1", value: port.value },
       ]]);
-      await expectTold(b, "fo-course:1", [[{ op: "replace", path: "/courses", value: away.value }, port, { op: "replace", path: "/courses", value: home.value }]]);
+      await expectTold(b, "fo-course:1", [[field("/courses/weddings_id", 2), named, field("/courses/weddings_id", 1)]]);
       await assertCopiesHold(b, copies);
     });
 
@@ -2318,14 +2378,14 @@ export function fanOutCases(backend: () => PathBackend): void {
         { op: "replace", path: "/courses/1/name", value: "Broth" },
       ]);
       const moved = course(1, "Broth", 2);
-      await expectTold(b, "fo-catalog:", [[{ op: "replace", path: "/courses/1", value: moved }]]);
+      await expectTold(b, "fo-catalog:", [[field("/courses/1/name", "Broth"), field("/courses/1/weddings_id", 2)]]);
       await expectTold(b, "fo-board:1", [[{ op: "remove", path: "/courses/1" }, { op: "remove", path: "/drinks/1" }]]);
       await expectTold(b, "fo-board:2", [[{ op: "add", path: "/courses/1", value: moved }, { op: "add", path: "/drinks/1", value: drink(1, 1, "Sherry") }]]);
       await expectTold(b, "fo-drinks:2", [[{ op: "add", path: "/drinks/1", value: drink(1, 1, "Sherry") }]]);
       await assertCopiesHold(b, copies);
     });
 
-    test("a course moved and moved back in one run of replaces goes nowhere: the other wedding's documents hear nothing (todo #62)", async () => {
+    test("a course moved and moved back in one run of replaces goes nowhere: no document but the writer's hears anything, for nothing changed (todo #62, #69)", async () => {
       const b = backend();
       const docs = ["fo-board:1", "fo-board:2", "fo-drinks:1", "fo-drinks:2", "fo-catalog:"];
       const copies = await openAll(b.process, docs);
@@ -2333,8 +2393,7 @@ export function fanOutCases(backend: () => PathBackend): void {
         { op: "replace", path: "/courses/1/weddings_id", value: 2 },
         { op: "replace", path: "/courses/1/weddings_id", value: 1 },
       ]);
-      await expectTold(b, "fo-board:1", [[{ op: "replace", path: "/courses/1", value: course(1, "Soup") }]]);
-      await expectSilent(b, "fo-board:2", "fo-drinks:1", "fo-drinks:2");
+      await expectSilent(b, "fo-board:1", "fo-board:2", "fo-drinks:1", "fo-drinks:2");
       await assertCopiesHold(b, copies);
     });
 
@@ -2358,7 +2417,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       const b = backend();
       const copies = await openAll(b.process, ["fo-household:1", "fo-board:1", "fo-board:2", "fo-all-households:"]);
       await write(b.process, "fo-all-households:", [{ op: "replace", path: "/households/1/weddings_id", value: 2 }]);
-      await expectTold(b, "fo-household:1", [[{ op: "replace", path: "/households", value: household(1, "a@x", 2) }]]);
+      await expectTold(b, "fo-household:1", [[field("/households/weddings_id", 2)]]);
       await expectTold(b, "fo-board:1", [[{ op: "remove", path: "/households/1" }]]);
       await expectTold(b, "fo-board:2", [[{ op: "add", path: "/households/1", value: household(1, "a@x", 2) }]]);
       await assertCopiesHold(b, copies);
@@ -2382,7 +2441,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       await write(b.process, "fo-board:1", [{ op: "replace", path: "/courses/1/name", value: "Fish soup" }]);
       await expectTold(b, "fo-courses-like:So", [[{ op: "remove", path: "/courses/1" }]]);
       await expectTold(b, "fo-courses-like:Fi", [[{ op: "add", path: "/courses/1", value: course(1, "Fish soup") }]]);
-      await expectTold(b, "fo-all-courses:", [[{ op: "replace", path: "/courses/1", value: course(1, "Fish soup") }]]);
+      await expectTold(b, "fo-all-courses:", [[field("/courses/1/name", "Fish soup")]]);
       await assertCopiesHold(b, copies);
     });
 

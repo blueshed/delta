@@ -26,6 +26,10 @@ beforeEach(() => {
     process: { call: (action, msg) => local.call(action, msg), heard },
     quiet: async () => {}, // in-process: told before the write answers
     exportTables: async () => exportTables(db, pathSchema),
+    storeSetsT: async () => {
+      db.run("CREATE TRIGGER fo_t AFTER UPDATE ON fo_households BEGIN UPDATE fo_households SET t = upper(NEW.email) WHERE id = NEW.id; END");
+      return async () => void db.run("DROP TRIGGER fo_t");
+    },
   };
 });
 

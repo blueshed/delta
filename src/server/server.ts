@@ -506,23 +506,18 @@ export function createWs(opts?: WsOptions): WsServer {
 // ---------------------------------------------------------------------------
 
 /**
- * Normalize a delta batch for broadcast: rewrite field-level ops (depth >= 3,
- * e.g. `/cards/5/title`) into whole-row replaces of their depth-2 ancestor
- * (`/cards/5`), with the row value read from the just-applied doc state.
+ * Rewrite field-level ops (depth >= 3, e.g. `/cards/5/title`) into whole-row
+ * replaces of their depth-2 ancestor (`/cards/5`), with the row value read
+ * from the just-applied doc state.
  *
- * The SQLite and Postgres backends already broadcast whole-row ops; without
- * this, the free-form document was the one path emitting field-level ops on the
- * wire — which keyed reactive consumers (railroad's `list()`) cannot see: the
- * client applies them by mutating the row object in place, so the row's
- * identity never changes and its DOM goes stale. Whole-row replaces give every
- * consumer a fresh row reference.
+ * No document broadcasts so since 0.13: a holder is told what changed, and the
+ * client gives the row a field lands in a fresh reference itself. Kept for a
+ * custom stream whose readers want whole rows.
  *
  * Depth <= 2 ops pass through untouched. Multiple field ops on one row
  * collapse to a single replace (the doc already reflects the whole batch). A
  * rewrite whose row no longer exists (removed later in the same batch) is
  * dropped — the removal op itself broadcasts the disappearance.
- *
- * Exported for custom DocType authors who assemble their own broadcasts.
  */
 export function normalizeForBroadcast(doc: unknown, ops: DeltaOp[]): DeltaOp[] {
   const out: DeltaOp[] = [];
@@ -597,7 +592,7 @@ export async function registerDoc<T>(
     const ops = mintIds(doc, sent);
     applyOps(doc, ops);
     log.info(`delta [${ops.map((o) => `${o.op} ${o.path}`).join(", ")}]`);
-    ws.publish(name, { doc: name, ops: normalizeForBroadcast(doc, ops) });
+    ws.publish(name, { doc: name, ops });   // told as applied: what changed
     // Fire-and-forget by design (the delta is already acked and broadcast), so
     // an fs failure is logged rather than left as an unhandled rejection.
     persist().catch((err: any) => log.error(`persist failed: ${err.message}`));
