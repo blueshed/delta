@@ -69,8 +69,7 @@
     "@types/bun": "^1.4.2",
     "@types/pg": "^8.20.0",
     "jose": "^6.2.4",
-    "pg": "^8.22.0",
-    "typescript": "^5.9.3"
+    "pg": "^8.22.0"
   },
   "author": "Peter Bunyan <peter@blueshed.co.uk> (https://blueshed.co.uk)",
   "license": "MIT",
