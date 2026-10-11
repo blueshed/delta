@@ -16,13 +16,13 @@ import type { WsServer } from "../server";
 import { trackSubscribe, trackUnsubscribe, onClientDrop } from "../server";
 import { createLogger } from "../logger";
 import type { Pool, PoolClient } from "pg";
-import { callAs, resolveDoc, holdAuth } from "./registry";
+import { callAs, resolveDoc, holdAuth, holdPrefixes } from "./registry";
 import type { DocType } from "./registry";
 import type { DeltaAuth } from "../auth";
 import { isAuthError } from "../auth";
 import type { DeltaOp } from "../../core";
 import { isEntryId, ledgerWho, socketCursor } from "../ledger";
-import { assertOnePrefix, assertOwned, createCustomDocs, NOT_FOUND, type CustomDoc, type Owns, type Refusal } from "../custom";
+import { assertOwned, createCustomDocs, NOT_FOUND, type CustomDoc, type Owns, type Refusal } from "../custom";
 
 const log = createLogger("[doc]");
 
@@ -138,8 +138,9 @@ export async function createDocListener<I = unknown>(
   // one, a registered type -- says who owns it, or that it is shared. Asked
   // before the pool is touched, so a refusal leaves nothing to clean up.
   assertOwned(opts?.custom ?? [], auth);
-  assertOnePrefix(opts?.custom ?? [], (p) => resolveDoc(p)?.type.prefix === p);
   const releaseAuth = auth ? holdAuth() : () => {};
+  let releasePrefixes = () => {};
+  const releaseHolds = () => { releaseAuth(); releasePrefixes(); };
   const ledger = !!opts?.ledger;
   const whoOf = (identity: I | undefined): string | null => ledgerWho(identity, opts?.who);
   // The cursor undo walks: named by a caller in this process, and over the
@@ -176,10 +177,11 @@ export async function createDocListener<I = unknown>(
   let listener: PoolClient;
   let fetchSql: string;
   try {
+    releasePrefixes = holdPrefixes((opts?.custom ?? []).map((d) => d.prefix));
     fetchSql = await fetchQuery(pool);
     listener = await pool.connect();
   }
-  catch (err) { releaseAuth(); throw err; }
+  catch (err) { releaseHolds(); throw err; }
   let destroyed = false;
   let reconnecting = false;
 
@@ -253,7 +255,7 @@ export async function createDocListener<I = unknown>(
   } catch (err) {
     detachListener(listener);
     listener.release();
-    releaseAuth();
+    releaseHolds();
     throw err;
   }
 
@@ -578,7 +580,7 @@ export async function createDocListener<I = unknown>(
     },
     async destroy() {
       destroyed = true;
-      releaseAuth();
+      releaseHolds();
       try {
         await listener.query("UNLISTEN *");
       } catch {}

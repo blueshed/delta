@@ -10,6 +10,7 @@ import {
 import { openPglite } from "../src/server/pglite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
+import { defineDoc } from "../src/schema";
 import { pathDocs, pathSchema, pathSeed, postgresInbox, postgresMenuCard } from "./helpers/path";
 import { auth, customOwns, everyDoc, mineDoc, ownsCases, whoamiDoc, type Me } from "./helpers/owns";
 
@@ -57,7 +58,17 @@ describe("pglite: one prefix, one document (#76)", () => {
   test("two custom documents of one prefix, or one of a table document's, are refused, naming it", async () => {
     for (const def of pathDocs) registerDocType(docTypeFromDef(def, pool));
     const listen = (custom: CustomDocDef<any, Me>[]) => createDocListener(createLocal().server, pool, { custom });
-    await expect(listen([postgresInbox, { ...postgresInbox, matches: () => true }])).rejects.toThrow(/defineCustomDoc\("fo-inbox:"\): another document of this registration has its prefix/);
-    await expect(listen([{ ...postgresInbox, prefix: "fo-board:" }])).rejects.toThrow(/defineCustomDoc\("fo-board:"\): another document of this registration has its prefix/);
+    await expect(listen([postgresInbox, { ...postgresInbox, matches: () => true }])).rejects.toThrow(/"fo-inbox:" names two documents/);
+    await expect(listen([{ ...postgresInbox, prefix: "fo-board:" }])).rejects.toThrow(/"fo-board:" names two documents/);
+  });
+
+  test("a document type of a prefix registered already is refused, and so is one of a running listener's custom document, until it stops", async () => {
+    registerDocType(docTypeFromDef(pathDocs[0]!, pool));
+    expect(() => registerDocType(docTypeFromDef(pathDocs[0]!, pool))).toThrow(/"fo-board:" names two documents/);
+    const inbox = defineDoc(postgresInbox.prefix, { root: "households", include: [] });
+    const listener = await createDocListener(createLocal().server, pool, { custom: [postgresInbox] });
+    expect(() => registerDocType(docTypeFromDef(inbox, pool))).toThrow(/"fo-inbox:" names two documents/);
+    await listener.destroy();
+    registerDocType(docTypeFromDef(inbox, pool));
   });
 });

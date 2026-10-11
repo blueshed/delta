@@ -57,13 +57,13 @@ export function assertOwned(defs: CustomDoc[], auth: DeltaAuth<any> | undefined)
 }
 
 /**
- * One prefix, one document: a custom doc's prefix is refused where another of
- * the registration's custom docs has it, or a table document (`isTable`) --
- * else one would silently answer for the other (todo #76).
+ * One prefix, one document: refused where a prefix comes twice in `prefixes`,
+ * or `taken` says another document has it already -- else one would silently
+ * answer for the other (todo #76).
  */
-export function assertOnePrefix(defs: CustomDoc[], isTable: (prefix: string) => boolean): void {
-  const twice = defs.find((d, i) => isTable(d.prefix) || defs.findIndex((e) => e.prefix === d.prefix) < i);
-  if (twice) throw new Error(`defineCustomDoc("${twice.prefix}"): another document of this registration has its prefix -- a name is answered by one document: give each its own`);
+export function assertOnePrefix(prefixes: string[], taken: (prefix: string) => boolean = () => false): void {
+  const twice = prefixes.find((p, i) => taken(p) || prefixes.indexOf(p) < i);
+  if (twice !== undefined) throw new Error(`"${twice}" names two documents -- a name is answered by one document: give each its own prefix`);
 }
 
 /** Rows keyed by id. */

@@ -156,17 +156,19 @@ describe("sqlite and json: several registrations on one server, one name", () =>
         : json.registerDocs(local.server, join(mkdtempSync(join(tmpdir(), "delta-owns-")), "data.json"), pathSchema, [defineDoc("fo-board:", { root: "weddings", include: [] })], [], {}),
       ).toThrow(/"fo-board:" is registered already on this server/);
     });
-    test(`${kind}: two custom documents of one prefix, or one of a table document's, in one registration are refused, naming it (#76)`, () => {
-      const register = (customDocs: CustomDocDef<any, Me>[]) => {
-        const local = createLocal();
+    test(`${kind}: two documents of one prefix in one registration are refused, naming it, and hold no prefix (#76)`, () => {
+      const local = createLocal();
+      const register = (docs: typeof pathDocs, customDocs: CustomDocDef<any, Me>[]) => {
         const db = new Database(":memory:");
         createTables(db, pathSchema);
         return kind === "sqlite"
-          ? registerDocs(local.server, db, pathSchema, pathDocs, customDocs, {})
-          : json.registerDocs(local.server, join(mkdtempSync(join(tmpdir(), "delta-owns-")), "data.json"), pathSchema, pathDocs, customDocs, {});
+          ? registerDocs(local.server, db, pathSchema, docs, customDocs, {})
+          : json.registerDocs(local.server, join(mkdtempSync(join(tmpdir(), "delta-owns-")), "data.json"), pathSchema, docs, customDocs, {});
       };
-      expect(() => register([sqliteInbox, { ...sqliteInbox, matches: () => true }])).toThrow(/defineCustomDoc\("fo-inbox:"\): another document of this registration has its prefix/);
-      expect(() => register([{ ...sqliteInbox, prefix: "fo-board:" }])).toThrow(/defineCustomDoc\("fo-board:"\): another document of this registration has its prefix/);
+      expect(() => register(pathDocs, [sqliteInbox, { ...sqliteInbox, matches: () => true }])).toThrow(/"fo-inbox:" names two documents/);
+      expect(() => register(pathDocs, [{ ...sqliteInbox, prefix: "fo-board:" }])).toThrow(/"fo-board:" names two documents/);
+      expect(() => register([...pathDocs, defineDoc("fo-board:", { root: "weddings", include: ["tags"] })], [])).toThrow(/"fo-board:" names two documents/);
+      register(pathDocs, [sqliteInbox]);   // none of the refused held a prefix
     });
   }
 });

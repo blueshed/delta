@@ -17,6 +17,7 @@ import type { Pool } from "pg";
 import type { DocDef } from "./schema";
 import type { DeltaOp } from "../../core";
 import { authless, ownerless, type DeltaAuth } from "../auth";
+import { assertOnePrefix } from "../custom";
 
 /** Who is writing, for the ledger: the identity as the ledger has it, and the cursor undo walks. */
 export type Writer = { who: string | null; cursor: string | null; undoable?: boolean; undoes?: number | null };
@@ -94,8 +95,15 @@ const types: DocType[] = [];
 /** The listeners with an `auth` module now running: while there is one, every type must say who owns it. */
 const authed = new Set<object>();
 
+/** The custom documents' prefixes of the listeners now running, which no type may take (todo #76). */
+const held = new Set<string[]>();
+
+/** A prefix a registered type, or a running listener's custom document, has. */
+const taken = (prefix: string): boolean => types.some((t) => t.prefix === prefix) || [...held].some((ps) => ps.includes(prefix));
+
 export function registerDocType(t: DocType): void {
   if (authed.size > 0 && !t.owns && !t.shared) throw ownerless(t.prefix);
+  assertOnePrefix([t.prefix], taken);
   types.push(t);
   types.sort((a, b) => b.prefix.length - a.prefix.length);
 }
@@ -113,6 +121,18 @@ export function holdAuth(): () => void {
   return () => void authed.delete(token);
 }
 
+/**
+ * For `createDocListener`: refuse custom document prefixes that come twice, or
+ * that a registered type has; and from now until the returned release, refuse
+ * a type of one of them.
+ */
+export function holdPrefixes(prefixes: string[]): () => void {
+  assertOnePrefix(prefixes, (p) => types.some((t) => t.prefix === p));
+  const mine = [...prefixes];
+  held.add(mine);
+  return () => void held.delete(mine);
+}
+
 export function resolveDoc(docName: string): { type: DocType; ctx: any } | null {
   for (const type of types) {
     const ctx = type.parse(docName);
@@ -125,6 +145,7 @@ export function resolveDoc(docName: string): { type: DocType; ctx: any } | null 
 export function clearRegistry(): void {
   types.length = 0;
   authed.clear();
+  held.clear();
 }
 
 /**

@@ -89,11 +89,12 @@ const log = createLogger("[delta-sqlite]");
 const registrations = new WeakMap<object, Map<symbol, string[]>>();
 
 /**
- * Claim `prefixes` on `ws` for one registration (refused if another holds one
- * of them), and answer whether a name is this registration's: whether no other
+ * Claim `prefixes` on `ws` for one registration (refused if one comes twice, or
+ * another registration holds one of them), and answer whether a name is this registration's: whether no other
  * registration's prefix matching it is longer than `mine`, the length of its own.
  */
 function claim(ws: object, prefixes: string[]): (docName: string, mine: number) => boolean {
+  assertOnePrefix(prefixes);
   const registration = Symbol("registerDocs");
   const onServer = registrations.get(ws) ?? new Map<symbol, string[]>();
   for (const theirs of onServer.values()) {
@@ -161,7 +162,6 @@ export function registerDocs<I = unknown>(
     throw authless(docs.map((d) => d.prefix).join(", "), "registerDocs");
   }
   assertOwned(customDocs, auth);
-  assertOnePrefix(customDocs, (p) => docs.some((d) => d.prefix === p));
   // One name, one registration on this server: the longest prefix answers it.
   const answers = claim(ws, [...docs.map((d) => d.prefix), ...customDocs.map((d) => d.prefix)]);
   /** The gate's identity (with `auth`), or its refusal. */
