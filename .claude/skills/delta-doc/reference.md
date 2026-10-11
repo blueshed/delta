@@ -1081,7 +1081,8 @@ URL resolution: `--url` → `DELTA_WS_URL` → `.delta` file in cwd → `ws://lo
 **For an agent or a script**, every runtime command takes:
 
 - `--token <t>` or `DELTA_TOKEN` (prefer the env: a flag shows in `ps`): sent as `call authenticate` on connecting, before the command -- never in the URL. A refused token is the sign-in's 401.
-- `--json`: one JSON line per event on stdout and nothing else (no status lines on stderr); an error is one `{"error":{"code","message"}}` line on stderr, exit code 1 (a bad argument: exit 2). Without it a person gets the answer pretty-printed, as before.
+- `--json`: one JSON line per event on stdout and nothing else (no status lines on stderr); an answer of nothing is `null`. An error is one `{"error":{"code","message"}}` line on stderr: `code` is the server's (the error table, *Wire protocol*), or `0` for one the CLI met itself -- the connection failed or closed, a bad argument. Without it a person gets the answer pretty-printed, as before, and an error as `delta: <message>`.
+- Exit codes: `0` done, `1` an error (the server's, the connection's), `2` a bad argument (a missing doc name, an unknown command or flag, ops that are not JSON) -- under `--json` as the same one line.
 - `watch` ends, exit 0, at the first of `--count <n>` broadcasts, `--for <ms>`, or `--until "<op> <path>"` (or `--until <path>`): an op at that path or under it, of that verb if given -- `--until "add /items"` is the first item added. Broadcasts are row-level, so name the row, not a field. With none it runs until Ctrl-C. An error told for the document, or the server closing the socket, ends it with exit 1.
 - `delta` prints the ops as applied on every backend: it asks with `inverse: true`, which every writable document answers with `ops` (*The inverse without a ledger*).
 

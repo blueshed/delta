@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-/** @blueshed/delta CLI: the commands are listed in `usage()`. */
+/** @blueshed/delta CLI: the commands are listed in `USAGE`. */
 import { parseArgs } from "node:util";
 import { resolve, basename, join, dirname } from "node:path";
 import { homedir } from "node:os";
@@ -20,9 +20,7 @@ const PKG_VERSION = (() => {
   }
 })();
 
-function usage(code = 0): never {
-  const stream = code === 0 ? process.stdout : process.stderr;
-  stream.write(
+const USAGE =
     `Usage:\n` +
     `  delta sql <module> [--out <file>] [--force] [--schema-export <name>] [--docs-export <name>]\n` +
     `  delta init <dir> [--with-auth] [--upgrade]\n` +
@@ -37,28 +35,37 @@ function usage(code = 0): never {
     `Runtime commands take:\n` +
     `  --url <url>  |  DELTA_WS_URL  |  .delta file  |  ws://localhost:\${PORT:-3100}/ws   (in order)\n` +
     `  --token <t>  |  DELTA_TOKEN    sent as call authenticate first, never in the URL\n` +
-    `  --json       one JSON line per event on stdout; an error is {"error":...} on stderr, exit 1\n`,
-  );
-  process.exit(code);
-}
+    `  --json       one JSON line per event on stdout; an error is one {"error":{"code","message"}}\n` +
+    `               line on stderr: code is the server's, or 0 when the CLI met it itself\n` +
+    `\n` +
+    `Exit codes: 0 done, 1 an error (the server's, the connection's), 2 a bad argument.\n`;
 
 // ---------------------------------------------------------------------------
 // Runtime CLI — open / watch / delta / call against a running delta server.
 //
 // For a person: answers pretty-printed, status on stderr. With --json, for a
 // program (an agent): one JSON line per event on stdout, nothing else; an
-// error is one {"error":...} line on stderr and exit code 1.
+// error is one {"error":{code,message}} line on stderr -- the server's, or
+// code 0 for one the CLI met itself -- exit 1, or 2 for a bad argument.
 // ---------------------------------------------------------------------------
 
-let json = false;
+let json = process.argv.includes("--json");   // before parsing: a flag parseArgs refuses is answered in kind
 
-const print = (result: unknown) =>
-  process.stdout.write((json ? JSON.stringify(result) : JSON.stringify(result, null, 2)) + "\n");
+const print = (result: unknown) => process.stdout.write(JSON.stringify(result ?? null, null, json ? undefined : 2) + "\n");
 const say = (line: string) => { if (!json) process.stderr.write(line + "\n"); };
 
-function usageError(why: string): never {
-  process.stderr.write(`delta: ${why}\n`);
-  process.exit(2);
+/** An error: the server's `{ code, message }` as it is, or one the CLI met itself, code 0. Exits `exit`. */
+function fail(err: unknown, exit = 1): never {
+  const told = !!err && typeof err === "object" && !(err instanceof Error);
+  const error = told ? { code: 0, ...(err as object) } : { code: 0, message: err instanceof Error ? err.message : String(err) };
+  process.stderr.write((json ? JSON.stringify({ error }) : `delta: ${told ? JSON.stringify(err) : error.message}`) + "\n");
+  process.exit(exit);
+}
+
+/** A bad argument: exit 2; a person is shown the usage too, when `show`. */
+function usageError(why: string, show = false): never {
+  if (show && !json) process.stderr.write(USAGE + "\n");
+  fail(why, 2);
 }
 
 function resolveWsUrl(values: Record<string, unknown>): string {
@@ -160,7 +167,7 @@ function parseJsonArg(s: string | undefined, label: string): unknown {
 }
 
 async function cmdOpen(docName: string | undefined, values: Record<string, unknown>) {
-  if (!docName) usage(1);
+  if (!docName) usageError("open takes a <docName>", true);
   print(await withWs(values, ({ send }) => send({ action: "open", doc: docName })));
 }
 
@@ -191,7 +198,7 @@ function untilOf(value: unknown): ((op: any) => boolean) | undefined {
  * server closing the socket, ends it with exit 1.
  */
 async function cmdWatch(docName: string | undefined, values: Record<string, unknown>) {
-  if (!docName) usage(1);
+  if (!docName) usageError("watch takes a <docName>", true);
   const most = wholeNumber(values.count, "--count");
   const ms = wholeNumber(values.for, "--for");
   const until = untilOf(values.until);
@@ -212,7 +219,7 @@ async function cmdWatch(docName: string | undefined, values: Record<string, unkn
     });
     const state = await send({ action: "open", doc: docName });
     say(`opened ${docName}`);
-    line({ doc: docName, state });
+    line({ doc: docName, state: state ?? null });
     enough();
     const timer = ms === undefined ? undefined : setTimeout(end.resolve, ms);
     try { await Promise.race([end.promise, closed]); }
@@ -225,7 +232,7 @@ async function cmdDelta(
   opsJson: string | undefined,
   values: Record<string, unknown>,
 ) {
-  if (!docName || !opsJson) usage(1);
+  if (!docName || !opsJson) usageError("delta takes a <docName> and <opsJSON>", true);
   const ops = parseJsonArg(opsJson, "ops");
   if (!Array.isArray(ops)) usageError("ops must be a JSON array");
   print(await withWs(values, async ({ send }) => {
@@ -242,7 +249,7 @@ async function cmdCall(
   paramsJson: string | undefined,
   values: Record<string, unknown>,
 ) {
-  if (!method) usage(1);
+  if (!method) usageError("call takes a <method>", true);
   const params = parseJsonArg(paramsJson, "params");
   print(await withWs(values, ({ send }) => send({ action: "call", method, params: params ?? {} })));
 }
@@ -299,7 +306,7 @@ function backupFile(dest: string): string {
 const GENERATED_MARKER = "GENERATED FROM";
 
 async function cmdSql(modulePath: string | undefined, values: Record<string, unknown>) {
-  if (!modulePath) usage(1);
+  if (!modulePath) usageError("sql takes a <module>", true);
 
   const abs = resolve(process.cwd(), modulePath);
   let mod: Record<string, unknown>;
@@ -371,7 +378,7 @@ async function cmdSql(modulePath: string | undefined, values: Record<string, unk
 // ---------------------------------------------------------------------------
 
 function cmdInit(dir: string | undefined, values: Record<string, unknown>) {
-  if (!dir) usage(1);
+  if (!dir) usageError("init takes a <dir>", true);
 
   const absDir = resolve(process.cwd(), dir);
   mkdirSync(absDir, { recursive: true });
@@ -638,7 +645,8 @@ function compareVersion(a: string, b: string): number {
 // ---------------------------------------------------------------------------
 
 async function main() {
-  const { values, positionals } = parseArgs({
+  let parsed;
+  try { parsed = parseArgs({
     args: process.argv.slice(2),
     options: {
       out: { type: "string", short: "o" },
@@ -659,10 +667,11 @@ async function main() {
     },
     allowPositionals: true,
     strict: true,
-  });
+  }); }
+  catch (err) { usageError((err as Error).message, true); }
+  const { values, positionals } = parsed;
 
-  if (values.help) usage(0);
-  json = !!values.json;
+  if (values.help) { process.stdout.write(USAGE); return; }
 
   const cmd = positionals[0];
   const arg = positionals[1];
@@ -676,14 +685,8 @@ async function main() {
     case "watch":           return cmdWatch(arg, values);
     case "delta":           return cmdDelta(arg, arg2, values);
     case "call":            return cmdCall(arg, arg2, values);
-    default:                usage(1);
+    default:                usageError(cmd ? `no command ${cmd}` : "a command, please", true);
   }
 }
 
-main().catch((err) => {
-  // A server's error is { code, message } as it is; anything else, its message.
-  const told = !!err && typeof err === "object" && !(err instanceof Error);
-  const error = told ? err : { message: err instanceof Error ? err.message : String(err) };
-  process.stderr.write((json ? JSON.stringify({ error }) : `delta: ${told ? JSON.stringify(err) : error.message}`) + "\n");
-  process.exit(1);
-});
+main().catch((err) => fail(err));

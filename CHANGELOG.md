@@ -33,7 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   what walking the entry does -- which `planWalk` and `_delta_walk_plan` both answer.
 - **The CLI is safe for an agent.** `--token` or `DELTA_TOKEN` signs in to an auth-enabled server
   in band (`call authenticate` first, never in the URL). `--json` prints one JSON line per event
-  on stdout and nothing else; an error is one `{"error":...}` line on stderr with exit code 1.
+  on stdout and nothing else (`null` for an answer of nothing); an error is one
+  `{"error":{"code","message"}}` line on stderr, `code` the server's or `0` for one the CLI met
+  itself. Exit codes: `0` done, `1` an error, `2` a bad argument (a missing doc name, an unknown
+  command or flag; these exited 1 before).
   `watch` ends, exit 0, at the first of `--count <n>`, `--for <ms>` or `--until "<op> <path>"`, and
   with exit 1 when the server closes the socket (it used to hang). `delta` prints the ops as
   applied on every backend, not only on a ledger: it asks for them (`inverse: true`, below).

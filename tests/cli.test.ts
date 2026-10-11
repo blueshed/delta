@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { defineSchema, defineDoc, createTables, registerDocs } from "../src/server/sqlite";
-import { createWs, registerDoc } from "../src/server/server";
+import { createWs, registerDoc, registerMethod } from "../src/server/server";
 import { wireAuth, type DeltaAuth } from "../src/server/auth";
 import { applyFramework, applySql, clearRegistry, createDocListener, docTypeFromDef, generateSql, registerDocType } from "../src/server/postgres";
 import { openPglite } from "../src/server/pglite";
@@ -40,6 +40,7 @@ function serve(withAuth: boolean, dir?: string) {
   if (withAuth) wireAuth(ws, auth);
   registerDocs(ws, db, schema, [items], [], withAuth ? { auth, shared: true } : {});
   if (dir) void registerDoc(ws, "notes", { file: join(dir, "notes.json"), empty: { lines: {} } });
+  registerMethod(ws, "nothing", () => undefined);
   const server = Bun.serve({ port: 0, routes: { [ws.path]: ws.upgrade }, websocket: ws.websocket });
   ws.setServer(server);
   return { server, url: `ws://localhost:${server.port}/ws` };
@@ -150,7 +151,40 @@ describe("delta open / delta / call --json: one JSON line, stderr empty", () => 
   test("a server that is not there: exit 1, the reason on stderr", async () => {
     const { code, stderr } = await run(["open", "items:", "--url", "ws://localhost:1/ws", "--json"]);
     expect(code).toBe(1);
-    expect(JSON.parse(stderr.trim()).error.message).toContain("WebSocket");
+    const { error } = JSON.parse(stderr.trim());
+    expect(error.code).toBe(0);
+    expect(error.message).toContain("WebSocket");
+  });
+});
+
+describe("answers and arguments", () => {
+  test("a method that returns nothing prints null, not undefined", async () => {
+    const { code, stdout } = await run(["call", "nothing", "--url", open.url, "--json"]);
+    expect([code, stdout]).toEqual([0, "null\n"]);
+  });
+
+  const refused: [string, string[]][] = [
+    ["a command with no doc name", ["open"]],
+    ["no command", []],
+    ["an unknown command", ["frobnicate"]],
+    ["an unknown flag", ["open", "items:", "--frobnicate"]],
+    ["ops that are not JSON", ["delta", "items:", "[nope"]],
+    ["a --count that is not a whole number", ["watch", "items:", "--count", "-1"]],
+  ];
+  for (const [what, args] of refused) {
+    test(`${what}: exit 2, one {error: {code: 0, message}} line on stderr`, async () => {
+      const { code, stdout, stderr } = await run([...args, "--url", open.url, "--json"]);
+      expect([code, stdout]).toEqual([2, ""]);
+      expect(stderr.trim().split("\n")).toHaveLength(1);
+      expect(JSON.parse(stderr)).toEqual({ error: { code: 0, message: expect.any(String) } });
+    });
+  }
+
+  test("a person is shown the usage with a bad argument", async () => {
+    const { code, stderr } = await run(["open"]);
+    expect(code).toBe(2);
+    expect(stderr).toContain("Usage:");
+    expect(stderr).toContain("delta: open takes a <docName>");
   });
 });
 
@@ -195,7 +229,7 @@ describe("delta watch ends when told to", () => {
     gone.server.stop(true);
     const { code, stderr } = await w.end();
     expect(code).toBe(1);
-    expect(JSON.parse(stderr.trim()).error.message).toBe("socket closed");
+    expect(JSON.parse(stderr.trim())).toEqual({ error: { code: 0, message: "socket closed" } });
   });
 });
 
