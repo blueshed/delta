@@ -42,6 +42,11 @@ afterEach(() => rmSync(dir, { recursive: true, force: true }));
 describe("json", () => {
   pathCases(() => backend);
 
+  test("a scope key that is not a column of the root is refused at registration, as on SQLite and Postgres", () => {
+    const bad = { prefix: "bad:", root: "courses", include: [], scope: { "courses.id": ":id" } };
+    expect(() => registerDocs(createLocal().server, file, pathSchema, [bad])).toThrow('scope key "courses.id" is not a column of "courses"');
+  });
+
   test("the file is the truth: a write is in it, readable, and a process started on it reads what the last one left", async () => {
     await backend.process.call("open", { doc: "fo-board:1" });
     await write(backend.process, "fo-board:1", [{ op: "add", path: "/courses/-", value: { name: "Fish" } }], { cursor: "s1" });

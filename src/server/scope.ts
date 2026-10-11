@@ -20,7 +20,7 @@
  * casts the text: a boolean's "yes" is true, a time the instant it names; one
  * the column cannot take is a 400.
  */
-import type { DocDef } from "../schema";
+import type { DocDef, Schema } from "../schema";
 
 export type Op = "=" | "!=" | "<" | ">" | "<=" | ">=" | "like";
 export type Cond = { col: string; op: Op; value: string };
@@ -38,6 +38,23 @@ export interface Scope {
 }
 
 const OPS = new Set<Op>(["=", "!=", "<", ">", "<=", ">="]);
+
+/**
+ * Every scope key is a column of the root collection (`id`, its parent key,
+ * or one of its columns), and the root a collection of the schema: thrown at
+ * registration, as `_delta_resolve_scope` raises. An `at:` binding names no
+ * column. Catches a typo and the dotted key (`"items.id"`), which would read
+ * an always-empty document.
+ */
+export function assertScopeKeys(def: DocDef, schema: Schema): void {
+  const root = schema.tables[def.root];
+  if (!root) throw new Error(`doc "${def.prefix}" references unknown root collection: ${def.root}`);
+  const valid = ["id", ...(root.parent ? [root.parent.fkColumn] : []), ...Object.keys(root.columns)];
+  for (const [key, binding] of Object.entries(def.scope)) {
+    if (valid.includes(key) || binding.startsWith("at:")) continue;
+    throw new Error(`scope key "${key}" is not a column of "${def.root}" (valid keys: ${valid.join(", ")})`);
+  }
+}
 
 export function resolveScope(def: DocDef, docId: string): Scope {
   const entries = Object.entries(def.scope);

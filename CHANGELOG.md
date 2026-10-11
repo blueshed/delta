@@ -113,6 +113,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code, message } }` with the error's code (500 if it has none). An action nothing is registered
   for is 400 `Unknown action`, as over a socket, where it was 404 `No handler matched` (still
   the answer when handlers are registered but none takes the message).
+- **A scope key that is not a column of the root is refused at `registerDocs`** on SQLite and
+  the JSON file, as Postgres refuses it (`scope key "items.id" is not a column of "items"`), and
+  so is a root collection the schema does not have. They registered, then answered 500 at open.
+  A key must be `id`, the root's parent key or one of its columns, declared in the schema (a
+  column added with `ALTER TABLE` and not declared is refused, as on Postgres).
 
 ## [0.12.0] - 2026-10-11
 

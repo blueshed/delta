@@ -23,7 +23,7 @@ import { assertOnePrefix, assertOwned, createCustomDocs, isPromise, NOT_FOUND, t
 import { type DeltaOp, splitPath, joinPath } from "../core";
 import { createLogger } from "./logger";
 import { createLedger, isEntryId, ledgerWho, planWalk, rowAt, socketCursor } from "./ledger";
-import { meets, resolveScope, rowId, sameId, whereOf, type Scope } from "./scope";
+import { assertScopeKeys, meets, resolveScope, rowId, sameId, whereOf, type Scope } from "./scope";
 import { defaultForType, type DocDef, type ResolvedTable, type Schema } from "../schema";
 import { waitForLocks } from "./sqlite/ddl";
 import { keeping, scopeValue } from "./sqlite/keep";
@@ -150,6 +150,7 @@ export function registerDocs<I = unknown>(
   customDocs: CustomDocDef<any, I>[] = [],
   options: RegisterOptions<I> = {},
 ) {
+  for (const doc of docs) assertScopeKeys(doc, schema);
   // Default-deny, as docTypeFromDef and createDocListener are: with auth, every
   // document says who owns it, or that it is shared. A name is the channel its
   // writes are told on, so whoever has it open hears them.

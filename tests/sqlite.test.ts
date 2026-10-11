@@ -934,9 +934,22 @@ describe("registerDocs", () => {
   // ---------------------------------------------------------------------------
 
   describe("scoped docs", () => {
+    test("a scope key that is not a column of the root is refused at registration, as Postgres refuses it", () => {
+      const s = defineSchema({ lists: { columns: { title: "text" } }, items: { parent: "lists", columns: { text: "text" } } });
+      const sdb = new Database(":memory:");
+      createTables(sdb, s);
+      const bad = defineDoc("bad:", { root: "items", include: [], scope: { "items.id": ":id" } });
+      expect(() => registerDocs(createWs(), sdb, s, [bad])).toThrow('scope key "items.id" is not a column of "items" (valid keys: id, lists_id, text)');
+      const ghost = defineDoc("ghost:", { root: "nothing", include: [] });
+      expect(() => registerDocs(createWs(), sdb, s, [ghost])).toThrow("unknown root collection: nothing");
+      // id, the parent key, a column, and an at: binding are all keys
+      const good = defineDoc("good:", { root: "items", include: [], scope: { id: ":id", lists_id: ":list", text: "like:t", valid_from: "at:when" } });
+      expect(() => registerDocs(createWs(), sdb, s, [good])).not.toThrow();
+    });
+
     test("scope with :docId resolves to doc ID", async () => {
       const s = defineSchema({
-        wishlists: { columns: { title: "text" } },
+        wishlists: { columns: { title: "text", user_id: "text" } },
         items: {
           parent: { collection: "wishlists", fk: "wishlist_id" },
           columns: { name: "text" },
@@ -951,8 +964,6 @@ describe("registerDocs", () => {
       const sdb = new Database(":memory:");
       createTables(sdb, s);
 
-      // Wishlists table needs a user_id column for scoping
-      sdb.run("ALTER TABLE wishlists ADD COLUMN user_id TEXT");
       sdb.run("INSERT INTO wishlists (id, title, user_id, valid_from) VALUES ('w1', 'My List', 'peter', ?)", [PAST]);
       sdb.run("INSERT INTO items (id, wishlist_id, name, valid_from) VALUES ('i1', 'w1', 'Book', ?)", [PAST]);
 
@@ -972,7 +983,7 @@ describe("registerDocs", () => {
 
     test("a plain binding is a parameter read from the doc name, as on Postgres", async () => {
       const s = defineSchema({
-        settings: { columns: { value: "text" } },
+        settings: { columns: { value: "text", category: "text" } },
       });
       const doc = defineDoc("global:", {
         root: "settings",
@@ -982,7 +993,6 @@ describe("registerDocs", () => {
 
       const sdb = new Database(":memory:");
       createTables(sdb, s);
-      sdb.run("ALTER TABLE settings ADD COLUMN category TEXT");
       sdb.run("INSERT INTO settings (id, value, category, valid_from) VALUES ('s1', 'dark', 'app', ?)", [PAST]);
       sdb.run("INSERT INTO settings (id, value, category, valid_from) VALUES ('s2', 'en', 'lang', ?)", [PAST]);
 
