@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Developed against railroad 0.16.0**, and `src/server/logger.ts` re-synced with its logger
+  (a doc comment moved, an unreachable fallback gone). `@types/bun` is `^1.4.2`.
+
 - **Type checks run with `bun check`** (Bun 1.4.3, TypeScript 7) in place of `tsc --noEmit`;
   CI pins Bun 1.4.3. The `check` script is gone, so `bun check` is Bun's own.
 

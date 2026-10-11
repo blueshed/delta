@@ -3,7 +3,7 @@
  *
  * Colored and timestamped on a terminal, plain when piped or with `NO_COLOR`,
  * level-gated; an unknown `LOG_LEVEL` falls back to "info". The code below is
- * `@blueshed/railroad/logger.ts` (0.12.0) as it is, copied rather than
+ * `@blueshed/railroad/logger.ts` (0.16.0) as it is, copied rather than
  * imported so a server that doesn't use delta's client needs no railroad;
  * `tests/server.test.ts` fails when the two differ. Re-sync it when railroad's
  * changes.
@@ -68,7 +68,7 @@ const yellow = wrap("33");
 const red = wrap("31");
 const dim = wrap("2");
 
-const color: Record<string, (s: string) => string> = {
+const color: Record<Exclude<LogLevel, "silent">, (s: string) => string> = {
   error: red,
   warn: yellow,
   info: gray,
@@ -79,9 +79,8 @@ function timestamp() {
   return new Date().toISOString().slice(11, 23);
 }
 
-function fmt(level: LogLevel, tag: string, msg: string) {
-  const colorFn = color[level] ?? gray;
-  return `${gray(timestamp())} ${colorFn(level.toUpperCase().padEnd(5))} ${tag} ${msg}`;
+function fmt(level: keyof typeof color, tag: string, msg: string) {
+  return `${gray(timestamp())} ${color[level](level.toUpperCase().padEnd(5))} ${tag} ${msg}`;
 }
 
 /** Create a tagged logger instance. */
@@ -96,7 +95,6 @@ export function createLogger(tag: string) {
 
 type Handler = (req: Request) => Response | Promise<Response>;
 
-/** Wrap a route handler with access logging. */
 function safePathname(url: string): string {
   try {
     return new URL(url).pathname;
@@ -105,6 +103,7 @@ function safePathname(url: string): string {
   }
 }
 
+/** Wrap a route handler with access logging. */
 export function loggedRequest(tag: string, handler: Handler): Handler {
   const log = createLogger(tag);
   return async (req: Request) => {
