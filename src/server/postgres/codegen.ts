@@ -89,8 +89,9 @@ export function generateSql(
     lines.push(`ALTER SEQUENCE ${q(seqName)} OWNED BY ${q(table.name)}.id;`);
 
     if (table.temporal) {
+      // security_invoker (Postgres 15+): the view reads as the caller, so the table's RLS holds through it
       lines.push(
-        `CREATE OR REPLACE VIEW ${q("current_" + table.name)} AS SELECT * FROM ${q(table.name)} WHERE valid_to IS NULL;`,
+        `CREATE OR REPLACE VIEW ${q("current_" + table.name)} WITH (security_invoker = true) AS SELECT * FROM ${q(table.name)} WHERE valid_to IS NULL;`,
       );
       lines.push(
         `CREATE INDEX IF NOT EXISTS ${q("idx_" + table.name + "_id_valid")} ON ${q(table.name)} (id, valid_to);`,

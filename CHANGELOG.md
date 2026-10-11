@@ -79,6 +79,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   table one: a custom `fo-b` opened `fo-board:1`. A custom document now answers only where no
   longer prefix matches the name (SQLite and the JSON file: any of the server's registrations;
   Postgres: a registered type).
+- **RLS holds on a temporal table's current rows.** `generateSql` made each `current_<table>` view
+  without `security_invoker`, so the view read as its owner -- usually a role that bypasses RLS --
+  and `open` of a temporal document handed a `NOSUPERUSER` role every row its policy hides. The view
+  is now `WITH (security_invoker = true)` (Postgres 15+): apply the generated SQL again
+  (`CREATE OR REPLACE VIEW` sets it on a view there already).
 - **A time in a document's name (`at:`) reads the whole document as it stood then, on every
   backend.** On Postgres `delta_open` read the included collections at that time but the root as it
   is now; SQLite and the JSON file ignored the time and read it all as it is now. Now each reads

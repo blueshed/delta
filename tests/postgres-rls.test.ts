@@ -36,9 +36,11 @@ const auth: DeltaAuth<Id> = {
 
 const schema = defineSchema({
   rls_items: { columns: { owner_id: "integer", name: "text" }, temporal: false },
+  rls_notes: { columns: { owner_id: "integer", text: "text" }, temporal: true },
 });
 const everyone = defineDoc("rls-all:", { root: "rls_items", include: [] });
 const mine = defineDoc("rls-mine:", { root: "rls_items", include: [], scope: { owner_id: ":id" } });
+const notes = defineDoc("rls-notes:", { root: "rls_notes", include: [] });
 
 let admin: Pool;
 let app: Pool;
@@ -50,13 +52,19 @@ beforeAll(async () => {
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${ROLE}') THEN
       CREATE ROLE ${ROLE} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '${ROLE}';
     END IF; END $$;`);
-  await admin.query("DROP TABLE IF EXISTS rls_items CASCADE; DROP SEQUENCE IF EXISTS seq_rls_items;");
-  await applySql(admin, generateSql(schema, [everyone, mine]));
+  await admin.query("DROP TABLE IF EXISTS rls_items, rls_notes CASCADE; DROP SEQUENCE IF EXISTS seq_rls_items, seq_rls_notes;");
+  await applySql(admin, generateSql(schema, [everyone, mine, notes]));
   await admin.query(`
     ALTER TABLE rls_items ENABLE ROW LEVEL SECURITY;
     ALTER TABLE rls_items FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS rls_items_owner ON rls_items;
     CREATE POLICY rls_items_owner ON rls_items FOR ALL
+      USING (owner_id = NULLIF(current_setting('app.user_id', true), '')::bigint)
+      WITH CHECK (owner_id = NULLIF(current_setting('app.user_id', true), '')::bigint);
+    ALTER TABLE rls_notes ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE rls_notes FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS rls_notes_owner ON rls_notes;
+    CREATE POLICY rls_notes_owner ON rls_notes FOR ALL
       USING (owner_id = NULLIF(current_setting('app.user_id', true), '')::bigint)
       WITH CHECK (owner_id = NULLIF(current_setting('app.user_id', true), '')::bigint);
     GRANT USAGE ON SCHEMA public TO ${ROLE};
@@ -71,8 +79,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app.end();
-  await admin.query("DROP TABLE IF EXISTS rls_items CASCADE; DROP SEQUENCE IF EXISTS seq_rls_items;");
-  await admin.query("DELETE FROM _delta_docs WHERE prefix IN ('rls-all:', 'rls-mine:')");
+  await admin.query("DROP TABLE IF EXISTS rls_items, rls_notes CASCADE; DROP SEQUENCE IF EXISTS seq_rls_items, seq_rls_notes;");
+  await admin.query("DELETE FROM _delta_docs WHERE prefix IN ('rls-all:', 'rls-mine:', 'rls-notes:')");
   await admin.end();
 });
 
@@ -107,6 +115,14 @@ describe("RLS and the broadcast channel (NOSUPERUSER role)", () => {
   test("the role really is held by the policy: unbound, it reads nothing", async () => {
     expect(Number((await admin.query("SELECT count(*) AS n FROM rls_items")).rows[0].n)).toBe(1);
     expect(Number((await app.query("SELECT count(*) AS n FROM rls_items")).rows[0].n)).toBe(0);
+  });
+
+  test("a temporal table's rows are held by the policy too: its current_ view reads as the caller, not as its owner", async () => {
+    await admin.query("TRUNCATE rls_notes; INSERT INTO rls_notes (id, owner_id, text) VALUES (nextval('seq_rls_notes'), 1, 'alice'), (nextval('seq_rls_notes'), 2, 'bob')");
+    registerDocType(docTypeFromDef(notes, app, { auth, shared: true }));
+    listener = await createDocListener(ws, app, { auth });
+    const opened = await sendAndAwait(ws, person(1), { action: "open", doc: "rls-notes:" });
+    expect(Object.values(opened.result.rls_notes).map((r: any) => r.text)).toEqual(["alice"]);
   });
 
   test("with auth, a document nobody said is owned or shared does not register", () => {

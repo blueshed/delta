@@ -62,7 +62,7 @@ describe("generateSql", () => {
     expect(sql).toContain("valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW()");
     expect(sql).toContain("valid_to TIMESTAMPTZ");
     expect(sql).toContain("PRIMARY KEY (id, valid_from)");
-    expect(sql).toContain('CREATE OR REPLACE VIEW "current_areas"');
+    expect(sql).toContain('CREATE OR REPLACE VIEW "current_areas" WITH (security_invoker = true)');
     expect(sql).toContain('CREATE INDEX IF NOT EXISTS "idx_areas_id_valid"');
   });
 

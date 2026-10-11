@@ -686,7 +686,7 @@ registerDocType(docTypeFromDef(def, appPool, { auth, owns }));
 await createDocListener(ws, appPool, { auth });
 ```
 
-Under this setup `withAppAuth(appPool, ...)` sets `app.user_id` as the `app` role, and the policy `USING (owner_id = current_setting('app.user_id')::bigint)` filters without the role bypassing it.
+Under this setup `withAppAuth(appPool, ...)` sets `app.user_id` as the `app` role, and the policy `USING (owner_id = current_setting('app.user_id')::bigint)` filters without the role bypassing it. A temporal table's `current_<table>` view is made `security_invoker` (Postgres 15+), so it reads as the caller and the table's policy holds through it.
 
 **RLS filters reads, not the channel.** A write is broadcast on the channel named after the document it went through, to every socket that opened that name. The listener reads the change log with no identity, so a policy never sees the broadcast. One name that several identities open, on a table whose rows RLS hides from some of them, hands each of them every row written through it. So: one name per owner, and `owns` to check it (*Per-user list isolation*, above). `tests/postgres-rls.test.ts` pins this under a `NOSUPERUSER` role.
 
