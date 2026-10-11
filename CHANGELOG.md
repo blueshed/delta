@@ -30,6 +30,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Postgres: a write costs what is open, not every name ever opened (todo #73, #33's cost).**
+  `_delta_holders` asked every name in `_delta_versions` -- a row for each document name ever
+  opened, never pruned -- so a write through a scoped document with 10 open and 100,000 opened
+  once took 10.6 s (1,000: 80 ms). Each listener now holds the names it has subscribers for in a
+  new `_delta_held` table, from before an open reads until its last subscriber lets go, and a
+  write asks only those and the writer's: 1.6 ms at 10, 1,000 and 100,000 (`bun run bench`). An
+  open waits for the writes running then (a lock per prefix), so it reads what they wrote or is
+  told it; a process that dies leaves names its lock no longer covers, cleared when a listener
+  starts and by `delta_prune_ops`, which also drops the version of a name nobody holds with
+  nothing left in the log or the ledger (opened again, it starts at 0). A listener that comes
+  back to find its names cleared lets go of their sockets, which open them again. In `001a`
+  (`_delta_held`), `001b` (`_delta_holders`), `001c` (`_delta_hold` and its kin), `001e`
+  (`delta_prune_ops`) and `listener.ts`: apply the framework SQL again with this release -- a
+  listener on the old SQL does not start, and the new SQL with an old listener tells only the
+  writer.
 - **A row a write makes and its cascade takes out is told its add wherever its remove is told
   (todo #75)**, on every backend. `[add /courses/9, add /drinks/5 under it, remove /courses/9]`
   told the board and the menu the drink's remove but not its add, so an open copy met a remove

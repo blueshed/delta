@@ -30,6 +30,17 @@ CREATE TABLE IF NOT EXISTS _delta_versions (
   version  BIGINT NOT NULL DEFAULT 0
 );
 
+-- The documents open now (todo #73): a row for each name a listener has
+-- subscribers for, and which listener. A write's fan-out asks these names, not
+-- every name ever opened. A listener is alive while its connection holds its
+-- lock (001c, _delta_holder_live); a dead one's rows are cleared.
+CREATE SEQUENCE IF NOT EXISTS _delta_holder_ids AS integer;
+CREATE TABLE IF NOT EXISTS _delta_held (
+  doc_name TEXT NOT NULL,
+  holder   INTEGER NOT NULL,
+  PRIMARY KEY (doc_name, holder)
+);
+
 CREATE TABLE IF NOT EXISTS _delta_ops_log (
   id         BIGSERIAL PRIMARY KEY,
   doc_name   TEXT NOT NULL,

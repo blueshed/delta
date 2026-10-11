@@ -69,13 +69,13 @@ describe("pglite: a row put in by hand", () => {
 
 /**
  * A name opened on framework SQL that took it, which the resolver now refuses
- * (Postgres's own casts took an integer's 1_000 and a real's Infinity): it is
- * in _delta_versions, so the fan-out asks it of every write beside it. It holds
+ * (Postgres's own casts took an integer's 1_000 and a real's Infinity), and
+ * held open, so the fan-out asks it of every write beside it. It holds
  * nothing -- as on SQLite -- and the write goes on.
  */
 describe("pglite: a name opened before the scope's grammar refused it", () => {
   test("holds nothing, and every write beside it goes on", async () => {
-    await pool.query("INSERT INTO _delta_versions (doc_name, version) VALUES ('fo-slots-upto:Infinity', 1), ('fo-seats-at:1_000', 1)");
+    await pool.query("INSERT INTO _delta_held (doc_name, holder) VALUES ('fo-slots-upto:Infinity', 0), ('fo-seats-at:1_000', 0)");
     const copies = await openAll(backend.process, ["fo-slots-upto:", "fo-seating:1"]);
     await write(backend.process, "fo-slots-upto:", [{ op: "add", path: "/slots/-", value: { weddings_id: 1, price: 1 } }]);
     await write(backend.process, "fo-seating:1", [{ op: "add", path: "/seats/-", value: { table_no: 1000, kept: true } }]);

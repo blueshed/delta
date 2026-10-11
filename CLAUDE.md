@@ -81,7 +81,8 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
 - **Fan-out is the same on every backend.** A write is told to every document that held or
   holds a row it changed, each what changed for it (arrived: add; stayed: replace; left:
   remove; the root: replaced, or null). On Postgres it is worked out in `delta_apply`
-  (`_delta_holders`, `_delta_tell`, `001b`/`001d`), so every process hears it; on SQLite and
+  (`_delta_holders`, `_delta_tell`, `001b`/`001d`) over the names open now (`_delta_held`, each
+  listener's), so every process hears it; on SQLite and
   the JSON file, in `write()` (`holders`, `tell`). `tests/postgres-isolation.test.ts` and
   `tests/sqlite-isolation.test.ts` pin that nobody else is told.
 - **Rows carry from one backend to the next** with `exportTables` / `importTables` (the same

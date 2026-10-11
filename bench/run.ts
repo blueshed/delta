@@ -16,6 +16,7 @@ import { deltaNewAdapter } from "./adapters/delta-new";
 import { deltaOldAdapter } from "./adapters/delta-old";
 import { rawPostgresAdapter } from "./adapters/raw-postgres";
 import { runSingleWrite } from "./workloads/single-write";
+import { runFanout } from "./workloads/fanout";
 
 const PG_URL =
   process.env.BENCH_PG_URL ??
@@ -100,6 +101,14 @@ async function main(): Promise<void> {
     `\ndelta-old / delta-new p50 ratio: ${(oldS.p50 / newS.p50).toFixed(2)}x   (expect ≈ 4x)` +
       `\ndelta-new / raw-postgres p50 ratio: ${(newS.p50 / rawS.p50).toFixed(2)}x   (expect ≈ 1-2x — extra server work in delta_apply)`,
   );
+
+  // A write's fan-out as the names ever opened grow, ten open: it should stay flat.
+  console.log("\nfan-out — one write through a scoped document, 10 open\n");
+  console.log("    ever opened         p50         p95        mean    writes");
+  for (const n of [10, 1_000, 100_000]) {
+    const s = await runFanout(PG_URL, n);
+    console.log(`${n.toLocaleString().padStart(15, " ")}   ${fmtMs(s.p50)}   ${fmtMs(s.p95)}   ${fmtMs(s.mean)}   ${String(s.iterations).padStart(7, " ")}`);
+  }
 }
 
 main().catch((err) => {

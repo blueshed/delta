@@ -94,7 +94,12 @@ END;
 $$ LANGUAGE plpgsql STABLE;
 
 -- ---------------------------------------------------------------------------
--- delta_prune_ops: clean up old log entries
+-- delta_prune_ops: clean up old log entries -- and the names nobody holds
+-- open (todo #73): the rows of listeners that are gone, and the version of a
+-- name no listener holds, with nothing left of it in the log or the ledger.
+-- Opened again, it starts a fresh copy at 0. The table lock keeps an open from
+-- holding a name between the question and the delete. Answers the log
+-- entries cleared.
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION delta_prune_ops(p_keep INTERVAL DEFAULT '1 hour')
@@ -103,6 +108,12 @@ DECLARE v_count BIGINT;
 BEGIN
   DELETE FROM _delta_ops_log WHERE created_at < NOW() - p_keep;
   GET DIAGNOSTICS v_count = ROW_COUNT;
+  LOCK TABLE _delta_held IN SHARE ROW EXCLUSIVE MODE;
+  DELETE FROM _delta_held h WHERE NOT _delta_holder_live(h.holder);
+  DELETE FROM _delta_versions v
+   WHERE NOT EXISTS (SELECT 1 FROM _delta_held h WHERE h.doc_name = v.doc_name)
+     AND NOT EXISTS (SELECT 1 FROM _delta_ops_log l WHERE l.doc_name = v.doc_name)
+     AND NOT EXISTS (SELECT 1 FROM _delta_ledger g WHERE g.doc_name = v.doc_name);
   RETURN v_count;
 END;
 $$ LANGUAGE plpgsql;

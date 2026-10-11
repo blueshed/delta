@@ -36,3 +36,10 @@ signal. At real-world RTT (say 20 ms), 4× compounds into a multi-hundred-ms
 tax per op.
 
 Results from the release run are captured in [results-0.3.0.md](./results-0.3.0.md).
+
+## Fan-out
+
+After the table, one write through a scoped document (`fanout:1`) with 10 documents open
+through a listener and 10, 1,000 and 100,000 names opened once and let go. A write asks the
+names open now (`_delta_held`, todo #73), so its cost stays flat as the names ever opened grow.
+Before 0.13.0 it asked every name in `_delta_versions`: p50 1.7 ms, 80 ms and 10.6 s.

@@ -20,7 +20,7 @@ import * as json from "../src/server/json";
 import { openPglite } from "../src/server/pglite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
-import { applyFramework, newPool } from "./setup";
+import { applyFramework, newPool, waitFor } from "./setup";
 import {
   assertCopiesHold, course, expectTold, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresInbox, postgresMenuCard, postgresOpenSeats, readAll, told, write,
   type PathBackend, type PathProcess,
@@ -150,6 +150,68 @@ describe("postgres: what only a database shared by processes has", () => {
     const { rows } = await pool.query("SELECT doc_name FROM _delta_versions WHERE doc_name LIKE 'fo-%' ORDER BY doc_name");
     expect(rows.map((r: any) => r.doc_name)).toEqual(["fo-board:1"]);
   });
+});
+
+/** A write's fan-out asks the names open now, not every name ever opened (todo #73). */
+describe("postgres: the documents open now", () => {
+  const logged = async (doc: string) => Number((await pool.query("SELECT count(*) FROM _delta_ops_log WHERE doc_name = $1", [doc])).rows[0].count);
+  const held = async () => (await pool.query("SELECT doc_name FROM _delta_held WHERE doc_name LIKE 'fo-%' ORDER BY doc_name")).rows.map((r: any) => r.doc_name);
+  /** Closed, and let go of: the listener lets go after it answers. */
+  const close = async (doc: string) => {
+    await backend.process.call("close", { doc });
+    await waitFor(async () => !(await held()).includes(doc));
+  };
+
+  test("a document opened and closed again is not told: nothing is written to its log", async () => {
+    await openAll(backend.process, ["fo-board:1", "fo-menu:1"]);
+    await close("fo-menu:1");
+    await write(backend.process, "fo-board:1", [{ op: "replace", path: "/courses/1/name", value: "Broth" }]);
+    expect({ held: await held(), menu: await logged("fo-menu:1") }).toEqual({ held: ["fo-board:1"], menu: 0 });
+  });
+
+  test("a document opened while a write runs reads what the write did, or is told it: the open waits for the write", async () => {
+    const first = await pool.connect();
+    try {
+      await first.query("BEGIN");
+      await first.query(`SELECT delta_apply('fo-board:1', '[{"op":"replace","path":"/courses/1/name","value":"Broth"}]'::jsonb)`);
+      // the write has asked who holds course 1 -- not the menu, open nowhere yet
+      const opened = backend.process.call("open", { doc: "fo-menu:1" });
+      await new Promise((r) => setTimeout(r, 200));
+      await first.query("COMMIT");
+      expect((await opened).result.courses["1"].name).toBe("Broth");
+    } finally {
+      await first.query("ROLLBACK").catch(() => {});
+      first.release();
+    }
+  });
+
+  test("delta_prune_ops lets go of a name nobody holds, with nothing in the log or the ledger: opened again, it starts at 0 and is told from there", async () => {
+    await openAll(backend.process, ["fo-board:1", "fo-menu:1"]);
+    await write(backend.process, "fo-board:1", [{ op: "replace", path: "/courses/1/name", value: "Broth" }]);
+    await close("fo-menu:1");
+    await pool.query("SELECT delta_prune_ops('0 seconds')");
+    const { rows } = await pool.query("SELECT doc_name FROM _delta_versions WHERE doc_name LIKE 'fo-%' ORDER BY doc_name");
+    expect(rows.map((r: any) => r.doc_name)).toEqual(["fo-board:1"]);   // open, and the ledger names it
+
+    const copies = await openAll(backend.process, ["fo-menu:1"]);
+    expect(copies.get("fo-menu:1")._v).toBe(0);
+    await write(backend.process, "fo-board:1", [{ op: "replace", path: "/courses/1/name", value: "Soup" }]);
+    await expectTold(backend, "fo-menu:1", [[{ op: "replace", path: "/courses/1", value: course(1, "Soup") }]]);
+    expect(backend.process.heard.find((h) => h.channel === "fo-menu:1")!.data.v).toBe(1);
+    await assertCopiesHold(backend, copies);
+  });
+
+  test("a listener whose names were cleared while it was away lets go of their sockets, which open them again", async () => {
+    await openAll(backend.process, ["fo-menu:1"]);
+    // the listener's connection ends, and another clears the names of a listener that is gone
+    const { rows: [{ holder }] } = await pool.query("SELECT holder FROM _delta_held WHERE doc_name = 'fo-menu:1'");
+    await pool.query(`SELECT pg_terminate_backend(pid) FROM pg_locks
+                       WHERE locktype = 'advisory' AND classid = hashtext('_delta_held')::oid AND objid = $1::oid`, [holder]);
+    await waitFor(async () => !(await pool.query("SELECT _delta_holder_live($1) AS live", [holder])).rows[0].live);
+    await pool.query("SELECT delta_prune_ops()");
+    expect(await held()).toEqual([]);
+    await waitFor(() => backend.process.heard.some((h) => h.channel === "fo-menu:1" && h.data.error), { timeout: 5000 });
+  }, 10000);
 });
 
 describe("postgres: the writer's own channel", () => {

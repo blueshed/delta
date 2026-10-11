@@ -504,10 +504,16 @@ END;
 $$ LANGUAGE plpgsql STABLE;
 
 -- _delta_holders: the documents that hold `p_row` of `p_coll` -- every one
--- ever opened (a name in _delta_versions), and the writer's own `p_writer`.
+-- open now (a name in _delta_held, todo #73), and the writer's own `p_writer`.
 -- A single-mode document of an unscoped definition is found by its name,
 -- prefix || the root the row hangs from; a scoped or list-mode one, or one
--- holding an unparented collection, by the opened names of its prefix.
+-- holding an unparented collection, by the open names of its prefix. So a
+-- write costs what is open, not what was ever opened.
+--
+-- Before it asks, it takes its prefix's lock, shared, until the write commits:
+-- an open of that prefix holds its name and waits for it (_delta_hold), so a
+-- name held from now is seen here, and a write that asked before is read by
+-- the open. VOLATILE, so the question is asked after the lock.
 CREATE OR REPLACE FUNCTION _delta_holders(p_coll TEXT, p_row JSONB, p_writer TEXT)
 RETURNS TEXT[] AS $$
 DECLARE
@@ -529,8 +535,9 @@ BEGIN
     v_all := v_def.scope <> '{}'::jsonb
              OR (p_coll IS DISTINCT FROM v_def.root_collection AND v_coll.parent_collection IS NULL);
     v_rid := CASE WHEN v_all THEN NULL ELSE _delta_chain_root(p_coll, p_row, v_def.root_collection) END;
+    PERFORM pg_advisory_xact_lock_shared(hashtext('_delta_hold'), hashtext(v_def.prefix));
     FOR v_cand IN
-      SELECT doc_name FROM _delta_versions
+      SELECT doc_name FROM _delta_held
        WHERE (v_all AND starts_with(doc_name, v_def.prefix))
           OR (NOT v_all AND doc_name IN (v_def.prefix, v_def.prefix || v_rid::text))
       UNION
@@ -545,7 +552,7 @@ BEGIN
   END LOOP;
   RETURN v_names;
 END;
-$$ LANGUAGE plpgsql STABLE;
+$$ LANGUAGE plpgsql VOLATILE;
 
 -- ---------------------------------------------------------------------------
 -- _delta_strip_temporal: remove valid_from/valid_to/override from a JSONB row

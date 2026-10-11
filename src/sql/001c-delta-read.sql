@@ -371,3 +371,57 @@ BEGIN
   RETURN v_result || jsonb_build_object('_version', v_version);
 END;
 $$ LANGUAGE plpgsql;
+
+-- ---------------------------------------------------------------------------
+-- The documents open now (_delta_held, todo #73): each listener holds the
+-- names it has subscribers for, so a write's fan-out asks only those.
+-- ---------------------------------------------------------------------------
+
+-- _delta_holder_live: is listener `p_holder` alive? Its connection holds its
+-- lock (_delta_holder_start) until the connection ends.
+CREATE OR REPLACE FUNCTION _delta_holder_live(p_holder INTEGER)
+RETURNS BOOLEAN LANGUAGE sql STABLE AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM pg_locks
+     WHERE locktype = 'advisory' AND granted AND objsubid = 2
+       AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+       AND classid = hashtext('_delta_held')::oid AND objid = p_holder::oid);
+$$;
+
+-- _delta_holder_start: a listener starts, on the connection it keeps, as a new
+-- holder (`p_holder` NULL) or again after its connection was lost. It takes
+-- its lock, clears the rows of listeners that are gone, and answers its id,
+-- and whether it held anything still: false, coming back, when its names were
+-- cleared while it was away -- writes since may not have been told them.
+CREATE OR REPLACE FUNCTION _delta_holder_start(p_holder INTEGER, OUT holder INTEGER, OUT kept BOOLEAN) AS $$
+BEGIN
+  holder := COALESCE(p_holder, nextval('_delta_holder_ids')::INTEGER);
+  PERFORM pg_advisory_lock_shared(hashtext('_delta_held'), holder);   -- shared: a lost connection may not have ended yet
+  kept := EXISTS (SELECT 1 FROM _delta_held WHERE _delta_held.holder = _delta_holder_start.holder);
+  DELETE FROM _delta_held h WHERE NOT _delta_holder_live(h.holder);
+END;
+$$ LANGUAGE plpgsql;
+
+-- _delta_holder_stop: a listener lets go of every name it holds, and its lock.
+CREATE OR REPLACE FUNCTION _delta_holder_stop(p_holder INTEGER) RETURNS void AS $$
+BEGIN
+  DELETE FROM _delta_held WHERE holder = p_holder;
+  PERFORM pg_advisory_unlock_shared(hashtext('_delta_held'), p_holder);
+END;
+$$ LANGUAGE plpgsql;
+
+-- _delta_hold: listener `p_holder` has `p_doc` open, from before it reads it.
+-- It waits for the writes running now that may tell a document of the name's
+-- prefix (each holds that prefix's lock, _delta_holders): they asked who holds
+-- what without this name, so the read that follows must see what they wrote.
+-- A write that asks after this commits sees the name.
+CREATE OR REPLACE FUNCTION _delta_hold(p_holder INTEGER, p_doc TEXT) RETURNS void AS $$
+BEGIN
+  INSERT INTO _delta_held (doc_name, holder) VALUES (p_doc, p_holder) ON CONFLICT DO NOTHING;
+  PERFORM pg_advisory_xact_lock(hashtext('_delta_hold'), hashtext(COALESCE((_delta_find_doc(p_doc)).prefix, '')));
+END;
+$$ LANGUAGE plpgsql;
+
+-- _delta_let_go: listener `p_holder` has `p_doc` open no longer.
+CREATE OR REPLACE FUNCTION _delta_let_go(p_holder INTEGER, p_doc TEXT) RETURNS void
+LANGUAGE sql AS $$ DELETE FROM _delta_held WHERE doc_name = p_doc AND holder = p_holder; $$;

@@ -22,7 +22,7 @@ import type { DeltaAuth } from "../auth";
 import { isAuthError } from "../auth";
 import type { DeltaOp } from "../../core";
 import { isEntryId, ledgerWho, socketCursor } from "../ledger";
-import { assertOwned, createCustomDocs, NOT_FOUND, type CustomDoc, type Owns, type Refusal } from "../custom";
+import { assertOwned, createCustomDocs, NOT_FOUND, sendTo, type CustomDoc, type Owns, type Refusal } from "../custom";
 
 const log = createLogger("[doc]");
 
@@ -159,6 +159,23 @@ export async function createDocListener<I = unknown>(
     return isAuthError(gated) ? { error: { code: 401, message: gated.error } } : { identity: gated };
   };
   const tracked = new Map<string, DocState>();
+  /**
+   * The names this listener holds open in the database (`_delta_held`, todo
+   * #73), each its hold's query: a write's fan-out asks only the names held
+   * somewhere. A name is held from before its first open here reads it, until
+   * nobody here has it open or is opening it (`opening`). Holds and lets go
+   * run on the listener's connection, in turn.
+   */
+  const holds = new Map<string, Promise<unknown>>();
+  const opening = new Map<string, number>();
+  let holder: number | null = null;
+  let turn: Promise<unknown> = Promise.resolve();
+  /** One query at a time on the listener's connection, in the order asked. */
+  function inTurn(sql: string, params: unknown[]): Promise<unknown> {
+    const run = turn.then(() => listener.query(sql, params));
+    turn = run.catch(() => {});
+    return run;
+  }
 
   // The custom documents (../custom): who holds each, who may hear it, what a
   // write tells it -- and who may still hear any document (todo #17): a change
@@ -198,7 +215,8 @@ export async function createDocListener<I = unknown>(
     }
   }
 
-  async function setupListener(client: any) {
+  /** LISTEN on `client`, and hold this listener's names on it: false when they were cleared while it was away. */
+  async function setupListener(client: any): Promise<boolean> {
     await client.query("LISTEN delta_changes");
     client.on("notification", onNotification);
     errorHandler = (err: Error) => {
@@ -206,6 +224,9 @@ export async function createDocListener<I = unknown>(
       if (!destroyed) reconnect();
     };
     client.on("error", errorHandler);
+    const { rows } = await client.query("SELECT holder, kept FROM _delta_holder_start($1)", [holder]);
+    holder = rows[0].holder;
+    return rows[0].kept;
   }
 
   async function reconnect() {
@@ -224,8 +245,11 @@ export async function createDocListener<I = unknown>(
         try {
           await delay(Math.min(attempt * 1000, 10000));
           listener = await pool.connect();
-          await setupListener(listener);
+          const kept = await setupListener(listener);
           log.info("listener reconnected");
+          // Names cleared while away were not told what was written: their
+          // sockets open them again.
+          if (!kept) letGoAll();
           // Catch up: ops committed while we were disconnected were NOTIFY'd to
           // nobody, so re-drain every tracked doc from its last seen version.
           await resyncTracked();
@@ -355,7 +379,36 @@ export async function createDocListener<I = unknown>(
         state.subscribers.delete(sub);
       }
     }
-    if (state.subscribers.size === 0) tracked.delete(docName);
+    if (state.subscribers.size === 0) { tracked.delete(docName); release(docName); }
+  }
+
+  function hold(docName: string): Promise<unknown> {
+    let held = holds.get(docName);
+    if (!held) {
+      held = inTurn("SELECT _delta_hold($1, $2)", [holder, docName]);
+      held.catch(() => { if (holds.get(docName) === held) holds.delete(docName); });
+      holds.set(docName, held);
+    }
+    return held;
+  }
+
+  /** Let go of a name nobody here has open or is opening. */
+  function release(docName: string): void {
+    if (tracked.get(docName)?.subscribers.size || opening.has(docName) || !holds.delete(docName)) return;
+    inTurn("SELECT _delta_let_go($1, $2)", [holder, docName])
+      .catch((err) => log.error(`let go of ${docName}: ${errMsg(err)}`));
+  }
+
+  /** The names were cleared while the listener was away: each socket is let go of its documents, and opens them again. */
+  function letGoAll(): void {
+    holds.clear();
+    for (const [docName, state] of tracked) {
+      for (const client of state.subscribers) {
+        try { trackUnsubscribe(client, docName); } catch { /* the socket may be closing */ }
+        sendTo(client, { doc: docName, error: { code: 500, message: "the server lost the database for a while: open it again" } });
+      }
+      tracked.delete(docName);
+    }
   }
 
   // Transport-level teardown (socket drop / logout via dropClientSubscriptions):
@@ -366,7 +419,7 @@ export async function createDocListener<I = unknown>(
   function releaseClient(client: any): void {
     for (const [docName, state] of tracked) {
       if (!state.subscribers.delete(client)) continue;
-      if (state.subscribers.size === 0) tracked.delete(docName);
+      if (state.subscribers.size === 0) { tracked.delete(docName); release(docName); }
     }
     custom.leave(client);
   }
@@ -467,24 +520,32 @@ export async function createDocListener<I = unknown>(
   }
 
   ws.on("open", withDoc("open", async ({ docName, type, ctx, msg, client, respond, identity }) => {
-    const result = await type.open(ctx, docName, msg, identity);
-    if (!result) return respond({ error: NOT_FOUND });
+    opening.set(docName, (opening.get(docName) ?? 0) + 1);
+    try {
+      await hold(docName);   // before the read: a write from now is told to this name
+      const result = await type.open(ctx, docName, msg, identity);
+      if (!result) return respond({ error: NOT_FOUND });
 
-    pruneDoc(docName);
-    let state = tracked.get(docName);
-    if (!state) {
-      state = { version: Number(result.version), until: Number(result.version), subscribers: new Set(), notifying: false, pending: false };
-      tracked.set(docName, state);
-    } else {
-      state.version = Math.max(state.version, Number(result.version));
-      state.until = Math.max(state.until, state.version);
+      pruneDoc(docName);
+      let state = tracked.get(docName);
+      if (!state) {
+        state = { version: Number(result.version), until: Number(result.version), subscribers: new Set(), notifying: false, pending: false };
+        tracked.set(docName, state);
+      } else {
+        state.version = Math.max(state.version, Number(result.version));
+        state.until = Math.max(state.until, state.version);
+      }
+
+      state.subscribers.add(client);
+      trackSubscribe(client, docName);
+      onClientDrop(client, releaseClient);
+      respond({ result: result.result });
+      log.info(`opened ${docName} v${state.version}`);
+    } finally {
+      const left = opening.get(docName)! - 1;
+      if (left > 0) opening.set(docName, left); else opening.delete(docName);
+      release(docName);
     }
-
-    state.subscribers.add(client);
-    trackSubscribe(client, docName);
-    onClientDrop(client, releaseClient);
-    respond({ result: result.result });
-    log.info(`opened ${docName} v${state.version}`);
   }));
 
   ws.on("delta", withDoc("delta", async ({ docName, type, ctx, msg, client, respond, identity }) => {
@@ -569,7 +630,7 @@ export async function createDocListener<I = unknown>(
     const state = tracked.get(docName);
     if (state) {
       state.subscribers.delete(client);
-      if (state.subscribers.size === 0) tracked.delete(docName);
+      if (state.subscribers.size === 0) { tracked.delete(docName); release(docName); }
     }
     respond({ result: { ack: true } });
     log.debug(`closed ${docName}`);
@@ -578,12 +639,14 @@ export async function createDocListener<I = unknown>(
   return {
     evict(docName: string) {
       tracked.delete(docName);
+      release(docName);
     },
     async destroy() {
       destroyed = true;
       unhold();
       try {
-        await listener.query("UNLISTEN *");
+        await inTurn("UNLISTEN *", []);
+        await inTurn("SELECT _delta_holder_stop($1)", [holder]);
       } catch {}
       // Released connections are recycled by the pool; stale listeners would
       // fire against this closure's state on future pooled connections.
