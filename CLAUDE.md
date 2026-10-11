@@ -109,8 +109,10 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
   imports railroad's subpaths, never the root barrel.
 - `src/server/server.ts`: `createWs`, the JSON-file backend (`registerDoc`), `WsServer`.
 - `src/server/sqlite.ts`: the SQLite backend (`registerDocs`, custom docs, fan-out, implied
-  docs, `inverseOf`, `exportTables` / `importTables`; with `{ ledger: true }`, `undo` / `redo` /
-  `history`).
+  docs, `inverseOf`; with `{ ledger: true }`, `undo` / `redo` / `history`), and the package's
+  `./sqlite` entry. Beside it, `src/server/sqlite/`: `ddl` (createTables, migrateSchema),
+  `validate`, `rows` (writes and codecs), `keep` (a scope's values as columns keep them), `read`
+  (open and open_at), `carry` (`exportTables` / `importTables`).
 - `src/server/json.ts`: the JSON file, the same documents as SQLite (SQLite in memory, loaded
   from the file and saved to it after every change).
 - `src/server/pglite.ts`: Postgres in process -- PGlite behind the slice of `pg`'s Pool delta

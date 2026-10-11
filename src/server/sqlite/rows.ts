@@ -1,0 +1,177 @@
+/** A row as SQLite keeps it: written, closed, read back, and each value as its column stores it. */
+import { joinPath } from "../../core";
+import { defaultForType, isoTime, type DocDef, type ResolvedTable, type Schema } from "../../schema";
+import { rowId } from "../scope";
+
+/** The view a collection's current rows are read from. */
+export const current = (table: ResolvedTable) => (table.temporal ? `current_${table.name}` : table.name);
+
+/** A time in SQLite's own sortable form, "YYYY-MM-DD HH:MM:SS.mmm" in UTC, from ISO-8601 or that form. */
+export function sqliteTime(value: unknown): string {
+  const iso = isoTime(value);
+  return iso && /^\d{4}-\d{2}-\d{2}T/.test(iso) ? iso.replace("T", " ").replace("Z", "") : String(value);
+}
+
+// ---------------------------------------------------------------------------
+// SQL helpers
+// ---------------------------------------------------------------------------
+
+// Strictly-monotonic, millisecond-resolution timestamp. The temporal PK is
+// (id, valid_from); whole-second timestamps made any two writes to the same
+// row within one wall-clock second — including the common create-then-edit —
+// collide on the PK and roll the delta back. Millisecond precision plus a
+// per-process monotonic bump guarantees every call yields a distinct,
+// lexicographically-sortable valid_from. Format "YYYY-MM-DD HH:MM:SS.mmm"
+// stays comparable with the `datetime('now')` column default.
+let _lastNowMs = 0;
+export function now(): string {
+  let ms = Date.now();
+  if (ms <= _lastNowMs) ms = _lastNowMs + 1;
+  _lastNowMs = ms;
+  return new Date(ms).toISOString().replace("T", " ").replace("Z", "");
+}
+
+// Close the live version of a row. When a reinsert follows, the caller MUST
+// pass the reinsert's `ts` so the old row's valid_to EXACTLY equals the new
+// row's valid_from — otherwise (with monotonic sub-second now()) the close
+// lands a tick later than the reinsert, leaving a temporal overlap that makes
+// half-open time-travel reads (valid_to > at) match two versions at once.
+export function closeRow(db: any, table: ResolvedTable, id: string | number, ts: string = now()) {
+  db.run(`UPDATE ${table.name} SET valid_to = ? WHERE id = ? AND valid_to IS NULL`, [ts, id]);
+  return ts;
+}
+
+/**
+ * Insert one version of a row -- a new row, a root row, or the next version of
+ * a temporal one: its id, its parent key, its columns, and on a temporal
+ * table `valid_from = ts`. The one row writer: the three it replaces had
+ * drifted, and the root's had lost the parent key (v0.5.0 review #5).
+ */
+export function insertRow(db: any, table: ResolvedTable, row: any, ts: string) {
+  const cols = ["id"];
+  if (table.parent) cols.push(table.parent.fkColumn);
+  cols.push(...Object.keys(table.columns));
+  if (table.temporal) cols.push("valid_from");
+  const vals = cols.map((c) => (c === "valid_from" ? ts : encodeValue(table, c, row[c])));
+  db.run(`INSERT INTO ${table.name} (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`, vals);
+}
+
+/** An error the writer is answered with: `code` is its wire code. */
+export function refuse(code: number, message: string): never {
+  throw Object.assign(new Error(message), { code });
+}
+
+/** SQLite's own error, with the fix when the fix is a call the app left out. */
+export function named(err: any): any {
+  if (typeof err?.message === "string" && /no such table/.test(err.message) && !/createTables/.test(err.message)) {
+    err.message += " -- call createTables(db, schema) before the first open";
+  }
+  return err;
+}
+
+export function insertCollectionRow(
+  db: any,
+  schema: Schema,
+  table: ResolvedTable,
+  id: string | number,
+  rootId: string | number | undefined,
+  def: DocDef,
+  row: Record<string, unknown>,
+  ts: string,
+  list = false,
+): any {
+  // An add names a new row. On a temporal table the key is (id, valid_from),
+  // so an add of a live id would insert a second live version of it (and on a
+  // plain table fail UNIQUE as a 500): refuse it, in any document's scope.
+  if (db.query(`SELECT 1 FROM ${current(table)} WHERE id = ?`).get(id)) {
+    refuse(409, `Row already exists: ${joinPath(table.docKey, String(id))} -- replace it, or add to ${joinPath(table.docKey, "-")} for a new id`);
+  }
+  const fullRow: any = { id, ...row };
+  fullRow.id = id;   // the path names the row, whatever the value says
+
+  // A single-mode document's direct child hangs from its root; any other row
+  // names its parent (a grandchild, a list-mode document's rows), as on Postgres.
+  if (table.parent) {
+    if (!list && table.parent.collection === def.root) {
+      fullRow[table.parent.fkColumn] = rootId;
+    } else if (fullRow[table.parent.fkColumn] != null) {
+      fullRow[table.parent.fkColumn] = rowId(fullRow[table.parent.fkColumn] as string | number);
+    }
+  }
+
+  // Apply defaults
+  for (const [col, colDef] of Object.entries(table.columns)) {
+    if (fullRow[col] === undefined) {
+      fullRow[col] = colDef.default ?? (colDef.nullable ? null : defaultForType(colDef.type));
+    }
+  }
+
+  // A version this write made and took back (added, then removed) never was
+  // outside it: an add of the same id again takes its place.
+  if (table.temporal) db.run(`DELETE FROM ${table.name} WHERE id = ? AND valid_from = ? AND valid_to = ?`, [id, ts, ts]);
+  insertRow(db, table, fullRow, ts);
+
+  // The row read back, as Postgres's RETURNING gives it: as it is kept (a
+  // scope's "10" in a text column is "10"), its columns in the table's order --
+  // so a row told of an add, the ledger's entry, and the same row read again
+  // (by an undo's guard and inverse, a redo, a reopen) are the same row, keys,
+  // values and all.
+  const read = db.query(`SELECT * FROM ${current(table)} WHERE id = ?`).get(id);
+  decodeRow(table, read);
+  return read;
+}
+
+/**
+ * Overwrite a row in place: a non-temporal row, or the live version of a
+ * temporal one that the write going on made (one version per write).
+ *
+ * A temporal row is otherwise updated by closing the old version and inserting a new one
+ * — the composite `(id, valid_from)` key keeps both. A non-temporal table has
+ * `id` as its whole primary key, so that same insert collides: replaces against
+ * one used to fail with `UNIQUE constraint failed`, making non-temporal rows
+ * unupdatable. UPDATE rather than DELETE+INSERT (which is what the Postgres
+ * backend does) so the row is never briefly absent.
+ */
+export function updateRow(db: any, table: ResolvedTable, id: string | number, row: any) {
+  const cols: string[] = [];
+  if (table.parent) cols.push(table.parent.fkColumn);
+  cols.push(...Object.keys(table.columns));
+  if (cols.length === 0) return;
+
+  const sets = cols.map((c) => `${c} = ?`).join(", ");
+  const vals = cols.map((c) => encodeValue(table, c, row[c]));
+  // a temporal table's live version alone: the one a write made, rewritten as the write goes on
+  db.run(`UPDATE ${table.name} SET ${sets} WHERE id = ?${table.temporal ? " AND valid_to IS NULL" : ""}`, [...vals, id]);
+}
+
+// ---------------------------------------------------------------------------
+// Field codecs
+// ---------------------------------------------------------------------------
+
+export function encodeValue(table: ResolvedTable, col: string, value: unknown): any {
+  const def = table.columns[col];
+  if (!def) return value ?? null;
+
+  // Every json value is stored as JSON, strings included: a string stored raw
+  // came back from a cold read parsed ("123" as 123, "true" as true).
+  if (def.type === "json" && value != null) {
+    return JSON.stringify(value);
+  }
+  if (def.type === "boolean") {
+    return value == null ? null : (value ? 1 : 0);
+  }
+  return value ?? null;
+}
+
+export function decodeRow(table: ResolvedTable, row: any) {
+  // A temporal row's validity is storage, not data: a document holds the row as it is, as Postgres gives it.
+  if (table.temporal) { delete row.valid_from; delete row.valid_to; }
+  for (const [col, def] of Object.entries(table.columns)) {
+    if (def.type === "json" && typeof row[col] === "string") {
+      try { row[col] = JSON.parse(row[col]); } catch { /* a string an earlier release stored raw: keep it */ }
+    }
+    if (def.type === "boolean" && row[col] != null) {
+      row[col] = !!row[col];
+    }
+  }
+}
