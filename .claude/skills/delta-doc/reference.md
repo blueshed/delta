@@ -28,7 +28,7 @@ Full API, patterns, and recipes. The companion `SKILL.md` is the router; start t
 - *Document kinds* — `registerMemory`, `registerSource`, `registerStatic`
 - *Stored functions* — `delta_open`, `delta_apply`, `*_as` 1-RTT variants, the ledger's `delta_apply_logged` / `delta_walk` / `delta_undo` / `delta_redo` / `delta_history`
   - *Composing doc operations from SQL* — call `delta_open_as` / `delta_apply_as` from your own `plpgsql`; identity-binding + `SECURITY DEFINER` caveats
-- *CLI* — `bunx @blueshed/delta` runtime + build-time commands
+- *CLI* — `bunx @blueshed/delta` runtime + build-time commands; for an agent, `--token`, `--json`, a `watch` that ends
 - *Testing* — `@blueshed/delta/testing`, the pointer vectors, integration pattern; client-side tests and one-shot scripts
 - *Local development across repos* — a packed tarball, never `file:` (two railroads go inert)
 - *Wire-level protocol* — message shapes
@@ -1069,14 +1069,25 @@ Runtime — talk to a running server:
 
 ```bash
 bunx @blueshed/delta open  <docName>             # one-shot open + print + exit
-bunx @blueshed/delta watch <docName>             # stream broadcast ops live (never exits)
-bunx @blueshed/delta delta <docName> <opsJSON>   # apply ops
+bunx @blueshed/delta watch <docName>             # the state, then each broadcast to it, a JSON line each
+bunx @blueshed/delta delta <docName> <opsJSON>   # apply ops; prints the answer with the ops as applied
 bunx @blueshed/delta call  <method>  [paramsJSON]  # invoke RPC
 ```
 
 Always the scoped name: `bunx delta` without a local install runs an unrelated npm package called `delta`.
 
 URL resolution: `--url` → `DELTA_WS_URL` → `.delta` file in cwd → `ws://localhost:${PORT:-3100}/ws`.
+
+**For an agent or a script**, every runtime command takes:
+
+- `--token <t>` or `DELTA_TOKEN` (prefer the env: a flag shows in `ps`): sent as `call authenticate` on connecting, before the command -- never in the URL. A refused token is the sign-in's 401.
+- `--json`: one JSON line per event on stdout and nothing else (no status lines on stderr); an error is one `{"error":{"code","message"}}` line on stderr, exit code 1 (a bad argument: exit 2). Without it a person gets the answer pretty-printed, as before.
+- `watch` ends, exit 0, at the first of `--count <n>` broadcasts, `--for <ms>`, or `--until "<op> <path>"` (or `--until <path>`): an op at that path or under it, of that verb if given -- `--until "add /items"` is the first item added. Broadcasts are row-level, so name the row, not a field. With none it runs until Ctrl-C. An error told for the document, or the server closing the socket, ends it with exit 1.
+- `delta` prints the ops as applied on every backend: it asks with `inverse: true` (SQLite and the JSON file answer `ops` and `inverse`), and where the answer is `{ ack }` alone (Postgres without a ledger, a free-form document) takes them from the write's broadcast to its own socket.
+
+```bash
+DELTA_TOKEN=$T bunx @blueshed/delta watch board:1 --json --until "add /cards" --for 10000
+```
 
 Build-time — Postgres only:
 

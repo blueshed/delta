@@ -29,19 +29,37 @@ function usage(code = 0): never {
     `  delta install-skills [--user] [--dry-run]\n` +
     `\n` +
     `  delta open  <docName>                  Open a doc, print its state, exit.\n` +
-    `  delta watch <docName>                  Open a doc, then stream broadcast ops.\n` +
-    `  delta delta <docName> <opsJSON>        Apply JSON-Patch ops to a doc.\n` +
+    `  delta watch <docName>                  Open a doc, then print each broadcast to it, a line each.\n` +
+    `        [--count <n>] [--for <ms>] [--until "<op> <path>"]   exit 0 at the first that comes\n` +
+    `  delta delta <docName> <opsJSON>        Apply JSON-Patch ops to a doc; print the ops as applied.\n` +
     `  delta call  <method>  [paramsJSON]     Invoke an RPC method.\n` +
     `\n` +
-    `URL resolution for runtime commands (in order):\n` +
-    `  --url <url>  |  DELTA_WS_URL  |  .delta file  |  ws://localhost:\${PORT:-3100}/ws\n`,
+    `Runtime commands take:\n` +
+    `  --url <url>  |  DELTA_WS_URL  |  .delta file  |  ws://localhost:\${PORT:-3100}/ws   (in order)\n` +
+    `  --token <t>  |  DELTA_TOKEN    sent as call authenticate first, never in the URL\n` +
+    `  --json       one JSON line per event on stdout; an error is {"error":...} on stderr, exit 1\n`,
   );
   process.exit(code);
 }
 
 // ---------------------------------------------------------------------------
 // Runtime CLI — open / watch / delta / call against a running delta server.
+//
+// For a person: answers pretty-printed, status on stderr. With --json, for a
+// program (an agent): one JSON line per event on stdout, nothing else; an
+// error is one {"error":...} line on stderr and exit code 1.
 // ---------------------------------------------------------------------------
+
+let json = false;
+
+const print = (result: unknown) =>
+  process.stdout.write((json ? JSON.stringify(result) : JSON.stringify(result, null, 2)) + "\n");
+const say = (line: string) => { if (!json) process.stderr.write(line + "\n"); };
+
+function usageError(why: string): never {
+  process.stderr.write(`delta: ${why}\n`);
+  process.exit(2);
+}
 
 function resolveWsUrl(values: Record<string, unknown>): string {
   const flag = values.url as string | undefined;
@@ -54,17 +72,25 @@ function resolveWsUrl(values: Record<string, unknown>): string {
   return `ws://localhost:${process.env.PORT ?? "3100"}/ws`;
 }
 
-async function withWs<T>(
-  url: string,
-  fn: (api: {
-    send: (msg: any) => Promise<any>;
-    onBroadcast: (handler: (msg: any) => void) => void;
-  }) => Promise<T>,
-): Promise<T> {
-  const ws = new WebSocket(url);
+interface Api {
+  send: (msg: any) => Promise<any>;
+  onBroadcast: (handler: (msg: any) => void) => void;
+  /** Rejects when the server closes the socket. */
+  closed: Promise<never>;
+}
+
+/**
+ * Connect, sign in when there is a token (`--token` or DELTA_TOKEN, sent as
+ * `call authenticate`, never in the URL), run `fn`, close.
+ */
+async function withWs<T>(values: Record<string, unknown>, fn: (api: Api) => Promise<T>): Promise<T> {
+  const ws = new WebSocket(resolveWsUrl(values));
   const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
   const broadcastHandlers = new Set<(msg: any) => void>();
   let nextId = 1;
+  let onClosed!: (err: Error) => void;
+  const closed = new Promise<never>((_, reject) => (onClosed = reject));
+  closed.catch(() => {});   // asked only by watch
 
   await new Promise<void>((resolve, reject) => {
     ws.onopen = () => resolve();
@@ -102,9 +128,10 @@ async function withWs<T>(
   ws.onclose = () => {
     for (const p of pending.values()) p.reject(new Error("socket closed"));
     pending.clear();
+    onClosed(new Error("socket closed"));
   };
 
-  const api = {
+  const api: Api = {
     send(msg: any): Promise<any> {
       const id = nextId++;
       return new Promise((resolve, reject) => {
@@ -113,11 +140,15 @@ async function withWs<T>(
       });
     },
     onBroadcast(handler: (msg: any) => void) { broadcastHandlers.add(handler); },
+    closed,
   };
 
   try {
+    const token = (values.token as string | undefined) ?? process.env.DELTA_TOKEN;
+    if (token) await api.send({ action: "call", method: "authenticate", params: { token } });
     return await fn(api);
   } finally {
+    ws.onclose = null;
     try { ws.close(); } catch {}
   }
 }
@@ -125,31 +156,67 @@ async function withWs<T>(
 function parseJsonArg(s: string | undefined, label: string): unknown {
   if (s === undefined) return undefined;
   try { return JSON.parse(s); }
-  catch (err) {
-    process.stderr.write(`delta: ${label} is not valid JSON: ${(err as Error).message}\n`);
-    process.exit(2);
-  }
+  catch (err) { usageError(`${label} is not valid JSON: ${(err as Error).message}`); }
 }
-
-const print = (result: unknown) => process.stdout.write(JSON.stringify(result, null, 2) + "\n");
 
 async function cmdOpen(docName: string | undefined, values: Record<string, unknown>) {
   if (!docName) usage(1);
-  print(await withWs(resolveWsUrl(values), ({ send }) => send({ action: "open", doc: docName })));
+  print(await withWs(values, ({ send }) => send({ action: "open", doc: docName })));
 }
 
+function wholeNumber(value: unknown, flag: string): number | undefined {
+  if (value === undefined) return undefined;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0) usageError(`${flag} takes a whole number, not ${value}`);
+  return n;
+}
+
+/** `--until "<op> <path>"` or `--until <path>`: an op at that path or under it, of that verb if given. */
+function untilOf(value: unknown): ((op: any) => boolean) | undefined {
+  if (value === undefined) return undefined;
+  const s = String(value);
+  const at = s.indexOf("/");
+  const verb = at < 0 ? "" : s.slice(0, at).trim();
+  const path = s.slice(at);
+  if (at < 0 || (verb && !["add", "replace", "remove"].includes(verb))) {
+    usageError(`--until takes "<op> <path>" or "<path>", e.g. "add /items", not ${s}`);
+  }
+  return (op) => (!verb || op?.op === verb) && (op?.path === path || String(op?.path).startsWith(path + "/"));
+}
+
+/**
+ * Print the doc's state, then each broadcast to it, one JSON line each. Ends,
+ * exit 0, when the first of --count broadcasts, --for ms or an op --until
+ * names comes; without one, at Ctrl-C. An error told for the doc, or the
+ * server closing the socket, ends it with exit 1.
+ */
 async function cmdWatch(docName: string | undefined, values: Record<string, unknown>) {
   if (!docName) usage(1);
-  const url = resolveWsUrl(values);
-  process.stderr.write(`watching ${docName} on ${url} (Ctrl-C to stop)\n`);
-  await withWs(url, async ({ send, onBroadcast }) => {
+  const most = wholeNumber(values.count, "--count");
+  const ms = wholeNumber(values.for, "--for");
+  const until = untilOf(values.until);
+  const line = (msg: unknown) => process.stdout.write(JSON.stringify(msg) + "\n");
+  const ends = most !== undefined || ms !== undefined || until !== undefined;
+  say(`watching ${docName} on ${resolveWsUrl(values)}${ends ? "" : " (Ctrl-C to stop)"}`);
+  await withWs(values, async ({ send, onBroadcast, closed }) => {
+    const end = Promise.withResolvers<void>();
+    let heard = 0;
+    const enough = () => { if (most !== undefined && heard >= most) end.resolve(); };
     onBroadcast((msg) => {
-      if (msg.doc === docName) process.stdout.write(JSON.stringify(msg) + "\n");
+      if (msg.doc !== docName) return;
+      if (msg.error) return end.reject(msg.error);
+      line(msg);
+      heard++;
+      enough();
+      if (until && Array.isArray(msg.ops) && msg.ops.some(until)) end.resolve();
     });
-    const result = await send({ action: "open", doc: docName });
-    process.stderr.write(`opened ${docName}\n`);
-    process.stdout.write(JSON.stringify({ doc: docName, state: result }) + "\n");
-    await new Promise<never>(() => {}); // until Ctrl-C
+    const state = await send({ action: "open", doc: docName });
+    say(`opened ${docName}`);
+    line({ doc: docName, state });
+    enough();
+    const timer = ms === undefined ? undefined : setTimeout(end.resolve, ms);
+    try { await Promise.race([end.promise, closed]); }
+    finally { clearTimeout(timer); }
   });
 }
 
@@ -159,16 +226,23 @@ async function cmdDelta(
   values: Record<string, unknown>,
 ) {
   if (!docName || !opsJson) usage(1);
-  const ops = parseJsonArg(opsJson, "ops") as unknown;
-  if (!Array.isArray(ops)) {
-    process.stderr.write(`delta: ops must be a JSON array\n`);
-    process.exit(2);
-  }
-  print(await withWs(resolveWsUrl(values), async ({ send }) => {
+  const ops = parseJsonArg(opsJson, "ops");
+  if (!Array.isArray(ops)) usageError("ops must be a JSON array");
+  print(await withWs(values, async ({ send, onBroadcast }) => {
     // SQLite's registerDocs requires the doc to be cached before delta;
     // opening on the same socket is the cheapest way to guarantee it.
     await send({ action: "open", doc: docName });
-    return send({ action: "delta", doc: docName, ops });
+    const told: any[] = [];
+    onBroadcast((msg) => { if (msg.doc === docName && Array.isArray(msg.ops)) told.push(msg); });
+    // `inverse: true` asks SQLite and the JSON file for the ops as applied.
+    const answer = await send({ action: "delta", doc: docName, ops, inverse: true });
+    if (answer?.ops) return answer;
+    // A backend that answers { ack } alone (no ledger) told this socket the
+    // ops as applied: the broadcast of this write, at its version when it has one.
+    const mine = (msg: any) => answer?.version == null || Number(msg.v) === Number(answer.version);
+    for (let i = 0; i < 40 && !told.some(mine); i++) await Bun.sleep(25);
+    const heard = told.find(mine);
+    return heard ? { ...answer, ops: heard.ops } : answer;
   }));
 }
 
@@ -179,7 +253,7 @@ async function cmdCall(
 ) {
   if (!method) usage(1);
   const params = parseJsonArg(paramsJson, "params");
-  print(await withWs(resolveWsUrl(values), ({ send }) => send({ action: "call", method, params: params ?? {} })));
+  print(await withWs(values, ({ send }) => send({ action: "call", method, params: params ?? {} })));
 }
 
 // ---------------------------------------------------------------------------
@@ -585,6 +659,11 @@ async function main() {
       user: { type: "boolean", default: false },
       "dry-run": { type: "boolean", default: false },
       url: { type: "string" },
+      token: { type: "string" },
+      json: { type: "boolean", default: false },
+      count: { type: "string" },
+      for: { type: "string" },
+      until: { type: "string" },
       help: { type: "boolean", short: "h", default: false },
     },
     allowPositionals: true,
@@ -592,6 +671,7 @@ async function main() {
   });
 
   if (values.help) usage(0);
+  json = !!values.json;
 
   const cmd = positionals[0];
   const arg = positionals[1];
@@ -610,10 +690,9 @@ async function main() {
 }
 
 main().catch((err) => {
-  let msg: string;
-  if (err instanceof Error) msg = err.message;
-  else if (err && typeof err === "object") msg = JSON.stringify(err);
-  else msg = String(err);
-  process.stderr.write(`delta: ${msg}\n`);
+  // A server's error is { code, message } as it is; anything else, its message.
+  const told = !!err && typeof err === "object" && !(err instanceof Error);
+  const error = told ? err : { message: err instanceof Error ? err.message : String(err) };
+  process.stderr.write((json ? JSON.stringify({ error }) : `delta: ${told ? JSON.stringify(err) : error.message}`) + "\n");
   process.exit(1);
 });

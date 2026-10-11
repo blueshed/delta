@@ -154,7 +154,8 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
   `delta_history`, `_as` forms).
 - `src/server/auth*.ts`, `src/sql/auth-jwt.sql`: the `DeltaAuth` contract and the JWT reference.
 - `cli.ts`: `bunx @blueshed/delta` (open, watch, delta, call, init, sql, install-skills;
-  install-skills copies `@blueshed/*` skills and the packages `claudeSkills` names).
+  install-skills copies `@blueshed/*` skills and the packages `claudeSkills` names). The runtime
+  commands take `--token` / `DELTA_TOKEN` and `--json` for an agent; `tests/cli.test.ts` runs them.
 - `src/testing.ts` (`./testing`): `mockClient`, `sendAndAwait`, `waitFor`, `pointerVectors` (the
   pointer grammar's vectors, `src/pointer-vectors.json`), for delta's tests and a consumer's.
   `tests/setup.ts`: the Postgres ones (`newPool`, `applyFramework`, `resetState`). `createLocal()` is

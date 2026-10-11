@@ -29,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own tests drive a server with, for an app to test its own; and `pointerVectors`, the one JSON
   Pointer grammar as data (`src/pointer-vectors.json` in the package), which `splitPath` and
   `_delta_split_path` both answer, for another parser (eta's) to run.
+- **The CLI is safe for an agent.** `--token` or `DELTA_TOKEN` signs in to an auth-enabled server
+  in band (`call authenticate` first, never in the URL). `--json` prints one JSON line per event
+  on stdout and nothing else; an error is one `{"error":...}` line on stderr with exit code 1.
+  `watch` ends, exit 0, at the first of `--count <n>`, `--for <ms>` or `--until "<op> <path>"`, and
+  with exit 1 when the server closes the socket (it used to hang). `delta` prints the ops as
+  applied on every backend, not only on a ledger: SQLite and the JSON file are asked for them
+  (`inverse: true`), and a backend that answers `{ ack }` alone is read from the write's broadcast.
+  Without `--json` a person's output is as it was.
 
 ### Changed
 
