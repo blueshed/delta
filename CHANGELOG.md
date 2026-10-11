@@ -154,7 +154,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server gave the new socket a fresh id for good, so undo answered null for the writes before
   the drop. The new socket still has a fresh id while the old one is open (#24: a live socket
   never takes another live socket's address or cursor), and now takes the chosen id, address
-  and cursor, when the old one closes. Signed in, the cursor includes the person, so a second
+  and cursor, when the old one closes -- if it is who the old one was (both signed out, or the
+  same person); another person waiting on the id keeps its own address. Signed in, the cursor includes the person, so a second
   tab of the same person has it at once, and anyone else never.
 
 ## [0.12.0] - 2026-10-11

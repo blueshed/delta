@@ -758,7 +758,7 @@ describe("clientId collision (#24)", () => {
     expect(ws2.sent.at(-1)).toEqual({ n: 3 });
   });
 
-  test("one that came while the id was held takes it when the holder closes -- not one that has left meanwhile", () => {
+  test("one that came while the id was held takes it when the holder closes -- not one whose close has run (it left the queue)", () => {
     const ws = createWs();
     const a = mockSocket("shared");
     ws.websocket.open(a);
@@ -774,6 +774,51 @@ describe("clientId collision (#24)", () => {
     ws.sendTo("shared", { to: "b" });
     expect(b.sent.at(-1)).toEqual({ to: "b" });
     expect(left.sent).toEqual([]);
+  });
+
+  test("a waiter that is closing (its close not yet run) is passed over: the next one open takes the id", () => {
+    const ws = createWs();
+    const a = mockSocket("shared");
+    ws.websocket.open(a);
+    const closing = mockSocket("shared");
+    ws.websocket.open(closing);
+    const b = mockSocket("shared");
+    ws.websocket.open(b);
+    (closing as any).readyState = 2;   // CLOSING: Bun has not called close yet
+    (a as any).readyState = 3;
+    ws.websocket.close(a);
+    expect(closing.data.clientId).not.toBe("shared");
+    expect(b.data.clientId).toBe("shared");
+  });
+
+  test("signed in, the id goes on only to the same person: another waiting on it keeps its own address", () => {
+    const ws = createWs();
+    const signedIn = (who: string) => Object.assign(mockSocket("shared"), { data: { clientId: "shared", identity: { id: who } } });
+    const alice = signedIn("alice");
+    ws.websocket.open(alice);
+    const mallory = signedIn("mallory");
+    ws.websocket.open(mallory);
+    const aliceAgain = signedIn("alice");
+    ws.websocket.open(aliceAgain);
+    (alice as any).readyState = 3;
+    ws.websocket.close(alice);
+    expect(mallory.data.clientId).not.toBe("shared");
+    expect(aliceAgain.data.clientId).toBe("shared");
+    ws.sendTo("shared", { to: "alice" });
+    expect(aliceAgain.sent.at(-1)).toEqual({ to: "alice" });
+    expect(mallory.sent).toEqual([]);
+
+    // and with no one of hers waiting, nobody takes it
+    const ws2 = createWs();
+    const holder = signedIn("alice");
+    ws2.websocket.open(holder);
+    const other = signedIn("mallory");
+    ws2.websocket.open(other);
+    (holder as any).readyState = 3;
+    ws2.websocket.close(holder);
+    expect(other.data.clientId).not.toBe("shared");
+    ws2.sendTo("shared", { to: "nobody" });
+    expect(other.sent).toEqual([]);
   });
 
   test("a different LIVE socket colliding on a clientId is given a fresh id (no hijack)", () => {

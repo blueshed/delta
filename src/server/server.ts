@@ -375,13 +375,21 @@ export function createWs(opts?: WsOptions): WsServer {
     }
   }
 
-  /** `id`'s holder has closed: the first socket still open that chose it takes it, address and cursor. */
-  function handOn(id: string): void {
+  /**
+   * `id`'s holder has closed: the first socket still open that chose it, and
+   * is who the holder was (both signed out, or the same person), takes it --
+   * address and cursor. One closing is passed over (its close has not run
+   * yet: Bun's CLOSING, or one `refuseHeld` is closing), and so is another
+   * person: never their `sendTo` address.
+   */
+  function handOn(id: string, holder: any): void {
     const queue = waiting.get(id);
     if (!queue) return;
+    const who = JSON.stringify(holder.data?.identity);
     for (const next of queue) {
       queue.delete(next);
       if (next.readyState !== 1 || gone.has(next)) continue;
+      if (JSON.stringify(next.data?.identity) !== who) continue;
       clients.delete(next.data.clientId);
       next.data.clientId = id;
       delete next.data.chosenId;
@@ -482,7 +490,7 @@ export function createWs(opts?: WsOptions): WsServer {
         // own this id.
         if (clientId && clients.get(clientId) === ws) {
           clients.delete(clientId);
-          handOn(clientId);
+          handOn(clientId, ws);
         }
         const chosen = ws.data?.chosenId;
         if (chosen) waiting.get(chosen)?.delete(ws);
