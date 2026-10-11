@@ -400,109 +400,11 @@ export function registerDocs<I = unknown>(
   }
 
   // ---------------------------------------------------------------------------
-  // Load doc from SQL
-  // ---------------------------------------------------------------------------
-
-  /**
-   * A document as its scope reads it from the tables: single mode, one root row
-   * and its children; list mode, every root row the scope admits and each
-   * included collection in full -- as Postgres's `delta_open` reads it.
-   */
-  function loadDocFromSql(def: DocDef, scope: Scope): any | null {
-    const rootTable = schema.tables[def.root];
-    if (!rootTable) return null;
-
-    const viewName = rootTable.temporal ? `current_${rootTable.name}` : rootTable.name;
-    const where = whereOf(scope, keeping(db, rootTable));
-    const rows = db.query(`SELECT * FROM ${viewName} WHERE ${where.sql}`).all(...(where.params as any[]));
-
-    if (scope.mode === "list") {
-      for (const row of rows) decodeRow(rootTable, row);
-      const doc: any = { [def.root]: toMap(rows) };
-      for (const collKey of def.include) {
-        const table = schema.tables[collKey];
-        if (!table) continue;
-        const all = db.query(`SELECT * FROM ${table.temporal ? `current_${table.name}` : table.name}`).all();
-        for (const row of all) decodeRow(table, row);
-        doc[collKey] = toMap(all);
-      }
-      return doc;
-    }
-
-    if (rows.length === 0) return null;
-    if (rows.length > 1) {
-      // A single-mode doc exposes exactly one root row. A scope that matches
-      // several (e.g. a non-unique column) silently drops all but the first
-      // here AND only loads the first row's children — surface it.
-      console.warn(
-        `[delta-sqlite] scope for doc root "${def.root}" matched ${rows.length} rows; using the first only. A single-mode doc's scope must match at most one row.`,
-      );
-    }
-    const rootRow = rows[0];
-    decodeRow(rootTable, rootRow);
-
-    const doc: any = { [def.root]: rootRow };
-
-    // Load each included collection
-    for (const collKey of def.include) {
-      const table = schema.tables[collKey];
-      if (!table) continue;
-
-      const collRows = loadCollection(table, def, rootRow);
-      // Apply field codecs
-      for (const row of collRows) {
-        decodeRow(table, row);
-      }
-      doc[collKey] = toMap(collRows);
-    }
-
-    return doc;
-  }
-
-  /** Recursively load a collection's rows by walking up to find the join path to the root. */
-  function loadCollection(table: ResolvedTable, def: DocDef, rootRow: any): any[] {
-    if (!table.parent) {
-      // No parent: no key ties a row of it to one document. Included, it is
-      // loaded in full, as the Postgres backend loads it: every document of
-      // the prefix holds every row, and the fan-out (holds) and loadDocAt say
-      // the same.
-      const viewName = table.temporal ? `current_${table.name}` : table.name;
-      return db.query(`SELECT * FROM ${viewName}`).all();
-    }
-
-    const parentCollection = table.parent.collection;
-
-    if (parentCollection === def.root) {
-      // Direct child of root — filter by FK = root ID
-      const viewName = table.temporal ? `current_${table.name}` : table.name;
-      return db.query(`SELECT * FROM ${viewName} WHERE ${table.parent.fkColumn} = ?`).all(rootRow.id);
-    }
-
-    // Grandchild — load parent rows first, then filter by their IDs. A parent
-    // the document need not include: its rows are walked all the same. One
-    // with no parent of its own ends the chain short of the root, so nothing
-    // under it is in the document, as the fan-out's chainRoot (and Postgres's
-    // _delta_load_collection) judge it (todo #32).
-    const parentTable = schema.tables[parentCollection];
-    if (!parentTable?.parent) return [];
-    const parentRows = loadCollection(parentTable, def, rootRow);
-    const parentIds = parentRows.map((r: any) => r.id);
-    if (parentIds.length === 0) return [];
-
-    const viewName = table.temporal ? `current_${table.name}` : table.name;
-    const placeholders = parentIds.map(() => "?").join(", ");
-    return db.query(`SELECT * FROM ${viewName} WHERE ${table.parent.fkColumn} IN (${placeholders})`).all(...parentIds);
-  }
-
-  // ---------------------------------------------------------------------------
   // Delta ops → SQL
   // ---------------------------------------------------------------------------
 
   /** A row of the write, for the telling: who held it before, and what it is now (null: gone). */
   type Touched = { coll: string; id: string | number; before: string[]; after: any | null };
-
-  /** The view a collection's current rows are read from. */
-  const current = (table: ResolvedTable) => (table.temporal ? `current_${table.name}` : table.name);
 
   /**
    * The id of the `root` row that `row` (of `coll`) hangs from, following parent
@@ -939,7 +841,7 @@ export function registerDocs<I = unknown>(
   function load(docName: string, def: DocDef, docId: string): any | null {
     let doc = cache.get(docName);
     if (doc) return doc;
-    doc = loadDocFromSql(def, resolveScope(def, docId));
+    doc = readDoc(db, schema, def, resolveScope(def, docId));
     if (!doc && def.implied) {
       doc = emptyDoc(def, docId);
       implied.add(docName);
@@ -1061,7 +963,7 @@ export function registerDocs<I = unknown>(
   function refresh(docName: string): void {
     const m = findDoc(docName);
     if (!m) return;
-    const doc = loadDocFromSql(m.def, resolveScope(m.def, m.docId));
+    const doc = readDoc(db, schema, m.def, resolveScope(m.def, m.docId));
     if (doc) cache.set(docName, doc);
     else if (m.def.implied) { cache.set(docName, emptyDoc(m.def, m.docId)); implied.add(docName); }
     else cache.delete(docName);
@@ -1195,7 +1097,7 @@ export function registerDocs<I = unknown>(
       const match = findDoc(msg.doc);
       if (!match) return;
       let there: unknown;
-      try { there = match.def.implied || loadDocFromSql(match.def, resolveScope(match.def, match.docId)); }
+      try { there = match.def.implied || readDoc(db, schema, match.def, resolveScope(match.def, match.docId)); }
       catch (err: any) { return respond({ error: failure(named(err)) }); }
       if (!there) return respond({ error: NOT_FOUND });
       respond({ result: ledger.history(msg.doc, cursorOf(msg, client), msg.limit) });
@@ -1312,69 +1214,67 @@ export function inverseOf(before: any, applied: DeltaOp[], asked?: DeltaOp[]): D
 
 /** Load a doc as it existed at a specific point in time (`at`: ISO-8601, or SQLite's own form). */
 export function loadDocAt(db: any, schema: Schema, def: DocDef, docId: string, at: string): any | null {
+  return readDoc(db, schema, def, resolveScope(def, docId), sqliteTime(at));
+}
+
+/**
+ * A document as its scope reads it from the tables -- as they stand, or as they
+ * stood at `at` (SQLite's own time form): single mode, one root row and its
+ * children; list mode, every root row the scope admits and each included
+ * collection in full -- as Postgres's `delta_open` and `delta_open_at` read it.
+ */
+function readDoc(db: any, schema: Schema, def: DocDef, scope: Scope, at?: string): any | null {
   const rootTable = schema.tables[def.root];
   if (!rootTable) return null;
-  const when = sqliteTime(at);
-  const scope = resolveScope(def, docId);
   const where = whereOf(scope, keeping(db, rootTable));
-
-  const rootRows = temporalQuery(db, rootTable, where.sql, where.params as any[], when);
-  if (scope.mode === "list") {
-    for (const row of rootRows) decodeRow(rootTable, row);
-    const doc: any = { [def.root]: toMap(rootRows) };
-    for (const collKey of def.include) {
-      const table = schema.tables[collKey];
-      if (!table) continue;
-      const rows = temporalQuery(db, table, "1 = 1", [], when);
-      for (const row of rows) decodeRow(table, row);
-      doc[collKey] = toMap(rows);
-    }
-    return doc;
+  const rows = readRows(db, rootTable, where.sql, where.params as any[], at);
+  const list = scope.mode === "list";
+  if (!list && rows.length === 0) return null;
+  if (!list && rows.length > 1) {
+    // A single-mode doc exposes exactly one root row. A scope that matches
+    // several (e.g. a non-unique column) silently drops all but the first
+    // here AND only loads the first row's children — surface it.
+    console.warn(
+      `[delta-sqlite] scope for doc root "${def.root}" matched ${rows.length} rows; using the first only. A single-mode doc's scope must match at most one row.`,
+    );
   }
-  if (rootRows.length === 0) return null;
-  const rootRow = rootRows[0];
-  decodeRow(rootTable, rootRow);
-
-  const doc: any = { [def.root]: rootRow };
-
+  const doc: any = { [def.root]: list ? toMap(rows) : rows[0] };
   for (const collKey of def.include) {
     const table = schema.tables[collKey];
-    if (!table) continue;
-
-    const collRows = loadCollectionAt(db, schema, table, def, rootRow, when);
-    for (const row of collRows) decodeRow(table, row);
-    doc[collKey] = toMap(collRows);
+    if (table) doc[collKey] = toMap(list ? readRows(db, table, "1 = 1", [], at) : readCollection(db, schema, table, def, rows[0].id, at));
   }
-
   return doc;
 }
 
-function temporalQuery(db: any, table: ResolvedTable, where: string, params: any[], at: string): any[] {
-  if (table.temporal) {
-    return db.query(
-      `SELECT * FROM ${table.name} WHERE ${where} AND valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)`,
-    ).all(...params, at, at);
-  }
-  return db.query(`SELECT * FROM ${table.name} WHERE ${where}`).all(...params);
+/** The view a collection's current rows are read from. */
+const current = (table: ResolvedTable) => (table.temporal ? `current_${table.name}` : table.name);
+
+/** A table's rows `where` says, as a document holds them: as they stand, or the versions live at `at`. */
+function readRows(db: any, table: ResolvedTable, where: string, params: any[], at?: string): any[] {
+  const rows = table.temporal && at !== undefined
+    ? db.query(`SELECT * FROM ${table.name} WHERE ${where} AND valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)`).all(...params, at, at)
+    : db.query(`SELECT * FROM ${current(table)} WHERE ${where}`).all(...params);
+  for (const row of rows) decodeRow(table, row);
+  return rows;
 }
 
-function loadCollectionAt(db: any, schema: Schema, table: ResolvedTable, def: DocDef, rootRow: any, at: string): any[] {
-  // No parent: included, in full, as open loads it.
-  if (!table.parent) return temporalQuery(db, table, "TRUE", [], at);
-
-  if (table.parent.collection === def.root) {
-    return temporalQuery(db, table, `${table.parent.fkColumn} = ?`, [rootRow.id], at);
-  }
-
-  // a parent with no parent of its own ends the chain short of the root: nothing under it is in the document, as open reads it
+/** A single document's rows of `table`, under its root row `rootId`, walking up the parent keys to it. */
+function readCollection(db: any, schema: Schema, table: ResolvedTable, def: DocDef, rootId: unknown, at?: string): any[] {
+  // No parent: no key ties a row of it to one document. Included, it is
+  // loaded in full, as the Postgres backend loads it: every document of the
+  // prefix holds every row, and the fan-out (holds) says the same.
+  if (!table.parent) return readRows(db, table, "1 = 1", [], at);
+  const fk = table.parent.fkColumn;
+  if (table.parent.collection === def.root) return readRows(db, table, `${fk} = ?`, [rootId], at);
+  // Grandchild: its parent rows first, then the rows under them. A parent the
+  // document need not include: its rows are walked all the same. One with no
+  // parent of its own ends the chain short of the root, so nothing under it is
+  // in the document, as the fan-out's chainRoot (and Postgres's
+  // _delta_load_collection) judge it (todo #32).
   const parentTable = schema.tables[table.parent.collection];
   if (!parentTable?.parent) return [];
-  const parentRows = loadCollectionAt(db, schema, parentTable, def, rootRow, at);
-  const parentIds = parentRows.map((r: any) => r.id);
-  if (parentIds.length === 0) return [];
-
-  const placeholders = parentIds.map(() => "?").join(", ");
-  return temporalQuery(db, table, `${table.parent.fkColumn} IN (${placeholders})`, parentIds, at);
+  const ids = readCollection(db, schema, parentTable, def, rootId, at).map((r: any) => r.id);
+  return ids.length ? readRows(db, table, `${fk} IN (${ids.map(() => "?").join(", ")})`, ids, at) : [];
 }
 
 // ---------------------------------------------------------------------------
