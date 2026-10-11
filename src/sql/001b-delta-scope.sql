@@ -513,7 +513,10 @@ $$ LANGUAGE plpgsql STABLE;
 -- Before it asks, it takes its prefix's lock, shared, until the write commits:
 -- an open of that prefix holds its name and waits for it (_delta_hold), so a
 -- name held from now is seen here, and a write that asked before is read by
--- the open. VOLATILE, so the question is asked after the lock.
+-- the open. VOLATILE, so the question is asked after the lock -- and so a
+-- write runs at READ COMMITTED: a transaction that reads from one snapshot
+-- (REPEATABLE READ, SERIALIZABLE) would not see a name held after it began,
+-- and is refused (SQLSTATE 0A000).
 --
 -- SECURITY DEFINER (todo #33), with pg_temp last on its path: who holds a row
 -- is worked out as the functions' owner, not the writer, so a parent row the writer's RLS hides (another's
@@ -534,6 +537,10 @@ DECLARE
   v_all   BOOLEAN;
   v_cand  TEXT;
 BEGIN
+  IF current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION 'a delta write runs at READ COMMITTED, not %: a document opened while it ran would not be told of it',
+      upper(current_setting('transaction_isolation')) USING ERRCODE = '0A000';
+  END IF;
   IF p_row IS NULL THEN RETURN v_names; END IF;
   SELECT * INTO v_coll FROM _delta_collections WHERE collection_key = p_coll;
   IF NOT FOUND THEN RETURN v_names; END IF;

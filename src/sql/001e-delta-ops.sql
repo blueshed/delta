@@ -109,7 +109,7 @@ BEGIN
   DELETE FROM _delta_ops_log WHERE created_at < NOW() - p_keep;
   GET DIAGNOSTICS v_count = ROW_COUNT;
   LOCK TABLE _delta_held IN SHARE ROW EXCLUSIVE MODE;
-  DELETE FROM _delta_held h WHERE NOT _delta_holder_live(h.holder);
+  PERFORM _delta_clear_dead_holders();
   DELETE FROM _delta_versions v
    WHERE NOT EXISTS (SELECT 1 FROM _delta_held h WHERE h.doc_name = v.doc_name)
      AND NOT EXISTS (SELECT 1 FROM _delta_ops_log l WHERE l.doc_name = v.doc_name)

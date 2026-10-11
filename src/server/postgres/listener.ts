@@ -166,17 +166,21 @@ export async function createDocListener<I = unknown>(
    * The names this listener holds open in the database (`_delta_held`, todo
    * #73), each its hold's query: a write's fan-out asks only the names held
    * somewhere. A name is held from before its first open here reads it, until
-   * nobody here has it open or is opening it (`opening`). Holds and lets go
-   * run on the listener's connection, in turn.
+   * nobody here has it open or is opening it (`opening`). Its holds and lets
+   * go run on the pool in the order asked, one name's beside another's: a hold
+   * that waits for a write holds up no other name. The listener's connection
+   * keeps the lock that says this holder is alive.
    */
   const holds = new Map<string, Promise<unknown>>();
   const opening = new Map<string, number>();
+  const queued = new Map<string, Promise<unknown>>();
   let holder: number | null = null;
-  let turn: Promise<unknown> = Promise.resolve();
-  /** One query at a time on the listener's connection, in the order asked. */
-  function inTurn(sql: string, params: unknown[]): Promise<unknown> {
-    const run = turn.then(() => listener.query(sql, params));
-    turn = run.catch(() => {});
+  /** `sql` for `docName`, after what was asked for it before. */
+  function inOrder(docName: string, sql: string): Promise<unknown> {
+    const run = (queued.get(docName) ?? Promise.resolve()).then(() => pool.query(sql, [holder, docName]));
+    const done = run.catch(() => {});
+    queued.set(docName, done);
+    void done.then(() => { if (queued.get(docName) === done) queued.delete(docName); });
     return run;
   }
 
@@ -213,8 +217,8 @@ export async function createDocListener<I = unknown>(
     }
   }
 
-  /** LISTEN on `client`, and hold this listener's names on it: false when they were cleared while it was away. */
-  async function setupListener(client: any): Promise<boolean> {
+  /** LISTEN on `client`, and keep this holder's lock on it. */
+  async function setupListener(client: any): Promise<void> {
     await client.query("LISTEN delta_changes");
     client.on("notification", onNotification);
     errorHandler = (err: Error) => {
@@ -222,9 +226,7 @@ export async function createDocListener<I = unknown>(
       if (!destroyed) reconnect();
     };
     client.on("error", errorHandler);
-    const { rows } = await client.query("SELECT holder, kept FROM _delta_holder_start($1)", [holder]);
-    holder = rows[0].holder;
-    return rows[0].kept;
+    holder = (await client.query("SELECT _delta_holder_start($1) AS holder", [holder])).rows[0].holder;
   }
 
   async function reconnect() {
@@ -243,11 +245,9 @@ export async function createDocListener<I = unknown>(
         try {
           await delay(Math.min(attempt * 1000, 10000));
           listener = await pool.connect();
-          const kept = await setupListener(listener);
+          await setupListener(listener);
           log.info("listener reconnected");
-          // Names cleared while away were not told what was written: their
-          // sockets open them again.
-          if (!kept) letGoAll();
+          await keepHolds();
           // Catch up: ops committed while we were disconnected were NOTIFY'd to
           // nobody, so re-drain every tracked doc from its last seen version.
           await resyncTracked();
@@ -382,7 +382,7 @@ export async function createDocListener<I = unknown>(
   function hold(docName: string): Promise<unknown> {
     let held = holds.get(docName);
     if (!held) {
-      held = inTurn("SELECT _delta_hold($1, $2)", [holder, docName]);
+      held = inOrder(docName, "SELECT _delta_hold($1, $2)");
       held.catch(() => { if (holds.get(docName) === held) holds.delete(docName); });
       holds.set(docName, held);
     }
@@ -392,15 +392,23 @@ export async function createDocListener<I = unknown>(
   /** Let go of a name nobody here has open or is opening. */
   function release(docName: string): void {
     if (tracked.get(docName)?.subscribers.size || opening.has(docName) || !holds.delete(docName)) return;
-    inTurn("SELECT _delta_let_go($1, $2)", [holder, docName])
+    inOrder(docName, "SELECT _delta_let_go($1, $2)")
       .catch((err) => log.error(`let go of ${docName}: ${errMsg(err)}`));
   }
 
-  /** The names were cleared while the listener was away: each socket is let go of its documents, and opens them again. */
-  function letGoAll(): void {
-    holds.clear();
-    for (const [docName, state] of tracked) {
-      for (const client of state.subscribers) {
+  /**
+   * Back from a lost connection: a name cleared while the listener was away
+   * (another took it for gone) may have missed a write. Each socket is let go
+   * of such a document, and opens it again; an open reading it reads again.
+   */
+  async function keepHolds(): Promise<void> {
+    await Promise.allSettled(holds.values());
+    const { rows } = await pool.query("SELECT doc_name FROM _delta_held WHERE holder = $1", [holder]);
+    const still = new Set(rows.map((r: any) => r.doc_name as string));
+    for (const docName of [...holds.keys()]) {
+      if (still.has(docName)) continue;
+      holds.delete(docName);
+      for (const client of tracked.get(docName)?.subscribers ?? []) {
         try { trackUnsubscribe(client, docName); } catch { /* the socket may be closing */ }
         sendTo(client, { doc: docName, error: { code: 500, message: "the server lost the database for a while: open it again" } });
       }
@@ -519,8 +527,14 @@ export async function createDocListener<I = unknown>(
   ws.on("open", withDoc("open", async ({ docName, type, ctx, msg, client, respond, identity }) => {
     opening.set(docName, (opening.get(docName) ?? 0) + 1);
     try {
-      await hold(docName);   // before the read: a write from now is told to this name
-      const result = await type.open(ctx, docName, msg, identity);
+      // held before the read: a write from now is told to this name; one lost
+      // while it read (keepHolds) is held and read again
+      let result;
+      for (let held = hold(docName); ; held = hold(docName)) {
+        await held;
+        result = await type.open(ctx, docName, msg, identity);
+        if (holds.get(docName) === held) break;
+      }
       if (!result) return respond({ error: NOT_FOUND });
 
       pruneDoc(docName);
@@ -639,8 +653,8 @@ export async function createDocListener<I = unknown>(
     async destroy() {
       destroyed = true;
       try {
-        await inTurn("UNLISTEN *", []);
-        await inTurn("SELECT _delta_holder_stop($1)", [holder]);
+        await listener.query("UNLISTEN *");
+        await listener.query("SELECT _delta_holder_stop($1)", [holder]);
       } catch {}
       // Released connections are recycled by the pool; stale listeners would
       // fire against this closure's state on future pooled connections.

@@ -199,17 +199,72 @@ describe("postgres: the documents open now", () => {
     await assertCopiesHold(backend, copies);
   });
 
-  test("a listener whose names were cleared while it was away lets go of their sockets, which open them again", async () => {
-    await openAll(backend.process, ["fo-menu:1"]);
-    // the listener's connection ends, and another clears the names of a listener that is gone
+  /** The listener's connection ends, and another clears the names of a listener that is gone. */
+  const loseTheListener = async () => {
     const { rows: [{ holder }] } = await pool.query("SELECT holder FROM _delta_held WHERE doc_name = 'fo-menu:1'");
-    await pool.query(`SELECT pg_terminate_backend(pid) FROM pg_locks
-                       WHERE locktype = 'advisory' AND classid = hashtext('_delta_held')::oid AND objid = $1::oid`, [holder]);
-    await waitFor(async () => !(await pool.query("SELECT _delta_holder_live($1) AS live", [holder])).rows[0].live);
+    const lock = `FROM pg_locks WHERE locktype = 'advisory' AND classid = hashtext('_delta_held')::oid AND objid = $1::oid`;
+    await pool.query(`SELECT pg_terminate_backend(pid) ${lock}`, [holder]);
+    await waitFor(async () => (await pool.query(`SELECT 1 ${lock}`, [holder])).rowCount === 0);
     await pool.query("SELECT delta_prune_ops()");
     expect(await held()).toEqual([]);
-    await waitFor(() => backend.process.heard.some((h) => h.channel === "fo-menu:1" && h.data.error), { timeout: 5000 });
+  };
+  const letGo = (doc: string) => backend.process.heard.some((h) => h.channel === doc && h.data.error);
+
+  test("a listener whose names were cleared while it was away lets go of their sockets, which open them again", async () => {
+    await openAll(backend.process, ["fo-menu:1"]);
+    await loseTheListener();
+    await waitFor(() => letGo("fo-menu:1"), { timeout: 5000 });
   }, 10000);
+
+  test("an open while the listener is away does not hide the names cleared: those are let go of, the one opened is kept", async () => {
+    await openAll(backend.process, ["fo-menu:1"]);
+    await loseTheListener();
+    await backend.process.call("open", { doc: "fo-board:1" });   // held again before the listener is back
+    await waitFor(() => letGo("fo-menu:1"), { timeout: 5000 });
+    expect({ board: letGo("fo-board:1"), held: await held() }).toEqual({ board: false, held: ["fo-board:1"] });
+  }, 10000);
+
+  test("an open waiting for a write holds up no open of another prefix", async () => {
+    const first = await pool.connect();
+    try {
+      await first.query("BEGIN");
+      await first.query(`SELECT delta_apply('fo-board:1', '[{"op":"replace","path":"/courses/1/name","value":"Broth"}]'::jsonb)`);
+      const menu = backend.process.call("open", { doc: "fo-menu:1" });   // waits for the write: the menu holds courses
+      await new Promise((r) => setTimeout(r, 50));
+      const tagged = await Promise.race([
+        backend.process.call("open", { doc: "fo-tagged:1" }).then((r) => r.result ? "opened" : "refused"),
+        new Promise((r) => setTimeout(() => r("waiting"), 1000)),
+      ]);
+      expect(tagged).toBe("opened");
+      await first.query("COMMIT");
+      expect((await menu).result.courses["1"].name).toBe("Broth");
+    } finally {
+      await first.query("ROLLBACK").catch(() => {});
+      first.release();
+    }
+  });
+
+  test("delta_prune_ops keeps the version of a name held open, though nothing of it is left in the log: the next change follows on", async () => {
+    await openAll(backend.process, ["fo-board:1", "fo-menu:1"]);
+    await write(backend.process, "fo-board:1", [{ op: "replace", path: "/courses/1/name", value: "Broth" }]);
+    await pool.query("SELECT delta_prune_ops('0 seconds')");
+    await write(backend.process, "fo-board:1", [{ op: "replace", path: "/courses/1/name", value: "Soup" }]);
+    await waitFor(() => told(backend.process, "fo-menu:1").length === 2);
+    expect(backend.process.heard.filter((h) => h.channel === "fo-menu:1").map((h) => h.data.v)).toEqual([1, 2]);
+  });
+
+  test("a write in a transaction that reads from one snapshot is refused: it would not see a name held after it began", async () => {
+    const other = await pool.connect();
+    try {
+      await other.query("BEGIN ISOLATION LEVEL REPEATABLE READ");
+      const refused = await other.query(`SELECT delta_apply('fo-board:1', '[{"op":"replace","path":"/courses/1/name","value":"RR"}]'::jsonb)`)
+        .then(() => null, (err: any) => ({ code: err.code, message: err.message }));
+      expect(refused).toEqual({ code: "0A000", message: expect.stringContaining("READ COMMITTED") });
+    } finally {
+      await other.query("ROLLBACK").catch(() => {});
+      other.release();
+    }
+  });
 });
 
 describe("postgres: the writer's own channel", () => {

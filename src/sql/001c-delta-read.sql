@@ -377,28 +377,31 @@ $$ LANGUAGE plpgsql;
 -- names it has subscribers for, so a write's fan-out asks only those.
 -- ---------------------------------------------------------------------------
 
--- _delta_holder_live: is listener `p_holder` alive? Its connection holds its
--- lock (_delta_holder_start) until the connection ends.
-CREATE OR REPLACE FUNCTION _delta_holder_live(p_holder INTEGER)
-RETURNS BOOLEAN LANGUAGE sql STABLE AS $$
-  SELECT EXISTS (
-    SELECT 1 FROM pg_locks
+-- _delta_clear_dead_holders: clear the names of listeners that are gone --
+-- those whose connection no longer holds their lock (_delta_holder_start).
+CREATE OR REPLACE FUNCTION _delta_clear_dead_holders() RETURNS void LANGUAGE sql AS $$
+  DELETE FROM _delta_held WHERE holder IN (
+    SELECT holder FROM _delta_held
+    EXCEPT
+    SELECT objid::bigint::integer FROM pg_locks
      WHERE locktype = 'advisory' AND granted AND objsubid = 2
        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
-       AND classid = hashtext('_delta_held')::oid AND objid = p_holder::oid);
+       AND classid = hashtext('_delta_held')::oid);
 $$;
 
 -- _delta_holder_start: a listener starts, on the connection it keeps, as a new
 -- holder (`p_holder` NULL) or again after its connection was lost. It takes
--- its lock, clears the rows of listeners that are gone, and answers its id,
--- and whether it held anything still: false, coming back, when its names were
--- cleared while it was away -- writes since may not have been told them.
-CREATE OR REPLACE FUNCTION _delta_holder_start(p_holder INTEGER, OUT holder INTEGER, OUT kept BOOLEAN) AS $$
+-- its lock, clears the names of listeners that are gone, and answers its id.
+-- Coming back, the listener asks which of its names are still held: one
+-- cleared while it was away may have missed a write.
+DROP FUNCTION IF EXISTS _delta_holder_start(INTEGER);   -- its first form answered `kept` too
+DROP FUNCTION IF EXISTS _delta_holder_live(INTEGER);
+CREATE OR REPLACE FUNCTION _delta_holder_start(p_holder INTEGER) RETURNS INTEGER AS $$
+DECLARE v_holder INTEGER := COALESCE(p_holder, nextval('_delta_holder_ids')::INTEGER);
 BEGIN
-  holder := COALESCE(p_holder, nextval('_delta_holder_ids')::INTEGER);
-  PERFORM pg_advisory_lock_shared(hashtext('_delta_held'), holder);   -- shared: a lost connection may not have ended yet
-  kept := EXISTS (SELECT 1 FROM _delta_held WHERE _delta_held.holder = _delta_holder_start.holder);
-  DELETE FROM _delta_held h WHERE NOT _delta_holder_live(h.holder);
+  PERFORM pg_advisory_lock_shared(hashtext('_delta_held'), v_holder);   -- shared: a lost connection may not have ended yet
+  PERFORM _delta_clear_dead_holders();
+  RETURN v_holder;
 END;
 $$ LANGUAGE plpgsql;
 
