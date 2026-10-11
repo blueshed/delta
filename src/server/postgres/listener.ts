@@ -636,10 +636,6 @@ export async function createDocListener<I = unknown>(
   return {
     /** Answer for one more type; one of a prefix it answers for already is replaced (`bun --hot`). */
     register: registry.register as (type: DocType<any, I>) => void,
-    evict(docName: string) {
-      tracked.delete(docName);
-      release(docName);
-    },
     async destroy() {
       destroyed = true;
       try {

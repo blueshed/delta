@@ -43,6 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   module run again); its checks are the same (with `auth`, `owns` or `shared`; no prefix twice,
   nor a custom document's). Migration: move each `registerDocType(t)` into `types: [t]`, and drop
   `clearRegistry()`.
+- **The Postgres listener's `evict`.** Undocumented and unused, it dropped a document's state while
+  sockets still had it open, and they heard no more of it. A Postgres document keeps no copy to
+  read again, so there is nothing to evict. Migration: drop the call.
 
 ### Fixed
 
