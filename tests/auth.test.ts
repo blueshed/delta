@@ -11,28 +11,9 @@ import {
   type DeltaAuth,
 } from "../src/server/auth";
 import { setLogLevel } from "../src/server/logger";
-import { mockClient } from "../src/testing";
+import { mockClient, sendAndAwait } from "../src/testing";
 
 setLogLevel("silent");
-
-// ---------------------------------------------------------------------------
-// Helpers — minimal mocks for the WsServer contract.
-// ---------------------------------------------------------------------------
-
-// Drive the first registered "call" handler for a given action.
-async function invoke(
-  ws: ReturnType<typeof createWs>,
-  client: any,
-  msg: any,
-): Promise<any> {
-  return new Promise((resolve) => {
-    ws.websocket.message(client, JSON.stringify({ id: 1, ...msg }));
-    setTimeout(() => {
-      const response = client.sent.find((m: any) => m.id === 1);
-      resolve(response);
-    }, 5);
-  });
-}
 
 // ---------------------------------------------------------------------------
 // isAuthError
@@ -78,7 +59,7 @@ describe("wireAuth", () => {
     wireAuth(ws, auth);
 
     const client = mockClient();
-    const res = await invoke(ws, client, {
+    const res = await sendAndAwait(ws, client, {
       action: "call",
       method: "login",
       params: { email: "a", password: "b" },
@@ -99,7 +80,7 @@ describe("wireAuth", () => {
     wireAuth(ws, auth);
 
     const client = mockClient();
-    const res = await invoke(ws, client, { action: "call", method: "login", params: {} });
+    const res = await sendAndAwait(ws, client, { action: "call", method: "login", params: {} });
 
     expect(res.error).toEqual({ code: 401, message: "bad" });
   });
@@ -113,7 +94,7 @@ describe("wireAuth", () => {
     wireAuth(ws, auth);
 
     const client = mockClient();
-    const res = await invoke(ws, client, { action: "call", method: "other" });
+    const res = await sendAndAwait(ws, client, { action: "call", method: "other" });
 
     expect(res.error?.message).toMatch(/No handler matched/);
   });
