@@ -108,6 +108,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   document (`registerDoc`), memory documents and `applyOps` itself. They applied it as a
   replace and broadcast it; now nothing is applied, broadcast or persisted. SQLite and Postgres
   already refused one.
+- **`createLocal()` answers as a socket does.** A handler that threw (the free-form document's
+  404 for a replace of what is not there) rejected `local.call`; it now resolves `{ error: {
+  code, message } }` with the error's code (500 if it has none). An action nothing is registered
+  for is 400 `Unknown action`, as over a socket, where it was 404 `No handler matched` (still
+  the answer when handlers are registered but none takes the message).
 
 ## [0.12.0] - 2026-10-11
 

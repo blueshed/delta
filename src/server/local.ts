@@ -29,7 +29,7 @@
  * handed out, and a caller that changes it changes nothing anyone is served.
  */
 import { createLogger } from "./logger";
-import type { ActionHandler, WsServer } from "./server";
+import { failure, type ActionHandler, type WsServer } from "./server";
 
 export type LocalAnswer = { result?: any; error?: { code: number; message: string } };
 
@@ -145,11 +145,21 @@ export function createLocal(): Local {
     websocket: { idleTimeout: 0, sendPings: false, publishToSelf: true, open() {}, message() {}, close() {} },
   };
 
+  // Answered as a socket answers (`createWs`'s `receive`): an action nothing
+  // is registered for is 400, one no handler took 404, and a handler that
+  // throws is answered with the error's code (500 if it has none).
   async function callAs(from: LocalClient, action: string, msg: Record<string, unknown>): Promise<LocalAnswer> {
+    const handlers = actions.get(action);
+    if (!handlers?.length) return { error: { code: 400, message: `Unknown action: ${action}` } };
     let answer: LocalAnswer | undefined;
-    for (const handler of actions.get(action) ?? []) {
-      await handler({ action, ...msg }, from, (response) => (answer ??= own(response)));
-      if (answer) return answer;
+    try {
+      for (const handler of handlers) {
+        await handler({ action, ...msg }, from, (response) => (answer ??= own(response)));
+        if (answer) return answer;
+      }
+    } catch (err: any) {
+      log.error(`error: ${err?.message ?? String(err)}`);
+      return answer ?? { error: failure(err) };
     }
     return { error: { code: 404, message: `No handler matched: ${action}` } };
   }

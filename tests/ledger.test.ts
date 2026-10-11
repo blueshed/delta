@@ -144,7 +144,7 @@ describe("the ledger", () => {
     const { db, local, say } = setup({});
     expect((await say(local, "s1", "m1", "one")).result).toEqual({ ack: true });
     expect(db.query("SELECT name FROM sqlite_master WHERE name = 'delta_ledger'").get()).toBeNull();
-    expect((await local.call("undo", { cursor: "s1" })).error?.message).toContain("No handler matched");
+    expect((await local.call("undo", { cursor: "s1" })).error).toEqual({ code: 400, message: "Unknown action: undo" });
   });
 });
 

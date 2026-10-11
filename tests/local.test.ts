@@ -43,8 +43,22 @@ describe("createLocal", () => {
     expect((await local.call("open", { doc: "said:hi" })).result).toEqual({ prefix: "said:" });
   });
 
-  test("an unknown action answers with an error", async () => {
-    expect((await setup().local.call("nope", {})).error?.message).toContain("No handler matched");
+  test("an action nothing is registered for is a 400, and one whose handlers all pass is a 404, as over a socket", async () => {
+    const { local } = setup();
+    expect((await local.call("nope", {})).error).toEqual({ code: 400, message: "Unknown action: nope" });
+    expect((await local.call("open", { doc: "nobody:1" })).error).toEqual({ code: 404, message: "No handler matched: open" });
+  });
+
+  test("a handler that throws is answered with its code, as a socket answers it, never a rejection: the free-form document's 404", async () => {
+    const file = `/tmp/delta-local-throws-${Date.now()}.json`;
+    const local = createLocal();
+    await registerDoc(local.server, "free", { file, empty: { a: { x: 1 } } as any });
+    expect((await local.call("delta", { doc: "free", ops: [{ op: "replace", path: "/nope", value: 1 }] })).error)
+      .toEqual({ code: 404, message: 'Path not found: "/nope" is not there to replace' });
+    expect((await local.call("delta", { doc: "free", ops: [{ op: "move", from: "/a", path: "/b" }] })).error?.code).toBe(400);
+    local.server.on("boom", () => { throw new Error("kaboom"); });
+    expect((await local.call("boom", {})).error).toEqual({ code: 500, message: "kaboom" });
+    try { (await import("node:fs")).unlinkSync(file); } catch {}
   });
 
   test("a handler that answers after an await is waited for", async () => {
