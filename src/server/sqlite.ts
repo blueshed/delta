@@ -426,7 +426,8 @@ export function registerDocs<I = unknown>(
   /**
    * The next serial for a collection: its sequence advanced. A collection with
    * no sequence yet starts from the largest id it holds -- rows put in by
-   * hand -- and from then on counts on, as a Postgres sequence does.
+   * hand -- and from then on counts on, as a Postgres sequence does, past
+   * any id a write named (`passId`).
    */
   function nextId(table: ResolvedTable): number {
     const seq = db.query("SELECT last FROM _delta_sequences WHERE collection = ?").get(table.docKey) as { last: number } | null;
@@ -434,6 +435,11 @@ export function registerDocs<I = unknown>(
     const next = start + 1;
     db.run("INSERT INTO _delta_sequences (collection, last) VALUES (?, ?) ON CONFLICT (collection) DO UPDATE SET last = excluded.last", [table.docKey, next]);
     return next;
+  }
+
+  /** An id a write named moves its collection's sequence past it, never back, so a later `add /<coll>/-` does not meet it (#72) -- Postgres's `_delta_serial_past`. */
+  function passId(table: ResolvedTable, id: string | number): void {
+    if (typeof id === "number") db.run("UPDATE _delta_sequences SET last = ? WHERE collection = ? AND last < ?", [id, table.docKey, id]);
   }
 
   // You may write what you may read. Reads were always scoped; writes addressed
@@ -648,6 +654,7 @@ export function registerDocs<I = unknown>(
             if (!parentHeld(parent.collection, fk)) refuse(404, `Row not found: ${parent.collection}/${fk ?? ""}`);
           }
           const fullRow = insertCollectionRow(db, schema, table, id, rootId, def, row, ts, list);
+          passId(table, id);
           // A root row added through a document is one it holds: a list's, given
           // its bindings, meets the rest of its conditions too, and a single
           // document's own root added back the whole of its name's scope -- else

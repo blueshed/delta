@@ -297,14 +297,10 @@ export async function expectSilent(b: PathBackend, ...channels: string[]): Promi
 export function pathCases(backend: () => PathBackend): void {
   documentCases(backend);
   fanOutCases(backend);
+  serialCases(backend);
 }
 
-/**
- * A row added under an id it names moves the collection's serial past it, as
- * importTables does (#63). Asked of the Postgres backends; SQLite and the JSON
- * file mint past their sequence alone, so a named id above it is met later --
- * they join here when sqlite.ts's nextId takes the larger.
- */
+/** A row added under an id it names moves the collection's serial past it, as importTables does (#63, #72). */
 export function serialCases(backend: () => PathBackend): void {
   describe("a serial and an id a write names", () => {
     test("a row added under an id it names moves the serial past it: the next /- does not meet it (#63)", async () => {

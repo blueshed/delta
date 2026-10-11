@@ -22,7 +22,7 @@ import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
 import { applyFramework, newPool } from "./setup";
 import {
-  assertCopiesHold, course, expectTold, household, openAll, pathCases, serialCases, pathDocs, pathSchema, pathSeed, postgresInbox, postgresMenuCard, postgresOpenSeats, readAll, told, write,
+  assertCopiesHold, course, expectTold, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresInbox, postgresMenuCard, postgresOpenSeats, readAll, told, write,
   type PathBackend, type PathProcess,
 } from "./helpers/path";
 
@@ -74,7 +74,6 @@ afterEach(async () => {
 });
 
 describe("postgres", () => pathCases(() => backend));
-describe("postgres", () => serialCases(() => backend));
 
 describe("postgres: what only a database shared by processes has", () => {
   test("a write through one process reaches another document open in another process", async () => {

@@ -12,7 +12,7 @@ import { openPglite } from "../src/server/pglite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
 import {
-  assertCopiesHold, expectTold, household, openAll, pathCases, serialCases, pathDocs, pathSchema, pathSeed, postgresInbox, postgresMenuCard, postgresOpenSeats, told, write, type PathBackend,
+  assertCopiesHold, expectTold, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresInbox, postgresMenuCard, postgresOpenSeats, told, write, type PathBackend,
 } from "./helpers/path";
 import { waitFor } from "./setup";
 
@@ -55,7 +55,6 @@ afterEach(async () => {
 });
 
 describe("pglite", () => pathCases(() => backend));
-describe("pglite", () => serialCases(() => backend));
 
 /** A row put in by hand, outside delta, is past the serial: a mint that meets it is refused, never a second live row (todo #16). */
 describe("pglite: a row put in by hand", () => {
