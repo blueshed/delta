@@ -73,7 +73,7 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
   (`remove`), and one that stays as a `replace` of each field whose value changed -- the write's,
   a default's, a trigger's -- compared row before and after (`changedFields` in `core.ts`;
   `_delta_tell` in `001d`; a membership view in `custom.ts`). A memory or free-form document
-  tells its ops as applied. The client freshens what an op changes inside, so a keyed `list()`
+  tells its ops as applied. The client freshens the row a field op lands in (maps kept), so a keyed `list()`
   sees the row as new. A write's answer and ledger entry keep whole rows: they are its record.
 - **A document may hold some columns** (`defineDoc`'s `columns`, todo #70): it is opened, told
   and written by those, the id and the parent key alone (`holdsField` / `showRow` in `schema.ts`;

@@ -58,11 +58,16 @@ export const DeltaError = {
 };
 
 /**
- * Copy, once a broadcast, each object an op changes something inside -- the
- * row a field op lands in, the map a row is added to -- below the document
- * itself, which is held by reference. Anything that compares rows by
+ * Copy, once a broadcast, the row an op changes something inside -- and what
+ * lies under it -- below the document itself, which is held by reference:
+ * `/<coll>/<id>/<field>` copies the row, a single document's root field
+ * (`/<root>/<field>`, replaced) the root. Anything that compares rows by
  * reference (railroad's keyed `list()`, a `computed`) then sees the row that
- * changed as changed, and the rows that did not as they were.
+ * changed as changed, and the rows that did not as they were. A collection's
+ * map is changed in place: copying it on each broadcast cost about 0.4 ms a
+ * time at 10,000 rows, where a field op itself costs 1 µs. (A whole row
+ * replaced in a map, `/<coll>/<id>`, as a memory document may send, reads as a
+ * root's field and copies the map: the path cannot tell the two apart.)
  */
 function freshen(doc: any, ops: DeltaOp[]): void {
   const fresh = new Set<object>();
@@ -70,15 +75,16 @@ function freshen(doc: any, ops: DeltaOp[]): void {
     let parent = doc;
     let segments: string[];
     try { segments = splitPath(op.path); } catch { return; }   // applyOps refuses it
-    for (const seg of segments.slice(0, -1)) {
-      const child = Object.hasOwn(parent, seg) ? parent[seg] : undefined;
-      if (child === null || typeof child !== "object") break;
-      if (!fresh.has(child)) {
+    segments.slice(0, -1).forEach((seg, depth) => {
+      const child = parent && Object.hasOwn(parent, seg) ? parent[seg] : undefined;
+      if (child === null || typeof child !== "object") { parent = undefined; return; }
+      // depth 0 is a collection's map, or a single document's root: copied only as the root a field is replaced in
+      if ((depth > 0 || (segments.length === 2 && op.op === "replace")) && !fresh.has(child)) {
         parent[seg] = Array.isArray(child) ? [...child] : { ...child };
         fresh.add(parent[seg]);
       }
       parent = parent[seg];
-    }
+    });
   }
 }
 

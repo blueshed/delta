@@ -108,29 +108,33 @@ describe("openDoc per-client state", () => {
 });
 
 describe("a broadcast leaves what changed fresh, and the rest as it was", () => {
-  test("the document keeps its reference; the row a field lands in, and the map that holds it, are new objects; a row left alone is the same (todo #69)", async () => {
-    const url = startFakeDeltaServer({ shapes: { s1: { x: 0, y: 0 }, s2: { x: 1, y: 1 } } });
+  test("the document and a collection's map keep their references; the row a field lands in is a new object, and so is a root a field of it is replaced in; a row left alone is the same (todo #69)", async () => {
+    const url = startFakeDeltaServer({ settings: { theme: "dark" }, shapes: { s1: { x: 0, y: 0 }, s2: { x: 1, y: 1 } } });
     const client = connectWs(url);
-    const doc = openDoc<{ shapes: Record<string, { x: number; y: number }> }>(
+    const doc = openDoc<{ settings: { theme: string }; shapes: Record<string, { x: number; y: number }> }>(
       "shapes:",
       client,
     );
     await doc.ready;
 
     const rootBefore = doc.data.peek()!;
-    const { shapes } = rootBefore;
+    const { settings, shapes } = rootBefore;
     const { s1, s2 } = shapes;
 
-    await doc.send([{ op: "replace", path: "/shapes/s1/x", value: 42 }]);
+    await doc.send([{ op: "replace", path: "/shapes/s1/x", value: 42 }, { op: "replace", path: "/settings/theme", value: "light" }]);
     await new Promise((r) => setTimeout(r, 50));
 
-    // the document is held by reference; what changed is fresh, so a keyed list() sees it under Object.is
-    expect(doc.data.peek()).toBe(rootBefore);
-    expect(doc.data.peek()!.shapes).not.toBe(shapes);
-    expect(doc.data.peek()!.shapes.s1).not.toBe(s1);
-    expect(doc.data.peek()!.shapes.s1).toEqual({ x: 42, y: 0 });
+    // the document is held by reference, a map changed in place (copying it costs O(rows) a broadcast);
+    // what changed is fresh, so a keyed list() sees it under Object.is
+    const now = doc.data.peek()!;
+    expect(now).toBe(rootBefore);
+    expect(now.shapes).toBe(shapes);
+    expect(now.shapes.s1).not.toBe(s1);
+    expect(now.shapes.s1).toEqual({ x: 42, y: 0 });
     expect(s1.x).toBe(0);   // a reference taken before is the row as it was
-    expect(doc.data.peek()!.shapes.s2).toBe(s2);
+    expect(now.shapes.s2).toBe(s2);
+    expect(now.settings).not.toBe(settings);
+    expect(now.settings).toEqual({ theme: "light" });
 
     client.close();
   });
