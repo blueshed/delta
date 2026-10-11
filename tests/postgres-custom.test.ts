@@ -24,13 +24,8 @@ import {
 } from "../src/server/postgres";
 import { createWs, type WsServer } from "../src/server/server";
 import { setLogLevel } from "../src/server/logger";
-import {
-  newPool,
-  applyFramework,
-  mockClient,
-  sendAndAwait,
-  waitFor,
-} from "./setup";
+import { newPool, applyFramework } from "./setup";
+import { mockClient, sendAndAwait, waitFor } from "../src/testing";
 
 setLogLevel("silent");
 

@@ -18,7 +18,8 @@ import {
   applySql, generateSql, createDocListener, docTypeFromDef,
 } from "../src/server/postgres";
 import { setLogLevel } from "../src/server/logger";
-import { newPool, applyFramework, mockClient, sendAndAwait } from "./setup";
+import { newPool, applyFramework } from "./setup";
+import { mockClient, sendAndAwait } from "../src/testing";
 import { unlinkSync } from "node:fs";
 
 setLogLevel("silent");

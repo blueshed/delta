@@ -29,7 +29,7 @@ Full API, patterns, and recipes. The companion `SKILL.md` is the router; start t
 - *Stored functions* — `delta_open`, `delta_apply`, `*_as` 1-RTT variants, the ledger's `delta_apply_logged` / `delta_walk` / `delta_undo` / `delta_redo` / `delta_history`
   - *Composing doc operations from SQL* — call `delta_open_as` / `delta_apply_as` from your own `plpgsql`; identity-binding + `SECURITY DEFINER` caveats
 - *CLI* — `bunx @blueshed/delta` runtime + build-time commands
-- *Testing* — `setup.ts` helpers, integration pattern; client-side tests and one-shot scripts
+- *Testing* — `@blueshed/delta/testing`, the pointer vectors, integration pattern; client-side tests and one-shot scripts
 - *Local development across repos* — a packed tarball, never `file:` (two railroads go inert)
 - *Wire-level protocol* — message shapes
 - *Why delta* — the reasoning and the lineage
@@ -1099,19 +1099,18 @@ Re-runs are idempotent: byte-identical destinations skip; locally edited copies 
 
 ## Testing
 
-**In your app**, test through `createLocal()` (below) or a real `Bun.serve` on port 0 with `connectWs("ws://localhost:<port>/ws")`. The helpers below are this repository's own `tests/setup.ts`; they are not in the npm package, so copy what you need.
+**In your app**, test through `createLocal()` (below), a real `Bun.serve` on port 0 with `connectWs("ws://localhost:<port>/ws")`, or the helpers delta's own tests use, from `@blueshed/delta/testing`:
 
 ```ts
-// delta's tests/setup.ts (repository only):
-newPool()                      // → Pool from DELTA_TEST_PG_URL (defaults to localhost:5433)
-applyFramework(pool)           // runs 001*-delta-*.sql in order
-applyAuthJwt(pool)             // runs auth-jwt.sql (users + login/register)
-applyItemsFixture(pool)        // runs tests/fixtures/items.sql
-resetState(pool)               // truncates items, users, _delta_versions, _delta_ops_log, _delta_ledger
-mockClient(data?)              // a WS-shaped test client; mockClient({ local: true }) is an in-process caller
-sendAndAwait(ws, client, msg)  // drives ws.websocket.message, waits for response
-waitFor(predicate, opts?)      // async poll until truthy
+import { mockClient, sendAndAwait, waitFor, pointerVectors } from "@blueshed/delta/testing";
+
+mockClient(data?)              // a WS-shaped test client: what it was sent (parsed) in .sent; mockClient({ identity }) signed in, ({ local: true }) an in-process caller
+sendAndAwait(ws, client, msg)  // drives ws.websocket.message, waits for the answer with its id
+waitFor(predicate, opts?)      // async poll until truthy ({ timeout = 2000, interval = 25 })
+pointerVectors                 // [{ pointer, segments }]: one JSON Pointer grammar as data, segments null when malformed
 ```
+
+`pointerVectors` (also the file `src/pointer-vectors.json` in the package) is what `splitPath` and `_delta_split_path` both answer; a parser of your own (eta's) runs the same cases to speak the same paths. The Postgres helpers stay in the repository's `tests/setup.ts` (`newPool`, `applyFramework`, `applyAuthJwt`, `applyItemsFixture`, `resetState`): copy what you need.
 
 ```ts
 // pattern: integration test

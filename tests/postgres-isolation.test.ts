@@ -17,7 +17,8 @@ import {
 } from "../src/server/postgres";
 import { createWs, type WsServer } from "../src/server/server";
 import { setLogLevel } from "../src/server/logger";
-import { newPool, applyFramework, mockClient, sendAndAwait } from "./setup";
+import { newPool, applyFramework } from "./setup";
+import { mockClient, sendAndAwait } from "../src/testing";
 import {
   assertDocIsolation,
   type IsolationHarness,

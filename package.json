@@ -22,12 +22,14 @@
     "./pglite": "./src/server/pglite.ts",
     "./logger": "./src/server/logger.ts",
     "./auth": "./src/server/auth.ts",
-    "./auth-jwt": "./src/server/auth-jwt.ts"
+    "./auth-jwt": "./src/server/auth-jwt.ts",
+    "./testing": "./src/testing.ts"
   },
   "files": [
     "cli.ts",
     "src/**/*.ts",
     "src/sql/**/*.sql",
+    "src/pointer-vectors.json",
     ".claude/skills/delta-doc/**",
     "README.md",
     "LICENSE",

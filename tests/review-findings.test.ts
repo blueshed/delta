@@ -29,13 +29,8 @@ import {
 import { createWs, type WsServer } from "../src/server/server";
 import { setLogLevel } from "../src/server/logger";
 import type { DeltaAuth } from "../src/server/auth";
-import {
-  newPool,
-  applyFramework,
-  mockClient,
-  sendAndAwait,
-  waitFor,
-} from "./setup";
+import { newPool, applyFramework } from "./setup";
+import { mockClient, sendAndAwait, waitFor } from "../src/testing";
 
 setLogLevel("silent");
 

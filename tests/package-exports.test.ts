@@ -98,6 +98,7 @@ describe("package exports", () => {
     "./logger": "createLogger",
     "./auth": "wireAuth",
     "./auth-jwt": "jwtAuth",
+    "./testing": "mockClient",
   };
 
   test("every declared subpath is covered by this test", () => {
@@ -116,6 +117,13 @@ describe("package exports", () => {
     const json = await import("../src/server/json");
     const sqlite = await import("../src/server/sqlite");
     for (const name of ["defineSchema", "defineDoc", "defineCustomDoc"] as const) expect([name, json[name]]).toEqual([name, sqlite[name]]);
+  });
+
+  test('"./testing" gives the pointer vectors, and the package ships them as data', async () => {
+    const { pointerVectors } = await import("../src/testing");
+    expect(pointerVectors).toEqual(await Bun.file(join(repoRoot, "src/pointer-vectors.json")).json());
+    expect(pkg.files).toContain("src/pointer-vectors.json");
+    expect(pointerVectors.length).toBeGreaterThan(0);
   });
 
   for (const [subpath, named] of Object.entries(probes)) {

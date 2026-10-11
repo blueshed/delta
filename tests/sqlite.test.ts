@@ -9,6 +9,7 @@ import {
 import { createWs, dropClientSubscriptions } from "../src/server/server";
 import { applyOps } from "../src/core";
 import { setLogLevel } from "../src/server/logger";
+import { mockClient } from "../src/testing";
 
 setLogLevel("silent");
 
@@ -16,19 +17,7 @@ setLogLevel("silent");
 // Helpers
 // ---------------------------------------------------------------------------
 
-function mockSocket(clientId = "test-client") {
-  const sent: any[] = [];
-  const subscriptions = new Set<string>();
-  return {
-    data: { clientId },
-    readyState: 1,
-    send: (raw: string) => sent.push(JSON.parse(raw)),
-    subscribe: (ch: string) => subscriptions.add(ch),
-    unsubscribe: (ch: string) => subscriptions.delete(ch),
-    sent,
-    subscriptions,
-  };
-}
+const mockSocket = (clientId = "test-client") => mockClient({ clientId });
 
 // ---------------------------------------------------------------------------
 // Schema used across tests

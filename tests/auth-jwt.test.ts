@@ -20,10 +20,9 @@ import {
   applyFramework,
   applyAuthJwt,
   applyItemsFixture,
-  mockClient as socket,
   resetState,
-  sendAndAwait,
 } from "./setup";
+import { mockClient as socket, sendAndAwait } from "../src/testing";
 import { setLogLevel } from "../src/server/logger";
 
 setLogLevel("silent");

@@ -26,10 +26,8 @@ import {
   applyFramework,
   applyItemsFixture,
   resetState,
-  waitFor,
-  mockClient,
-  sendAndAwait,
 } from "./setup";
+import { waitFor, mockClient, sendAndAwait } from "../src/testing";
 
 setLogLevel("silent");
 

@@ -182,6 +182,8 @@ The core, `server` (with the free-form document), `json`, `sqlite`, `local`, `ki
   [`reference.md`](.claude/skills/delta-doc/reference.md) has the API, patterns, auth, row-level
   security, the ledger, the kinds and the wire protocol. `bunx @blueshed/delta install-skills` copies it
   into your project for Claude Code.
+- `@blueshed/delta/testing` for your own tests: `mockClient`, `sendAndAwait`, `waitFor`, and the
+  pointer vectors as data (reference.md, *Testing*).
 - [`examples/`](examples/): `shared-state` (a free-form document), `sites-bbox` (custom views on SQLite
   and Postgres), `kanban` (Postgres with railroad), `todos-vs-rls` (row-level security).
 - [CHANGELOG.md](CHANGELOG.md) for what changed in each release.

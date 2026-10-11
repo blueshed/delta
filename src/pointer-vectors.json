@@ -1,0 +1,16 @@
+[
+  { "pointer": "", "segments": [] },
+  { "pointer": "/", "segments": [""] },
+  { "pointer": "/items", "segments": ["items"] },
+  { "pointer": "/items/42/name", "segments": ["items", "42", "name"] },
+  { "pointer": "/items/007", "segments": ["items", "007"] },
+  { "pointer": "/a~1b/c~0d", "segments": ["a/b", "c~d"] },
+  { "pointer": "/~01", "segments": ["~1"] },
+  { "pointer": "/a//b", "segments": ["a", "", "b"] },
+  { "pointer": "/a/", "segments": ["a", ""] },
+  { "pointer": "//items", "segments": ["", "items"] },
+  { "pointer": "items", "segments": null },
+  { "pointer": "items/1", "segments": null },
+  { "pointer": "/a~2b", "segments": null },
+  { "pointer": "/a~", "segments": null }
+]

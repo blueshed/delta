@@ -180,6 +180,7 @@ Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/fi
 | `@blueshed/delta/logger` | anywhere | railroad's logger, kept in step: `createLogger`, `setLogLevel`, `loggedRequest` |
 | `@blueshed/delta/auth` | Bun | `DeltaAuth` contract, `wireAuth`, `upgradeWithAuth` |
 | `@blueshed/delta/auth-jwt` | Bun + pg + jose | `jwtAuth({ pool, secret })`, `applyAuthJwtSchema(pool)` |
+| `@blueshed/delta/testing` | Bun | `mockClient`, `sendAndAwait`, `waitFor`, `pointerVectors` -- for an app's own tests |
 
 ## Rules — non-negotiable, in order of importance
 

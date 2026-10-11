@@ -10,6 +10,7 @@ import {
 } from "../src/server/sqlite";
 import { createWs, type WsServer } from "../src/server/server";
 import { setLogLevel } from "../src/server/logger";
+import { mockClient } from "../src/testing";
 
 setLogLevel("silent");
 
@@ -18,20 +19,11 @@ setLogLevel("silent");
 // ---------------------------------------------------------------------------
 
 function mockSocket(clientId = "test-client") {
-  const sent: any[] = [];
   const received: any[] = [];
-  const subscriptions = new Set<string>();
-  return {
-    data: { clientId },
-    readyState: 1,
-    send: (raw: string) => sent.push(JSON.parse(raw)),
-    subscribe: (ch: string) => subscriptions.add(ch),
-    unsubscribe: (ch: string) => subscriptions.delete(ch),
-    publish: (_ch: string, raw: string) => received.push(JSON.parse(raw)),
-    sent,
+  return Object.assign(mockClient({ clientId }), {
     received,
-    subscriptions,
-  };
+    publish: (_ch: string, raw: string) => received.push(JSON.parse(raw)),
+  });
 }
 
 // Tie publish → all subscribed sockets' `received` list.

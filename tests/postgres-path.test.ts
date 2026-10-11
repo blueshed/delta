@@ -20,7 +20,8 @@ import * as json from "../src/server/json";
 import { openPglite } from "../src/server/pglite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
-import { applyFramework, newPool, waitFor } from "./setup";
+import { applyFramework, newPool } from "./setup";
+import { waitFor } from "../src/testing";
 import {
   assertCopiesHold, expectTold, field, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresEmails, postgresGuests, postgresInbox, postgresMenuCard, postgresOpenSeats, readAll, told, write,
   type PathBackend, type PathProcess,

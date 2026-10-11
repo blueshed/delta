@@ -8,7 +8,8 @@ import { createDocListener, defineDoc, docTypeFromDef } from "../src/server/post
 import { createWs } from "../src/server/server";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
-import { applyFramework, applyItemsFixture, mockClient, newPool, resetState, sendAndAwait, waitFor } from "./setup";
+import { applyFramework, applyItemsFixture, newPool, resetState } from "./setup";
+import { mockClient, sendAndAwait, waitFor } from "../src/testing";
 
 setLogLevel("silent");
 

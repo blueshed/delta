@@ -5,6 +5,7 @@ import {
 } from "../src/server/server";
 import { wireAuth, isAuthError, type DeltaAuth } from "../src/server/auth";
 import { setLogLevel } from "../src/server/logger";
+import { mockClient } from "../src/testing";
 import { mkdtempSync, readdirSync, realpathSync, rmSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,20 +16,7 @@ setLogLevel("silent");
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Minimal mock ws with send, subscribe, unsubscribe, data, readyState. */
-function mockSocket(clientId = "test-client") {
-  const sent: any[] = [];
-  const subscriptions = new Set<string>();
-  return {
-    data: { clientId },
-    readyState: 1,
-    send: (raw: string) => sent.push(JSON.parse(raw)),
-    subscribe: (ch: string) => subscriptions.add(ch),
-    unsubscribe: (ch: string) => subscriptions.delete(ch),
-    sent,
-    subscriptions,
-  };
-}
+const mockSocket = (clientId = "test-client") => mockClient({ clientId });
 
 // ---------------------------------------------------------------------------
 // createWs — unit tests

@@ -19,7 +19,7 @@
 import { describe, expect, test } from "bun:test";
 import { applyOps } from "../../src/core";
 import { defineDoc, defineSchema, type Snapshot } from "../../src/schema";
-import { waitFor } from "../setup";
+import { waitFor } from "../../src/testing";
 
 // ---------------------------------------------------------------------------
 // The one schema, documents and seed

@@ -11,24 +11,13 @@ import {
   type DeltaAuth,
 } from "../src/server/auth";
 import { setLogLevel } from "../src/server/logger";
+import { mockClient } from "../src/testing";
 
 setLogLevel("silent");
 
 // ---------------------------------------------------------------------------
 // Helpers — minimal mocks for the WsServer contract.
 // ---------------------------------------------------------------------------
-
-function mockClient(data: Record<string, unknown> = {}) {
-  return {
-    data,
-    sent: [] as any[],
-    subscriptions: new Set<string>(),
-    readyState: 1,
-    send(msg: any) { this.sent.push(JSON.parse(msg)); },
-    subscribe(ch: string) { this.subscriptions.add(ch); },
-    unsubscribe(ch: string) { this.subscriptions.delete(ch); },
-  };
-}
 
 // Drive the first registered "call" handler for a given action.
 async function invoke(

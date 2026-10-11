@@ -25,7 +25,8 @@ import { setLogLevel } from "../src/server/logger";
 import { applyOps } from "../src/core";
 import { readFileSync } from "node:fs";
 import { frameworkSqlFiles } from "../src/server/postgres";
-import { PG_URL, newPool, applyFramework, mockClient, sendAndAwait, type MockClient } from "./setup";
+import { PG_URL, newPool, applyFramework } from "./setup";
+import { mockClient, sendAndAwait, type MockClient } from "../src/testing";
 
 setLogLevel("silent");
 

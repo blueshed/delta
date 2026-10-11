@@ -3,7 +3,8 @@
  * applyOps and dom-ops use) and `_delta_split_path` (001a, which delta_apply
  * uses) are run against the same vectors, so they cannot drift apart again.
  * Round 1 found the plpgsql one unescaped nothing, took slashless paths and
- * collapsed `//x`.
+ * collapsed `//x`. The vectors are the package's (`@blueshed/delta/testing`),
+ * for another parser (eta's) to run.
  */
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import type { Pool } from "pg";
@@ -11,27 +12,10 @@ import { splitPath, joinPath } from "../src/core";
 import { createDocListener, docTypeFromDef, defineDoc } from "../src/server/postgres";
 import { createWs } from "../src/server/server";
 import { setLogLevel } from "../src/server/logger";
-import { newPool, applyFramework, applyItemsFixture, resetState, mockClient, sendAndAwait } from "./setup";
+import { newPool, applyFramework, applyItemsFixture, resetState } from "./setup";
+import { mockClient, sendAndAwait, pointerVectors } from "../src/testing";
 
 setLogLevel("silent");
-
-/** pointer → its segments, or null when it is malformed. */
-const VECTORS: [string, string[] | null][] = [
-  ["", []],
-  ["/", [""]],
-  ["/items", ["items"]],
-  ["/items/42/name", ["items", "42", "name"]],
-  ["/items/007", ["items", "007"]],
-  ["/a~1b/c~0d", ["a/b", "c~d"]],
-  ["/~01", ["~1"]],
-  ["/a//b", ["a", "", "b"]],
-  ["/a/", ["a", ""]],
-  ["//items", ["", "items"]],
-  ["items", null],
-  ["items/1", null],
-  ["/a~2b", null],
-  ["/a~", null],
-];
 
 let pool: Pool;
 
@@ -58,7 +42,7 @@ const core = (path: string): string[] | null => {
 };
 
 describe("one pointer grammar", () => {
-  for (const [path, segments] of VECTORS) {
+  for (const { pointer: path, segments } of pointerVectors) {
     test(`${JSON.stringify(path)} → ${JSON.stringify(segments)} in core and in plpgsql`, async () => {
       expect(core(path)).toEqual(segments);
       expect(await plpgsql(path)).toEqual(segments);

@@ -1,6 +1,8 @@
 /**
  * Test setup helpers — spin up a pg Pool against the compose-managed
- * Postgres, apply framework SQL files, and clean up between cases.
+ * Postgres, apply framework SQL files, and clean up between cases. The helpers
+ * that need no Postgres (mockClient, sendAndAwait, waitFor) are the package's
+ * own `@blueshed/delta/testing` (src/testing.ts).
  *
  * The compose service listens on localhost:5433 (so it won't fight with any
  * local Postgres on :5432). Override with DELTA_TEST_PG_URL if needed.
@@ -69,69 +71,4 @@ export async function resetState(pool: Pool): Promise<void> {
       END IF;
     END $$;
   `);
-}
-
-/** Wait for a predicate to return truthy. Defaults to 2s overall budget. */
-export async function waitFor<T>(
-  fn: () => T | Promise<T>,
-  { timeout = 2000, interval = 25 }: { timeout?: number; interval?: number } = {},
-): Promise<T> {
-  const deadline = Date.now() + timeout;
-  let last: unknown;
-  while (Date.now() < deadline) {
-    try {
-      const v = await fn();
-      if (v) return v;
-    } catch (e) {
-      last = e;
-    }
-    await new Promise((r) => setTimeout(r, interval));
-  }
-  throw new Error(`waitFor timeout${last ? `: ${String(last)}` : ""}`);
-}
-
-// ---------------------------------------------------------------------------
-// Mock WS client — fulfils the surface `createWs()` callbacks expect.
-// ---------------------------------------------------------------------------
-
-export interface MockClient {
-  data: Record<string, unknown>;
-  sent: any[];
-  subscriptions: Set<string>;
-  readyState: number;
-  send(msg: string): void;
-  subscribe(ch: string): void;
-  unsubscribe(ch: string): void;
-}
-
-export function mockClient(data: Record<string, unknown> = {}): MockClient {
-  return {
-    data,
-    sent: [],
-    subscriptions: new Set<string>(),
-    readyState: 1,
-    send(msg: string) { this.sent.push(JSON.parse(msg)); },
-    subscribe(ch: string) { this.subscriptions.add(ch); },
-    unsubscribe(ch: string) { this.subscriptions.delete(ch); },
-  };
-}
-
-/**
- * Drive a single message through a WsServer's `websocket.message` handler
- * and wait for the matching response on `client.sent`. Identifies the
- * response via `{ id }`; assigns an id if the caller omits one.
- */
-export async function sendAndAwait(
-  ws: { websocket: { message: (ws: any, raw: any) => any } },
-  client: MockClient,
-  msg: any,
-  { timeout = 3000 }: { timeout?: number } = {},
-): Promise<any> {
-  const id = msg.id ?? Math.floor(Math.random() * 1e9);
-  const before = client.sent.length;
-  await ws.websocket.message(client, JSON.stringify({ ...msg, id }));
-  return waitFor(
-    () => client.sent.slice(before).find((m: any) => m.id === id),
-    { timeout },
-  );
 }

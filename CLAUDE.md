@@ -51,7 +51,8 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
 - **One pointer grammar, two parsers.** Strict RFC 6901: `splitPath` / `joinPath` in
   `src/core.ts` (which `applyOps`, `dom-ops` and every backend use) and `_delta_split_path` /
   `_delta_build_path` in `001a`. `tests/postgres-pointer.test.ts` runs both on one set of
-  vectors; change them together. Build a path from ids with `joinPath`, never a template.
+  vectors (`src/pointer-vectors.json`, published in `./testing`); change them together. Build a
+  path from ids with `joinPath`, never a template.
 - **A batch applies whole or not at all**, on every backend (`applyOps` undoes in place).
 - **`add /<coll>/-` makes a row the server names**, on every backend, and the echo carries
   `/<coll>/<id>` (`tests/create-row.test.ts`). The path's id wins over one in the value.
@@ -154,8 +155,10 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
 - `src/server/auth*.ts`, `src/sql/auth-jwt.sql`: the `DeltaAuth` contract and the JWT reference.
 - `cli.ts`: `bunx @blueshed/delta` (open, watch, delta, call, init, sql, install-skills;
   install-skills copies `@blueshed/*` skills and the packages `claudeSkills` names).
-- `tests/setup.ts`: `newPool`, `applyFramework`, `resetState`, `mockClient`, `sendAndAwait`,
-  `waitFor`. `createLocal()` is the lighter harness for SQLite and the kinds.
+- `src/testing.ts` (`./testing`): `mockClient`, `sendAndAwait`, `waitFor`, `pointerVectors` (the
+  pointer grammar's vectors, `src/pointer-vectors.json`), for delta's tests and a consumer's.
+  `tests/setup.ts`: the Postgres ones (`newPool`, `applyFramework`, `resetState`). `createLocal()` is
+  the lighter harness for SQLite and the kinds.
 - `examples/`: `shared-state`, `sites-bbox`, `kanban`, `todos-vs-rls`.
 
 ## Notes

@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`@blueshed/delta/json` exports `defineSchema`, `defineDoc` and `defineCustomDoc`**, as
   `./sqlite` and `./postgres` do, so an app on the JSON file imports everything from one place
   and moving on changes the import path only.
+- **`@blueshed/delta/testing`**: `mockClient`, `sendAndAwait` and `waitFor`, the helpers delta's
+  own tests drive a server with, for an app to test its own; and `pointerVectors`, the one JSON
+  Pointer grammar as data (`src/pointer-vectors.json` in the package), which `splitPath` and
+  `_delta_split_path` both answer, for another parser (eta's) to run.
 
 ### Changed
 

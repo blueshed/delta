@@ -14,7 +14,7 @@ import { setLogLevel } from "../src/server/logger";
 import {
   assertCopiesHold, expectTold, field, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresEmails, postgresGuests, postgresInbox, postgresMenuCard, postgresOpenSeats, told, write, type PathBackend,
 } from "./helpers/path";
-import { waitFor } from "./setup";
+import { waitFor } from "../src/testing";
 
 setLogLevel("silent");
 
