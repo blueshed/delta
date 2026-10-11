@@ -15,7 +15,7 @@
  */
 import {
   provide, list, when,
-  type ReadonlySignal,
+  type JSX, type ReadonlySignal,
 } from "@blueshed/railroad";
 import { connectWs, WS, openDoc, type Doc } from "@blueshed/delta/client";
 

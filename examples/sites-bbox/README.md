@@ -30,7 +30,9 @@ In-memory SQLite. Single process. The server prints the URL it's listening on.
 
 ## Run (Postgres)
 
-Same two doc types, same client code — only the server-side wiring changes.
+Same two doc types, same client code — only the server-side wiring changes,
+and the names: on Postgres a document and a row are named by number, so open
+`world:<id>` (the id the server seeds) and add sites with `add /sites/-`.
 
 ```sh
 docker compose up -d --wait
@@ -73,10 +75,10 @@ await world.send([
 
 ## What to read
 
-The custom-doc API has parallel implementations in both backends:
+Both backends run one module for custom documents, `src/server/custom.ts`:
 
-- SQLite: `src/server/sqlite.ts` — `defineCustomDoc`, `registerDocs(..., customDocs)`, `customFanOut`.
-- Postgres: `src/server/postgres/listener.ts` — `defineCustomDoc`, `createDocListener(ws, pool, { custom })`, `customFanOut`.
+- SQLite: `defineCustomDoc` and `registerDocs(..., customDocs)` from `src/server/sqlite.ts`.
+- Postgres: `defineCustomDoc` and `createDocListener(ws, pool, { custom })` from `src/server/postgres/listener.ts`.
 
 Both share the same membership def shape: `{ prefix, watch, parse, query, matches }`.
 The signatures match what `server.ts` / `server-pg.ts` use:
@@ -93,7 +95,7 @@ the writer's entry in `_delta_ops_log` carries the write as applied, and the
 listener runs the custom fan-out loop on it, once per write, against every
 open predicate doc on this process.
 
-(Postgres additionally supports a whole-doc `recompute` mode in place of
-`query`+`matches`; this example uses the membership mode on both backends.)
+(Both backends also take a whole-doc `recompute` mode in place of
+`query`+`matches`; this example uses the membership mode on both.)
 
 Tests: `tests/sqlite-custom.test.ts` and `tests/postgres-custom.test.ts`.
