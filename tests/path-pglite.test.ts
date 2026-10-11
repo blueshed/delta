@@ -411,7 +411,7 @@ describe("pglite: an implied document named by text", () => {
 describe("pglite: a single document's root, addressed by its id", () => {
   test("is not moved to a parent the document does not hold (404)", async () => {
     await openAll(backend.process, ["fo-household:1"]);
-    expect((await backend.process.call("delta", { doc: "fo-household:1", ops: [{ op: "replace", path: "/households/1", value: { weddings_id: 2 } }] })).error?.code).toBe(404);
+    expect((await backend.process.call("delta", { doc: "fo-household:1", ops: [{ op: "replace", path: "/households/1", value: { weddings_id: 2, email: "a@x" } }] })).error?.code).toBe(404);
     expect((await backend.process.call("open", { doc: "fo-household:1" })).result.households).toEqual(household(1, "a@x"));
   });
 });

@@ -1896,32 +1896,31 @@ describe("todo fixes: whole-row replace (#3) + socket-drop cleanup (#7)", () => 
     const row = db.query("SELECT title, done, project_id FROM current_tasks WHERE id = 't1'").get() as any;
     expect(row.title).toBe("CHANGED");
     expect(row.done).toBe(1);
-    expect(row.project_id).toBe("p1"); // merge keeps the FK the value omitted
+    expect(row.project_id).toBe("p1"); // where it hangs is its place, not a field: it stays
   });
 
-  test("#3: whole-row replace is a partial MERGE — omitted fields keep their values (Postgres parity)", async () => {
+  test("#3: whole-row replace is the row (RFC 6902): a field it leaves out takes its default, null where nullable; a required one left out is refused (400)", async () => {
+    const sock = mockSocket();
+    await open(sock);
+    const send = (id: number, ops: unknown[]) => ws.websocket.message(sock, JSON.stringify({ id, action: "delta", doc: "project:p1", ops }));
+    await send(2, [{ op: "replace", path: "/tasks/t1/priority", value: 3 }]);
+    await send(3, [{ op: "replace", path: "/tasks/t1", value: { done: true } }]);
+    expect(sock.sent.find((m: any) => m.id === 3)?.error?.code).toBe(400);
+    await send(4, [{ op: "replace", path: "/tasks/t1", value: { title: "New", done: true } }]);
+    const row = db.query("SELECT title, done, priority, project_id FROM current_tasks WHERE id = 't1'").get() as any;
+    expect(row).toEqual({ title: "New", done: 1, priority: null, project_id: "p1" });
+  });
+
+  test("#3: whole-root replace /<root> is the root row (was a 500)", async () => {
     const sock = mockSocket();
     await open(sock);
     await ws.websocket.message(sock, JSON.stringify({
       id: 2, action: "delta", doc: "project:p1",
-      ops: [{ op: "replace", path: "/tasks/t1", value: { done: true } }],
-    }));
-    const row = db.query("SELECT title, done FROM current_tasks WHERE id = 't1'").get() as any;
-    expect(row.title).toBe("Orig"); // delta_apply does `v_row || value` — so do we
-    expect(row.done).toBe(1);
-  });
-
-  test("#3: whole-root replace /<root> merges into the root row (was a 500)", async () => {
-    const sock = mockSocket();
-    await open(sock);
-    await ws.websocket.message(sock, JSON.stringify({
-      id: 2, action: "delta", doc: "project:p1",
-      ops: [{ op: "replace", path: "/projects", value: { name: "Beta" } }],
+      ops: [{ op: "replace", path: "/projects", value: { name: "Beta", status: "done" } }],
     }));
     expect(sock.sent[1].error).toBeUndefined();
-    const row = db.query("SELECT name, status FROM current_projects WHERE id = 'p1'").get() as any;
-    expect(row.name).toBe("Beta");
-    expect(row.status).toBe("active");
+    const row = db.query("SELECT name, status, meta FROM current_projects WHERE id = 'p1'").get() as any;
+    expect(row).toEqual({ name: "Beta", status: "done", meta: null });
   });
 
   test("#3: whole-row replace with a non-object value is rejected (400), not acked", async () => {
@@ -1942,7 +1941,7 @@ describe("todo fixes: whole-row replace (#3) + socket-drop cleanup (#7)", () => 
     await ws.websocket.message(sock, JSON.stringify({
       id: 2, action: "delta", doc: "project:p1",
       ops: [
-        { op: "replace", path: "/tasks/t1", value: { title: "Merged" } },
+        { op: "replace", path: "/tasks/t1", value: { title: "Merged", done: false } },
         { op: "replace", path: "/tasks/t1/done", value: true },
       ],
     }));

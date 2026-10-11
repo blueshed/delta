@@ -348,10 +348,11 @@ BEGIN
       IF v_here IS NULL OR EXISTS (SELECT 1 FROM unnest(v_fields) f WHERE NOT _delta_same(v_here->f, v_wrote->f)) THEN
         v_conflict := v_conflict || to_jsonb(v_at);
       ELSE
-        -- the document's root is replaced at /root, however the entry spelled it
-        v_ops := v_ops || jsonb_build_array(jsonb_build_object('op', 'replace',
-          'path', CASE WHEN v_here = v_doc->v_parts[1] THEN _delta_build_path(v_parts[1]) ELSE v_path END,
-          'value', (SELECT jsonb_object_agg(f, COALESCE(v_was->f, 'null'::jsonb)) FROM unnest(v_fields) f)));
+        -- each field set back, one replace each (a replace of the row is the row whole, todo #3);
+        -- the document's root at /root/<field>, however the entry spelled it
+        v_ops := v_ops || (SELECT jsonb_agg(jsonb_build_object('op', 'replace',
+          'path', CASE WHEN v_here = v_doc->v_parts[1] THEN _delta_build_path(v_parts[1]) ELSE v_path END || _delta_build_path(f),
+          'value', COALESCE(v_was->f, 'null'::jsonb)) ORDER BY f) FROM unnest(v_fields) f);
       END IF;
     END IF;
   END LOOP;

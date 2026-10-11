@@ -28,7 +28,7 @@ import { defaultForType, type DocDef, type ResolvedTable, type Schema } from "..
 import { waitForLocks } from "./sqlite/ddl";
 import { keeping, scopeValue } from "./sqlite/keep";
 import { loadDocAt, readDoc } from "./sqlite/read";
-import { closeRow, current, decodeRow, insertCollectionRow, insertRow, named, now, refuse, sqliteTime, updateRow } from "./sqlite/rows";
+import { closeRow, current, decodeRow, insertCollectionRow, insertRow, leftOut, named, now, refuse, sqliteTime, updateRow } from "./sqlite/rows";
 import { namesRootRow, validateOps } from "./sqlite/validate";
 
 export type {
@@ -582,8 +582,11 @@ export function registerDocs<I = unknown>(
      * Replace fields of a row the document holds -- the root (`root`), or a row
      * of a map -- as the op says, into the run of that row. The path names the
      * row, so `id` and the temporal columns in a value are not taken from it.
+     * A replace of the row itself (`whole`) is the row, as RFC 6902 says: a
+     * column its value leaves out holds what an add would give it (todo #3);
+     * its parent key, where it hangs, stays unless the value names another.
      */
-    const replaceRow = (table: ResolvedTable, id: string | number, fields: Record<string, unknown>, root: boolean) => {
+    const replaceRow = (table: ResolvedTable, id: string | number, fields: Record<string, unknown>, root: boolean, whole = false) => {
       const collKey = table.docKey;
       const key = `${collKey}/${id}`;
       if (run && run.key !== key) endRun();
@@ -605,6 +608,7 @@ export function registerDocs<I = unknown>(
           && !(list && parent.collection !== def.root) && !parentHeld(parent.collection, to)) {
         refuse(404, `Row not found: ${parent.collection}/${to}`);
       }
+      if (whole) for (const [col, colDef] of Object.entries(table.columns)) run.row[col] = leftOut(colDef);
       for (const [field, value] of Object.entries(fields)) {
         if (field === "id" || field === "valid_from" || field === "valid_to") continue;
         run.row[field] = value;
@@ -649,7 +653,7 @@ export function registerDocs<I = unknown>(
       // It holds no other root row, so another id is not found.
       if (isRoot && op.op === "replace" && (parts.length === 3 || (parts.length === 2 && namesRootRow(table!, parts[1]!, rootId)))) {
         if (!sameId(rowId(parts[1]!), rootId)) refuse(404, `Row not found: ${collKey}/${rowId(parts[1]!)}`);
-        replaceRow(table!, rootId!, parts.length === 3 ? { [parts[2]!]: (op as any).value } : (op as any).value, true);
+        replaceRow(table!, rootId!, parts.length === 3 ? { [parts[2]!]: (op as any).value } : (op as any).value, true, parts.length === 2);
         continue;
       }
 
@@ -660,11 +664,10 @@ export function registerDocs<I = unknown>(
         continue;
       }
 
-      // ...and /<root> a partial merge into it (Postgres parity: delta_apply
-      // merges over the current row).
+      // ...and /<root> the root row whole.
       if (!list && collKey === def.root && parts.length === 1) {
         if (op.op !== "replace") throw new Error(`Root supports replace only`);
-        replaceRow(table!, rootId!, (op as any).value as Record<string, unknown>, true);
+        replaceRow(table!, rootId!, (op as any).value as Record<string, unknown>, true, true);
         continue;
       }
 
@@ -742,11 +745,8 @@ export function registerDocs<I = unknown>(
           }
           if (isRoot) doc[collKey] = null;
         } else if (op.op === "replace") {
-          // Whole-row replace: /<coll>/<id> — a partial merge over the current
-          // row (Postgres parity: delta_apply does `v_row || value`).
-          // validateOps accepted this shape all along, but it used to fall
-          // through here and ack as a silent no-op (v0.5.0 review #3).
-          replaceRow(table, id, (op as any).value as Record<string, unknown>, false);
+          // Whole-row replace: /<coll>/<id> -- the row, as an add's value is
+          replaceRow(table, id, (op as any).value as Record<string, unknown>, false, true);
         }
       } else if (parts.length === 3 && op.op === "replace") {
         // Field update: /<coll>/<id>/<field>

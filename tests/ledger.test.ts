@@ -385,7 +385,7 @@ describe("undo beside someone else", () => {
     await read();
     const w = await write("A", [{ op: "replace", path: "/notes/text", value: "A's" }]);
     const dry = await undo("A", { dry: true });
-    expect(dry.result).toEqual({ doc: "note:1", entry: w.result.entry, ops: [{ op: "replace", path: "/notes", value: { text: null } }] });
+    expect(dry.result).toEqual({ doc: "note:1", entry: w.result.entry, ops: [{ op: "replace", path: "/notes/text", value: null }] });
     expect((await read()).notes.text).toBe("A's");
     expect((await undo("A", { entry: w.result.entry + 1 })).error?.code).toBe(409);
     expect((await read()).notes.text).toBe("A's");

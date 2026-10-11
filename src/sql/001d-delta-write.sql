@@ -323,9 +323,38 @@ END;
 $$ LANGUAGE plpgsql STABLE;
 
 -- ---------------------------------------------------------------------------
+-- _delta_whole: a replace of a row itself (`/<coll>/<id>`, a single
+-- document's `/<root>`) is the row, as RFC 6902 says: each column
+-- (`p_columns`) holds what an add gives one its value leaves out -- its
+-- default, or null -- the row as blank as that, for the row as it is to be
+-- written over and the value merged over that. Its id and parent key, where
+-- it is, stay. A required column the value leaves out (not nullable, no
+-- default) is the writer's mistake: 23502, 400 on the wire, as for an add,
+-- and asked with the value's fields, before whether the row is there (todo
+-- #3; replaceRow in sqlite.ts).
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION _delta_whole(p_columns JSONB, p_value JSONB)
+RETURNS JSONB AS $$
+DECLARE
+  v_missing TEXT;
+BEGIN
+  SELECT string_agg(col_key, ', ' ORDER BY col_key) INTO v_missing
+    FROM jsonb_each(p_columns) AS x(col_key, col_def)
+   WHERE NOT p_value ? col_key AND NOT COALESCE((col_def->>'nullable')::boolean, false) AND NOT col_def ? 'default';
+  IF v_missing IS NOT NULL THEN
+    RAISE EXCEPTION 'Required field missing: % (give it a value, or declare a default or make it nullable in the schema)', v_missing
+      USING ERRCODE = '23502';
+  END IF;
+  RETURN COALESCE((SELECT jsonb_object_agg(col_key, COALESCE(col_def->'default', 'null'::jsonb)) FROM jsonb_each(p_columns) AS x(col_key, col_def)), '{}'::jsonb);
+END;
+$$ LANGUAGE plpgsql IMMUTABLE;
+
+-- ---------------------------------------------------------------------------
 -- delta_apply: apply delta ops to relational tables, bump version, NOTIFY
 --
 -- Handles:
+--   replace /<root>              → the root row, whole (_delta_whole)
 --   replace /<root>/field        → temporal update on root row
 --   add     /<collection>/<id>   → insert new row
 --   remove  /<collection>/<id>   → temporal close + cascades
@@ -362,6 +391,7 @@ DECLARE
   v_field         TEXT;
   v_row           JSONB;
   v_new_row       JSONB;
+  v_blank         JSONB;             -- a replace of the row whole: each column as an add leaves it (_delta_whole); of a field, nothing
   v_exists        BOOLEAN;
   v_missing       TEXT;
   v_ts            TIMESTAMPTZ := NOW();
@@ -512,6 +542,7 @@ BEGIN
         v_op := jsonb_set(v_op, '{value}', jsonb_build_object(v_parts[2], v_op->'value'));
       END IF;
       PERFORM _delta_assert_fields(v_coll_key, v_coll.columns_def, v_coll.parent_fk, v_op->'value');
+      v_blank := CASE WHEN array_length(v_parts, 1) = 1 THEN _delta_whole(v_coll.columns_def, v_op->'value') ELSE '{}'::jsonb END;
 
       -- Read + lock
       IF v_coll.temporal THEN
@@ -532,9 +563,10 @@ BEGIN
       PERFORM _delta_assert_parent_held(v_def, p_doc_name, v_coll.parent_fk, v_coll.parent_collection, v_row, v_op->'value');
       v_before := _delta_holders(v_coll_key, _delta_strip_temporal(v_row), p_doc_name);
 
-      -- Merge partial value. The row keeps its id: one in the value is the
-      -- document's, as an add's is the path's (it renumbered the row).
-      v_new_row := v_row || (v_op->'value') || jsonb_build_object('id', v_doc_id);
+      -- `/<root>` is the row whole (_delta_whole); `/<root>/<field>` that field.
+      -- The row keeps its id: one in the value is the document's, as an add's
+      -- is the path's (it renumbered the row).
+      v_new_row := v_row || v_blank || (v_op->'value') || jsonb_build_object('id', v_doc_id);
 
       IF v_coll.temporal THEN
         -- One version per write: a version this write made (its valid_from is the
@@ -806,6 +838,7 @@ BEGIN
         v_op := jsonb_set(v_op, '{value}', jsonb_build_object(v_parts[3], v_op->'value'));
       END IF;
       PERFORM _delta_assert_fields(v_coll_key, v_coll.columns_def, v_coll.parent_fk, v_op->'value');
+      v_blank := CASE WHEN array_length(v_parts, 1) = 2 THEN _delta_whole(v_coll.columns_def, v_op->'value') ELSE '{}'::jsonb END;
 
       IF v_coll.temporal THEN
         EXECUTE format(
@@ -847,9 +880,10 @@ BEGIN
           INTO v_hung FROM jsonb_array_elements(_delta_hanging_rows(v_coll_key, v_id)) WITH ORDINALITY AS e(r, n);
       END IF;
 
-      -- Merge partial value into current row. The row keeps its id: one in
-      -- the value is the path's, as an add's is (it renumbered the row).
-      v_new_row := v_row || (v_op->'value') || jsonb_build_object('id', v_id);
+      -- `/<coll>/<id>` is the row whole (_delta_whole); `/<coll>/<id>/<field>`
+      -- that field. The row keeps its id: one in the value is the path's, as
+      -- an add's is (it renumbered the row).
+      v_new_row := v_row || v_blank || (v_op->'value') || jsonb_build_object('id', v_id);
 
       IF v_coll.temporal THEN
         -- One version per write: a version this write made (its valid_from is the

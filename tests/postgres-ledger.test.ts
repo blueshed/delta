@@ -280,7 +280,7 @@ describe("undo beside someone else (Postgres)", () => {
     const id = idOf(await write(ws, c, "B", [{ op: "add", path: "/items/-", value: { name: "first" } }]));
     const w = await write(ws, c, "A", [{ op: "replace", path: `/items/${id}/name`, value: "A's" }]);
     const dry = await walk(ws, c, "A", { dry: true });
-    expect(dry.result).toEqual({ doc: "items:", entry: w.result.entry, ops: [{ op: "replace", path: `/items/${id}`, value: { name: "first" } }] });
+    expect(dry.result).toEqual({ doc: "items:", entry: w.result.entry, ops: [{ op: "replace", path: `/items/${id}/name`, value: "first" }] });
     expect((await row(id)).name).toBe("A's");
     expect((await walk(ws, c, "A", { entry: w.result.entry + 99 })).error?.code).toBe(409);
     expect((await walk(ws, c, "A", { entry: w.result.entry })).result.ops).toHaveLength(1);

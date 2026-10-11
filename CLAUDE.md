@@ -46,6 +46,8 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
 ## Invariants
 
 - **Three op verbs** (`add`, `replace`, `remove`) on `/<coll>/<id>[/field]` paths. No new verbs.
+  They mean what RFC 6902 says on every backend: a replace of a row is the row (a field it
+  leaves out takes its default; its id and parent key stay), never a merge.
 - **One pointer grammar, two parsers.** Strict RFC 6901: `splitPath` / `joinPath` in
   `src/core.ts` (which `applyOps`, `dom-ops` and every backend use) and `_delta_split_path` /
   `_delta_build_path` in `001a`. `tests/postgres-pointer.test.ts` runs both on one set of

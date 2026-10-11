@@ -212,9 +212,14 @@ describe("validateOps", () => {
 
   test("whole-row replace with only known fields is accepted", () => {
     const errs = validateOps(schema, def, [
-      { op: "replace", path: "/items/3", value: { name: "a", value: 1 } },
+      { op: "replace", path: "/items/3", value: { name: "a", value: 1, meta: {} } },
     ]);
     expect(errs).toEqual([]);
+  });
+
+  test("a whole-row replace is the row (RFC 6902, #3): a required field it leaves out is refused, as an add's is; a nullable one is not", () => {
+    const errs = validateOps(schema, def, [{ op: "replace", path: "/items/3", value: { name: "a", value: 1 } }]);
+    expect(errs.map((e) => e.message.split(" (")[0])).toEqual(["Required field missing: meta"]);
   });
 
   test("id and parent fk column are allowed keys in whole-row writes", () => {
@@ -266,22 +271,29 @@ describe("validateOps", () => {
 
     test("a single document writes its root's parent key as a field, and its row's parent key as a field (#37)", () => {
       expect(validateOps(wedding, household, [{ op: "replace", path: "/households/weddings_id", value: 2 }])).toEqual([]);
-      expect(validateOps(wedding, household, [{ op: "replace", path: "/households", value: { weddings_id: 2 } }])).toEqual([]);
+      expect(validateOps(wedding, household, [{ op: "replace", path: "/households", value: { weddings_id: 2, email: "a@x" } }])).toEqual([]);
       expect(validateOps(wedding, board, [{ op: "replace", path: "/households/1/weddings_id", value: 2 }])).toEqual([]);
       expect(validateOps(wedding, board, [{ op: "replace", path: "/households/1/weddings_id", value: "2" }])).toEqual([]);
     });
 
-    test("a root field that is not a column is refused, as a field and in the whole-root merge", () => {
+    test("a root field that is not a column is refused, as a field and in the whole root", () => {
       expect(messages(validateOps(wedding, household, [{ op: "replace", path: "/households/nope", value: 1 }]))).toEqual(["Unknown field: nope"]);
-      expect(messages(validateOps(wedding, household, [{ op: "replace", path: "/households", value: { nope: 1 } }]))).toEqual(["Unknown field: nope"]);
+      expect(messages(validateOps(wedding, household, [{ op: "replace", path: "/households", value: { email: "a@x", nope: 1 } }]))).toEqual(["Unknown field: nope"]);
+    });
+
+    test("a replace of a row is the row (RFC 6902, #3): a required column it leaves out is refused, as an add's is", () => {
+      const missing = (path: string, value: object) => messages(validateOps(wedding, path.split("/").length === 2 ? household : board, [{ op: "replace", path, value }])).map((m) => m.split(" (")[0]);
+      expect(missing("/households", {})).toEqual(["Required field missing: email"]);
+      expect(missing("/households/1", {})).toEqual(["Required field missing: email"]);
+      expect(missing("/households/1", { email: "a@x" })).toEqual([]);
     });
 
     test("a parent key is never null, nor anything but an id, in every form of replace", () => {
       for (const value of [null, 1.5, true, "x"]) {
         expect(validateOps(wedding, board, [{ op: "replace", path: "/households/1/weddings_id", value }]).length).toBe(1);
-        expect(validateOps(wedding, board, [{ op: "replace", path: "/households/1", value: { weddings_id: value } }]).length).toBe(1);
+        expect(validateOps(wedding, board, [{ op: "replace", path: "/households/1", value: { weddings_id: value, email: "a@x" } }]).length).toBe(1);
         expect(validateOps(wedding, household, [{ op: "replace", path: "/households/weddings_id", value }]).length).toBe(1);
-        expect(validateOps(wedding, household, [{ op: "replace", path: "/households", value: { weddings_id: value } }]).length).toBe(1);
+        expect(validateOps(wedding, household, [{ op: "replace", path: "/households", value: { weddings_id: value, email: "a@x" } }]).length).toBe(1);
       }
     });
 
@@ -311,7 +323,7 @@ describe("validateOps", () => {
 
     test("a row keeps its id: one in a replace's value is taken (the path's wins), and id is not a field", () => {
       expect(validateOps(wedding, board, [{ op: "replace", path: "/households/1", value: { id: 9, email: "q@x" } }])).toEqual([]);
-      expect(validateOps(wedding, household, [{ op: "replace", path: "/households", value: { id: 9 } }])).toEqual([]);
+      expect(validateOps(wedding, household, [{ op: "replace", path: "/households", value: { id: 9, email: "a@x" } }])).toEqual([]);
       expect(messages(validateOps(wedding, board, [{ op: "replace", path: "/households/1/id", value: 9 }]))).toEqual(["Unknown field: id"]);
       expect(messages(validateOps(wedding, household, [{ op: "replace", path: "/households/id", value: 9 }])).map((m) => m.split(" (")[0])).toEqual(["Unknown field: id"]);
     });

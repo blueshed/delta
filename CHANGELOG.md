@@ -33,6 +33,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two holders 168 bytes of ops; it now tells 122. **Migration:** apply broadcasts with `applyOps`
   (`@blueshed/delta/core`) or `applyOpsToCollection`; don't assume a `replace` carries the
   whole row. `changedFields` (core) is what a row that stays is told.
+- **Breaking for a writer that sends part of a row: a replace of a row is the row (todo #3).**
+  `replace /<coll>/<id>` (a single document's `/<root>`, or its root by its id) with a value
+  merged it over the row on the table backends and replaced the row on the free-form document.
+  Now every backend does as RFC 6902 says: the value is the row, a field it leaves out takes its
+  default (null where nullable), and a required one left out is a 400, as for an add. Its id and
+  where it hangs (its parent key) stay unless the value names another. On the JSON file, SQLite,
+  PGlite and Postgres (`_delta_whole`, new in `001d`, and `delta_apply` replaced in place; apply
+  with `bunx @blueshed/delta init`); `validateOps` on both says so ahead. An undo sets back each
+  field it changed as its own replace (`planWalk`, `_delta_walk_plan` in `001g`), so `dry`
+  answers `replace /<coll>/<id>/<field>` ops. **Migration:** to change some fields, replace
+  each (`/<coll>/<id>/<field>`; one straight after another is one write of the row), or send
+  the row whole.
 - **The docs promise only what is so, and tests prove it.** Serial ids are the four table
   backends' (the JSON file via `./json`, SQLite, PGlite, Postgres); `registerDoc` is called "a
   free-form document" everywhere (uuid ids, no schema, not on the moving-on path), never "the

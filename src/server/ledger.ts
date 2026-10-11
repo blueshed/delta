@@ -101,8 +101,8 @@ export function rowAt(doc: any, path: string): any {
  * What walking `entry` does to the document as it is now (`current`): only the
  * fields the entry changed, each guarded by what the entry left there.
  *
- * - The entry changed a row's fields (`replace`): set back those fields, if
- *   each still holds what the entry wrote.
+ * - The entry changed a row's fields (`replace`): set back those fields, one
+ *   replace of each (`/<coll>/<id>/<field>`), if each still holds what the entry wrote.
  * - The entry made a row (`remove` walks it): take the row away, if it is as
  *   the entry left it, and nobody has put a row under it since: `under` names
  *   the rows its removal would take with it, each of which the entry must have
@@ -119,7 +119,7 @@ export function rowAt(doc: any, path: string): any {
  * and `/<root>/<id>` (its add, its remove). Both are keyed by the second, the
  * id read from the row, so the root is walked once, by its net change, however
  * the entry spelled it -- removed, added back and written is one row, not a
- * conflict with itself. A replace of the root is planned at `/<root>`, as every
+ * conflict with itself. A replace of the root is planned at `/<root>/<field>`, as every
  * backend takes it; an add or a remove at `/<root>/<id>`. Postgres's
  * `_delta_walk_plan` (001g) keys it the same.
  */
@@ -158,12 +158,12 @@ export function planWalk(entry: { ops: DeltaOp[]; inverse: DeltaOp[] }, current:
       if (here != null) conflict.push(at);
       else ops.push({ op: "add", path: key, value: was });
     } else {                                          // it changed the row's fields
-      const fields = [...new Set([...data(was), ...data(wrote)])].filter((f) => !same(was[f], wrote[f]));
+      const fields = [...new Set([...data(was), ...data(wrote)])].filter((f) => !same(was[f], wrote[f])).toSorted();
       if (fields.length === 0) continue;
       // the document's root is replaced at /<root>, however the entry spelled it
       const path = here != null && here === current?.[coll!] ? joinPath(coll!) : key;
       if (here == null || fields.some((f) => !same(here[f], wrote[f]))) conflict.push(at);
-      else ops.push({ op: "replace", path, value: Object.fromEntries(fields.map((f) => [f, was[f] ?? null])) });
+      else ops.push(...fields.map((f): DeltaOp => ({ op: "replace", path: path + joinPath(f), value: was[f] ?? null })));   // each field: a replace of the row is the row whole (todo #3)
     }
   }
   return conflict.length ? { ops: [], conflict } : { ops, conflict };

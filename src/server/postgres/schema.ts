@@ -108,20 +108,30 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
         if (err) fail(err);
       }
     };
+    // A row's value, added or replaced whole (RFC 6902: a replace of the row is the row): a column
+    // that is neither nullable nor has a default must be given -- by the value, or, for a list-mode
+    // root row's add, by the scope, as delta_apply checks after it stamps them (#39, #3).
+    const required = (row: Record<string, unknown>, given: Record<string, unknown> = {}) => {
+      for (const [col, colDef] of Object.entries(table.columns)) {
+        if (!colDef.nullable && colDef.default === undefined && !Object.hasOwn(row, col) && !Object.hasOwn(given, col)) {
+          fail(`Required field missing: ${col} (give it a value, or declare a default or make it nullable in the schema)`);
+        }
+      }
+    };
     // A row's id, as the path names it: the number its digits name, up to 2^53 - 1 (_delta_row_id).
     const idErr = (seg: string): string | null =>
       !/^[0-9]+$/.test(seg) ? `Row id "${seg}" in ${op.path} is not a number: Postgres mints row ids -- add to ${joinPath(collKey, "-")} and read the id from the echo`
       : pastSafeId(seg) ? `Row id ${seg} in ${op.path} is past 2^53 - 1, which no number holds exactly -- add to ${joinPath(collKey, "-")} and read the id from the echo`
       : null;
 
-    // A single document's root: `replace /<root>` merges into it, and
+    // A single document's root: `replace /<root>` is the root row, whole, and
     // `replace /<root>/<field>` (a segment that is not an id) writes one field
     // -- a column, or the parent key: the row moves (#37).
     if (collKey === def.root && !opts.list && op.op === "replace" && (parts.length === 1 || (parts.length === 2 && !/^\d+$/.test(parts[1]!)))) {
       if (parts[1] === "id") fail("Unknown field: id (a row keeps the id its path names)");
       else if (parts.length === 2) rowErrs({ [parts[1]!]: value }, "replace");
       else if (!isObject) fail("Replace value must be an object");
-      else rowErrs(value, "replace");
+      else { rowErrs(value, "replace"); required(value); }
       continue;
     }
 
@@ -145,17 +155,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
     }
     if (!isObject) { fail(`${op.op === "add" ? "Add" : "Replace"} value must be an object`); continue; }
     rowErrs(value, op.op as "add" | "replace");
-    // A column that is neither nullable nor has a default must be given -- by
-    // the value, or, for a list-mode root row, by the scope, as delta_apply
-    // checks after it stamps them (#39).
-    if (op.op === "add") {
-      const given = opts.list && collKey === def.root ? (opts.values ?? {}) : {};
-      for (const [col, colDef] of Object.entries(table.columns)) {
-        if (!colDef.nullable && colDef.default === undefined && !Object.hasOwn(value, col) && !Object.hasOwn(given, col)) {
-          fail(`Required field missing: ${col} (give it a value, or declare a default or make it nullable in the schema)`);
-        }
-      }
-    }
+    required(value, op.op === "add" && opts.list && collKey === def.root ? opts.values : {});
   }
   return errors;
 }

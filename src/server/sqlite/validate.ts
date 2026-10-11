@@ -46,7 +46,20 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
       return colDef ? validateFieldType(colDef, field, value) : null;
     };
 
-    // One-segment paths: /<root> is a whole-root partial merge (replace only);
+    // A row's value, added or replaced whole (RFC 6902: a replace of the row is
+    // the row): a column that is neither nullable nor has a default must be
+    // given -- by the value, or, for a list-mode root row's add, by the scope,
+    // as Postgres checks after it stamps them. It used to be stored as "", 0 or
+    // false, acked and broadcast.
+    const required = (value: Record<string, unknown>, given: Record<string, unknown> = {}) => {
+      for (const [col, colDef] of Object.entries(table.columns)) {
+        if (!colDef.nullable && colDef.default === undefined && value[col] === undefined && given[col] === undefined) {
+          errors.push({ path: op.path, message: `Required field missing: ${col} (give it a value, or declare a default or make it nullable in the schema)` });
+        }
+      }
+    };
+
+    // One-segment paths: /<root> is the root row, replaced whole (replace only);
     // /<coll> on an included collection has no meaning for a client op — reject
     // it here so it 400s instead of reaching the executor's throw (500).
     if (parts.length === 1) {
@@ -70,6 +83,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
         const typeErr = fieldErr(field, fieldValue);
         if (typeErr) errors.push({ path: `${op.path}/${field}`, message: typeErr });
       }
+      required(value);
       continue;
     }
 
@@ -130,18 +144,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
         if (!isKnownKey(key)) errors.push({ path: op.path, message: `Unknown field: ${key}` });
       }
 
-      // Required-field check applies to adds only: a column that is neither
-      // nullable nor has a default must be given (it used to be stored as "",
-      // 0 or false, acked and broadcast) -- by the value, or, for a list-mode
-      // root row, by the scope, as Postgres checks after it stamps them.
-      if (op.op === "add") {
-        const given = opts.list && collKey === def.root ? (opts.values ?? {}) : {};
-        for (const [col, colDef] of Object.entries(table.columns)) {
-          if (!colDef.nullable && colDef.default === undefined && value[col] === undefined && given[col] === undefined) {
-            errors.push({ path: op.path, message: `Required field missing: ${col} (give it a value, or declare a default or make it nullable in the schema)` });
-          }
-        }
-      }
+      required(value, op.op === "add" && opts.list && collKey === def.root ? opts.values : {});
 
       // Type-check the fields that map to declared columns, and a replace's
       // parent key (an add's is its document's root, or found in scope).

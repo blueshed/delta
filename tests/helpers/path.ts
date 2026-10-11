@@ -723,20 +723,37 @@ export function documentCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
+    test("a replace of a row is the row, as RFC 6902 says and the free-form document does: a field its value leaves out takes its default -- null where nullable -- a required one left out is refused (400), and where the row hangs stays; at /<coll>/<id>, the root's /<root>, and the root by its id (todo #3)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-household:1"]);
+      const code = async (doc: string, ops: unknown[]) => (await b.process.call("delta", { doc, ops })).error?.code;
+      for (const [doc, path] of [["fo-board:1", "/households/1"], ["fo-household:1", "/households"], ["fo-household:1", "/households/1"]] as const) {
+        await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/t", value: "kept?" }]);
+        expect({ path, code: await code(doc, [{ op: "replace", path, value: { t: "no email" } }]) }).toEqual({ path, code: 400 });
+        await write(b.process, doc, [{ op: "replace", path, value: { email: `${path.length}@x` } }]);
+        expect({ path, row: content((await b.process.call("open", { doc: "fo-household:1" })).result).households }).toEqual({ path, row: household(1, `${path.length}@x`) });
+      }
+      await expectTold(b, "fo-household:1", [1, 2, 3].flatMap((i) => [
+        [field("/households/t", "kept?")],
+        [field("/households/email", `${[13, 11, 13][i - 1]}@x`), field("/households/t", null)],
+      ]));
+      await assertCopiesHold(b, copies);
+    });
+
     test("a column may take any name: a household's t, named as the write SQL named its row, is written and read in every form (todo #58)", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-household:1", "fo-inbox:a@x"]);
       await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/t", value: "field" }]);
       await write(b.process, "fo-household:1", [{ op: "replace", path: "/households/t", value: "root" }]);
-      await write(b.process, "fo-household:1", [{ op: "replace", path: "/households", value: { t: "merged" } }]);
-      await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/2", value: { t: "row" } }]);
+      await write(b.process, "fo-household:1", [{ op: "replace", path: "/households", value: { email: "a@x", t: "whole" } }]);
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/2", value: { email: "b@x", t: "row" } }]);
       const added = await write(b.process, "fo-board:1", [{ op: "add", path: "/households/-", value: { email: "a@x", t: "added" } }]);
       expect(added.ops).toEqual([{ op: "add", path: "/households/4", value: household(4, "a@x", 1, "added") }]);
       expect(content((await b.process.call("open", { doc: "fo-board:1" })).result).households).toEqual({
-        "1": household(1, "a@x", 1, "merged"), "2": household(2, "b@x", 1, "row"), "4": household(4, "a@x", 1, "added"),
+        "1": household(1, "a@x", 1, "whole"), "2": household(2, "b@x", 1, "row"), "4": household(4, "a@x", 1, "added"),
       });
       const now = await b.process.call("open_at", { doc: "fo-household:1", at: new Date(Date.now() + 1000).toISOString() });
-      expect(content(now.result)).toEqual({ households: household(1, "a@x", 1, "merged") });
+      expect(content(now.result)).toEqual({ households: household(1, "a@x", 1, "whole") });
       await write(b.process, "fo-board:1", [{ op: "remove", path: "/households/4" }]);
       await assertCopiesHold(b, copies);
     });
@@ -778,7 +795,7 @@ export function documentCases(backend: () => PathBackend): void {
       const code = async (action: string, msg: Record<string, unknown>) => (await b.process.call(action, { doc: theirs, ...msg })).error?.code;
       expect(await code("open", {})).toBe(404);
       expect(await code("delta", { ops: [{ op: "replace", path: "/households/t", value: "taken" }] })).toBe(404);
-      expect(await code("delta", { ops: [{ op: "replace", path: "/households/1", value: { t: "taken" } }] })).toBe(404);
+      expect(await code("delta", { ops: [{ op: "replace", path: "/households/1", value: { email: "a@x", t: "taken" } }] })).toBe(404);
       expect(await code("delta", { ops: [{ op: "remove", path: "/households/1" }] })).toBe(404);
       expect(await code("open_at", { at: new Date().toISOString() })).toBe(404);
       expect(await code("history", {})).toBe(404);
@@ -1648,7 +1665,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       const favourBack = { op: "add", path: "/favours/1", value: favour };
       expect(written.ops).toEqual([{ op: "remove", path: "/households/1" }, favourGone, { op: "add", path: "/households/1", value: household(1, "z@x") }]);
       const dry = await b.process.call("undo", { cursor: "s1", dry: true });
-      expect({ ops: dry.result.ops, conflict: dry.result.conflict }).toEqual({ ops: [{ op: "replace", path: "/households", value: { email: "a@x" } }, favourBack], conflict: undefined });
+      expect({ ops: dry.result.ops, conflict: dry.result.conflict }).toEqual({ ops: [field("/households/email", "a@x"), favourBack], conflict: undefined });
       const walked = async (way: string) => {
         const { result } = await b.process.call(way, { cursor: "s1" });
         return { ops: result.ops, conflict: result.conflict };
@@ -1975,14 +1992,14 @@ export function fanOutCases(backend: () => PathBackend): void {
       const older = await write(b.process, "fo-board:1", [soup], { cursor: "s1" });
       const later = await write(b.process, "fo-board:1", [wedding], { cursor: "s1" });
       const dry = await b.process.call("undo", { cursor: "s1", change: older.entry, dry: true });
-      expect(dry.result).toEqual({ doc: "fo-board:1", entry: older.entry, ops: [{ op: "replace", path: "/courses/1", value: { name: "Soup" } }] });
+      expect(dry.result).toEqual({ doc: "fo-board:1", entry: older.entry, ops: [field("/courses/1/name", "Soup")] });
       expect(await name(b)).toBe("Broth");
       expect((await b.process.call("undo", { cursor: "s1", change: older.entry, entry: later.entry })).error?.code).toBe(409);
       expect(await name(b)).toBe("Broth");
       const undone = await b.process.call("undo", { cursor: "s1", change: older.entry, entry: older.entry });
       expect(walked(undone).ops).toEqual([{ op: "replace", path: "/courses/1", value: course(1, "Soup") }]);
       const redry = await b.process.call("redo", { cursor: "s1", change: older.entry, dry: true });
-      expect(redry.result).toEqual({ doc: "fo-board:1", entry: undone.result.entry, ops: [{ op: "replace", path: "/courses/1", value: { name: "Broth" } }] });
+      expect(redry.result).toEqual({ doc: "fo-board:1", entry: undone.result.entry, ops: [field("/courses/1/name", "Broth")] });
       await assertCopiesHold(b, copies);
     });
   });
@@ -2251,7 +2268,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       const copies = await openAll(b.process, ["fo-board:1", "fo-board:2", "fo-menu:1", "fo-drinks:1", "fo-household:1", "fo-course:2"]);
       const code = async (doc: string, ops: unknown[]) => (await b.process.call("delta", { doc, ops })).error?.code;
       expect(await code("fo-board:1", [{ op: "replace", path: "/households/1/weddings_id", value: 2 }])).toBe(404);
-      expect(await code("fo-board:1", [{ op: "replace", path: "/households/1", value: { weddings_id: 2 } }])).toBe(404);
+      expect(await code("fo-board:1", [{ op: "replace", path: "/households/1", value: { weddings_id: 2, email: "a@x" } }])).toBe(404);
       expect(await code("fo-board:1", [{ op: "replace", path: "/drinks/1/courses_id", value: 2 }])).toBe(404);
       expect(await code("fo-board:1", [{ op: "replace", path: "/drinks/1", value: { courses_id: 2, name: "Gin" } }])).toBe(404);
       expect(await code("fo-menu:1", [{ op: "replace", path: "/drinks/1/courses_id", value: 2 }])).toBe(404);
@@ -2287,8 +2304,8 @@ export function fanOutCases(backend: () => PathBackend): void {
       const copies = await openAll(b.process, ["fo-seat-of:1:3", "fo-seats-at:3", "fo-seats-at:7", "fo-seating:1"]);
       const code = async (ops: unknown[]) => (await b.process.call("delta", { doc: "fo-seat-of:1:3", ops })).error?.code;
       expect(await code([{ op: "replace", path: "/seats/table_no", value: 7 }])).toBe(404);
-      expect(await code([{ op: "replace", path: "/seats", value: { table_no: 7 } }])).toBe(404);
-      expect(await code([{ op: "replace", path: "/seats/1", value: { table_no: 7 } }])).toBe(404);
+      expect(await code([{ op: "replace", path: "/seats", value: { table_no: 7, kept: true } }])).toBe(404);
+      expect(await code([{ op: "replace", path: "/seats/1", value: { table_no: 7, kept: true } }])).toBe(404);
       expect(await code([{ op: "replace", path: "/seats/1/table_no", value: 7 }])).toBe(404);
       expect(await code([{ op: "replace", path: "/seats/kept", value: false }, { op: "replace", path: "/seats/table_no", value: 7 }])).toBe(404);   // a run: its first write undone too
       await expectSilent(b, "fo-seat-of:1:3", "fo-seats-at:3", "fo-seats-at:7", "fo-seating:1");
@@ -2402,9 +2419,9 @@ export function fanOutCases(backend: () => PathBackend): void {
       const copies = await openAll(b.process, ["fo-household:1", "fo-board:1", "fo-board:2", "fo-course:1", "fo-all-households:"]);
       const code = async (doc: string, ops: unknown[]) => (await b.process.call("delta", { doc, ops })).error?.code;
       expect(await code("fo-household:1", [{ op: "replace", path: "/households/weddings_id", value: 2 }])).toBe(404);
-      expect(await code("fo-household:1", [{ op: "replace", path: "/households", value: { weddings_id: 2 } }])).toBe(404);
+      expect(await code("fo-household:1", [{ op: "replace", path: "/households", value: { weddings_id: 2, email: "a@x" } }])).toBe(404);
       expect(await code("fo-household:1", [{ op: "replace", path: "/households/1/weddings_id", value: 2 }])).toBe(404);
-      expect(await code("fo-household:1", [{ op: "replace", path: "/households/1", value: { weddings_id: 2 } }])).toBe(404);
+      expect(await code("fo-household:1", [{ op: "replace", path: "/households/1", value: { weddings_id: 2, email: "a@x" } }])).toBe(404);
       expect(await code("fo-household:1", [{ op: "replace", path: "/households/email", value: "x@x" }, { op: "replace", path: "/households/weddings_id", value: 2 }])).toBe(404);   // a run: its first write undone too
       expect(await code("fo-course:1", [{ op: "replace", path: "/courses/weddings_id", value: 2 }])).toBe(404);
       expect(await code("fo-household:1", [{ op: "remove", path: "/households/1" }, { op: "add", path: "/households/1", value: { weddings_id: 2, email: "a@x" } }])).toBe(404);   // taken out and added back elsewhere

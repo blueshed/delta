@@ -102,7 +102,7 @@ describe("docTypeFromDef", () => {
     expect(rows[0].value).toBe(1);
   });
 
-  test("apply replace updates the row", async () => {
+  test("apply replace updates the row: a field, or the row whole (a replace of a row is the row: todo #3)", async () => {
     const type = docTypeFromDef(defineDoc("items:", { root: "items", include: [] }), pool);
     await type.apply({}, "items:", [
       { op: "add", path: "/items/-", value: { name: "a", value: 1 } },
@@ -111,13 +111,15 @@ describe("docTypeFromDef", () => {
     const id = rows[0].id;
 
     await type.apply({}, "items:", [
-      { op: "replace", path: `/items/${id}`, value: { value: 99 } },
+      { op: "replace", path: `/items/${id}/value`, value: 99 },
     ]);
+    const updated = (await type.open({}, "items:"))!.result.items[String(id)] as any;
+    expect([updated.name, updated.value]).toEqual(["a", 99]);
 
-    const result = await type.open({}, "items:");
-    const updated = result!.result.items[String(id)] as any;
-    expect(updated.value).toBe(99);
-    expect(updated.name).toBe("a");
+    await expect(type.apply({}, "items:", [{ op: "replace", path: `/items/${id}`, value: { value: 7 } }])).rejects.toMatchObject({ code: "23502" });
+    await type.apply({}, "items:", [{ op: "replace", path: `/items/${id}`, value: { name: "b", value: 7 } }]);
+    const whole = (await type.open({}, "items:"))!.result.items[String(id)] as any;
+    expect([whole.name, whole.value]).toEqual(["b", 7]);
   });
 
   test("apply remove deletes the row", async () => {
