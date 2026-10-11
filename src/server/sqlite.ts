@@ -168,7 +168,6 @@ const log = createLogger("[delta-sqlite]");
  */
 const registrations = new WeakMap<object, Map<symbol, string[]>>();
 
-/** Register all doc definitions with the WebSocket server. */
 export interface RegisterOptions<I = unknown> {
   /**
    * Keep a ledger (`./ledger`): every write recorded with its inverse, its
@@ -199,6 +198,7 @@ export interface RegisterOptions<I = unknown> {
   shared?: boolean;
 }
 
+/** Register all doc definitions with the WebSocket server. */
 export function registerDocs<I = unknown>(
   ws: WsServer,
   db: any,
@@ -733,7 +733,7 @@ export function registerDocs<I = unknown>(
           broadcastOps.push({ op: "add", path: joinPath(collKey, String(id)), value: fullRow });
           touched.push({ coll: collKey, id, before: [], after: fullRow });
         } else if (op.op === "remove") {
-          // Remove row + cascades. `removeRow` addresses rows by id ALONE, so
+          // Remove row + cascades. The removal addresses rows by id ALONE, so
           // without this gate a client could name any id and delete a sibling
           // doc's row -- or one that has left this document earlier in the write.
           if (!held(table, id)) refuse(404, `Row not found: ${collKey}/${id}`);
@@ -866,12 +866,6 @@ export function registerDocs<I = unknown>(
   type Failed = { error: { code: number; message: string } };
 
   /**
-   * The one write path -- a fresh write, an undo, a redo: validated, applied in
-   * one transaction with its ledger entry (a savepoint inside a caller's own),
-   * and then told: to the document's subscribers, to the other open documents
-   * that share its rows, and to the custom documents that watch them.
-   */
-  /**
    * Read back every doc someone has open that `evict()` dropped, before a
    * write: fan-out checks a target's scope against its copy, and one with no
    * copy used to lose its removes and grandchildren for good (v0.5.0 review #6).
@@ -885,6 +879,12 @@ export function registerDocs<I = unknown>(
     custom.reread();
   }
 
+  /**
+   * The one write path -- a fresh write, an undo, a redo: validated, applied in
+   * one transaction with its ledger entry (a savepoint inside a caller's own),
+   * and then told: to the document's subscribers, to the other open documents
+   * that share its rows, and to the custom documents that watch them.
+   */
   function write(docName: string, def: DocDef, doc: any, ops: DeltaOp[], by: { who: string | null; cursor: string | null; undoes?: number; undoable?: boolean }): Written | Failed {
     // Pre-flight validation — reject unknown collections/fields and bad types
     // up front instead of silently acking an op that diverges cache/broadcast
