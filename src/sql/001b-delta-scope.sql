@@ -201,9 +201,7 @@ BEGIN
         -- so it compares as SQLite orders it, after every number: = > >= read no
         -- row, != < <= every row. (Single mode's id is the root's: still a 400.)
         IF v_resolved ~ '^\s*[+-]?[0-9]+\s*$' THEN
-          IF v_resolved !~ '^\s*[+-]?0*[0-9]{1,16}\s*$' THEN
-            v_refused := format('%s %s is past 2^53 - 1, which no number holds exactly', v_key, v_resolved);
-          ELSIF abs(v_resolved::numeric) > 9007199254740991 THEN
+          IF abs(v_resolved::numeric) > 9007199254740991 THEN
             v_refused := format('%s %s is past 2^53 - 1, which no number holds exactly', v_key, v_resolved);
           END IF;
         ELSIF v_resolved ~* '^\s*[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)(e[+-]?[0-9]+)?\s*$' THEN
@@ -212,8 +210,8 @@ BEGIN
           v_cond := CASE WHEN v_op IN ('!=', '<', '<=') THEN format('%I IS NOT NULL', v_key) ELSE 'FALSE' END;
         END IF;
       ELSIF v_type = 'integer' THEN
-        -- at most 16 digits past any zeros (2^53 - 1 has 16), so the cast that follows cannot fail
-        IF v_resolved !~ '^\s*[+-]?0*[0-9]{1,16}\s*$' THEN
+        -- digits first, a statement of its own: the cast that follows takes only them
+        IF v_resolved !~ '^\s*[+-]?[0-9]+\s*$' THEN
           v_refused := format('%s must be an integer, not "%s"', v_key, v_resolved);
         ELSIF abs(v_resolved::numeric) > 9007199254740991 THEN
           v_refused := format('%s must be an integer, not "%s"', v_key, v_resolved);
@@ -232,12 +230,10 @@ BEGIN
         -- A date, YYYY-MM-DD (a name's ":" separates its values, so it holds no
         -- time of day), read as the instant midnight UTC begins it, whatever
         -- the session's TimeZone -- as SQLite reads it; not now, 20260101 or
-        -- Jan 1 2026, which Postgres's own cast takes. (Each test a statement
-        -- of its own, so make_date is asked only of a month there is.)
+        -- Jan 1 2026, which Postgres's own cast takes. (The day a statement of
+        -- its own, so make_date is asked only of a month there is.)
         v_date := regexp_match(v_resolved, '^\s*([0-9]{4})-([0-9]{2})-([0-9]{2})\s*$');
-        IF v_date IS NULL THEN
-          v_refused := format('%s must be a date, YYYY-MM-DD, not "%s"', v_key, v_resolved);
-        ELSIF v_date[1]::int < 1 OR v_date[2]::int NOT BETWEEN 1 AND 12 THEN
+        IF v_date IS NULL OR v_date[1]::int < 1 OR v_date[2]::int NOT BETWEEN 1 AND 12 THEN
           v_refused := format('%s must be a date, YYYY-MM-DD, not "%s"', v_key, v_resolved);
         ELSIF v_date[3]::int NOT BETWEEN 1 AND extract(day FROM make_date(v_date[1]::int, v_date[2]::int, 1) + interval '1 month - 1 day')::int THEN
           v_refused := format('%s must be a date, YYYY-MM-DD, not "%s"', v_key, v_resolved);

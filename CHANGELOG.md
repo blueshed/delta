@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Internal
 
 - `kinds.ts`: the three kinds share one join, leave and `close` (`family()`).
+- `001b`'s `_delta_resolve_scope` (replaced in place, the same answers): an id's or integer's
+  refusal reads its digits then its size, without a second 16-digit pattern; a date's refusals
+  short of its day are one test.
 
 ## [0.11.0] - 2026-09-28
 
