@@ -59,8 +59,8 @@ BEGIN
       USING ERRCODE = 'P0001';
   END IF;
 
-  -- List mode (todo #74): as delta_open reads a list, at p_at.
-  IF v_mode = 'list' THEN RETURN _delta_read_list(v_def, v_resolved->>'where', p_at); END IF;
+  -- List mode (todo #74): as delta_open reads a list, at p_at -- each row as it shows (todo #70).
+  IF v_mode = 'list' THEN RETURN _delta_show_doc(v_def, _delta_read_list(v_def, v_resolved->>'where', p_at), FALSE); END IF;
 
   v_doc_id := (v_resolved->'values'->>'id')::BIGINT;
 
@@ -89,7 +89,7 @@ BEGIN
     );
   END LOOP;
 
-  RETURN v_result;
+  RETURN _delta_show_doc(v_def, v_result, TRUE);
 END;
 $$ LANGUAGE plpgsql STABLE;
 

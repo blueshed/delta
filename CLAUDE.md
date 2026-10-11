@@ -75,6 +75,10 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
   `_delta_tell` in `001d`; a membership view in `custom.ts`). A memory or free-form document
   tells its ops as applied. The client freshens what an op changes inside, so a keyed `list()`
   sees the row as new. A write's answer and ledger entry keep whole rows: they are its record.
+- **A document may hold some columns** (`defineDoc`'s `columns`, todo #70): it is opened, told
+  and written by those, the id and the parent key alone (`holdsField` / `showRow` in `schema.ts`;
+  `_delta_show`, `_delta_held_columns` in `001c`/`001d`). The store, the copies kept server-side
+  and the ledger keep rows whole: a document's columns are what it shows and takes.
 - **Opt-in stays opt-in.** Without `ledger: true` / `inverse: true`, answers and broadcasts
   keep their 0.5 shapes.
 - **One app, every backend.** The JSON file (`./json`), SQLite, Postgres in process (`./pglite`)

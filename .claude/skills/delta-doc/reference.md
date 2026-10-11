@@ -13,6 +13,7 @@ Full API, patterns, and recipes. The companion `SKILL.md` is the router; start t
 - *Doc patterns* — list, catalog (list-mode `include`), scoped-single, the parent chain, moving a row, what a remove takes, per-user isolation, custom DocType
   - *Custom read docs* — `defineCustomDoc` membership (`query`+`matches`) vs recompute (whole-doc); root-replace primitive
 - *Implied documents* — `implied: true`: open empty, the first write makes the root row (every backend; on Postgres, named by number)
+- *Some columns* — `columns: { legs: ["day"] }`: a slim document, opened, told and written by those columns alone
 - *Fan-out* — which other open docs hear a write, and what each is told
 - *Authentication* — `DeltaAuth`, JWT impl, token flow, identity switching
 - *RLS with `app.user_id`* — policies, two-pool setup, error-leak rules
@@ -266,6 +267,7 @@ interface DocDef {
   scope: Record<string, string>;     // root column → a binding read from the doc name, one rule on every
                                      // backend (`scope` syntax): ":id", "<=:end", "like:prefix"; a plain "name" is ":name", not a literal
   implied?: boolean;                 // opens empty until its first write makes the root row (Postgres: by number)
+  columns?: Record<string, string[]>; // of a collection it names, the columns it holds (and id, parent key): *Some columns*
 }
 
 // DeltaAuth — pluggable authentication; identity is yours.
@@ -564,6 +566,16 @@ const room = defineDoc("room:", { root: "rooms", include: ["messages"], implied:
 ```
 
 An implied document is keyed by its root id, so it cannot also declare a `scope` (`defineDoc` throws). A document that is not implied still answers 404 for a missing root row. **A name is a number on Postgres**: its ids are serials, so `room:attic` is refused there as a mistake (400), as any text id is. An app that will move along the path names its implied documents by number (`room:7`); keep a name-keyed one (`session:<token>`) to documents that never move. On Postgres the root row is made by `delta_apply` in the write's transaction (`_delta_make_implied`), under the writer's `app.user_id`, so RLS's `WITH CHECK` sees it.
+
+## Some columns
+
+What someone needs in front of them is often less than every column. `defineDoc(prefix, { root, include, columns: { <coll>: [<column>, ...] } })` holds of each collection it names those columns, the row's id and its parent key; a collection it does not name, whole. A trip's map wants the legs and stops, not the notes beside them:
+
+```ts
+const tripMap = defineDoc("trip-map:", { root: "trips", include: ["legs", "stops"], columns: { legs: ["day", "from", "to"], stops: ["name", "lat", "lng"] } });
+```
+
+On every backend: it opens (and `open_at`) with those columns; it is told only what changes of them -- a write of a leg's notes tells it nothing, a leg that arrives arrives with its columns; and a write through it names those alone (another column is a 400, as one the table does not have -- the schema is no secret, so it is a mistake, not a refusal). A row replaced whole through it is those columns whole (*The primitive*): the columns it does not hold stay as they are. An add through it gives the rest their defaults, so a column it does not hold that has none (not nullable, no default) cannot be added through it (400). Undo through it puts back what was there, every column: the ledger keeps rows whole. Each column named must be one of its collection's (thrown at registration and by `generateSql`). On Postgres the names are kept in `_delta_docs.held` (`001a`), shown by `_delta_show` (`001c`).
 
 ## Fan-out — which open documents hear a write
 

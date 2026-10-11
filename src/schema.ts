@@ -69,6 +69,12 @@ export interface DocDef {
   scope: Record<string, string>;
   /** There before its root row is: opens empty, and its first write makes the row. */
   implied?: boolean;
+  /**
+   * The columns it holds of a collection it names (the root, an include):
+   * those, the row's id and its parent key. A collection not named here is
+   * held whole. It is opened, told and written by those alone (todo #70).
+   */
+  columns?: Record<string, string[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -197,7 +203,7 @@ export function defaultForType(type: ColumnType): unknown {
 
 export function defineDoc(
   prefix: string,
-  opts: { root: string; include: string[]; scope?: Record<string, string>; implied?: boolean },
+  opts: { root: string; include: string[]; scope?: Record<string, string>; implied?: boolean; columns?: Record<string, string[]> },
 ): DocDef {
   if (!DOC_PREFIX.test(prefix)) {
     throw new Error(
@@ -208,13 +214,43 @@ export function defineDoc(
   if (opts.implied && opts.scope && Object.keys(opts.scope).length > 0) {
     throw new Error(`An implied doc is keyed by its root id: ${prefix} cannot also declare a scope`);
   }
+  for (const [coll, cols] of Object.entries(opts.columns ?? {})) {
+    if (coll !== opts.root && !opts.include.includes(coll)) throw new Error(`doc "${prefix}" names columns of ${coll}, which it does not hold: name the root or an include`);
+    for (const col of cols) assertColumnName(col);
+  }
   return {
     prefix,
     root: opts.root,
     include: opts.include,
     scope: opts.scope ?? {},
     ...(opts.implied ? { implied: true } : {}),
+    ...(opts.columns && Object.keys(opts.columns).length ? { columns: opts.columns } : {}),
   };
+}
+
+/** Does a document hold `field` of a row of `coll`? Its id and parent key always; else, where it names that collection's columns, those. */
+export function holdsField(def: DocDef, schema: Schema, coll: string, field: string): boolean {
+  const cols = def.columns?.[coll];
+  return !cols || field === "id" || field === schema.tables[coll]?.parent?.fkColumn || cols.includes(field);
+}
+
+/** A row of `coll` as a document shows it: the fields it holds (`holdsField`). */
+export function showRow(def: DocDef, schema: Schema, coll: string, row: any): any {
+  if (!def.columns?.[coll] || row === null || typeof row !== "object") return row;
+  return Object.fromEntries(Object.entries(row).filter(([f]) => holdsField(def, schema, coll, f)));
+}
+
+/** A document as it shows: each row of a collection whose columns it names, those alone. `single`: its root is one row, not a map. */
+export function showDoc(def: DocDef, schema: Schema, doc: any, single: boolean): any {
+  if (!def.columns || doc == null) return doc;
+  const out = { ...doc };
+  for (const coll of Object.keys(def.columns)) {
+    const held = out[coll];
+    if (held == null) continue;
+    out[coll] = single && coll === def.root ? showRow(def, schema, coll, held)
+      : Object.fromEntries(Object.entries(held).map(([id, row]) => [id, showRow(def, schema, coll, row)]));
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

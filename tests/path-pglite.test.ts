@@ -201,6 +201,13 @@ describe("pglite: validateOps answers as delta_apply does", () => {
     ["fo-tags-labelled:red", { op: "replace", path: "/tags", value: { label: "red" } }],
     ["fo-all-courses:", { op: "add", path: "/courses/-", value: { weddings_id: 1, name: "x" } }],
     ["fo-all-courses:", { op: "replace", path: "/courses/name", value: "x" }],
+    ["fo-slim:1", { op: "replace", path: "/households/1/email", value: "q@x" }],
+    ["fo-slim:1", { op: "replace", path: "/households/1/t", value: "x" }],
+    ["fo-slim:1", { op: "replace", path: "/households/1", value: { email: "q@x" } }],
+    ["fo-slim:1", { op: "replace", path: "/households/1", value: { email: "q@x", t: "x" } }],
+    ["fo-slim:1", { op: "add", path: "/households/-", value: { email: "q@x" } }],
+    ["fo-slim:1", { op: "add", path: "/households/-", value: { email: "q@x", t: "x" } }],
+    ["fo-slim:1", { op: "add", path: "/seats/-", value: { table_no: 2 } }],
     ["fo-seats-kept:1", { op: "add", path: "/seats/-", value: { weddings_id: 1, table_no: 4 } }],
     ["fo-seats-wished:5", { op: "add", path: "/seats/-", value: { weddings_id: 1, table_no: 4, kept: false } }],
   ];

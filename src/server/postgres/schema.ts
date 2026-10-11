@@ -10,6 +10,7 @@
 import type { Pool } from "pg";
 import { type DeltaOp, joinPath, splitPath } from "../../core";
 import {
+  holdsField,
   type Schema,
   type DocDef,
   type ValidationError,
@@ -88,8 +89,9 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
     const fk = table.parent?.fkColumn;
     const value = (op as any).value;
     const isObject = value !== null && typeof value === "object" && !Array.isArray(value);
-    // A value's keys (_delta_assert_fields): its columns, the row's id (the path's wins) and parent key, a temporal row's validity.
-    const known = (k: string) => Object.hasOwn(table.columns, k) || k === "id" || k === fk || k === "valid_from" || k === "valid_to";
+    // A value's keys (_delta_assert_fields): its columns the document holds (todo #70), the row's id (the path's wins) and parent key, a temporal row's validity.
+    const held = (k: string) => holdsField(def, schema, collKey, k);
+    const known = (k: string) => (Object.hasOwn(table.columns, k) && held(k)) || k === "id" || k === fk || k === "valid_from" || k === "valid_to";
     // What a written field may hold, beyond its column's cast: a column that is
     // not nullable is never null (the table's NOT NULL); a parent key is an id.
     const fieldErr = (field: string, v: unknown): string | null => {
@@ -111,9 +113,9 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
     // A row's value, added or replaced whole (RFC 6902: a replace of the row is the row): a column
     // that is neither nullable nor has a default must be given -- by the value, or, for a list-mode
     // root row's add, by the scope, as delta_apply checks after it stamps them (#39, #3).
-    const required = (row: Record<string, unknown>, given: Record<string, unknown> = {}) => {
+    const required = (row: Record<string, unknown>, given: Record<string, unknown> = {}, add = false) => {   // a replace sets the columns it holds
       for (const [col, colDef] of Object.entries(table.columns)) {
-        if (!colDef.nullable && colDef.default === undefined && !Object.hasOwn(row, col) && !Object.hasOwn(given, col)) {
+        if (!colDef.nullable && colDef.default === undefined && !Object.hasOwn(row, col) && !Object.hasOwn(given, col) && (add || held(col))) {
           fail(`Required field missing: ${col} (give it a value, or declare a default or make it nullable in the schema)`);
         }
       }
@@ -155,7 +157,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
     }
     if (!isObject) { fail(`${op.op === "add" ? "Add" : "Replace"} value must be an object`); continue; }
     rowErrs(value, op.op as "add" | "replace");
-    required(value, op.op === "add" && opts.list && collKey === def.root ? opts.values : {});
+    required(value, op.op === "add" && opts.list && collKey === def.root ? opts.values : {}, op.op === "add");
   }
   return errors;
 }

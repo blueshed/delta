@@ -108,6 +108,8 @@ export const pathDocs = [
   defineDoc("fo-all-households:", { root: "households", include: [] }),
   // the party: the wedding, its households and their favours
   defineDoc("fo-party:", { root: "weddings", include: ["households", "favours"] }),
+  // the party, slim: a household's email and a seat's table, each with its id and parent key, and nothing else of them (todo #70)
+  defineDoc("fo-slim:", { root: "weddings", include: ["households", "seats"], columns: { households: ["email"], seats: ["table_no"] } }),
   // a time in the name (at:): the document as it stood then -- the notes, the courses and every note, a wedding and its notes
   defineDoc("fo-notes-on:", { root: "notes", include: [], scope: { at: "at:when" } }),
   defineDoc("fo-courses-noted-on:", { root: "courses", include: ["notes"], scope: { at: "at:when" } }),
@@ -313,6 +315,7 @@ export async function expectSilent(b: PathBackend, ...channels: string[]): Promi
 /** Every case, asked of the backend `backend()` answers (a fresh one per case). */
 export function pathCases(backend: () => PathBackend): void {
   documentCases(backend);
+  columnCases(backend);
   fanOutCases(backend);
   serialCases(backend);
   asItStoodCases(backend);
@@ -391,6 +394,51 @@ export function asItStoodCases(backend: () => PathBackend): void {
       });
       expect(await at(b, "fo-courses-like:So", then)).toEqual({ courses: { "1": course(1, "Soup"), "3": course(3, "Sorbet") } });
       expect(await at(b, "fo-tags-labelled:blue", then)).toEqual({ tags: {} });
+    });
+  });
+}
+
+/** A document over some of its rows' columns (todo #70): opened, told and written by those alone. */
+export function columnCases(backend: () => PathBackend): void {
+  describe("a document that holds some columns of a collection (todo #70)", () => {
+    const slim = (id: number, email: string) => ({ id, weddings_id: 1, email });
+
+    test("it opens with those columns, the id and the parent key -- as it stood too -- and a collection it does not name, whole", async () => {
+      const b = backend();
+      const { result } = await b.process.call("open", { doc: "fo-slim:1" });
+      expect(content(result)).toEqual({
+        weddings: { id: 1, name: "ours" },
+        households: { "1": slim(1, "a@x"), "2": slim(2, "b@x") },
+        seats: { "1": { id: 1, weddings_id: 1, table_no: 3 } },
+      });
+      const then = await b.process.call("open_at", { doc: "fo-slim:1", at: new Date().toISOString() });
+      expect(content(then.result)).toEqual(content(result));
+    });
+
+    test("it is told only what changes of its columns: a write of another column tells it nothing; a row that arrives, its columns", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-slim:1", "fo-board:1"]);
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/t", value: "notes" }]);
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/email", value: "z@x" }, { op: "replace", path: "/households/1/t", value: "more" }]);
+      await write(b.process, "fo-board:1", [{ op: "add", path: "/households/-", value: { email: "n@x", t: "long" } }]);
+      await expectTold(b, "fo-slim:1", [[field("/households/1/email", "z@x")], [{ op: "add", path: "/households/4", value: slim(4, "n@x") }]]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a write through it may touch its columns alone (400 for another, as for a field no row has); a row replaced whole through it keeps the columns it does not hold; undone, a row removed through it comes back whole", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-slim:1", "fo-board:1"]);
+      const code = async (ops: unknown[]) => (await b.process.call("delta", { doc: "fo-slim:1", ops })).error?.code;
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/t", value: "kept" }]);
+      expect(await code([{ op: "replace", path: "/households/1/t", value: "x" }])).toBe(400);
+      expect(await code([{ op: "replace", path: "/households/1", value: { email: "a@x", t: "x" } }])).toBe(400);
+      expect(await code([{ op: "add", path: "/households/-", value: { email: "n@x", t: "x" } }])).toBe(400);
+      expect(await code([{ op: "add", path: "/seats/-", value: { table_no: 2 } }])).toBe(400);   // kept, which it does not hold, has no default
+      await write(b.process, "fo-slim:1", [{ op: "replace", path: "/households/1", value: { email: "w@x" } }], { cursor: "s1" });
+      await write(b.process, "fo-slim:1", [{ op: "remove", path: "/households/1" }], { cursor: "s1" });
+      expect((await b.process.call("undo", { cursor: "s1" })).result?.conflict).toBeUndefined();
+      expect(content((await b.process.call("open", { doc: "fo-board:1" })).result).households["1"]).toEqual(household(1, "w@x", 1, "kept"));
+      await assertCopiesHold(b, copies);
     });
   });
 }

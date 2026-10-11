@@ -1,6 +1,6 @@
 /** What a write may say (`validateOps`): its paths, collections, fields and values, against the schema. */
 import { joinPath, splitPath, type DeltaOp } from "../../core";
-import type { ColumnDef, DocDef, ResolvedTable, Schema, ValidationError } from "../../schema";
+import { holdsField, type ColumnDef, type DocDef, type ResolvedTable, type Schema, type ValidationError } from "../../schema";
 import { pastSafeId, rowId, sameId } from "../scope";
 
 /**
@@ -38,7 +38,10 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
     const fkCol = table.parent?.fkColumn;
     // Own columns only: `table.columns.toString` is Object.prototype's, not a column.
     const columnOf = (k: string): ColumnDef | undefined => (Object.hasOwn(table.columns, k) ? table.columns[k] : undefined);
-    const isKnownKey = (k: string) => k === "id" || k === fkCol || columnOf(k) !== undefined;
+    // A column the document does not hold (its `columns`) is no field of it: it may not write it,
+    // as it never reads it (todo #70). A walk puts back what the store recorded, whole.
+    const held = (k: string) => opts.walk || holdsField(def, schema, collKey, k);
+    const isKnownKey = (k: string) => (k === "id" || k === fkCol || columnOf(k) !== undefined) && held(k);
     // A field's value: a column's by its type; the parent key's as a key (the row moves).
     const fieldErr = (field: string, value: unknown): string | null => {
       if (field === fkCol) return validateParentKey(field, value);
@@ -51,9 +54,10 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
     // given -- by the value, or, for a list-mode root row's add, by the scope,
     // as Postgres checks after it stamps them. It used to be stored as "", 0 or
     // false, acked and broadcast.
-    const required = (value: Record<string, unknown>, given: Record<string, unknown> = {}) => {
+    // A replace leaves the columns the document does not hold as they are; an add makes them.
+    const required = (value: Record<string, unknown>, given: Record<string, unknown> = {}, add = false) => {
       for (const [col, colDef] of Object.entries(table.columns)) {
-        if (!colDef.nullable && colDef.default === undefined && value[col] === undefined && given[col] === undefined) {
+        if (!colDef.nullable && colDef.default === undefined && value[col] === undefined && given[col] === undefined && (add || held(col))) {
           errors.push({ path: op.path, message: `Required field missing: ${col} (give it a value, or declare a default or make it nullable in the schema)` });
         }
       }
@@ -100,7 +104,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
         continue;
       }
       const field = parts[1]!;
-      if (field !== fkCol && !columnOf(field)) {
+      if ((field !== fkCol && !columnOf(field)) || !held(field)) {
         errors.push({ path: op.path, message: `Unknown field: ${field}` });
         continue;
       }
@@ -144,7 +148,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
         if (!isKnownKey(key)) errors.push({ path: op.path, message: `Unknown field: ${key}` });
       }
 
-      required(value, op.op === "add" && opts.list && collKey === def.root ? opts.values : {});
+      required(value, op.op === "add" && opts.list && collKey === def.root ? opts.values : {}, op.op === "add");
 
       // Type-check the fields that map to declared columns, and a replace's
       // parent key (an add's is its document's root, or found in scope).
@@ -157,7 +161,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
     // Field-level replace: /<coll>/<id>/field -- a column, or the parent key (the row moves, as on Postgres)
     if (op.op === "replace" && parts.length === 3) {
       const field = parts[2]!;
-      if (field !== fkCol && !columnOf(field)) {
+      if ((field !== fkCol && !columnOf(field)) || !held(field)) {
         errors.push({ path: op.path, message: `Unknown field: ${field}` });
         continue;
       }

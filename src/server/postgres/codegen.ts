@@ -24,6 +24,7 @@
  */
 import type { Schema, DocDef } from "./schema";
 import { q, lit, columnSqlType, sqlDefault, findCascadeOn } from "./sql";
+import { assertScopeKeys } from "../scope";
 
 export interface GenerateSqlOptions {
   /** Header comment included at the top of the file. */
@@ -128,10 +129,13 @@ export function generateSql(
   lines.push("");
 
   // Doc definitions. `implied` is written when a document is implied (and
-  // then for each, so one that stops being implied is reset): SQL for an app
-  // with none needs no framework SQL newer than it.
+  // then for each, so one that stops being implied is reset), and `held` when
+  // one names its columns (todo #70): SQL for an app with neither needs no
+  // framework SQL newer than it.
   lines.push("-- Doc definitions");
   const implied = docs.some((d) => d.implied);
+  const held = docs.some((d) => d.columns);
+  for (const doc of docs) assertScopeKeys(doc, schema);   // its scope's keys and the columns it names are its collections' columns
   for (const doc of docs) {
     // Build a proper Postgres text[] array literal: each element is wrapped in
     // double quotes with embedded `"` and `\` backslash-escaped, so a comma or
@@ -145,13 +149,13 @@ export function generateSql(
       : "'{}'";
     const scope = lit(JSON.stringify(doc.scope));
     lines.push(
-      `INSERT INTO _delta_docs (prefix, root_collection, include, scope${implied ? ", implied" : ""})`,
+      `INSERT INTO _delta_docs (prefix, root_collection, include, scope${implied ? ", implied" : ""}${held ? ", held" : ""})`,
     );
     lines.push(
-      `  VALUES (${lit(doc.prefix)}, ${lit(doc.root)}, ${include}, ${scope}${implied ? `, ${!!doc.implied}` : ""})`,
+      `  VALUES (${lit(doc.prefix)}, ${lit(doc.root)}, ${include}, ${scope}${implied ? `, ${!!doc.implied}` : ""}${held ? `, ${lit(JSON.stringify(doc.columns ?? {}))}` : ""})`,
     );
     lines.push(
-      `  ON CONFLICT (prefix) DO UPDATE SET root_collection = EXCLUDED.root_collection, include = EXCLUDED.include, scope = EXCLUDED.scope${implied ? ", implied = EXCLUDED.implied" : ""};`,
+      `  ON CONFLICT (prefix) DO UPDATE SET root_collection = EXCLUDED.root_collection, include = EXCLUDED.include, scope = EXCLUDED.scope${implied ? ", implied = EXCLUDED.implied" : ""}${held ? ", held = EXCLUDED.held" : ""};`,
     );
   }
   lines.push("");

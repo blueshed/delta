@@ -225,7 +225,7 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION _delta_open_held(p_doc_name TEXT)
 RETURNS JSONB AS $$
 DECLARE
-  v_doc    JSONB := COALESCE(delta_open(p_doc_name), '{}'::jsonb);
+  v_doc    JSONB := COALESCE(_delta_open(p_doc_name, TRUE), '{}'::jsonb);
   v_def    _delta_docs := _delta_find_doc(p_doc_name);
   v_scope  JSONB;
   v_coll   RECORD;
@@ -276,10 +276,42 @@ END;
 $$ LANGUAGE plpgsql STABLE;
 
 -- ---------------------------------------------------------------------------
--- delta_open: load a doc from relational tables, return JSONB + version
+-- _delta_show: a row of `p_coll` as a document shows it -- where it names that
+-- collection's columns (`held`, todo #70), those, the row's id and its parent
+-- key; else whole. _delta_show_doc: each row of a document so (`p_single`: its
+-- root is one row, not a map). showRow / showDoc in schema.ts.
 -- ---------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION delta_open(p_doc_name TEXT)
+CREATE OR REPLACE FUNCTION _delta_show(p_def _delta_docs, p_coll TEXT, p_row JSONB)
+RETURNS JSONB AS $$
+  SELECT CASE WHEN NOT COALESCE(p_def.held, '{}'::jsonb) ? p_coll OR jsonb_typeof(p_row) IS DISTINCT FROM 'object' THEN p_row
+    ELSE (SELECT COALESCE(jsonb_object_agg(f, v), '{}'::jsonb) FROM jsonb_each(p_row) AS e(f, v)
+           WHERE f = 'id' OR (p_def.held->p_coll) ? f
+              OR f = (SELECT parent_fk FROM _delta_collections WHERE collection_key = p_coll)) END;
+$$ LANGUAGE sql STABLE;
+
+CREATE OR REPLACE FUNCTION _delta_show_doc(p_def _delta_docs, p_doc JSONB, p_single BOOLEAN)
+RETURNS JSONB AS $$
+DECLARE
+  v_out  JSONB := p_doc;
+  v_coll TEXT;
+BEGIN
+  FOR v_coll IN SELECT jsonb_object_keys(COALESCE(p_def.held, '{}'::jsonb)) LOOP
+    CONTINUE WHEN jsonb_typeof(p_doc->v_coll) IS DISTINCT FROM 'object';
+    v_out := v_out || jsonb_build_object(v_coll, CASE WHEN p_single AND v_coll = p_def.root_collection THEN _delta_show(p_def, v_coll, p_doc->v_coll)
+      ELSE (SELECT COALESCE(jsonb_object_agg(id, _delta_show(p_def, v_coll, r)), '{}'::jsonb) FROM jsonb_each(p_doc->v_coll) AS e(id, r)) END);
+  END LOOP;
+  RETURN v_out;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+-- ---------------------------------------------------------------------------
+-- delta_open: load a doc from relational tables, return JSONB + version -- its
+-- rows as it shows them (_delta_show_doc). _delta_open(name, TRUE) reads them
+-- whole: what the ledger's inverse and a walk's guard read.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION _delta_open(p_doc_name TEXT, p_whole BOOLEAN)
 RETURNS JSONB AS $$
 DECLARE
   v_def       _delta_docs;
@@ -368,9 +400,13 @@ BEGIN
     ON CONFLICT (doc_name) DO NOTHING;
   SELECT version INTO v_version FROM _delta_versions WHERE doc_name = p_doc_name;
 
+  IF NOT p_whole THEN v_result := _delta_show_doc(v_def, v_result, v_mode <> 'list'); END IF;
   RETURN v_result || jsonb_build_object('_version', v_version);
 END;
 $$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION delta_open(p_doc_name TEXT)
+RETURNS JSONB LANGUAGE sql AS $$ SELECT _delta_open(p_doc_name, FALSE); $$;
 
 -- ---------------------------------------------------------------------------
 -- The documents open now (_delta_held, todo #73): each listener holds the

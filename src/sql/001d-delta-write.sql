@@ -273,15 +273,16 @@ BEGIN
       CONTINUE WHEN v_was AND v_is AND (v_t ? 'carried');   -- carried along, and held either way: unchanged for it
       v_root := v_single AND (v_t->>'coll') = v_def.root_collection;
       v_path := CASE WHEN v_root THEN _delta_build_path(v_t->>'coll') ELSE _delta_build_path(v_t->>'coll', v_t->>'id') END;
+      -- each row as this document shows it: the columns it holds (_delta_show, todo #70)
       IF v_was AND v_is THEN   -- stayed: what changed
         v_told := v_told || COALESCE((SELECT jsonb_agg(jsonb_build_object('op', 'replace', 'path', v_path || _delta_build_path(f), 'value', v) ORDER BY f COLLATE "C")
-                                        FROM jsonb_each(v_t->'after') AS e(f, v) WHERE v IS DISTINCT FROM v_t->'was'->f), '[]'::jsonb);
+                                        FROM jsonb_each(_delta_show(v_def, v_t->>'coll', v_t->'after')) AS e(f, v) WHERE v IS DISTINCT FROM v_t->'was'->f), '[]'::jsonb);
       ELSIF v_is THEN
         v_told := v_told || jsonb_build_array(jsonb_build_object(
-          'op', CASE WHEN v_root THEN 'replace' ELSE 'add' END, 'path', v_path, 'value', v_t->'after'));
+          'op', CASE WHEN v_root THEN 'replace' ELSE 'add' END, 'path', v_path, 'value', _delta_show(v_def, v_t->>'coll', v_t->'after')));
       ELSIF v_root THEN   -- gone: null, or the empty root an implied document then opens with
         v_told := v_told || jsonb_build_array(jsonb_build_object('op', 'replace', 'path', v_path, 'value',
-          CASE WHEN COALESCE(v_def.implied, FALSE) THEN _delta_implied_root(v_def, (v_t->>'id')::BIGINT) ELSE 'null'::jsonb END));
+          CASE WHEN COALESCE(v_def.implied, FALSE) THEN _delta_show(v_def, v_t->>'coll', _delta_implied_root(v_def, (v_t->>'id')::BIGINT)) ELSE 'null'::jsonb END));
       ELSE
         v_told := v_told || jsonb_build_array(jsonb_build_object('op', 'remove', 'path', v_path));
       END IF;
@@ -333,6 +334,17 @@ $$ LANGUAGE plpgsql STABLE;
 -- and asked with the value's fields, before whether the row is there (todo
 -- #3; replaceRow in sqlite.ts).
 -- ---------------------------------------------------------------------------
+
+-- _delta_held_columns: the columns of `p_coll` (`p_columns`, its columns_def)
+-- a document holds -- those it names (`held`, todo #70), else all. A write
+-- through it names those alone (_delta_assert_fields: 400 for another, as for
+-- a column there is not), and replacing a row whole sets those alone.
+
+CREATE OR REPLACE FUNCTION _delta_held_columns(p_def _delta_docs, p_coll TEXT, p_columns JSONB)
+RETURNS JSONB AS $$
+  SELECT CASE WHEN NOT COALESCE(p_def.held, '{}'::jsonb) ? p_coll THEN p_columns
+    ELSE COALESCE((SELECT jsonb_object_agg(k, v) FROM jsonb_each(p_columns) AS e(k, v) WHERE (p_def.held->p_coll) ? k), '{}'::jsonb) END;
+$$ LANGUAGE sql STABLE;
 
 CREATE OR REPLACE FUNCTION _delta_whole(p_columns JSONB, p_value JSONB)
 RETURNS JSONB AS $$
@@ -392,6 +404,7 @@ DECLARE
   v_row           JSONB;
   v_new_row       JSONB;
   v_blank         JSONB;             -- a replace of the row whole: each column as an add leaves it (_delta_whole); of a field, nothing
+  v_cols          JSONB;             -- the op's collection's columns the document holds (_delta_held_columns); a walk's, all
   v_exists        BOOLEAN;
   v_missing       TEXT;
   v_ts            TIMESTAMPTZ := NOW();
@@ -503,6 +516,8 @@ BEGIN
     IF NOT FOUND THEN
       RAISE EXCEPTION 'unknown collection: %', v_coll_key USING ERRCODE = '22023';
     END IF;
+    -- a walk puts back what the ledger recorded, whole
+    v_cols := CASE WHEN COALESCE(p_walk, FALSE) THEN v_coll.columns_def ELSE _delta_held_columns(v_def, v_coll_key, v_coll.columns_def) END;
 
     -- Scope guard: an op may only target the doc's root or an included
     -- collection. Defence-in-depth — a client that opened doc A must not write
@@ -541,8 +556,8 @@ BEGIN
         END IF;
         v_op := jsonb_set(v_op, '{value}', jsonb_build_object(v_parts[2], v_op->'value'));
       END IF;
-      PERFORM _delta_assert_fields(v_coll_key, v_coll.columns_def, v_coll.parent_fk, v_op->'value');
-      v_blank := CASE WHEN array_length(v_parts, 1) = 1 THEN _delta_whole(v_coll.columns_def, v_op->'value') ELSE '{}'::jsonb END;
+      PERFORM _delta_assert_fields(v_coll_key, v_cols, v_coll.parent_fk, v_op->'value');
+      v_blank := CASE WHEN array_length(v_parts, 1) = 1 THEN _delta_whole(v_cols, v_op->'value') ELSE '{}'::jsonb END;
 
       -- Read + lock
       IF v_coll.temporal THEN
@@ -641,7 +656,7 @@ BEGIN
           v_op->>'path', p_doc_name, v_def.root_collection
           USING ERRCODE = '22023';
       END IF;
-      PERFORM _delta_assert_fields(v_coll_key, v_coll.columns_def, v_coll.parent_fk, v_op->'value');
+      PERFORM _delta_assert_fields(v_coll_key, v_cols, v_coll.parent_fk, v_op->'value');
       v_id_text := v_parts[2];
       -- Auto-generate ID from sequence if path ends with '-'
       IF v_id_text = '-' THEN
@@ -837,8 +852,8 @@ BEGIN
         END IF;
         v_op := jsonb_set(v_op, '{value}', jsonb_build_object(v_parts[3], v_op->'value'));
       END IF;
-      PERFORM _delta_assert_fields(v_coll_key, v_coll.columns_def, v_coll.parent_fk, v_op->'value');
-      v_blank := CASE WHEN array_length(v_parts, 1) = 2 THEN _delta_whole(v_coll.columns_def, v_op->'value') ELSE '{}'::jsonb END;
+      PERFORM _delta_assert_fields(v_coll_key, v_cols, v_coll.parent_fk, v_op->'value');
+      v_blank := CASE WHEN array_length(v_parts, 1) = 2 THEN _delta_whole(v_cols, v_op->'value') ELSE '{}'::jsonb END;
 
       IF v_coll.temporal THEN
         EXECUTE format(

@@ -24,7 +24,7 @@ import { type DeltaOp, splitPath, joinPath, changedFields } from "../core";
 import { createLogger } from "./logger";
 import { createLedger, isEntryId, ledgerWho, planWalk, rowAt, socketCursor } from "./ledger";
 import { assertScopeKeys, meets, resolveScope, rowId, sameId, whereOf, type Scope } from "./scope";
-import { defaultForType, type DocDef, type ResolvedTable, type Schema } from "../schema";
+import { defaultForType, holdsField, showDoc, showRow, type DocDef, type ResolvedTable, type Schema } from "../schema";
 import { waitForLocks } from "./sqlite/ddl";
 import { keeping, scopeValue } from "./sqlite/keep";
 import { loadDocAt, readDoc } from "./sqlite/read";
@@ -608,7 +608,8 @@ export function registerDocs<I = unknown>(
           && !(list && parent.collection !== def.root) && !parentHeld(parent.collection, to)) {
         refuse(404, `Row not found: ${parent.collection}/${to}`);
       }
-      if (whole) for (const [col, colDef] of Object.entries(table.columns)) run.row[col] = leftOut(colDef);
+      // (of the columns this document holds: it leaves the rest as they are)
+      if (whole) for (const [col, colDef] of Object.entries(table.columns)) if (holdsField(def, schema, collKey, col)) run.row[col] = leftOut(colDef);
       for (const [field, value] of Object.entries(fields)) {
         if (field === "id" || field === "valid_from" || field === "valid_to") continue;
         run.row[field] = value;
@@ -797,9 +798,10 @@ export function registerDocs<I = unknown>(
         if ((!was && !is) || (t.carried && was && is)) continue;
         const root = single && t.coll === m.def.root;
         const path = root ? joinPath(t.coll) : joinPath(t.coll, String(t.id));
-        if (was && is) ops.push(...changedFields(path, t.was, t.after));
-        else if (is) ops.push({ op: root ? "replace" : "add", path, value: t.after });
-        else ops.push(root ? { op: "replace", path, value: m.def.implied ? emptyDoc(m.def, m.docId)[m.def.root] : null } : { op: "remove", path });
+        const show = (row: any) => showRow(m.def, schema, t.coll, row);   // the columns it holds (todo #70)
+        if (was && is) ops.push(...changedFields(path, show(t.was), show(t.after)));
+        else if (is) ops.push({ op: root ? "replace" : "add", path, value: show(t.after) });
+        else ops.push(root ? { op: "replace", path, value: m.def.implied ? show(emptyDoc(m.def, m.docId)[m.def.root]) : null } : { op: "remove", path });
       }
       told.set(target, ops);
     }
@@ -845,8 +847,10 @@ export function registerDocs<I = unknown>(
     onClientDrop(client, releaseClient);
 
     // with a ledger, the version the document is at, as the Postgres backend's open says it (`_v`),
-    // so a copy kept from the stream of changes knows where it starts
-    respond({ result: ledger ? { ...doc, _v: ledger.version(docName) } : doc });
+    // so a copy kept from the stream of changes knows where it starts; its rows as it shows them
+    // (the copy kept here is whole: what undo and the inverse read)
+    const shown = showDoc(match.def, schema, doc, resolveScope(match.def, match.docId).mode === "single");
+    respond({ result: ledger ? { ...shown, _v: ledger.version(docName) } : shown });
     log.info(`opened ${docName}`);
   }));
 
@@ -1135,7 +1139,7 @@ export function registerDocs<I = unknown>(
     let doc: any;
     try { doc = loadDocAt(db, schema, match.def, match.docId, String(msg.at)); }
     catch (err: any) { return respond({ error: failure(named(err)) }); }
-    respond(doc ? { result: doc } : { error: NOT_FOUND });
+    respond(doc ? { result: showDoc(match.def, schema, doc, resolveScope(match.def, match.docId).mode === "single") } : { error: NOT_FOUND });
   }));
 
   ws.on("close", guarded((msg, client, respond) => {

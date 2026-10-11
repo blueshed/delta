@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A document can hold some columns of a collection (todo #70).** `defineDoc(prefix, { root,
+  include, columns: { legs: ["day", "from", "to"] } })` holds of each collection it names those
+  columns, the row's id and its parent key (a collection not named, whole), on every backend: it
+  opens (and `open_at`) with them, is told only what changes of them (a write of another column
+  tells it nothing), and a write through it names them alone (another is a 400, as a column the
+  table does not have). A row replaced whole through it keeps the columns it does not hold; undo
+  puts back every column. A column named that its collection lacks is thrown at registration and
+  by `generateSql`. Postgres keeps them in `_delta_docs.held` (`001a`, added if not there), shown
+  by `_delta_show` / `_delta_show_doc` (`001c`, `001d`, `001e`; `delta_open` reads through
+  `_delta_open(name, whole)`, whose whole read the ledger uses): apply with `bunx @blueshed/delta
+  init`.
 - **`@blueshed/delta/json` exports `defineSchema`, `defineDoc` and `defineCustomDoc`**, as
   `./sqlite` and `./postgres` do, so an app on the JSON file imports everything from one place
   and moving on changes the import path only.

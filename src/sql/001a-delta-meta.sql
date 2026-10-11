@@ -25,6 +25,11 @@ CREATE TABLE IF NOT EXISTS _delta_docs (
 -- empty, and its first write makes the row -- as on SQLite and ./json.
 ALTER TABLE _delta_docs ADD COLUMN IF NOT EXISTS implied BOOLEAN NOT NULL DEFAULT FALSE;
 
+-- The columns a document holds of a collection it names (todo #70): collection
+-- key -> its column names. The row's id and parent key it holds always; a
+-- collection not named, whole. It is opened, told and written by those alone.
+ALTER TABLE _delta_docs ADD COLUMN IF NOT EXISTS held JSONB NOT NULL DEFAULT '{}';
+
 CREATE TABLE IF NOT EXISTS _delta_versions (
   doc_name TEXT PRIMARY KEY,
   version  BIGINT NOT NULL DEFAULT 0

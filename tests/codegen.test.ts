@@ -159,3 +159,18 @@ describe("generateSql", () => {
     expect(sql).toContain("-- Regenerate: make sql");
   });
 });
+
+describe("a document's columns (todo #70)", () => {
+  const schema = defineSchema({ trips: { columns: { name: "text" } }, legs: { parent: "trips", columns: { day: "integer", notes: "text?" } } });
+
+  test("are written to _delta_docs.held, and only when a document names some", () => {
+    const slim = defineDoc("trip-map:", { root: "trips", include: ["legs"], columns: { legs: ["day"] } });
+    expect(generateSql(schema, [slim])).toContain(`'{"legs":["day"]}'`);
+    expect(generateSql(schema, [defineDoc("trip:", { root: "trips", include: ["legs"] })])).not.toContain("held");
+  });
+
+  test("name only collections it holds, and only columns they have", () => {
+    expect(() => defineDoc("x:", { root: "trips", include: [], columns: { legs: ["day"] } })).toThrow("which it does not hold");
+    expect(() => generateSql(schema, [defineDoc("x:", { root: "trips", include: ["legs"], columns: { legs: ["nope"] } })])).toThrow('names column "nope" of legs');
+  });
+});

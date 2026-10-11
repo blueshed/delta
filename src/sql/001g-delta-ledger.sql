@@ -177,7 +177,7 @@ DECLARE
   v_entry   BIGINT;
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtext('delta:' || p_doc_name));
-  v_before  := COALESCE(delta_open(p_doc_name), '{}'::jsonb);
+  v_before  := COALESCE(_delta_open(p_doc_name, TRUE), '{}'::jsonb);   -- whole: the inverse puts back every column
   -- the rows each removal's cascade will take beyond the document, as they are: its inverse puts them back
   v_before  := _delta_beside(v_before, _delta_find_doc(p_doc_name), (
     SELECT jsonb_agg(r) FROM jsonb_array_elements(p_ops) AS o,

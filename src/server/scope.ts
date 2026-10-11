@@ -49,6 +49,11 @@ const OPS = new Set<Op>(["=", "!=", "<", ">", "<=", ">="]);
 export function assertScopeKeys(def: DocDef, schema: Schema): void {
   const root = schema.tables[def.root];
   if (!root) throw new Error(`doc "${def.prefix}" references unknown root collection: ${def.root}`);
+  // and every column it names is one of its collection's (todo #70)
+  for (const [coll, cols] of Object.entries(def.columns ?? {})) {
+    const table = schema.tables[coll];
+    for (const col of cols) if (!table || !Object.hasOwn(table.columns, col)) throw new Error(`doc "${def.prefix}" names column "${col}" of ${coll}, which has no such column`);
+  }
   const valid = ["id", ...(root.parent ? [root.parent.fkColumn] : []), ...Object.keys(root.columns)];
   for (const [key, binding] of Object.entries(def.scope)) {
     if (valid.includes(key) || binding.startsWith("at:")) continue;
