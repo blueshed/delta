@@ -44,7 +44,8 @@ let ws: ReturnType<typeof createWs>;
 let listener: Awaited<ReturnType<typeof createDocListener>>;
 
 beforeEach(async () => {
-  await pool.query("TRUNCATE add_notes, add_tags; TRUNCATE _delta_versions;");
+  // delta's serials are not owned by their tables (TRUNCATE leaves them): each test names ids anew (#71)
+  await pool.query("TRUNCATE add_notes, add_tags; ALTER SEQUENCE seq_add_notes RESTART; ALTER SEQUENCE seq_add_tags RESTART; TRUNCATE _delta_versions;");
   ws = createWs();
   ws.setServer({ publish() {} });
   listener = await createDocListener(ws, pool, { types: [docTypeFromDef(doc, pool), docTypeFromDef(tags, pool)] });
