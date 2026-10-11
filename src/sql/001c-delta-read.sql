@@ -280,7 +280,12 @@ BEGIN
       USING ERRCODE = 'P0001';
   END IF;
 
-  v_view := _delta_source_view(v_root_coll.table_name, v_root_coll.temporal);
+  -- A time in the name (`at:`): the whole document as it stood then, its root
+  -- as its included collections, as SQLite reads it.
+  v_view := _delta_source_view(v_root_coll.table_name, v_root_coll.temporal, v_at);
+  IF v_root_coll.temporal AND v_at IS NOT NULL THEN
+    v_where := v_where || ' AND ' || _delta_temporal_where(v_at);
+  END IF;
 
   IF v_mode = 'list' THEN
     -- List mode: return all matching rows as a map

@@ -47,6 +47,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`@blueshed/delta/json` opens a newcomer's first file**: one that is not there, empty, or `{}`
   opens as empty tables and takes a first write. `{}` crashed `registerDocs` (no `tables`), and
   an empty file failed to parse.
+- **A document named with a time (`at:`) reads the past: it takes no writes and is told only what
+  its time does not keep**, on every backend. A write through `notes-on:2021-01-01` changed the
+  rows as they are now, and such a document open was told every current write, so its copy
+  drifted from a fresh open. Now a write through it is refused (403, read-only; on Postgres
+  SQLSTATE `25006`, which the listener maps), and a write elsewhere is told to it only where it
+  changes what it reads: a temporal row is read as it stood, so a time past hears none; a table
+  that keeps no history is read as it is, so it hears those; a time to come reads as now. The
+  time is a date, `YYYY-MM-DD`, the instant midnight UTC begins it -- on Postgres whatever the
+  session's `TimeZone` (it was cast in the session's zone) -- and anything else is a 400 (SQLite
+  and the JSON file read `notadate` as text, Postgres answered 500). In `scope.ts` (`isDay`,
+  shared with `keep.ts`), `sqlite.ts`, `001b` (`_delta_resolve_scope`, `_delta_doc_holds`) and
+  `001d` (`delta_apply`), replaced in place: apply them again.
 
 ## [0.12.0] - 2026-10-11
 

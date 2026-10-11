@@ -28,7 +28,7 @@ import { defaultForType, type DocDef, type ResolvedTable, type Schema } from "..
 import { waitForLocks } from "./sqlite/ddl";
 import { keeping, scopeValue } from "./sqlite/keep";
 import { loadDocAt, readDoc } from "./sqlite/read";
-import { closeRow, current, decodeRow, insertCollectionRow, insertRow, named, now, refuse, updateRow } from "./sqlite/rows";
+import { closeRow, current, decodeRow, insertCollectionRow, insertRow, named, now, refuse, sqliteTime, updateRow } from "./sqlite/rows";
 import { namesRootRow, validateOps } from "./sqlite/validate";
 
 export type {
@@ -389,6 +389,8 @@ export function registerDocs<I = unknown>(
   function holds(def: DocDef, scope: Scope, coll: string, row: any): boolean {
     if (!row) return false;
     if (coll !== def.root && !def.include.includes(coll)) return false;
+    // named with a time past, it holds a temporal row as it stood then, which no write now changes (a table that keeps no history it reads as it is)
+    if (scope.at !== undefined && schema.tables[coll]?.temporal && sqliteTime(scope.at) <= sqliteTime(new Date().toISOString())) return false;
     if (coll === def.root) {
       if (scope.mode !== "list" && !sameId(row.id, scope.id)) return false;
       // a name its columns cannot take holds nothing: it is refused (400) when opened or written through
@@ -883,6 +885,8 @@ export function registerDocs<I = unknown>(
     // up front instead of silently acking an op that diverges cache/broadcast
     // from what the DB can persist.
     const scope = resolveScope(def, docName.slice(def.prefix.length));
+    // a document named with a time reads it as it stood: what is written now is not its to write
+    if (scope.at !== undefined) return { error: { code: 403, message: `${docName} reads ${def.root} as it stood at ${scope.at}: it takes no writes. Write through a document with no time in its name.` } };
     const validationErrors = validateOps(schema, def, ops, { list: scope.mode === "list", values: scope.values, walk: by.undoes !== undefined });
     if (validationErrors.length) {
       return { error: { code: 400, message: validationErrors.map((e) => `${e.path}: ${e.message}`).join("; ") } };

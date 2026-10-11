@@ -1,6 +1,6 @@
 /** How a table's columns keep a scope's values, so a condition reads by one rule what an add stamps (./scope `Keep`). */
 import type { ResolvedTable } from "../../schema";
-import type { Keep } from "../scope";
+import { isDay, type Keep } from "../scope";
 import { encodeValue, refuse } from "./rows";
 
 /**
@@ -38,10 +38,7 @@ export function scopeValue(table: ResolvedTable, col: string, text: string): unk
     case "timestamptz": {
       // A date, YYYY-MM-DD -- a name's ":" separates its values, so it holds no time of day -- the instant midnight
       // UTC begins it, as Postgres's resolver reads it; stamped on an add as the text, as a time is stored here.
-      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(t);
-      const [y, mo, d] = m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [0, 0, 0];
-      const days = [31, y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1];
-      if (y >= 1 && days !== undefined && d >= 1 && d <= days) return t;
+      if (isDay(t)) return t;
       return refuse(400, `${col} must be a date, YYYY-MM-DD, not "${text}"`);
     }
     case "text": return text;

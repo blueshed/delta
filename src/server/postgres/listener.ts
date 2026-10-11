@@ -70,7 +70,7 @@ function errMsg(err: unknown): string {
  * sent again goes through, or meets the rows the other made (409). Anything
  * else is the server's (500).
  */
-const CODE_OF_SQLSTATE: Record<string, number> = { "22023": 400, "22P02": 400, "23502": 400, P0002: 404, "23505": 409, "40001": 409, "40P01": 409 };
+const CODE_OF_SQLSTATE: Record<string, number> = { "22023": 400, "22P02": 400, "23502": 400, "25006": 403, P0002: 404, "23505": 409, "40001": 409, "40P01": 409 };
 function wireCode(err: unknown): number {
   const state = (err as { code?: unknown } | null)?.code;
   return (typeof state === "string" && CODE_OF_SQLSTATE[state]) || 500;

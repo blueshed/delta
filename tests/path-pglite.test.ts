@@ -101,6 +101,16 @@ describe("pglite: a date in a name, whatever the session's TimeZone", () => {
       await pool.query("RESET TimeZone");
     }
   });
+
+  test("a time in the name (at:) too: the seed's note, begun at 2020-01-01T00:00:00Z, is there at 2020-01-01 in Tokyo", async () => {
+    await pool.query("SET TimeZone = 'Asia/Tokyo'");   // its midnight is 15:00 UTC the day before
+    try {
+      const { result } = await backend.process.call("open", { doc: "fo-notes-on:2020-01-01" });
+      expect(Object.keys(result.notes)).toEqual(["1"]);
+    } finally {
+      await pool.query("RESET TimeZone");
+    }
+  });
 });
 
 /**

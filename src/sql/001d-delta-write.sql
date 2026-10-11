@@ -381,6 +381,11 @@ BEGIN
   END IF;
 
   v_scope   := _delta_resolve_scope(v_def, p_doc_name);
+  -- a document named with a time reads it as it stood: what is written now is not its to write (403)
+  IF v_scope->>'at' IS NOT NULL THEN
+    RAISE EXCEPTION '% reads % as it stood at %: it takes no writes. Write through a document with no time in its name.',
+      p_doc_name, v_def.root_collection, left(v_scope->>'at', 10) USING ERRCODE = '25006';
+  END IF;
   v_is_list := (v_scope->>'mode') = 'list';
   IF NOT v_is_list THEN
     v_doc_id := (v_scope->'values'->>'id')::BIGINT;
@@ -420,7 +425,7 @@ BEGIN
     -- one row, walked as one (_delta_walk_key). A walk is not asked: an undo
     -- of the root's removal puts it back (todo #43), and a walk of such a
     -- document starts from the root absent, guarded by its plan
-    -- (_delta_walk_plan), as SQLite's and the JSON file's are.
+    -- (_delta_walk_plan), as SQLite's and ./json's are.
     IF NOT v_is_list AND NOT COALESCE(p_walk, FALSE) THEN   -- a walk not said (null) is none
       -- there, and meeting the whole of its name's scope (a column beside its id), as delta_open reads it
       EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I t WHERE t.id = $1 AND %s)', v_root_view, v_scope->>'where') INTO v_exists USING v_doc_id;
@@ -737,8 +742,8 @@ BEGIN
         IF NOT v_is_list AND v_r->>'coll' = v_def.root_collection THEN v_root_was := v_r->'row'; END IF;
       END LOOP;
       v_removed := _delta_cascade_remove(v_coll_key, v_id);
-      -- A remove of a row that is not there is a 404, as on SQLite and the
-      -- JSON file (A6): the scope gate above lets any id of a collection a
+      -- A remove of a row that is not there is a 404, as on SQLite and ./json
+      -- (the same tables, kept in a JSON file; A6): the scope gate above lets any id of a collection a
       -- document holds whole (one with no parent, a list's include) through,
       -- and the cascade removes nothing (or RLS hid the row from this identity).
       IF jsonb_array_length(v_removed) = 0 THEN

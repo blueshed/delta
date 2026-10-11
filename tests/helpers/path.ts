@@ -108,6 +108,10 @@ export const pathDocs = [
   defineDoc("fo-all-households:", { root: "households", include: [] }),
   // the party: the wedding, its households and their favours
   defineDoc("fo-party:", { root: "weddings", include: ["households", "favours"] }),
+  // a time in the name (at:): the document as it stood then -- the notes, the courses and every note, a wedding and its notes
+  defineDoc("fo-notes-on:", { root: "notes", include: [], scope: { at: "at:when" } }),
+  defineDoc("fo-courses-noted-on:", { root: "courses", include: ["notes"], scope: { at: "at:when" } }),
+  defineDoc("fo-board-on:", { root: "weddings", include: ["notes"], scope: { id: ":id", at: "at:when" } }),
 ];
 
 /**
@@ -2011,6 +2015,46 @@ export function fanOutCases(backend: () => PathBackend): void {
       await expectTold(b, "fo-seats-at:5", [[{ op: "add", path: "/seats/1", value: seat(1, 5, true, { veg: true }) }], added.ops]);
       await expectTold(b, "fo-seats-at:open:all", [added.ops]);
       await assertCopiesHold(b, copies);
+    });
+  });
+
+  describe("a document named with a time (at:) reads the past", () => {
+    const note = (text: string) => ({ op: "replace", path: "/notes/1", value: { id: 1, weddings_id: 1, text } });
+    const named = (name: string) => ({ op: "replace", path: "/weddings", value: { id: 1, name } });
+
+    test("open across a write, it is told only what its time does not keep -- the wedding's name, which keeps no history, not the note written since; a time to come reads as now, and hears both", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-board-on:1:2021-01-01", "fo-notes-on:2021-01-01", "fo-board-on:1:2999-01-01", "fo-notes-on:"]);
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/notes/1/text", value: "bring tables" }, { op: "replace", path: "/weddings/name", value: "renamed" }]);
+      await expectTold(b, "fo-board-on:1:2021-01-01", [[named("renamed")]]);
+      await expectTold(b, "fo-board-on:1:2999-01-01", [[note("bring tables"), named("renamed")]]);
+      await expectTold(b, "fo-notes-on:", [[note("bring tables")]]);
+      await expectSilent(b, "fo-notes-on:2021-01-01");
+      await assertCopiesHold(b, copies);
+    });
+
+    test("it takes no writes (403), past or to come, and nothing is written", async () => {
+      const b = backend();
+      await openAll(b.process, ["fo-board:1", "fo-board-on:1:2021-01-01", "fo-notes-on:2021-01-01", "fo-board-on:1:2999-01-01"]);
+      const code = async (doc: string, ops: unknown[]) => (await b.process.call("delta", { doc, ops })).error?.code;
+      expect(await code("fo-notes-on:2021-01-01", [{ op: "replace", path: "/notes/1/text", value: "via the past" }])).toBe(403);
+      expect(await code("fo-board-on:1:2021-01-01", [{ op: "add", path: "/notes/-", value: { text: "via the past" } }])).toBe(403);
+      expect(await code("fo-board-on:1:2021-01-01", [{ op: "replace", path: "/weddings/name", value: "via the past" }])).toBe(403);
+      expect(await code("fo-board-on:1:2999-01-01", [{ op: "replace", path: "/weddings/name", value: "via what is to come" }])).toBe(403);
+      const board = content((await b.process.call("open", { doc: "fo-board:1" })).result);
+      expect([board.weddings, board.notes]).toEqual([{ id: 1, name: "ours" }, { "1": { id: 1, weddings_id: 1, text: "bring chairs" } }]);
+      await expectSilent(b, "fo-board:1", "fo-board-on:1:2021-01-01", "fo-notes-on:2021-01-01", "fo-board-on:1:2999-01-01");
+    });
+
+    test("its time is a date, YYYY-MM-DD, the instant midnight UTC begins it; anything else is refused as a mistake (400)", async () => {
+      const b = backend();
+      for (const doc of ["fo-notes-on:notadate", "fo-notes-on:2021-02-30", "fo-notes-on:20210101", "fo-notes-on:today", "fo-board-on:1:2021-13-01"]) {
+        expect({ doc, code: (await b.process.call("open", { doc })).error?.code }).toEqual({ doc, code: 400 });
+      }
+      // the seed's note began at 2020-01-01T00:00:00Z: there at that date, not the day before
+      const notes = async (doc: string) => content((await b.process.call("open", { doc })).result).notes;
+      expect(await notes("fo-notes-on:2020-01-01")).toEqual({ "1": { id: 1, weddings_id: 1, text: "bring chairs" } });
+      expect(await notes("fo-notes-on:2019-12-31")).toEqual({});
     });
   });
 

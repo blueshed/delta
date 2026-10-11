@@ -12,11 +12,11 @@ export function loadDocAt(db: any, schema: Schema, def: DocDef, docId: string, a
 
 /**
  * A document as its scope reads it from the tables -- as they stand, or as they
- * stood at `at` (SQLite's own time form): single mode, one root row and its
+ * stood at `at` (SQLite's own time form; by default, the time in its name, `at:`): single mode, one root row and its
  * children; list mode, every root row the scope admits and each included
  * collection in full -- as Postgres's `delta_open` and `delta_open_at` read it.
  */
-export function readDoc(db: any, schema: Schema, def: DocDef, scope: Scope, at?: string): any | null {
+export function readDoc(db: any, schema: Schema, def: DocDef, scope: Scope, at = scope.at === undefined ? undefined : sqliteTime(scope.at)): any | null {
   const rootTable = schema.tables[def.root];
   if (!rootTable) return null;
   const where = whereOf(scope, keeping(db, rootTable));

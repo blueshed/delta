@@ -190,11 +190,12 @@ BEGIN
     -- Skip empty resolved values (no filter)
     IF v_resolved IS NULL OR v_resolved = '' THEN CONTINUE; END IF;
 
-    -- The value as its column takes it: one its column cannot take is refused
+    -- The value as its column takes it: one its column cannot take is refused.
+    -- A time in the name (at:) is a date, as a time column's condition is.
     v_cond := NULL;
-    IF v_op NOT IN ('at', 'like') THEN
-      v_type := v_root_coll.columns_def->v_key->>'type';
-      IF v_key = 'id' OR v_key = v_root_coll.parent_fk THEN
+    IF v_op <> 'like' THEN
+      v_type := CASE WHEN v_op = 'at' THEN 'timestamptz' ELSE v_root_coll.columns_def->v_key->>'type' END;
+      IF v_op <> 'at' AND (v_key = 'id' OR v_key = v_root_coll.parent_fk) THEN
         -- An id, as SQLite reads one: a whole number, signed, up to 2^53 - 1;
         -- one not whole is none (1.5, 1e0); other text is an id SQLite keeps as
         -- text (a session's token). No row here has one -- every id is a number --
@@ -475,6 +476,9 @@ BEGIN
   IF v_scope ? 'refused' THEN RETURN FALSE; END IF;
   SELECT * INTO v_coll FROM _delta_collections WHERE collection_key = p_coll;
   IF NOT FOUND THEN RETURN FALSE; END IF;
+  -- Named with a time past, it holds a temporal row as it stood then, which no
+  -- write now changes (a table that keeps no history it reads as it is).
+  IF v_coll.temporal AND (v_scope->>'at')::TIMESTAMPTZ <= now() THEN RETURN FALSE; END IF;
 
   -- The root: the one row a single-mode document is named for, or the rows a
   -- list-mode document's condition reads -- tested on the row's own values.

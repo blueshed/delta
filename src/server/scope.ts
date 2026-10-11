@@ -65,7 +65,12 @@ export function resolveScope(def: DocDef, docId: string): Scope {
   for (const { col, op, param } of parsed) {
     const value = valueOf(param);
     if (value === "") continue;
-    if (op === "at") { scope.at = value; continue; }
+    if (op === "at") {
+      // a date, as Postgres's resolver reads one: the instant midnight UTC begins it
+      if (!isDay(value.trim())) throw Object.assign(new Error(`${col} must be a date, YYYY-MM-DD, not "${value}"`), { code: 400 });
+      scope.at = value.trim();
+      continue;
+    }
     scope.conds.push({ col, op, value });
     if (op === "=") scope.values[col] = value;
   }
@@ -74,6 +79,15 @@ export function resolveScope(def: DocDef, docId: string): Scope {
     scope.id = scope.values.id;
   }
   return scope;
+}
+
+/** A day, YYYY-MM-DD, that the calendar has (2021-02-30 is none) -- a name's ":" separates its values, so it holds no time of day. */
+export function isDay(text: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  if (!m) return false;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const days = [31, y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1];
+  return y >= 1 && days !== undefined && d >= 1 && d <= days;
 }
 
 /**

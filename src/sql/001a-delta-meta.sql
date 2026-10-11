@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS _delta_docs (
 );
 
 -- An implied document is there before its root row is (todo #34): it opens
--- empty, and its first write makes the row -- as on SQLite and the JSON file.
+-- empty, and its first write makes the row -- as on SQLite and ./json.
 ALTER TABLE _delta_docs ADD COLUMN IF NOT EXISTS implied BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE TABLE IF NOT EXISTS _delta_versions (
