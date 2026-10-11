@@ -822,6 +822,15 @@ export function documentCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
+    test("an empty write through a document that is not there is not found (404): never there, or its root gone since", async () => {
+      const b = backend();
+      await openAll(b.process, ["fo-board:1", "fo-household:2"]);
+      expect((await b.process.call("delta", { doc: "fo-board:99", ops: [] })).error?.code).toBe(404);
+      await write(b.process, "fo-board:1", [{ op: "remove", path: "/households/2" }]);
+      await b.quiet();
+      expect((await b.process.call("delta", { doc: "fo-household:2", ops: [] })).error?.code).toBe(404);
+    });
+
     test("history says what was written through a document, newest first, and whose it was", async () => {
       const b = backend();
       await openAll(b.process, ["fo-board:1"]);

@@ -88,7 +88,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   version and told nobody, so an open client saw a gap and read the document again; SQLite and the
   JSON file made no version but told the writer an empty change. Now neither: the answer carries
   the version the document is at, and nothing is told. `_delta_bump_and_notify` (`001c`,
-  `CREATE OR REPLACE`: re-apply the framework, or `bunx @blueshed/delta init --upgrade`).
+  `CREATE OR REPLACE`: re-apply the framework, or `bunx @blueshed/delta init --upgrade`). An empty
+  write through a single document whose root is not there is not found (404), as on SQLite, where
+  Postgres answered it version 0 (`delta_apply`, `001d`, likewise).
 - **A time in a document's name (`at:`) reads the whole document as it stood then, on every
   backend.** On Postgres `delta_open` read the included collections at that time but the root as it
   is now; SQLite and the JSON file ignored the time and read it all as it is now. Now each reads

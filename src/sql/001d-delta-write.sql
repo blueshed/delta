@@ -412,6 +412,17 @@ BEGIN
     END IF;
   END IF;
 
+  -- An empty write is asked what each op is (below): a single document whose
+  -- root is not there is not found, as on SQLite -- unless implied, or a walk.
+  IF jsonb_array_length(p_ops) = 0 AND NOT v_is_list AND NOT COALESCE(p_walk, FALSE) AND NOT COALESCE(v_def.implied, FALSE) THEN
+    EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I t WHERE t.id = $1 AND %s)', v_root_view, v_scope->>'where') INTO v_exists USING v_doc_id;
+    IF NOT v_exists THEN
+      RAISE EXCEPTION 'document not found: % (its root, %, is not there)',
+        p_doc_name, _delta_build_path(v_def.root_collection, v_doc_id::text)
+        USING ERRCODE = 'P0002';
+    END IF;
+  END IF;
+
   FOR v_op IN SELECT jsonb_array_elements(p_ops)
   LOOP
     -- A single document is its root row and what hangs from it. One whose
