@@ -55,7 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Internal
 
 - A simplicity pass over the core (todo #68): dead branches and duplicated tests gone, one
-  `failure(err)` answer, `db.transaction().immediate()` for the write lock.
+  `failure(err)` answer, `db.transaction().immediate()` for the write lock. SQLite reads a
+  document by one walk for open and open_at, and `sqlite.ts` is split into `src/server/sqlite/`
+  (`./sqlite` exports as before); Postgres calls its `_as` functions through one `callAs`.
 
 ## [0.11.0] - 2026-09-28
 
