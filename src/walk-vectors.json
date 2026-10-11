@@ -1,0 +1,768 @@
+{
+ "schema": {
+  "lists": {
+   "columns": {
+    "title": "text",
+    "note": "text?"
+   },
+   "temporal": false
+  },
+  "cards": {
+   "parent": "lists",
+   "columns": {
+    "title": "text"
+   },
+   "temporal": false
+  }
+ },
+ "docs": {
+  "walk-lists:": {
+   "root": "lists",
+   "include": [
+    "cards"
+   ]
+  },
+  "walk-list:": {
+   "root": "lists",
+   "include": [
+    "cards"
+   ]
+  }
+ },
+ "vectors": [
+  {
+   "name": "a field it changed, still as it left it, is set back",
+   "doc": "walk-lists:",
+   "current": {
+    "lists": {
+     "1": {
+      "id": 1,
+      "title": "uno",
+      "note": "n"
+     }
+    },
+    "cards": {}
+   },
+   "entry": {
+    "ops": [
+     {
+      "op": "replace",
+      "path": "/lists/1",
+      "value": {
+       "id": 1,
+       "title": "uno",
+       "note": "n"
+      }
+     }
+    ],
+    "inverse": [
+     {
+      "op": "replace",
+      "path": "/lists/1",
+      "value": {
+       "id": 1,
+       "title": "one",
+       "note": "n"
+      }
+     }
+    ]
+   },
+   "expected": {
+    "ops": [
+     {
+      "op": "replace",
+      "path": "/lists/1",
+      "value": {
+       "title": "one"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "only the fields it changed: a later write to another field stays",
+   "doc": "walk-lists:",
+   "current": {
+    "lists": {
+     "1": {
+      "id": 1,
+      "title": "uno",
+      "note": "theirs"
+     }
+    },
+    "cards": {}
+   },
+   "entry": {
+    "ops": [
+     {
+      "op": "replace",
+      "path": "/lists/1",
+      "value": {
+       "id": 1,
+       "title": "uno",
+       "note": "n"
+      }
+     }
+    ],
+    "inverse": [
+     {
+      "op": "replace",
+      "path": "/lists/1",
+      "value": {
+       "id": 1,
+       "title": "one",
+       "note": "n"
+      }
+     }
+    ]
+   },
+   "expected": {
+    "ops": [
+     {
+      "op": "replace",
+      "path": "/lists/1",
+      "value": {
+       "title": "one"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "a field someone else has written since is a conflict, and nothing is walked",
+   "doc": "walk-lists:",
+   "current": {
+    "lists": {
+     "1": {
+      "id": 1,
+      "title": "theirs",
+      "note": "n"
+     }
+    },
+    "cards": {}
+   },
+   "entry": {
+    "ops": [
+     {
+      "op": "replace",
+      "path": "/lists/1",
+      "value": {
+       "id": 1,
+       "title": "uno",
+       "note": "n"
+      }
+     }
+    ],
+    "inverse": [
+     {
+      "op": "replace",
+      "path": "/lists/1",
+      "value": {
+       "id": 1,
+       "title": "one",
+       "note": "n"
+      }
+     }
+    ]
+   },
+   "expected": {
+    "ops": [],
+    "conflict": [
+     "/lists/1"
+    ]
+   }
+  },
+  {
+   "name": "a write that changed nothing walks nothing",
+   "doc": "walk-lists:",
+   "current": {
+    "lists": {
+     "1": {
+      "id": 1,
+      "title": "one",
+      "note": "n"
+     }
+    },
+    "cards": {}
+   },
+   "entry": {
+    "ops": [
+     {
+      "op": "replace",
+      "path": "/lists/1",
+      "value": {
+       "id": 1,
+       "title": "one",
+       "note": "n"
+      }
+     }
+    ],
+    "inverse": [
+     {
+      "op": "replace",
+      "path": "/lists/1",
+      "value": {
+       "id": 1,
+       "title": "one",
+       "note": "n"
+      }
+     }
+    ]
+   },
+   "expected": {
+    "ops": []
+   }
+  },
+  {
+   "name": "a row it made, as it left it, is removed",
+   "doc": "walk-lists:",
+   "current": {
+    "lists": {
+     "1": {
+      "id": 1,
+      "title": "one",
+      "note": "n"
+     }
+    },
+    "cards": {}
+   },
+   "entry": {
+    "ops": [
+     {
+      "op": "add",
+      "path": "/lists/1",
+      "value": {
+       "id": 1,
+       "title": "one",
+       "note": "n"
+      }
+     }
+    ],
+    "inverse": [
+     {
+      "op": "remove",
+      "path": "/lists/1"
+     }
+    ]
+   },
+   "expected": {
+    "ops": [
+     {
+      "op": "remove",
+      "path": "/lists/1"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a row it made, changed since, is a conflict",
+   "doc": "walk-lists:",
+   "current": {
+    "lists": {
+     "1": {
+      "id": 1,
+      "title": "changed",
+      "note": "n"
+     }
+    },
+    "cards": {}
+   },
+   "entry": {
+    "ops": [
+     {
+      "op": "add",
+      "path": "/lists/1",
+      "value": {
+       "id": 1,
+       "title": "one",
+       "note": "n"
+      }
+     }
+    ],
+    "inverse": [
+     {
+      "op": "remove",
+      "path": "/lists/1"
+     }
+    ]
+   },
+   "expected": {
+    "ops": [],
+    "conflict": [
+     "/lists/1"
+    ]
+   }
+  },
+  {
+   "name": "a row it made, with a row put under it since, is a conflict",
+   "doc": "walk-lists:",
+   "current": {
+    "lists": {
+     "1": {
+      "id": 1,
+      "title": "one",
+      "note": "n"
+     }
+    },
+    "cards": {
+     "1": {
+      "id": 1,
+      "lists_id": 1,
+      "title": "theirs"
+     }
+    }
+   },
+   "entry": {
+    "ops": [
+     {
+      "op": "add",
+      "path": "/lists/1",
+      "value": {
+       "id": 1,
+       "title": "one",
+       "note": "n"
+      }
+     }
+    ],
+    "inverse": [
+     {
+      "op": "remove",
+      "path": "/lists/1"
+     }
+    ]
+   },
+   "expected": {
+    "ops": [],
+    "conflict": [
+     "/lists/1"
+    ]
+   }
+  },
+  {
+   "name": "a row and the row under it, both made by it, are removed",
+   "doc": "walk-lists:",
+   "current": {
+    "lists": {
+     "1": {
+      "id": 1,
+      "title": "one",
+      "note": "n"
+     }
+    },
+    "cards": {
+     "1": {
+      "id": 1,
+      "lists_id": 1,
+      "title": "mine"
+     }
+    }
+   },
+   "entry": {
+    "ops": [
+     {
+      "op": "add",
+      "path": "/lists/1",
+      "value": {
+       "id": 1,
+       "title": "one",
+       "note": "n"
+      }
+     },
+     {
+      "op": "add",
+      "path": "/cards/1",
+      "value": {
+       "id": 1,
+       "lists_id": 1,
+       "title": "mine"
+      }
+     }
+    ],
+    "inverse": [
+     {
+      "op": "remove",
+      "path": "/cards/1"
+     },
+     {
+      "op": "remove",
+      "path": "/lists/1"
+     }
+    ]
+   },
+   "expected": {
+    "ops": [
+     {
+      "op": "remove",
+      "path": "/cards/1"
+     },
+     {
+      "op": "remove",
+      "path": "/lists/1"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a row it removed, still gone, is put back",
+   "doc": "walk-lists:",
+   "current": {
+    "lists": {},
+    "cards": {}
+   },
+   "entry": {
+    "ops": [
+     {
+      "op": "remove",
+      "path": "/lists/1"
+     }
+    ],
+    "inverse": [
+     {
+      "op": "add",
+      "path": "/lists/1",
+      "value": {
+       "id": 1,
+       "title": "one",
+       "note": "n"
+      }
+     }
+    ]
+   },
+   "expected": {
+    "ops": [
+     {
+      "op": "add",
+      "path": "/lists/1",
+      "value": {
+       "id": 1,
+       "title": "one",
+       "note": "n"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "a row it removed, and the row its removal took with it, are put back",
+   "doc": "walk-lists:",
+   "current": {
+    "lists": {},
+    "cards": {}
+   },
+   "entry": {
+    "ops": [
+     {
+      "op": "remove",
+      "path": "/lists/1"
+     },
+     {
+      "op": "remove",
+      "path": "/cards/1"
+     }
+    ],
+    "inverse": [
+     {
+      "op": "add",
+      "path": "/lists/1",
+      "value": {
+       "id": 1,
+       "title": "one",
+       "note": "n"
+      }
+     },
+     {
+      "op": "add",
+      "path": "/cards/1",
+      "value": {
+       "id": 1,
+       "lists_id": 1,
+       "title": "c"
+      }
+     }
+    ]
+   },
+   "expected": {
+    "ops": [
+     {
+      "op": "add",
+      "path": "/lists/1",
+      "value": {
+       "id": 1,
+       "title": "one",
+       "note": "n"
+      }
+     },
+     {
+      "op": "add",
+      "path": "/cards/1",
+      "value": {
+       "id": 1,
+       "lists_id": 1,
+       "title": "c"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "a row it removed, there again, is a conflict",
+   "doc": "walk-lists:",
+   "current": {
+    "lists": {
+     "1": {
+      "id": 1,
+      "title": "again",
+      "note": "n"
+     }
+    },
+    "cards": {}
+   },
+   "entry": {
+    "ops": [
+     {
+      "op": "remove",
+      "path": "/lists/1"
+     }
+    ],
+    "inverse": [
+     {
+      "op": "add",
+      "path": "/lists/1",
+      "value": {
+       "id": 1,
+       "title": "one",
+       "note": "n"
+      }
+     }
+    ]
+   },
+   "expected": {
+    "ops": [],
+    "conflict": [
+     "/lists/1"
+    ]
+   }
+  },
+  {
+   "name": "one conflict among its rows walks none of them",
+   "doc": "walk-lists:",
+   "current": {
+    "lists": {
+     "1": {
+      "id": 1,
+      "title": "uno",
+      "note": "n"
+     },
+     "2": {
+      "id": 2,
+      "title": "theirs",
+      "note": null
+     }
+    },
+    "cards": {}
+   },
+   "entry": {
+    "ops": [
+     {
+      "op": "replace",
+      "path": "/lists/1",
+      "value": {
+       "id": 1,
+       "title": "uno",
+       "note": "n"
+      }
+     },
+     {
+      "op": "replace",
+      "path": "/lists/2",
+      "value": {
+       "id": 2,
+       "title": "dos",
+       "note": null
+      }
+     }
+    ],
+    "inverse": [
+     {
+      "op": "replace",
+      "path": "/lists/2",
+      "value": {
+       "id": 2,
+       "title": "two",
+       "note": null
+      }
+     },
+     {
+      "op": "replace",
+      "path": "/lists/1",
+      "value": {
+       "id": 1,
+       "title": "one",
+       "note": "n"
+      }
+     }
+    ]
+   },
+   "expected": {
+    "ops": [],
+    "conflict": [
+     "/lists/2"
+    ]
+   }
+  },
+  {
+   "name": "a single document's root is set back at /<root>",
+   "doc": "walk-list:1",
+   "current": {
+    "lists": {
+     "id": 1,
+     "title": "eins",
+     "note": "n"
+    },
+    "cards": {}
+   },
+   "entry": {
+    "ops": [
+     {
+      "op": "replace",
+      "path": "/lists",
+      "value": {
+       "id": 1,
+       "title": "eins",
+       "note": "n"
+      }
+     }
+    ],
+    "inverse": [
+     {
+      "op": "replace",
+      "path": "/lists",
+      "value": {
+       "id": 1,
+       "title": "uno",
+       "note": "n"
+      }
+     }
+    ]
+   },
+   "expected": {
+    "ops": [
+     {
+      "op": "replace",
+      "path": "/lists",
+      "value": {
+       "title": "uno"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "a single document's root, written by someone else since, is a conflict",
+   "doc": "walk-list:1",
+   "current": {
+    "lists": {
+     "id": 1,
+     "title": "theirs",
+     "note": "n"
+    },
+    "cards": {}
+   },
+   "entry": {
+    "ops": [
+     {
+      "op": "replace",
+      "path": "/lists",
+      "value": {
+       "id": 1,
+       "title": "eins",
+       "note": "n"
+      }
+     }
+    ],
+    "inverse": [
+     {
+      "op": "replace",
+      "path": "/lists",
+      "value": {
+       "id": 1,
+       "title": "uno",
+       "note": "n"
+      }
+     }
+    ]
+   },
+   "expected": {
+    "ops": [],
+    "conflict": [
+     "/lists"
+    ]
+   }
+  },
+  {
+   "name": "a single document's root spelled two ways is one row, walked by its net change",
+   "doc": "walk-list:1",
+   "current": {
+    "lists": {
+     "id": 1,
+     "title": "eins",
+     "note": "n"
+    },
+    "cards": {}
+   },
+   "entry": {
+    "ops": [
+     {
+      "op": "replace",
+      "path": "/lists/1",
+      "value": {
+       "id": 1,
+       "title": "zwei",
+       "note": "n"
+      }
+     },
+     {
+      "op": "replace",
+      "path": "/lists",
+      "value": {
+       "id": 1,
+       "title": "eins",
+       "note": "n"
+      }
+     }
+    ],
+    "inverse": [
+     {
+      "op": "replace",
+      "path": "/lists",
+      "value": {
+       "id": 1,
+       "title": "zwei",
+       "note": "n"
+      }
+     },
+     {
+      "op": "replace",
+      "path": "/lists/1",
+      "value": {
+       "id": 1,
+       "title": "uno",
+       "note": "n"
+      }
+     }
+    ]
+   },
+   "expected": {
+    "ops": [
+     {
+      "op": "replace",
+      "path": "/lists",
+      "value": {
+       "title": "uno"
+      }
+     }
+    ]
+   }
+  }
+ ]
+}

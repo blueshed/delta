@@ -107,8 +107,9 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
   holds what it left (and a row it made is removed only if nobody has put rows under it); a
   conflict walks nothing and is recorded as walked -- but for a walk of a
   named change (`change`: `changeTip` / `_delta_change_tip`), which records nothing. Change them
-  together (`tests/ledger.test.ts`, `tests/postgres-ledger.test.ts`, "undo beside someone else";
-  `tests/helpers/path.ts`, "a change named by its entry").
+  together (`tests/walk-plan.test.ts` runs both on one set of vectors, `src/walk-vectors.json`,
+  published in `./testing`; `tests/ledger.test.ts`, `tests/postgres-ledger.test.ts`, "undo beside
+  someone else"; `tests/helpers/path.ts`, "a change named by its entry").
 - **The cursor**: named by an in-process caller (`client.data.local`); over a socket the
   connection's `clientId`, and signed in, the person with it (`socketCursor` in
   `src/server/ledger.ts`). A socket client never names another's.
@@ -156,8 +157,8 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
 - `cli.ts`: `bunx @blueshed/delta` (open, watch, delta, call, init, sql, install-skills;
   install-skills copies `@blueshed/*` skills and the packages `claudeSkills` names). The runtime
   commands take `--token` / `DELTA_TOKEN` and `--json` for an agent; `tests/cli.test.ts` runs them.
-- `src/testing.ts` (`./testing`): `mockClient`, `sendAndAwait`, `waitFor`, `pointerVectors` (the
-  pointer grammar's vectors, `src/pointer-vectors.json`), for delta's tests and a consumer's.
+- `src/testing.ts` (`./testing`): `mockClient`, `sendAndAwait`, `waitFor`, `pointerVectors` and
+  `walkVectors` (the two-language rules' cases, `src/*-vectors.json`), for delta's tests and a consumer's.
   `tests/setup.ts`: the Postgres ones (`newPool`, `applyFramework`, `resetState`). `createLocal()` is
   the lighter harness for SQLite and the kinds.
 - `examples/`: `shared-state`, `sites-bbox`, `kanban`, `todos-vs-rls`.

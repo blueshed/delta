@@ -28,7 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`@blueshed/delta/testing`**: `mockClient`, `sendAndAwait` and `waitFor`, the helpers delta's
   own tests drive a server with, for an app to test its own; and `pointerVectors`, the one JSON
   Pointer grammar as data (`src/pointer-vectors.json` in the package), which `splitPath` and
-  `_delta_split_path` both answer, for another parser (eta's) to run.
+  `_delta_split_path` both answer, for another parser (eta's) to run; and `walkVectors`
+  (`src/walk-vectors.json`), the undo guard's cases -- an entry, the document as it is now, and
+  what walking the entry does -- which `planWalk` and `_delta_walk_plan` both answer.
 - **The CLI is safe for an agent.** `--token` or `DELTA_TOKEN` signs in to an auth-enabled server
   in band (`call authenticate` first, never in the URL). `--json` prints one JSON line per event
   on stdout and nothing else; an error is one `{"error":...}` line on stderr with exit code 1.

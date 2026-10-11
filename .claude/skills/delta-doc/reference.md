@@ -1113,15 +1113,16 @@ Re-runs are idempotent: byte-identical destinations skip; locally edited copies 
 **In your app**, test through `createLocal()` (below), a real `Bun.serve` on port 0 with `connectWs("ws://localhost:<port>/ws")`, or the helpers delta's own tests use, from `@blueshed/delta/testing`:
 
 ```ts
-import { mockClient, sendAndAwait, waitFor, pointerVectors } from "@blueshed/delta/testing";
+import { mockClient, sendAndAwait, waitFor, pointerVectors, walkVectors } from "@blueshed/delta/testing";
 
 mockClient(data?)              // a WS-shaped test client: what it was sent (parsed) in .sent; mockClient({ identity }) signed in, ({ local: true }) an in-process caller
 sendAndAwait(ws, client, msg)  // drives ws.websocket.message, waits for the answer with its id
 waitFor(predicate, opts?)      // async poll until truthy ({ timeout = 2000, interval = 25 })
 pointerVectors                 // [{ pointer, segments }]: one JSON Pointer grammar as data, segments null when malformed
+walkVectors                    // { schema, docs, vectors: [{ name, doc, current, entry: { ops, inverse }, expected: { ops, conflict? } }] }
 ```
 
-`pointerVectors` (also the file `src/pointer-vectors.json` in the package) is what `splitPath` and `_delta_split_path` both answer; a parser of your own (eta's) runs the same cases to speak the same paths. The Postgres helpers stay in the repository's `tests/setup.ts` (`newPool`, `applyFramework`, `applyAuthJwt`, `applyItemsFixture`, `resetState`): copy what you need.
+`pointerVectors` (also the file `src/pointer-vectors.json` in the package) is what `splitPath` and `_delta_split_path` both answer; a parser of your own (eta's) runs the same cases to speak the same paths. `walkVectors` (`src/walk-vectors.json`) does the same for the undo guard (*The ledger*): each is an entry, the document as it is now, and what walking the entry does -- the ops, or none and the conflicting paths -- which `planWalk` and `_delta_walk_plan` both answer. The Postgres helpers stay in the repository's `tests/setup.ts` (`newPool`, `applyFramework`, `applyAuthJwt`, `applyItemsFixture`, `resetState`): copy what you need.
 
 ```ts
 // pattern: integration test
