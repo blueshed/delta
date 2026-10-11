@@ -107,21 +107,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   know what a hand-written `open` reads. Its `apply` logs with `_delta_bump_and_notify`; to hear
   other writes, make it with `docTypeFromDef`, or watch the collections with `defineCustomDoc`.
   `DocType`'s JSDoc and the skill say so, and `tests/postgres.test.ts` pins it.
-
-### Removed
-
-- **`registerDocType`, `resolveDoc` and `clearRegistry` (`@blueshed/delta/postgres`): a listener's
-  document types are its own.** They lived in one registry for the process, so two servers in
-  one process (tests, `bun --hot`, paintbrush) could not each have theirs. Give them to the
-  listener -- `createDocListener(ws, pool, { types: docs.map((def) => docTypeFromDef(def, pool)) })`
-  -- and add one later with the `register` it returns, which replaces the type of its prefix (a
-  module run again); its checks are the same (with `auth`, `owns` or `shared`; no prefix twice,
-  nor a custom document's). Migration: move each `registerDocType(t)` into `types: [t]`, and drop
-  `clearRegistry()`.
-- **The Postgres listener's `evict`.** Undocumented and unused, it dropped a document's state while
-  sockets still had it open, and they heard no more of it. A Postgres document keeps no copy to
-  read again, so there is nothing to evict. Migration: drop the call.
-
 - **Breaking: an add names a new id, so its answer tells nothing of rows the writer may not
   read (todo #71)**, on every backend. `add /households/3` through `fo-board:1` was a 409 when
   household 3 lived anywhere -- another wedding's, or a row RLS hides -- and a success when no
@@ -150,12 +135,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was removed -- sends `add /<coll>/-` and reads the id from the echo, or undoes the removal; a
   Postgres test that empties tables between cases restarts `seq_<table>` too (`TRUNCATE ...
   RESTART IDENTITY` leaves it: the table does not own it).
-
 - **Breaking: a table name with capitals is refused by `defineSchema`**, on every backend.
   Postgres folds an unquoted name to lowercase, so `PrMixed`'s generated SQL failed (`relation
   "seq_prmixed" does not exist`), and a privilege asked of the name would be another table's.
   The error names the fix. **Migration:** keep the key and give the table in lowercase snake
   case: `{ prMixed: { table: "pr_mixed", ... } }`.
+
+### Removed
+
+- **`registerDocType`, `resolveDoc` and `clearRegistry` (`@blueshed/delta/postgres`): a listener's
+  document types are its own.** They lived in one registry for the process, so two servers in
+  one process (tests, `bun --hot`, paintbrush) could not each have theirs. Give them to the
+  listener -- `createDocListener(ws, pool, { types: docs.map((def) => docTypeFromDef(def, pool)) })`
+  -- and add one later with the `register` it returns, which replaces the type of its prefix (a
+  module run again); its checks are the same (with `auth`, `owns` or `shared`; no prefix twice,
+  nor a custom document's). Migration: move each `registerDocType(t)` into `types: [t]`, and drop
+  `clearRegistry()`.
+- **The Postgres listener's `evict`.** Undocumented and unused, it dropped a document's state while
+  sockets still had it open, and they heard no more of it. A Postgres document keeps no copy to
+  read again, so there is nothing to evict. Migration: drop the call.
 
 ### Fixed
 
@@ -196,7 +194,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `add /drinks/- {courses_id: 2}` put a drink under Salad, which the list does not hold, and
   one under a course that is not there at all; both are a 404 now (`delta_apply`, replaced in
   place).
-
 - **On Postgres without a ledger, a write's answered `version` is a number**, as it is with one:
   a hand-written `DocType` that read it as pg gives a `BIGINT` (a string) passed the string on.
 - **A row a write makes and its cascade takes out is told its add wherever its remove is told
