@@ -3,7 +3,7 @@
  * other backend (tests/helpers/path.ts), their rows kept in one readable file.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportTables, importTables, registerDocs } from "../src/server/json";
@@ -45,6 +45,16 @@ describe("json", () => {
   test("a scope key that is not a column of the root is refused at registration, as on SQLite and Postgres", () => {
     const bad = { prefix: "bad:", root: "courses", include: [], scope: { "courses.id": ":id" } };
     expect(() => registerDocs(createLocal().server, file, pathSchema, [bad])).toThrow('scope key "courses.id" is not a column of "courses"');
+  });
+
+  test("a save goes to a temp file renamed over the file, and leaves none behind; a file that is not JSON is refused at start, naming it", async () => {
+    await backend.process.call("open", { doc: "fo-board:1" });
+    for (let i = 0; i < 3; i++) await write(backend.process, "fo-board:1", [{ op: "add", path: "/courses/-", value: { name: `c${i}` } }]);
+    await (backend as ReturnType<typeof open>).persisted();
+    expect(readdirSync(dir)).toEqual(["data.json"]);
+    const text = readFileSync(file, "utf8");
+    writeFileSync(file, text.slice(0, text.length / 2));   // a save cut short
+    expect(() => open()).toThrow(`${file} is not JSON`);
   });
 
   test("the file is the truth: a write is in it, readable, and a process started on it reads what the last one left", async () => {

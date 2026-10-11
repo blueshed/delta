@@ -5,7 +5,9 @@ import {
 } from "../src/server/server";
 import { wireAuth, isAuthError, type DeltaAuth } from "../src/server/auth";
 import { setLogLevel } from "../src/server/logger";
-import { unlinkSync } from "fs";
+import { mkdtempSync, readdirSync, rmSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 setLogLevel("silent");
 
@@ -328,7 +330,8 @@ describe("registerDoc", () => {
     expect(sock.sent[0]).toEqual({ id: 1, result: { ack: true } });
     expect(handle.getDoc()).toEqual({ items: ["buy milk"] });
 
-    // verify persisted to disk
+    // verify persisted to disk, once the save it queued is done
+    await handle.persist();
     const persisted = await Bun.file(tmpFile).json();
     expect(persisted.items).toContain("buy milk");
   });
@@ -441,6 +444,38 @@ describe("registerDoc", () => {
     await handle.persist();
     expect(await Bun.file(file).json()).toEqual({ a: { x: 1 } });
     try { unlinkSync(file); } catch {}
+  });
+
+  test("a save goes to a temp file renamed over the document's, and leaves no temp file behind", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "delta-doc-save-"));
+    const file = join(dir, "doc.json");
+    const ws = createWs();
+    const handle = await registerDoc(ws, "todo", { file, empty: { items: [] as string[] } });
+    const written: string[] = [];
+    const realWrite = Bun.write;
+    (Bun as any).write = (to: any, ...rest: any[]) => { written.push(String(to)); return (realWrite as any)(to, ...rest); };
+    try {
+      for (let i = 0; i < 5; i++) handle.applyAndBroadcast([{ op: "add", path: "/items/-", value: `n${i}` }]);
+      await handle.persist();
+    } finally {
+      (Bun as any).write = realWrite;
+    }
+    expect(written.length).toBeGreaterThan(0);
+    for (const to of written) expect(to).toMatch(new RegExp(`^${file}\\.\\d+\\.\\d+\\.tmp$`));   // never the file itself: a temp beside it
+    expect(readdirSync(dir)).toEqual(["doc.json"]);
+    expect((await Bun.file(file).json()).items).toEqual(["n0", "n1", "n2", "n3", "n4"]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a file that is not JSON (empty, or cut short by a crash) is refused at start, naming the file: never opened as empty and saved over", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "delta-doc-bad-"));
+    for (const [name, text] of [["empty.json", ""], ["cut.json", '{"items": ["a", "b"']] as const) {
+      const file = join(dir, name);
+      await Bun.write(file, text);
+      await expect(registerDoc(createWs(), "todo", { file, empty: { items: [] as string[] } })).rejects.toThrow(`${file} is not JSON`);
+      expect(await Bun.file(file).text()).toBe(text);
+    }
+    rmSync(dir, { recursive: true, force: true });
   });
 
   test("loads existing file on startup", async () => {
@@ -895,11 +930,11 @@ describe("persist queue", () => {
   });
 
   test("a failing write is logged, not thrown as an unhandled rejection", async () => {
-    // A directory path makes Bun.write fail. The delta is already acked and
+    // A path under a file (/dev/null) makes every write fail. The delta is already acked and
     // broadcast by then, so the failure must not escape applyAndBroadcast.
     const ws = createWs();
     const handle = await registerDoc<{ n: number }>(ws, "pf", {
-      file: "/tmp", empty: { n: 0 },
+      file: "/dev/null/pf.json", empty: { n: 0 },
     });
 
     const seen: unknown[] = [];

@@ -20,6 +20,8 @@
  *   });
  *   ws.setServer(server);
  */
+import { existsSync, readFileSync } from "node:fs";
+import { rename } from "node:fs/promises";
 import { createLogger } from "./logger";
 import { applyOps, splitPath, joinPath, type DeltaOp } from "../core";
 
@@ -68,7 +70,9 @@ export interface DocHandle<T> {
 }
 
 export interface DocOptions<T> {
+  /** Where the document is kept. A file that is there but not JSON is refused at start, naming it. */
   file: string;
+  /** The document while there is no file. */
   empty: T;
 }
 
@@ -554,6 +558,35 @@ export function mintIds(doc: unknown, ops: DeltaOp[]): DeltaOp[] {
   });
 }
 
+/**
+ * A JSON file's value, or undefined when there is no file. One that is there
+ * but not JSON (empty, or cut short) throws, naming the file: it holds data
+ * that should not be opened as nothing and saved over.
+ * @internal
+ */
+export function readJsonFile(file: string): unknown {
+  if (!existsSync(file)) return undefined;
+  const text = readFileSync(file, "utf8");
+  try {
+    return JSON.parse(text);
+  } catch (err: any) {
+    throw new Error(`${file} is not JSON (${err.message}): restore it, or move it away to start from empty`);
+  }
+}
+
+let saves = 0;
+/**
+ * Write `text` to `file` whole or not at all: to a temp file beside it, then
+ * renamed over it (atomic on one filesystem), so a crash mid-save leaves the
+ * last whole file, never a cut one.
+ * @internal
+ */
+export async function writeFileAtomic(file: string, text: string): Promise<void> {
+  const temp = `${file}.${process.pid}.${++saves}.tmp`;
+  await Bun.write(temp, text);
+  await rename(temp, file);
+}
+
 /** Register a persisted JSON document with the WebSocket server. */
 export async function registerDoc<T>(
   ws: Pick<WsServer, "on" | "publish">,
@@ -561,10 +594,8 @@ export async function registerDoc<T>(
   opts: DocOptions<T>,
 ): Promise<DocHandle<T>> {
   const log = createLogger(`[${name}]`);
-  const dataFile = Bun.file(opts.file);
-  let doc: T = (await dataFile.exists())
-    ? { ...structuredClone(opts.empty), ...((await dataFile.json()) as T) }
-    : structuredClone(opts.empty);
+  const saved = readJsonFile(opts.file) as T | undefined;
+  let doc: T = saved === undefined ? structuredClone(opts.empty) : { ...structuredClone(opts.empty), ...saved };
 
   log.info(`loaded from ${opts.file}`);
 
@@ -575,8 +606,7 @@ export async function registerDoc<T>(
 
   function persist(): Promise<void> {
     const done = persisting
-      .then(() => Bun.write(dataFile, JSON.stringify(doc, null, 2)))
-      .then(() => {});
+      .then(() => writeFileAtomic(opts.file, JSON.stringify(doc, null, 2)));
     // The chain must survive a failed write, so it continues from a swallowed
     // copy — but the promise handed back still rejects, so an explicit
     // `await handle.persist()` can observe the error.

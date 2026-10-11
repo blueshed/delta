@@ -139,6 +139,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so is a root collection the schema does not have. They registered, then answered 500 at open.
   A key must be `id`, the root's parent key or one of its columns, declared in the schema (a
   column added with `ALTER TABLE` and not declared is refused, as on Postgres).
+- **A save is whole or not at all**, for the free-form document (`registerDoc`) and the JSON
+  file (`./json`). Each wrote its file in place, so a crash mid-save could leave it empty or cut
+  short, and the next start failed with "Unexpected end of JSON input". A save now goes to a
+  temp file beside it, renamed over it. A file that is there but not JSON is refused at start
+  with an error naming it, never opened as `empty` and saved over (`empty` is the document while
+  there is no file).
 - **A client that chooses its `clientId` keeps its undo cursor when it reconnects before the
   server has seen its old socket close** (a network drop the server has not noticed yet). The
   server gave the new socket a fresh id for good, so undo answered null for the writes before

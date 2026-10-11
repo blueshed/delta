@@ -20,8 +20,8 @@
  * construction. One process owns the file.
  */
 import { Database } from "bun:sqlite";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import type { WsServer } from "./server";
+import { existsSync, statSync, writeFileSync } from "node:fs";
+import { readJsonFile, writeFileAtomic, type WsServer } from "./server";
 import type { DocDef, Schema, Snapshot } from "../schema";
 import {
   createTables,
@@ -42,14 +42,11 @@ type Saved = Snapshot & { ledger?: { entries: Record<string, unknown>[]; version
 
 /**
  * The file: a store with no rows yet when it is not there, 0 bytes, or JSON
- * with no tables (`{}`) -- a newcomer's first file. One that is not JSON is
- * refused by name, and left as it is.
+ * with no tables (`{}`) -- a newcomer's first file. One that is not JSON (cut
+ * short by a crash) is refused by name, and left as it is.
  */
 function read(file: string): Saved {
-  const text = existsSync(file) ? readFileSync(file, "utf8") : "";
-  let saved: Partial<Saved> | null = null;
-  try { saved = text === "" ? null : JSON.parse(text); }
-  catch (err: any) { throw new Error(`${file} is not JSON (${err.message}): fix it, or move it aside to start empty`); }
+  const saved = existsSync(file) && statSync(file).size === 0 ? undefined : (readJsonFile(file) as Partial<Saved> | null | undefined);
   return { ...saved, tables: saved?.tables ?? {}, sequences: saved?.sequences ?? {} };
 }
 
@@ -92,7 +89,7 @@ export function registerDocs<I = unknown>(
       };
     }
     const text = JSON.stringify(snapshot, null, 2);
-    saving = saving.then(() => Bun.write(file, text)).then(() => {});
+    saving = saving.then(() => writeFileAtomic(file, text));   // whole or not at all: a crash mid-save leaves the last whole file
   };
 
   const handle = registerSqlite<I>(ws, db, schema, docs, customDocs, { ...options, committed: save });
