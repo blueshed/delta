@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The `@blueshed/railroad` peer range takes `^0.16.0`.** 0.16.0 drops only the deprecated
+  `Promise<Node>` route handler, which delta's client and `dom-ops` do not use.
+
 ### Fixed
 
 - **A sourced document no longer polls forever when its only watcher leaves during the first
