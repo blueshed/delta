@@ -7,13 +7,16 @@
 -- add named, never back, so a later add at /- does not meet it (todo #63).
 -- setval needs UPDATE on the sequence, and an app role is granted USAGE,
 -- SELECT: so it runs as the framework's owner (SECURITY DEFINER), for a table
--- delta knows and an id a path may name, and nothing else.
+-- delta knows, an id a path may name, and a caller that may insert into the
+-- table, and nothing else. Running as the owner, current_user is the owner:
+-- the caller is the role SET ROLE named, else the session's.
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION _delta_serial_past(p_table TEXT, p_id BIGINT)
 RETURNS void LANGUAGE plpgsql SECURITY DEFINER AS $$
 BEGIN
-  IF p_id > 9007199254740991 OR NOT EXISTS (SELECT 1 FROM _delta_collections WHERE table_name = p_table) THEN
+  IF p_id > 9007199254740991 OR NOT EXISTS (SELECT 1 FROM _delta_collections WHERE table_name = p_table)
+     OR NOT has_table_privilege(COALESCE(NULLIF(current_setting('role'), 'none'), session_user), p_table, 'INSERT') THEN
     RETURN;
   END IF;
   EXECUTE format('SELECT setval(%L, $1) FROM %I WHERE $1 >= last_value + is_called::int',
@@ -29,7 +32,8 @@ END $$;
 -- _delta_serial_new: whether an id is past every one a collection's serial has
 -- handed out (minted, or passed for an add that named it): what an add may
 -- name (todo #71). The serial is read as the framework's owner, as
--- _delta_serial_past sets it.
+-- _delta_serial_past sets it, for a caller that may read the table: to any
+-- other every id is taken, so it learns nothing of the table's rows.
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION _delta_serial_new(p_table TEXT, p_id BIGINT)
@@ -37,7 +41,8 @@ RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT A
 DECLARE
   v_new BOOLEAN;
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM _delta_collections WHERE table_name = p_table) THEN
+  IF NOT EXISTS (SELECT 1 FROM _delta_collections WHERE table_name = p_table)
+     OR NOT has_table_privilege(COALESCE(NULLIF(current_setting('role'), 'none'), session_user), p_table, 'SELECT') THEN
     RETURN FALSE;
   END IF;
   EXECUTE format('SELECT $1 >= last_value + is_called::int FROM %I', 'seq_' || p_table) INTO v_new USING p_id;
@@ -442,6 +447,7 @@ DECLARE
   v_run_carried   BOOLEAN := FALSE;  -- that run has carried the rows under its row along
   v_hung          JSONB;
   v_outside       BOOLEAN;           -- the op's collection is neither the root nor included: a walk's, put back or taken again
+  v_passed        JSONB := '{}'::jsonb;   -- each table's highest id this write named: its serial passes it once the write is done
 BEGIN
   -- Guard: ops must be a JSON array
   IF p_ops IS NULL OR jsonb_typeof(p_ops) != 'array' THEN
@@ -476,6 +482,7 @@ BEGIN
     EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I WHERE id = $1)', v_root_view) INTO v_exists USING v_doc_id;
     PERFORM _delta_make_implied(v_def, v_doc_id, p_ops, v_ts);
     IF NOT v_exists THEN
+      v_passed := jsonb_build_object(v_root_coll.table_name, v_doc_id);
       EXECUTE format('SELECT _delta_strip_temporal(to_jsonb(t.*)) FROM %I t WHERE t.id = $1', v_root_view) INTO v_row USING v_doc_id;
       IF v_row IS NOT NULL THEN
         v_touched := jsonb_build_array(jsonb_build_object('coll', v_def.root_collection, 'id', v_doc_id, 'after', v_row, 'carried', TRUE,
@@ -688,10 +695,11 @@ BEGIN
       -- (todo #71): one it has (minted, or passed for an add that named it) is
       -- refused, whether a row holds it now or none does -- or RLS hides it --
       -- so the answer says nothing of rows the writer may not read. But for
-      -- ids the writer has read: a walk puts back the rows its entry took, a
-      -- single document names its own root (checked above), and a write may
-      -- add back a row it has itself written. SQLite's applyOps keeps the
-      -- same rule.
+      -- ids the writer has read: a walk puts back the rows its entry took, and
+      -- a write may add back a row it has itself written (a single document's
+      -- root taken out and put back). A single document's own root is no
+      -- other: whether RLS hides it, its name does not say. SQLite's applyOps
+      -- keeps the same rule.
       --
       -- A temporal key is (id, valid_from), so nothing in the table stops a
       -- second live version of an id (todo #16): a mint can meet a row put in
@@ -705,7 +713,6 @@ BEGIN
       END IF;
       v_exists := FALSE;
       IF v_id_text <> '-' AND NOT COALESCE(p_walk, FALSE)
-         AND (v_is_list OR v_coll_key IS DISTINCT FROM v_def.root_collection)
          AND NOT v_touched @> jsonb_build_array(jsonb_build_object('coll', v_coll_key, 'id', v_id)) THEN
         v_exists := NOT _delta_serial_new(v_coll.table_name, v_id);
       END IF;
@@ -799,7 +806,9 @@ BEGIN
       ) INTO v_new_row USING v_new_row;
 
       -- An id the add named moves the serial past it, so a later /- does not meet it.
-      IF v_id_text <> '-' THEN PERFORM _delta_serial_past(v_coll.table_name, v_id); END IF;
+      IF v_id_text <> '-' AND v_id > COALESCE((v_passed->>v_coll.table_name)::BIGINT, 0) THEN
+        v_passed := v_passed || jsonb_build_object(v_coll.table_name, v_id);
+      END IF;
 
       -- A root row added through a document is one it holds: a list's, given
       -- its bindings, must meet the rest of its conditions too (a name like
@@ -1008,6 +1017,13 @@ BEGIN
   -- written, so an undo walks back exactly what was done -- and so does the
   -- writer's entry in the log, once, for the custom documents (todo #44).
   v_version := _delta_tell(p_doc_name, v_touched, v_broadcast_ops);
+
+  -- The ids this write named move their serials past them, once it is done: a
+  -- serial does not roll back, so a write refused part way burns none (only a
+  -- failure at commit can).
+  FOR v_r IN SELECT jsonb_build_object('t', key, 'id', value) FROM jsonb_each(v_passed) LOOP
+    PERFORM _delta_serial_past(v_r->>'t', (v_r->>'id')::BIGINT);
+  END LOOP;
   RETURN jsonb_build_object('version', v_version, 'ops', v_broadcast_ops);
 END;
 $$ LANGUAGE plpgsql;

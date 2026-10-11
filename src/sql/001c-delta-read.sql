@@ -215,6 +215,14 @@ BEGIN
   EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I WHERE id = $1)', _delta_source_view(v_coll.table_name, v_coll.temporal))
     INTO v_exists USING p_id;
   IF v_exists THEN RETURN; END IF;
+  -- Not there, as the writer reads it: made under the add rule (todo #71) -- an
+  -- id the serial has handed out is taken, whether a row RLS hides holds it or
+  -- none does. delta_apply passes the serial past the root once it is done.
+  IF NOT _delta_serial_new(v_coll.table_name, p_id) THEN
+    RAISE EXCEPTION 'id already taken: % -- add to % for a new id',
+      _delta_build_path(p_def.root_collection, p_id::text), _delta_build_path(p_def.root_collection, '-')
+      USING ERRCODE = '23505';
+  END IF;
   v_row := _delta_implied_root(p_def, p_id);
   IF v_coll.temporal THEN v_row := v_row || jsonb_build_object('valid_from', p_ts, 'valid_to', NULL); END IF;
   EXECUTE format('INSERT INTO %I SELECT * FROM jsonb_populate_record(null::%I, $1)', v_coll.table_name, v_coll.table_name)

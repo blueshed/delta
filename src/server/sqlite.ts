@@ -279,9 +279,11 @@ export function registerDocs<I = unknown>(
     const rootTable = schema.tables[def.root]!;
     const root = doc[def.root];
     if (db.query(`SELECT 1 FROM ${current(rootTable)} WHERE id = ?`).get(root.id)) return;
+    if (handedOut(rootTable, root.id)) taken(def.root, root.id);   // made under the add rule (#71), as on Postgres
     const ts = now();
     if (rootTable.temporal) { root.valid_from = ts; root.valid_to = null; }
     insertRow(db, rootTable, root, ts);
+    passId(rootTable, root.id);
     const row = readRow(rootTable, root.id);
     const showed = holders(def.root, row, writer).filter((name) => {
       const m = findDoc(name);
@@ -482,6 +484,16 @@ export function registerDocs<I = unknown>(
   function serial(table: ResolvedTable): number {
     const seq = db.query("SELECT last FROM _delta_sequences WHERE collection = ?").get(table.docKey) as { last: number } | null;
     return seq?.last ?? ((db.query(`SELECT MAX(id) AS m FROM ${table.name} WHERE typeof(id) = 'integer'`).get() as { m: number | null } | null)?.m ?? 0);
+  }
+
+  /** Whether a collection's serial has handed `id` out: an add may not name it (#71). A text id is the client's own key, which no serial hands out. */
+  function handedOut(table: ResolvedTable, id: string | number): boolean {
+    return typeof id === "number" && id <= serial(table);
+  }
+
+  /** The one answer to an add of an id taken, whether a row holds it or the serial handed it out (#71). */
+  function taken(coll: string, id: string | number): never {
+    refuse(409, `Id already taken: ${joinPath(coll, String(id))} -- add to ${joinPath(coll, "-")} for a new id`);
   }
 
   /** An id a write named moves its collection's sequence past it, never back, so a later `add /<coll>/-` does not meet it (#72) -- Postgres's `_delta_serial_past`. */
@@ -701,16 +713,15 @@ export function registerDocs<I = unknown>(
           // (#71): one it has (minted, or passed for an add that named it) is
           // refused, whether a row holds it now or none does, so the answer
           // says nothing of rows the writer may not read. But for ids the
-          // writer has read: a walk puts back the rows its entry took, a single
-          // document names its own root, and a write may add back a row it
-          // has itself written. A live id is refused all the same (on a
-          // temporal table it would be a second live version, #16): a text id,
-          // the client's own key, which no serial hands out, or a row put in by
-          // hand past the serial. delta_apply keeps the same rule.
-          const named = !mint && !walk && !isRoot && !touched.some((t) => t.coll === collKey && sameId(t.id, id));
-          const taken = (named && typeof id === "number" && id <= serial(table))
-            || db.query(`SELECT 1 FROM ${current(table)} WHERE id = ?`).get(id);
-          if (taken) refuse(409, `Id already taken: ${joinPath(collKey, String(id))} -- add to ${joinPath(collKey, "-")} for a new id`);
+          // writer has read: a walk puts back the rows its entry took, and a
+          // write may add back a row it has itself written (a single
+          // document's root taken out and put back). A live id is refused all
+          // the same (on a temporal table it would be a second live version,
+          // #16): a text id, the client's own key, which no serial hands out,
+          // or a row put in by hand past the serial. delta_apply keeps the
+          // same rule.
+          const named = !mint && !walk && !touched.some((t) => t.coll === collKey && sameId(t.id, id));
+          if ((named && handedOut(table, id)) || db.query(`SELECT 1 FROM ${current(table)} WHERE id = ?`).get(id)) taken(collKey, id);
           // Add row
           const row = { ...((op as any).value as Record<string, unknown>) };
           // A list-mode document's root row is given its scope's equality bindings, as on Postgres:

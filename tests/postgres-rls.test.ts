@@ -50,6 +50,9 @@ const mine = defineDoc("rls-mine:", { root: "rls_items", include: [], scope: { o
 const notes = defineDoc("rls-notes:", { root: "rls_notes", include: [] });
 const board = defineDoc("rls-board:", { root: "rls_boards", include: ["rls_lists", "rls_cards"] });
 const cardsBy = defineDoc("rls-cards-by:", { root: "rls_cards", include: [], scope: { author_id: ":id" } });
+// one item, one note: there before their rows are, which a first write makes
+const item = defineDoc("rls-item:", { root: "rls_items", include: [], implied: true });
+const note = defineDoc("rls-note:", { root: "rls_notes", include: [], implied: true });
 
 const TABLES = "rls_items, rls_notes, rls_boards, rls_lists, rls_cards";
 const SEQUENCES = "seq_rls_items, seq_rls_notes, seq_rls_boards, seq_rls_lists, seq_rls_cards";
@@ -65,7 +68,7 @@ beforeAll(async () => {
       CREATE ROLE ${ROLE} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '${ROLE}';
     END IF; END $$;`);
   await admin.query(`DROP TABLE IF EXISTS ${TABLES} CASCADE; DROP SEQUENCE IF EXISTS ${SEQUENCES};`);
-  await applySql(admin, generateSql(schema, [everyone, mine, notes, board, cardsBy]));
+  await applySql(admin, generateSql(schema, [everyone, mine, notes, board, cardsBy, item, note]));
   await admin.query(`
     ALTER TABLE rls_items ENABLE ROW LEVEL SECURITY;
     ALTER TABLE rls_items FORCE ROW LEVEL SECURITY;
@@ -109,7 +112,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await app.end();
   await admin.query(`DROP TABLE IF EXISTS ${TABLES} CASCADE; DROP SEQUENCE IF EXISTS ${SEQUENCES};`);
-  await admin.query("DELETE FROM _delta_docs WHERE prefix IN ('rls-all:', 'rls-mine:', 'rls-notes:', 'rls-board:', 'rls-cards-by:')");
+  await admin.query("DELETE FROM _delta_docs WHERE prefix IN ('rls-all:', 'rls-mine:', 'rls-notes:', 'rls-board:', 'rls-cards-by:', 'rls-item:', 'rls-note:')");
   await admin.end();
 });
 
@@ -238,6 +241,52 @@ describe("RLS and the broadcast channel (NOSUPERUSER role)", () => {
     expect((await admin.query("SELECT owner_id::int FROM rls_notes WHERE valid_to IS NULL")).rows).toEqual([{ owner_id: 2 }]);
     // past the serial, an id is new
     expect((await sendAndAwait(ws, alice, { action: "delta", doc: "rls-all:", ops: [{ op: "add", path: `/rls_items/${spent.rls_items + 1}`, value: { owner_id: 1, name: "mine" } }] })).error).toBeUndefined();
+  });
+
+  test("an implied document named for a row RLS hides answers its first write as one named for an id no row holds (409), and makes no second live note (#71)", async () => {
+    listener = await createDocListener(ws, app, { types: [docTypeFromDef(item, app, { auth, shared: true }), docTypeFromDef(note, app, { auth, shared: true })], auth });
+    const id = async (sql: string) => Number((await admin.query(sql)).rows[0].id);
+    await admin.query("TRUNCATE rls_notes; INSERT INTO rls_notes (id, owner_id, text) VALUES (nextval('seq_rls_notes'), 2, 'bob')");
+    const hidden = { "rls-item:": await id("SELECT id FROM rls_items WHERE owner_id = 2"), "rls-note:": await id("SELECT id FROM rls_notes WHERE owner_id = 2") };
+    const spent = { "rls-item:": await id("SELECT nextval('seq_rls_items') AS id"), "rls-note:": await id("SELECT nextval('seq_rls_notes') AS id") };
+    const alice = person(1);
+    const first = async (prefix: "rls-item:" | "rls-note:", n: number) => {
+      const doc = `${prefix}${n}`;
+      await sendAndAwait(ws, alice, { action: "open", doc });
+      const field = prefix === "rls-item:" ? "/rls_items/name" : "/rls_notes/text";
+      const res = await sendAndAwait(ws, alice, { action: "delta", doc, ops: [{ op: "replace", path: field, value: "mine" }] });
+      return { code: res.error?.code, message: String(res.error?.message).replace(`/${n} `, "/<id> ") };
+    };
+    for (const prefix of ["rls-item:", "rls-note:"] as const) {
+      const refused = await first(prefix, hidden[prefix]);
+      expect(refused.code).toBe(409);
+      expect(await first(prefix, spent[prefix])).toEqual(refused);
+    }
+    expect((await admin.query("SELECT owner_id::int FROM rls_notes WHERE valid_to IS NULL")).rows).toEqual([{ owner_id: 2 }]);
+    // (one past the serial is made, and the serial follows it: tests/helpers/path.ts; here the policy's
+    // WITH CHECK refuses an empty root, whose owner is 0)
+  });
+
+  test("the serial helpers answer only a caller that may use the table: to a role with no privileges every id is taken, and the serial does not move (#71)", async () => {
+    await admin.query(`DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'delta_rls_none') THEN CREATE ROLE delta_rls_none NOSUPERUSER NOBYPASSRLS; END IF; END $$;`);
+    const c = await admin.connect();
+    const as = async (role: string, sql: string) => {
+      await c.query("BEGIN");
+      try {
+        await c.query(`SET LOCAL ROLE ${role}`);
+        return (await c.query(sql)).rows[0];
+      } finally { await c.query("ROLLBACK"); }
+    };
+    try {
+      const last = async () => Number((await admin.query("SELECT last_value FROM seq_rls_items")).rows[0].last_value);
+      const was = await last();
+      expect(await as(ROLE, "SELECT _delta_serial_new('rls_items', 1000) AS new")).toEqual({ new: true });
+      expect(await as("delta_rls_none", "SELECT _delta_serial_new('rls_items', 1000) AS new")).toEqual({ new: false });
+      await as("delta_rls_none", "SELECT _delta_serial_past('rls_items', 9007199254740991)");
+      expect(await last()).toBe(was);
+    } finally {
+      c.release();
+    }
   });
 
   test("an undo is a write: once the identity no longer owns the document, its undo is a 404 too", async () => {

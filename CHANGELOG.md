@@ -108,17 +108,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   numeric id the collection's serial has handed out (minted by `/-`, or passed for an add that
   named it) is a 409 whether a row holds it or not, with one message (`id already taken:
   /households/3 -- add to /households/- for a new id`); an id past the serial adds as before
-  and moves the serial on. The serial was never a secret: `/-` echoes it. Still let through,
-  each a row the writer has read: an undo or redo, putting rows back under their ids; a single
-  document's own root (`[remove /venues/42, add /venues/42 {...}]`); a row the same write
-  removed or made. A text id (SQLite and the JSON file) is the client's own key, which no
-  serial hands out: a taken one is still a 409 wherever it is, so it is as private as it is
-  unguessable (a uuid). `_delta_serial_new` is new in `001d` and `delta_apply` is replaced in
-  place: re-apply the framework (`applyFramework`, or `bunx @blueshed/delta init --upgrade`).
-  **Migration:** a later write that re-adds a removed row under its old id sends `add
-  /<coll>/-` and reads the id from the echo, or undoes the removal; a Postgres test that empties
-  tables between cases restarts `seq_<table>` too (`TRUNCATE ... RESTART IDENTITY` leaves it:
-  the table does not own it).
+  and moves the serial on -- once the write is done, so a write refused part way names none
+  (on Postgres, whose serials do not roll back, only a failure at commit can). The serial was
+  never a secret: `/-` echoes it. Still let through, each a row the writer has read: an undo or
+  redo, putting rows back under their ids; a row the same write removed or made (a single
+  document's root among them: `[remove /venues/42, add /venues/42 {...}]`). An implied
+  document's first write makes its root under the same rule: named for an id the serial has
+  handed out, it is a 409 (on Postgres under RLS a hidden root answered Postgres's own
+  duplicate key, and a hidden temporal one got a second live version); made, its root moves
+  the serial on. A text id (SQLite and the JSON file) is the client's own key, which no serial
+  hands out: a taken one is still a 409 wherever it is, so it is as private as it is
+  unguessable (a uuid). `_delta_serial_new` is new in `001d`; it and `_delta_serial_past` (both
+  run as the framework's owner) answer only a caller that may read, or insert into, the table.
+  `delta_apply` and `_delta_make_implied` are replaced in place: re-apply the framework
+  (`applyFramework`, or `bunx @blueshed/delta init --upgrade`). **Migration:** a later write
+  that re-adds a removed row under its old id -- or writes to an implied document whose root
+  was removed -- sends `add /<coll>/-` and reads the id from the echo, or undoes the removal; a
+  Postgres test that empties tables between cases restarts `seq_<table>` too (`TRUNCATE ...
+  RESTART IDENTITY` leaves it: the table does not own it).
 
 ### Fixed
 

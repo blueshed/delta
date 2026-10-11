@@ -400,6 +400,34 @@ export function serialCases(backend: () => PathBackend): void {
       expect(ops).toEqual([{ op: "add", path: "/households/5", value: household(5, "e@x") }]);
       await assertCopiesHold(b, copies);
     });
+
+    test("a write refused part way names no id: the same add sent again goes through (#71)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1"]);
+      const refused = await b.process.call("delta", { doc: "fo-board:1", ops: [
+        { op: "add", path: "/courses/9", value: { name: "Fish" } },
+        { op: "replace", path: "/courses/999/name", value: "x" },
+      ] });
+      expect(refused.error?.code).toBe(404);
+      const { ops } = await write(b.process, "fo-board:1", [{ op: "add", path: "/courses/9", value: { name: "Fish" } }]);
+      expect(ops).toEqual([{ op: "add", path: "/courses/9", value: course(9, "Fish") }]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("an implied document's first write makes its root under the add rule: an id the serial has handed out is taken; one past it is made and the serial follows (#71)", async () => {
+      const b = backend();
+      await openAll(b.process, ["fo-weddings:"]);
+      await write(b.process, "fo-weddings:", [{ op: "add", path: "/weddings/-", value: { name: "brief" } }, { op: "remove", path: "/weddings/3" }]);
+      const copies = await openAll(b.process, ["fo-plan:3", "fo-plan:50", "fo-weddings:"]);
+      const spent = await b.process.call("delta", { doc: "fo-plan:3", ops: [{ op: "add", path: "/courses/-", value: { name: "Soup" } }] });
+      expect(spent.error).toEqual({ code: 409, message: expect.stringMatching(/^id already taken: \/weddings\/3 -- add to \/weddings\/- for a new id$/i) });
+      await write(b.process, "fo-plan:50", [{ op: "add", path: "/courses/-", value: { name: "Soup" } }]);
+      const code = async (id: number) => (await b.process.call("delta", { doc: "fo-weddings:", ops: [{ op: "add", path: `/weddings/${id}`, value: { name: "x" } }] })).error?.code;
+      expect(await code(49)).toBe(409);
+      expect(await code(50)).toBe(409);
+      expect((await b.exportTables()).sequences?.weddings).toBe(50);
+      await assertCopiesHold(b, copies);
+    });
   });
 }
 
