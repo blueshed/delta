@@ -137,6 +137,25 @@ CREATE OR REPLACE FUNCTION _delta_inverse(p_before JSONB, p_ops JSONB)
 RETURNS JSONB LANGUAGE sql IMMUTABLE AS $$ SELECT _delta_inverse(p_before, p_ops, NULL); $$;
 
 -- ---------------------------------------------------------------------------
+-- _delta_beside: a document with rows outside it beside it -- rows, each
+-- {coll, id, row}, of collections it neither roots nor includes -- for the
+-- ledger: what a removal's cascade takes beyond the document (the schema's
+-- cascade, not the include's), which its inverse puts back and a walk of it is
+-- guarded by. `besides` in sqlite.ts.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION _delta_beside(p_doc JSONB, p_def _delta_docs, p_rows JSONB)
+RETURNS JSONB LANGUAGE sql STABLE AS $$
+  SELECT p_doc || COALESCE(jsonb_object_agg(coll, COALESCE(p_doc->coll, '{}'::jsonb) || rows), '{}'::jsonb)
+    FROM (SELECT r->>'coll' AS coll, jsonb_object_agg(r->>'id', r->'row') AS rows
+            FROM jsonb_array_elements(COALESCE(p_rows, '[]'::jsonb)) AS r
+           WHERE r->>'coll' IS DISTINCT FROM p_def.root_collection
+             AND NOT (r->>'coll' = ANY(COALESCE(p_def.include, ARRAY[]::text[])))
+             AND jsonb_typeof(r->'row') = 'object'
+           GROUP BY 1) AS beyond;
+$$;
+
+-- ---------------------------------------------------------------------------
 -- delta_apply_logged: delta_apply, with its ledger entry, in one transaction.
 -- A lock per document keeps another writer of it from landing between the read
 -- the inverse is taken from and the write. Returns delta_apply's {version, ops}
@@ -159,6 +178,13 @@ DECLARE
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtext('delta:' || p_doc_name));
   v_before  := COALESCE(delta_open(p_doc_name), '{}'::jsonb);
+  -- the rows each removal's cascade will take beyond the document, as they are: its inverse puts them back
+  v_before  := _delta_beside(v_before, _delta_find_doc(p_doc_name), (
+    SELECT jsonb_agg(r) FROM jsonb_array_elements(p_ops) AS o,
+           LATERAL _delta_split_path(o->>'path') AS p,
+           LATERAL jsonb_array_elements(_delta_cascade_rows(p[1], p[2]::bigint)) AS r
+     WHERE o->>'op' = 'remove' AND array_length(p, 1) = 2
+       AND p[2] ~ '^[0-9]+$' AND p[2]::numeric <= 9007199254740991));
   v_result  := delta_apply(p_doc_name, p_ops, p_undoes IS NOT NULL);   -- an entry that walks another is a walk
   v_inverse := _delta_inverse(v_before, v_result->'ops', p_ops);
   IF jsonb_array_length(v_result->'ops') > 0 THEN
@@ -256,9 +282,24 @@ DECLARE
   v_fields   TEXT[];
   v_ops      JSONB := '[]'::jsonb;
   v_conflict JSONB := '[]'::jsonb;
-  v_include  TEXT[] := (_delta_find_doc(p_entry.doc_name)).include;
+  v_def      _delta_docs := _delta_find_doc(p_entry.doc_name);
   v_others   BOOLEAN;
+  v_coll     RECORD;
+  v_row      JSONB;
+  v_beyond   JSONB := '[]'::jsonb;
 BEGIN
+  -- a row outside the document that the entry's cascade took is guarded by the tables, as they hold it now
+  FOR v_parts IN SELECT DISTINCT _delta_split_path(o->>'path') FROM jsonb_array_elements(p_entry.ops || p_entry.inverse) AS o LOOP
+    CONTINUE WHEN array_length(v_parts, 1) <> 2 OR v_parts[2] !~ '^[0-9]+$' OR v_parts[2]::numeric > 9007199254740991
+      OR v_parts[1] = v_def.root_collection OR v_parts[1] = ANY(COALESCE(v_def.include, ARRAY[]::text[]));
+    SELECT * INTO v_coll FROM _delta_collections WHERE collection_key = v_parts[1];
+    CONTINUE WHEN NOT FOUND;
+    EXECUTE format('SELECT _delta_strip_temporal(to_jsonb(t.*)) FROM %I t WHERE t.id = $1', _delta_source_view(v_coll.table_name, v_coll.temporal))
+      INTO v_row USING v_parts[2]::bigint;
+    v_beyond := v_beyond || jsonb_build_array(jsonb_build_object('coll', v_parts[1], 'id', v_parts[2]::bigint, 'row', v_row));
+  END LOOP;
+  v_doc := _delta_beside(v_doc, v_def, v_beyond);
+
   FOR v_op IN SELECT * FROM jsonb_array_elements(p_entry.ops) LOOP
     v_left := v_left || jsonb_build_object(_delta_walk_key(v_op->>'path', v_op->'value', v_doc),
       CASE WHEN v_op->>'op' = 'remove' THEN 'null'::jsonb ELSE v_op->'value' END);
@@ -285,7 +326,7 @@ BEGIN
     IF v_was IS NULL THEN                               -- it made the row
       -- a row under it that the entry did not make: what its removal would take with it
       v_others := array_length(v_parts, 1) = 2 AND EXISTS (
-        SELECT 1 FROM jsonb_array_elements(_delta_cascade_rows(v_parts[1], _delta_row_id(v_parts[1], v_parts[2]), v_include)) WITH ORDINALITY AS c(r, i)
+        SELECT 1 FROM jsonb_array_elements(_delta_cascade_rows(v_parts[1], _delta_row_id(v_parts[1], v_parts[2]))) WITH ORDINALITY AS c(r, i)
          WHERE i > 1 AND NOT (
            COALESCE(v_before->_delta_build_path(r->>'coll', r->>'id'), 'null'::jsonb) = 'null'::jsonb
            AND COALESCE(v_left->_delta_build_path(r->>'coll', r->>'id'), 'null'::jsonb) <> 'null'::jsonb));

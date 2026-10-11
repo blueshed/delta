@@ -22,14 +22,17 @@ END;
 $$;
 
 -- ---------------------------------------------------------------------------
--- _delta_cascade_remove: remove a row + cascade to children & referencedBy
--- Returns the array of broadcast ops generated.
+-- _delta_cascade_remove: remove a row + cascade to children & referencedBy,
+-- as the schema says, whichever document the removal is written through: one
+-- that does not include the drinks still takes a course's drinks (no orphans).
+-- Returns the array of broadcast ops generated. (Until 0.12.0 it took the
+-- writer's include, and left the rest: that form is dropped.)
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS _delta_cascade_remove(TEXT, BIGINT, TEXT[]);
 CREATE OR REPLACE FUNCTION _delta_cascade_remove(
   p_collection_key TEXT,
-  p_id             BIGINT,
-  p_include        TEXT[]
+  p_id             BIGINT
 ) RETURNS JSONB AS $$
 DECLARE
   v_coll      RECORD;
@@ -71,7 +74,6 @@ BEGIN
   FOR v_child IN
     SELECT * FROM _delta_collections
      WHERE parent_collection = p_collection_key
-       AND collection_key = ANY(p_include)
   LOOP
     v_view := _delta_source_view(v_child.table_name, v_child.temporal);
 
@@ -79,7 +81,7 @@ BEGIN
       EXECUTE format('SELECT id FROM %I WHERE %I = $1', v_view, v_child.parent_fk)
         USING p_id
     LOOP
-      v_ops := v_ops || _delta_cascade_remove(v_child.collection_key, v_child_row.id, p_include);
+      v_ops := v_ops || _delta_cascade_remove(v_child.collection_key, v_child_row.id);
     END LOOP;
   END LOOP;
 
@@ -91,7 +93,6 @@ BEGIN
       FROM _delta_collections c,
            jsonb_array_elements(c.cascade_on) AS elem
      WHERE elem->>'collection' = p_collection_key
-       AND c.collection_key = ANY(p_include)
   LOOP
     v_view := _delta_source_view(v_ref.table_name, v_ref.temporal);
 
@@ -99,7 +100,7 @@ BEGIN
       EXECUTE format('SELECT id FROM %I WHERE %I = $1', v_view, v_ref.fk_column)
         USING p_id
     LOOP
-      v_ops := v_ops || _delta_cascade_remove(v_ref.collection_key, v_ref_row.id, p_include);
+      v_ops := v_ops || _delta_cascade_remove(v_ref.collection_key, v_ref_row.id);
     END LOOP;
   END LOOP;
 
@@ -113,10 +114,10 @@ $$ LANGUAGE plpgsql;
 -- be asked while every row of every chain is still there.
 -- ---------------------------------------------------------------------------
 
+DROP FUNCTION IF EXISTS _delta_cascade_rows(TEXT, BIGINT, TEXT[]);
 CREATE OR REPLACE FUNCTION _delta_cascade_rows(
   p_collection_key TEXT,
-  p_id             BIGINT,
-  p_include        TEXT[]
+  p_id             BIGINT
 ) RETURNS JSONB AS $$
 DECLARE
   v_coll  RECORD;
@@ -136,22 +137,22 @@ BEGIN
 
   FOR v_child IN
     SELECT * FROM _delta_collections
-     WHERE parent_collection = p_collection_key AND collection_key = ANY(p_include)
+     WHERE parent_collection = p_collection_key
   LOOP
     FOR v_id IN EXECUTE format('SELECT id FROM %I WHERE %I = $1', _delta_source_view(v_child.table_name, v_child.temporal), v_child.parent_fk) USING p_id
     LOOP
-      v_rows := v_rows || _delta_cascade_rows(v_child.collection_key, v_id, p_include);
+      v_rows := v_rows || _delta_cascade_rows(v_child.collection_key, v_id);
     END LOOP;
   END LOOP;
 
   FOR v_ref IN
     SELECT c.collection_key, c.table_name, c.temporal, elem->>'fk' AS fk_column
       FROM _delta_collections c, jsonb_array_elements(c.cascade_on) AS elem
-     WHERE elem->>'collection' = p_collection_key AND c.collection_key = ANY(p_include)
+     WHERE elem->>'collection' = p_collection_key
   LOOP
     FOR v_id IN EXECUTE format('SELECT id FROM %I WHERE %I = $1', _delta_source_view(v_ref.table_name, v_ref.temporal), v_ref.fk_column) USING p_id
     LOOP
-      v_rows := v_rows || _delta_cascade_rows(v_ref.collection_key, v_id, p_include);
+      v_rows := v_rows || _delta_cascade_rows(v_ref.collection_key, v_id);
     END LOOP;
   END LOOP;
 
@@ -367,6 +368,7 @@ DECLARE
   v_run_at        INT;               -- the touched entry of the run of replaces under way
   v_run_carried   BOOLEAN := FALSE;  -- that run has carried the rows under its row along
   v_hung          JSONB;
+  v_outside       BOOLEAN;           -- the op's collection is neither the root nor included: a walk's, put back or taken again
 BEGIN
   -- Guard: ops must be a JSON array
   IF p_ops IS NULL OR jsonb_typeof(p_ops) != 'array' THEN
@@ -436,8 +438,12 @@ BEGIN
     -- to an unrelated collection through it. (The TS validateOps enforces the
     -- same pre-flight, but this guards every path into delta_apply, including
     -- SQL-side composition via delta_apply_as.)
-    IF v_coll_key IS DISTINCT FROM v_def.root_collection
-       AND NOT (v_coll_key = ANY(COALESCE(v_def.include, ARRAY[]::text[]))) THEN
+    -- A walk may put back, or take again, a row outside the document that its
+    -- entry's cascade reached (the schema's, not the include's): its plan
+    -- guards it against the tables (_delta_walk_plan).
+    v_outside := v_coll_key IS DISTINCT FROM v_def.root_collection
+                 AND NOT (v_coll_key = ANY(COALESCE(v_def.include, ARRAY[]::text[])));
+    IF v_outside AND NOT (COALESCE(p_walk, FALSE) AND array_length(v_parts, 1) = 2 AND v_op->>'op' IN ('add', 'remove')) THEN
       RAISE EXCEPTION
         'op collection "%" is not part of doc "%" (root: %, include: %)',
         v_coll_key, v_def.prefix, v_def.root_collection, v_def.include
@@ -607,7 +613,7 @@ BEGIN
       -- construction. A grandchild's arrives verbatim from the client — without
       -- this check it grafts the new row onto ANOTHER doc's parent. A single
       -- document's root row is not under its parent: its value names it.
-      IF v_coll.parent_collection IS NOT NULL
+      IF v_coll.parent_collection IS NOT NULL AND NOT v_outside
          AND v_coll.parent_collection IS DISTINCT FROM v_def.root_collection
          AND (v_is_list OR v_coll_key IS DISTINCT FROM v_def.root_collection)
          AND NOT _delta_row_in_scope(
@@ -705,18 +711,18 @@ BEGIN
       v_id := _delta_row_id(v_coll_key, v_parts[2]);
       -- _delta_cascade_remove addresses rows by id alone, so without this gate a
       -- client could name any id and delete a sibling doc's row.
-      IF NOT _delta_row_in_scope(v_def, p_doc_name, v_coll_key, v_id) THEN
+      IF NOT v_outside AND NOT _delta_row_in_scope(v_def, p_doc_name, v_coll_key, v_id) THEN
         RAISE EXCEPTION 'row not found: %/%', v_coll_key, v_id
           USING ERRCODE = 'P0002';
       END IF;
       -- who holds the row and every row the cascade takes, asked before any is gone
       v_befores := '{}'::jsonb;
-      FOR v_r IN SELECT jsonb_array_elements(_delta_cascade_rows(v_coll_key, v_id, v_def.include)) LOOP
+      FOR v_r IN SELECT jsonb_array_elements(_delta_cascade_rows(v_coll_key, v_id)) LOOP
         v_befores := v_befores || jsonb_build_object(
           (v_r->>'coll') || '/' || (v_r->>'id'), to_jsonb(_delta_holders(v_r->>'coll', v_r->'row', p_doc_name)));
         IF NOT v_is_list AND v_r->>'coll' = v_def.root_collection THEN v_root_was := v_r->'row'; END IF;
       END LOOP;
-      v_removed := _delta_cascade_remove(v_coll_key, v_id, v_def.include);
+      v_removed := _delta_cascade_remove(v_coll_key, v_id);
       -- A remove of a row that is not there is a 404, as on SQLite and the
       -- JSON file (A6): the scope gate above lets any id of a collection a
       -- document holds whole (one with no parent, a list's include) through,

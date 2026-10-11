@@ -337,6 +337,17 @@ export function registerDocs<I = unknown>(
    */
   type Touched = { coll: string; id: string | number; before: string[]; after: any | null; carried?: boolean };
 
+  /** A row outside a document -- of a collection it does not include -- that a write through it reaches (a cascade). */
+  type Beyond = { coll: string; row: any };
+
+  /** The document with rows outside it beside it, for the ledger: what an inverse puts back, and what a walk is guarded by. */
+  function besides(doc: any, rows: Beyond[]): any {
+    if (!rows.length) return doc;
+    const out = { ...doc };
+    for (const { coll, row } of rows) out[coll] = { ...out[coll], [row.id]: row };
+    return out;
+  }
+
   /**
    * The id of the `root` row that `row` (of `coll`) hangs from, following parent
    * keys up through the tables as they stand; null when the chain does not
@@ -413,28 +424,26 @@ export function registerDocs<I = unknown>(
    * A row and the rows its removal takes with it (its children, and the rows
    * `cascadeOn` it), parent first -- each once, where the walk first reaches it,
    * as the removal then takes it: a row reached twice (a child of the removed
-   * row that also cascades on another row it takes) is not taken again.
+   * row that also cascades on another row it takes) is not taken again. As the
+   * schema says, whichever document the removal is written through: one that
+   * does not include the drinks still takes a course's drinks.
    */
-  function cascadeRows(table: ResolvedTable, id: string | number, def: DocDef, out: { table: ResolvedTable; row: any }[] = [], seen = new Set<string>()): { table: ResolvedTable; row: any }[] {
+  function cascadeRows(table: ResolvedTable, id: string | number, out: { table: ResolvedTable; row: any }[] = [], seen = new Set<string>()): { table: ResolvedTable; row: any }[] {
     const key = `${table.docKey}/${id}`;
     const row = seen.has(key) ? null : readRow(table, id);
     if (!row) return out;
     seen.add(key);
     out.push({ table, row });
     for (const childKey of table.children) {
-      if (!def.include.includes(childKey)) continue;
-      const child = schema.tables[childKey];
-      if (!child?.parent) continue;
-      for (const r of db.query(`SELECT id FROM ${current(child)} WHERE ${child.parent.fkColumn} = ?`).all(id as any) as any[]) {
-        cascadeRows(child, r.id, def, out, seen);
+      const child = schema.tables[childKey]!;
+      for (const r of db.query(`SELECT id FROM ${current(child)} WHERE ${child.parent!.fkColumn} = ?`).all(id as any) as any[]) {
+        cascadeRows(child, r.id, out, seen);
       }
     }
     for (const ref of table.referencedBy) {
-      if (!def.include.includes(ref.collection)) continue;
-      const refTable = schema.tables[ref.collection];
-      if (!refTable) continue;
+      const refTable = schema.tables[ref.collection]!;
       for (const r of db.query(`SELECT id FROM ${current(refTable)} WHERE ${ref.fkColumn} = ?`).all(id as any) as any[]) {
-        cascadeRows(refTable, r.id, def, out, seen);
+        cascadeRows(refTable, r.id, out, seen);
       }
     }
     return out;
@@ -470,7 +479,7 @@ export function registerDocs<I = unknown>(
   // does not include, through the tables: `reaches`). The error message
   // deliberately matches the "not there" case: a distinct "forbidden" would
   // confirm the row exists to someone probing ids.
-  function applyOps(docName: string, def: DocDef, doc: any, ops: DeltaOp[], walk: boolean): { applied: DeltaOp[]; touched: Touched[] } {
+  function applyOps(docName: string, def: DocDef, doc: any, ops: DeltaOp[], walk: boolean): { applied: DeltaOp[]; touched: Touched[]; beyond: Beyond[] } {
     const scope = resolveScope(def, docName.slice(def.prefix.length));
     const list = scope.mode === "list";
     const rootId = list ? undefined : rowId(scope.id ?? doc[def.root]?.id);
@@ -479,6 +488,7 @@ export function registerDocs<I = unknown>(
     let rootWas: any;   // that root as this write took it out: added back, it goes under the same parent
     const broadcastOps: DeltaOp[] = [];
     const touched: Touched[] = [];
+    const beyond: Beyond[] = [];   // rows the cascade took that the document does not hold, as they were
     // A write is one moment, as a Postgres transaction's NOW() is: every version
     // it makes or closes is stamped with it, and a temporal row it writes twice
     // is one new version -- rewritten in place (`made`), not closed a tick later.
@@ -641,8 +651,10 @@ export function registerDocs<I = unknown>(
         continue;
       }
 
-      // Everything else is a row of a map (an included collection, or a list-mode document's root), or the root row itself.
-      if (!table || (collKey !== def.root && !def.include.includes(collKey))) {
+      // Everything else is a row of a map (an included collection, or a list-mode document's root), or the root row itself --
+      // or, in a walk, a row outside the document (`beyond`) that the entry's cascade took: put back, or taken again.
+      const outside = collKey !== def.root && !def.include.includes(collKey);
+      if (!table || (outside && !(walk && parts.length === 2 && op.op !== "replace"))) {
         throw new Error(`Unknown collection: ${collKey}`);
       }
 
@@ -671,7 +683,7 @@ export function registerDocs<I = unknown>(
           // parent is not in the document: its value names it, as a list's root
           // row's does; a list's included collection is whole.)
           const parent = table.parent;
-          if (!isRoot && parent && (list ? parent.collection === def.root : parent.collection !== def.root)) {
+          if (!isRoot && !outside && parent && (list ? parent.collection === def.root : parent.collection !== def.root)) {
             const fk = row[parent.fkColumn];
             if (!parentHeld(parent.collection, fk)) refuse(404, `Row not found: ${parent.collection}/${fk ?? ""}`);
           }
@@ -692,21 +704,22 @@ export function registerDocs<I = unknown>(
           }
           if (table.temporal) made.add(`${collKey}/${id}`);
           if (isRoot) doc[collKey] = fullRow;
-          else doc[collKey][id] = fullRow;
+          else if (!outside) doc[collKey][id] = fullRow;
           broadcastOps.push({ op: "add", path: joinPath(collKey, String(id)), value: fullRow });
           touched.push({ coll: collKey, id, before: [], after: fullRow });
         } else if (op.op === "remove") {
           // Remove row + cascades. The removal addresses rows by id ALONE, so
           // without this gate a client could name any id and delete a sibling
           // doc's row -- or one that has left this document earlier in the write.
-          if (!held(table, id)) refuse(404, `Row not found: ${collKey}/${id}`);
+          if (!(outside ? readRow(table, id) : held(table, id))) refuse(404, `Row not found: ${collKey}/${id}`);
           if (isRoot) rootWas = readRow(table, id);
           // the row and every row its removal takes, and who holds each, asked before any is gone
-          const cascade = cascadeRows(table, id, def).map(({ table: t, row }) => ({ t, row, before: holders(t.docKey, row, docName) }));
+          const cascade = cascadeRows(table, id).map(({ table: t, row }) => ({ t, row, before: holders(t.docKey, row, docName) }));
           for (const { t, row, before } of cascade) {
             if (t.temporal) closeRow(db, t, row.id, ts);
             else db.run(`DELETE FROM ${t.name} WHERE id = ?`, [row.id]);
             delete doc[t.docKey]?.[row.id];
+            if (t.docKey !== def.root && !def.include.includes(t.docKey)) beyond.push({ coll: t.docKey, row });
             broadcastOps.push({ op: "remove", path: joinPath(t.docKey, String(row.id)) });
             touched.push({ coll: t.docKey, id: row.id, before, after: null });
           }
@@ -727,7 +740,7 @@ export function registerDocs<I = unknown>(
     }
     endRun();
 
-    return { applied: broadcastOps, touched };
+    return { applied: broadcastOps, touched, beyond };
   }
 
   /**
@@ -858,7 +871,7 @@ export function registerDocs<I = unknown>(
     // up front instead of silently acking an op that diverges cache/broadcast
     // from what the DB can persist.
     const scope = resolveScope(def, docName.slice(def.prefix.length));
-    const validationErrors = validateOps(schema, def, ops, { list: scope.mode === "list", values: scope.values });
+    const validationErrors = validateOps(schema, def, ops, { list: scope.mode === "list", values: scope.values, walk: by.undoes !== undefined });
     if (validationErrors.length) {
       return { error: { code: 400, message: validationErrors.map((e) => `${e.path}: ${e.message}`).join("; ") } };
     }
@@ -886,7 +899,7 @@ export function registerDocs<I = unknown>(
         if (implied.has(docName) && !addsRoot) ensureImpliedRoot(def, doc);
         const done = applyOps(docName, def, doc, ops, by.undoes !== undefined);
         touched = done.touched;
-        const inverse = inverseOf(snapshot, done.applied, ops);
+        const inverse = inverseOf(besides(snapshot, done.beyond), done.applied, ops);
         const recorded = ledger?.record({ doc: docName, ops: done.applied, inverse, ...by });
         return { ops: done.applied, inverse, version: recorded?.version, entry: recorded?.entry };
       }).immediate();
@@ -1028,13 +1041,20 @@ export function registerDocs<I = unknown>(
       const doc = load(entry.doc, match.def, match.docId) ?? rootless(match.def, match.docId);
       try {
         // an implied document whose root row is not written yet holds no root to guard
-        // what removing a row would take with it: the rows its cascade reaches in this document
+        // what removing a row would take with it: the rows its cascade reaches
         const under = (key: string) => {
           const [coll, id] = splitPath(key);
           const table = schema.tables[coll!];
-          return table && id !== undefined ? cascadeRows(table, id, match.def).slice(1).map(({ table: t, row }) => joinPath(t.docKey, String(row.id))) : [];
+          return table && id !== undefined ? cascadeRows(table, id).slice(1).map(({ table: t, row }) => joinPath(t.docKey, String(row.id))) : [];
         };
-        const plan = planWalk(entry, implied.has(entry.doc) ? { ...doc, [match.def.root]: null } : doc, under);
+        // a row outside the document the entry's cascade took is guarded by the tables, as they hold it now
+        const outside = [...entry.ops, ...entry.inverse].flatMap((op) => {
+          const [coll, id] = splitPath(op.path);
+          const table = schema.tables[coll!];
+          const row = table && id !== undefined && coll !== match.def.root && !match.def.include.includes(coll!) ? readRow(table, rowId(id)) : null;
+          return row ? [{ coll: coll!, row }] : [];
+        });
+        const plan = planWalk(entry, besides(implied.has(entry.doc) ? { ...doc, [match.def.root]: null } : doc, outside), under);
         if (msg.dry) return respond({ result: { doc: entry.doc, entry: entry.id, ops: plan.ops, ...(plan.conflict.length ? { conflict: plan.conflict } : {}) } });
         const by = { who: whoOf(client), cursor };
         const out = plan.conflict.length || !plan.ops.length ? null : write(entry.doc, match.def, doc, plan.ops, { ...by, undoes: entry.id });

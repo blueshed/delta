@@ -26,6 +26,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   course moved out and back in one write tells each step. In `applyOps` and `tell`
   (`sqlite.ts`) and `delta_apply`, `_delta_tell` and a new `_delta_hanging_rows` (`001d`,
   replaced in place: apply it again).
+- **A removal takes every row under it, as the schema says, whichever document it is written
+  through**, on every backend. `remove /courses/1` through a list of courses that does not
+  include drinks left drink 1 in the table naming a course that was gone, and in the board's
+  copy; a household removed through its own document left its favour (`cascadeOn`). The cascade
+  now follows `parent` and `cascadeOn` alone, every document that held a row it takes is told,
+  and the answer and the ledger keep each remove: an undo puts them back, the rows beyond the
+  document guarded by the tables (a walk may add or remove them; `validateOps` takes `walk`).
+  Until now the skill described the orphans as intended. In `sqlite.ts` and `001d`
+  (`_delta_cascade_rows` and `_delta_cascade_remove` lose their `include` argument: the old
+  forms are dropped) and `001g` (`delta_apply_logged`, `_delta_walk_plan`, a new
+  `_delta_beside`): apply both again.
 
 ## [0.12.0] - 2026-10-11
 

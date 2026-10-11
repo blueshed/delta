@@ -8,7 +8,7 @@ import { pastSafeId, rowId, sameId } from "../scope";
  * `list`: the document is in list mode; `values`: its scope's equality bindings,
  * which a list-mode add of a root row is given (`applyOps`), so they count as given.
  */
-export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: { list?: boolean; values?: Record<string, string> } = {}): ValidationError[] {
+export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: { list?: boolean; values?: Record<string, string>; walk?: boolean } = {}): ValidationError[] {
   const errors: ValidationError[] = [];
   // A list-mode document's root is a map of rows, like an included collection.
   const single = (collKey: string) => collKey === def.root && !opts.list;
@@ -23,8 +23,8 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
       continue;
     }
 
-    // Check collection exists
-    if (collKey !== def.root && !def.include.includes(collKey)) {
+    // Check collection exists -- or, in a walk (`walk`), is one outside the document that its entry's cascade reached: a row put back, or taken again
+    if (collKey !== def.root && !def.include.includes(collKey) && !(opts.walk && parts.length === 2 && op.op !== "replace")) {
       errors.push({ path: op.path, message: `Unknown collection: ${collKey}` });
       continue;
     }

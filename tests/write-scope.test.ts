@@ -366,7 +366,7 @@ describe("write scoping (postgres)", () => {
     // like from inside the function.)
     await pool.query("DELETE FROM notes WHERE id = 100");
     const { rows } = await pool.query(
-      "SELECT _delta_cascade_remove('notes', 100, ARRAY['projects','notes']) AS ops",
+      "SELECT _delta_cascade_remove('notes', 100) AS ops",
     );
     expect(rows[0].ops).toEqual([]);
   });
