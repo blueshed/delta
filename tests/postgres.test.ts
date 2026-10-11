@@ -426,7 +426,7 @@ describe("scope DSL operators", () => {
     await registerScope("at-op:", { valid_from: "at:when" });
     try {
       const r = await resolve("at-op:", "at-op:2026-06-01");
-      expect(r.at).toBe("2026-06-01");
+      expect(r.at).toBe("2026-06-01 00:00:00+00");   // the instant midnight UTC begins the day, whatever the session's TimeZone
       // No WHERE contribution — the 'at' op short-circuits the filter branch.
       expect(r.where).not.toContain("valid_from");
     } finally { await cleanup("at-op:"); }
