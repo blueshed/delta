@@ -105,6 +105,15 @@ describe("package exports", () => {
     expect(declared).toEqual(Object.keys(probes).sort());
   });
 
+  test('"./postgres" exports its API, not codegen\'s SQL helpers (q, columnSqlType, sqlDefault, ...)', async () => {
+    expect(Object.keys(await import("../src/server/postgres")).sort()).toEqual([
+      "applyFramework", "applySql", "clearRegistry", "createDocListener", "createSnapshot", "defineCustomDoc",
+      "defineDoc", "defineSchema", "docTypeFromDef", "exportTables", "frameworkSqlFiles", "generateSql",
+      "importTables", "isAuthError", "loadDocAt", "pruneOpsLog", "registerDocType", "resolveDoc",
+      "resolveSnapshot", "upgradeWithAuth", "validateOps", "wireAuth", "withAppAuth",
+    ]);
+  });
+
   for (const [subpath, named] of Object.entries(probes)) {
     // Keys carry the exports-map's leading "." — drop it to get the specifier
     // a consumer writes ("./core" -> "@blueshed/delta/core").

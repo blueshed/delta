@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it is at or past the next serial, never back. SQLite and the JSON file still mint past their
   own sequence alone.
 
+### Removed
+
+- **`@blueshed/delta/postgres` no longer exports codegen's SQL helpers or `frameworkSql()`**:
+  `q`, `columnSqlType`, `sqlDefault`, `findCascadeOn`, `defaultForType` (unused, deleted) and
+  `frameworkSql` (deleted). Nothing outside delta imported them. For the framework SQL, read the
+  files `frameworkSqlFiles()` names, or call `applyFramework(pool)`.
+
 ### Internal
 
 - `kinds.ts`: the three kinds share one join, leave and `close` (`family()`).

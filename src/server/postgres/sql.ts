@@ -29,7 +29,7 @@ export function columnSqlType(def: ColumnDef): string {
 }
 
 export function sqlDefault(value: unknown): string {
-  if (typeof value === "string") return `'${value.replace(/'/g, "''")}'`;
+  if (typeof value === "string") return lit(value);
   if (typeof value === "number") return String(value);
   if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
   return "NULL";
@@ -46,15 +46,4 @@ export function findCascadeOn(collKey: string, schema: Schema): { fk: string; co
     }
   }
   return result;
-}
-
-export function defaultForType(type: ColumnDef["type"]): unknown {
-  switch (type) {
-    case "text": return "";
-    case "integer": return 0;
-    case "real": return 0;
-    case "boolean": return false;
-    case "json": return null;
-    case "timestamptz": return null;   // no sensible default — must be supplied
-  }
 }

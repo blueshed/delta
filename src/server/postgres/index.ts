@@ -34,14 +34,6 @@ export type {
   ValidationError,
 } from "./schema";
 
-export {
-  q,
-  columnSqlType,
-  sqlDefault,
-  findCascadeOn,
-  defaultForType,
-} from "./sql";
-
 export { generateSql } from "./codegen";
 
 export { exportTables, importTables } from "./carry";
@@ -51,7 +43,6 @@ export type { GenerateSqlOptions } from "./codegen";
 export {
   applyFramework,
   applySql,
-  frameworkSql,
   frameworkSqlFiles,
 } from "./bootstrap";
 

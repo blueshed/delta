@@ -31,13 +31,6 @@ export function frameworkSqlFiles(): string[] {
     .map((f) => join(FRAMEWORK_SQL_DIR, f));
 }
 
-/** The full framework SQL as one string (all files concatenated in order). */
-export function frameworkSql(): string {
-  return frameworkSqlFiles()
-    .map((p) => readFileSync(p, "utf8"))
-    .join("\n\n");
-}
-
 /**
  * Apply the framework SQL to the given pool. Runs every file in
  * `postgres/sql/` alphabetically — 001a through 001g today. Safe to call
