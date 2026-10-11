@@ -45,8 +45,11 @@ Parse `.version` in `package.json` as strict `x.y.z` (refuse anything else) and 
 
 ## 5. Stamp
 
-In each skill listed in the table, replace the frontmatter line `version: x.y.z` with the new
-version (insert it after `name:` if it is missing). Change nothing else in the skill.
+In each skill listed in the table, set the version under the frontmatter's `metadata:` map
+(`metadata:` then `  version: x.y.z`) to the new version, inserting both lines after `name:` if
+missing. A top-level `version:` line moves under `metadata:`: the Agent Skills spec allows only
+`name`, `description`, `license`, `compatibility`, `metadata` and `allowed-tools` at the top, and
+claude.ai and the Skills API refuse a skill with any other key. Change nothing else in the skill.
 
 ## 6. Promote the changelog
 
