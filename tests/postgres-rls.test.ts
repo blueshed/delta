@@ -23,6 +23,8 @@ import type { DeltaAuth } from "../src/server/auth";
 import { createWs, type WsServer } from "../src/server/server";
 import { setLogLevel } from "../src/server/logger";
 import { applyOps } from "../src/core";
+import { readFileSync } from "node:fs";
+import { frameworkSqlFiles } from "../src/server/postgres";
 import { PG_URL, newPool, applyFramework, mockClient, sendAndAwait, type MockClient } from "./setup";
 
 setLogLevel("silent");
@@ -461,5 +463,44 @@ describe("who is told is worked out whatever the writer may read (todo #33)", ()
     expect(copy).toEqual(fresh);
     expect(Object.values(fresh.rls_cards).map((c: any) => c.text)).toEqual(["for alice"]);
     expect(JSON.stringify(alice.sent)).not.toContain("bob's own");
+  });
+});
+
+describe("the framework's SECURITY DEFINER functions cannot be led astray", () => {
+  test("each searches the path it was applied with, and pg_temp last", async () => {
+    // the functions the framework SQL makes, as the database has them
+    const made = frameworkSqlFiles().flatMap((f) => [...readFileSync(f, "utf8").matchAll(/CREATE (?:OR REPLACE )?FUNCTION (\w+)/g)].map((m) => m[1]!));
+    const { rows } = await admin.query(`SELECT DISTINCT proname, proconfig FROM pg_proc
+      WHERE prosecdef AND pronamespace = current_schema()::regnamespace AND proname = ANY($1) ORDER BY proname`, [made]);
+    expect(rows.map((r: any) => r.proname)).toEqual(["_delta_holders", "_delta_serial_past"]);
+    for (const { proname, proconfig } of rows) {
+      const path = (proconfig ?? []).find((c: string) => c.startsWith("search_path="));
+      expect({ proname, last: path?.split(",").at(-1)?.trim() }).toEqual({ proname, last: "pg_temp" });
+    }
+  });
+
+  test("a role's own temporary tables do not stand in for delta's: _delta_holders reads no secret through them", async () => {
+    await admin.query(`CREATE TABLE IF NOT EXISTS rls_secrets (id bigint PRIMARY KEY, secret text);
+      INSERT INTO rls_secrets VALUES (1, 'hunter2') ON CONFLICT DO NOTHING;
+      ALTER TABLE rls_secrets ENABLE ROW LEVEL SECURITY; ALTER TABLE rls_secrets FORCE ROW LEVEL SECURITY;
+      GRANT SELECT ON rls_secrets TO ${ROLE};`);
+    const evil = await app.connect();
+    try {
+      expect((await evil.query("SELECT * FROM rls_secrets")).rows).toEqual([]);   // the policy holds: nothing to read
+      await evil.query(`
+        CREATE TEMP TABLE _delta_collections (collection_key TEXT PRIMARY KEY, table_name TEXT NOT NULL, columns_def JSONB NOT NULL DEFAULT '{}',
+          parent_collection TEXT, parent_fk TEXT, temporal BOOLEAN NOT NULL DEFAULT TRUE, cascade_on JSONB NOT NULL DEFAULT '[]');
+        CREATE TEMP TABLE _delta_docs (prefix TEXT PRIMARY KEY, root_collection TEXT NOT NULL, include TEXT[] NOT NULL DEFAULT '{}',
+          scope JSONB NOT NULL DEFAULT '{}', implied BOOLEAN NOT NULL DEFAULT FALSE);
+        INSERT INTO _delta_collections VALUES ('c', 'c', '{}', 'p', 'pid', false, '[]'), ('p', 'rls_secrets', '{}', 'root', 'secret', false, '[]'), ('root', 'root', '{}', NULL, NULL, false, '[]');
+        INSERT INTO _delta_docs VALUES ('x:', 'root', '{c}', '{}', false);`);
+      const answer = await evil.query(`SELECT _delta_holders('c', '{"id":1,"pid":1}', NULL) AS names`)
+        .then((r) => r.rows[0].names, (err: any) => err.message);
+      expect(answer).toEqual([]);
+    } finally {
+      await evil.query("DISCARD TEMP").catch(() => {});
+      evil.release();
+      await admin.query("DROP TABLE IF EXISTS rls_secrets");
+    }
   });
 });

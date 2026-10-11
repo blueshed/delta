@@ -49,6 +49,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Postgres: a SECURITY DEFINER function no longer searches the caller's temporary tables
+  first.** `_delta_serial_past` (`001d`) and `_delta_holders` (`001b`) took the search path as it
+  was applied (`"$user", public`), where `pg_temp` comes first unless named: a role that may make
+  temporary tables could make its own `_delta_collections` and read, through the function's
+  error, a column its RLS hides. Each now searches that path with `pg_temp` last
+  (`tests/postgres-rls.test.ts` asks every one, and makes the attempt as a `NOSUPERUSER` role).
+  Apply the framework SQL again.
 - **Postgres: who is told of a write does not depend on what the writer may read (todo #33).**
   The documents that hold a changed row were worked out as the writer, so a parent row the
   writer's RLS hid -- Alice's list, under Alice's board -- hid the document that holds it: Bob's

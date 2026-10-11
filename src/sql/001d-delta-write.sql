@@ -11,7 +11,7 @@
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION _delta_serial_past(p_table TEXT, p_id BIGINT)
-RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER AS $$
 BEGIN
   IF p_id > 9007199254740991 OR NOT EXISTS (SELECT 1 FROM _delta_collections WHERE table_name = p_table) THEN
     RETURN;
@@ -20,6 +20,10 @@ BEGIN
     'seq_' || p_table, 'seq_' || p_table) USING p_id;
 END;
 $$;
+-- the search path it was applied with, and pg_temp last (as _delta_holders, 001b)
+DO $$ BEGIN
+  EXECUTE format('ALTER FUNCTION _delta_serial_past(TEXT, BIGINT) SET search_path = %s, pg_temp', COALESCE(NULLIF(current_setting('search_path'), ''), 'public'));
+END $$;
 
 -- ---------------------------------------------------------------------------
 -- _delta_cascade_remove: remove a row + cascade to children & referencedBy,

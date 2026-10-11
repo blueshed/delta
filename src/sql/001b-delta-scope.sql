@@ -515,8 +515,8 @@ $$ LANGUAGE plpgsql STABLE;
 -- name held from now is seen here, and a write that asked before is read by
 -- the open. VOLATILE, so the question is asked after the lock.
 --
--- SECURITY DEFINER (todo #33): who holds a row is worked out as the functions'
--- owner, not the writer, so a parent row the writer's RLS hides (another's
+-- SECURITY DEFINER (todo #33), with pg_temp last on its path: who holds a row
+-- is worked out as the functions' owner, not the writer, so a parent row the writer's RLS hides (another's
 -- list, under another's board) does not hide the document that holds it. It
 -- answers document names, never a row; each document is told only what it
 -- holds (a caller may ask it of a row it makes up, and learn which open
@@ -562,7 +562,12 @@ BEGIN
   END LOOP;
   RETURN v_names;
 END;
-$$ LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path FROM CURRENT;
+$$ LANGUAGE plpgsql VOLATILE SECURITY DEFINER;
+-- the search path it was applied with, and pg_temp last: a caller's temporary
+-- tables never stand in for delta's own (pg_temp is searched first unless named)
+DO $$ BEGIN
+  EXECUTE format('ALTER FUNCTION _delta_holders(TEXT, JSONB, TEXT) SET search_path = %s, pg_temp', COALESCE(NULLIF(current_setting('search_path'), ''), 'public'));
+END $$;
 
 -- ---------------------------------------------------------------------------
 -- _delta_strip_temporal: remove valid_from/valid_to/override from a JSONB row
