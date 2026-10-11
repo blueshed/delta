@@ -127,6 +127,18 @@ export function clearRegistry(): void {
   authed.clear();
 }
 
+/**
+ * `SELECT fn(args) AS result` on `db`, as `identity` when the auth module
+ * says how to name it (`asSqlArg`): `fn_as(user, args)`, which sets
+ * `app.user_id` and calls `fn` in one round-trip (001f).
+ */
+export async function callAs<I>(db: { query(sql: string, params: unknown[]): Promise<{ rows: any[] }> }, fn: string, args: unknown[], auth?: DeltaAuth<I>, identity?: I): Promise<any> {
+  const as = auth?.asSqlArg && identity !== undefined ? [String(auth.asSqlArg(identity))] : [];
+  const all = [...as, ...args];
+  const { rows } = await db.query(`SELECT ${as.length ? `${fn}_as` : fn}(${all.map((_, i) => `$${i + 1}`).join(", ")}) AS result`, all);
+  return rows[0]?.result;
+}
+
 // ---------------------------------------------------------------------------
 // docTypeFromDef — lift a generic DocDef into a DocType
 // ---------------------------------------------------------------------------
@@ -163,7 +175,6 @@ export function docTypeFromDef<I = unknown>(
   },
 ): DocType<{}, I> {
   const auth = opts?.auth;
-  const usingAuth = !!auth?.asSqlArg;
   // Default-deny: RLS filters what `open` reads, not what the document's
   // channel carries, so a name several identities may open would hand each of
   // them every row written through it. Say who owns it, or that it is shared.
@@ -181,21 +192,7 @@ export function docTypeFromDef<I = unknown>(
     },
 
     async open(_ctx, docName, _msg, identity) {
-      let result: { doc: any } | undefined;
-      if (usingAuth && identity !== undefined) {
-        const { rows } = await pool.query(
-          "SELECT delta_open_as($1, $2) AS doc",
-          [String(auth!.asSqlArg!(identity)), docName],
-        );
-        result = rows[0];
-      } else {
-        const { rows } = await pool.query(
-          "SELECT delta_open($1) AS doc",
-          [docName],
-        );
-        result = rows[0];
-      }
-      const doc = result?.doc;
+      const doc = await callAs(pool, "delta_open", [docName], auth, identity);
       if (!doc) return null;
       const version = doc._version ?? 0;
       delete doc._version;
@@ -208,49 +205,16 @@ export function docTypeFromDef<I = unknown>(
     },
 
     async apply(_ctx, docName, ops, identity, by) {
-      let row: { result: any } | undefined;
-      if (by) {
-        // on the ledger: delta_apply with its entry, in one transaction (001g)
-        const logged = [docName, JSON.stringify(ops), by.who, by.cursor, by.undoable !== false, by.undoes ?? null];
-        const { rows } =
-          usingAuth && identity !== undefined
-            ? await pool.query("SELECT delta_apply_logged_as($1, $2, $3, $4, $5, $6, $7) AS result", [String(auth!.asSqlArg!(identity)), ...logged])
-            : await pool.query("SELECT delta_apply_logged($1, $2, $3, $4, $5, $6) AS result", logged);
-        row = rows[0];
-      } else if (usingAuth && identity !== undefined) {
-        const { rows } = await pool.query(
-          "SELECT delta_apply_as($1, $2, $3) AS result",
-          [String(auth!.asSqlArg!(identity)), docName, JSON.stringify(ops)],
-        );
-        row = rows[0];
-      } else {
-        const { rows } = await pool.query(
-          "SELECT delta_apply($1, $2) AS result",
-          [docName, JSON.stringify(ops)],
-        );
-        row = rows[0];
-      }
-      const result = row?.result;
+      // on the ledger: delta_apply with its entry, in one transaction (001g)
+      const result = by
+        ? await callAs(pool, "delta_apply_logged", [docName, JSON.stringify(ops), by.who, by.cursor, by.undoable !== false, by.undoes ?? null], auth, identity)
+        : await callAs(pool, "delta_apply", [docName, JSON.stringify(ops)], auth, identity);
       if (!result) throw new Error(`delta_apply returned no result for ${docName}`);
       return result;
     },
 
     async openAt(_ctx, docName, at, identity) {
-      let row: { doc: any } | undefined;
-      if (usingAuth && identity !== undefined) {
-        const { rows } = await pool.query(
-          "SELECT delta_open_at_as($1, $2, $3) AS doc",
-          [String(auth!.asSqlArg!(identity)), docName, at],
-        );
-        row = rows[0];
-      } else {
-        const { rows } = await pool.query(
-          "SELECT delta_open_at($1, $2) AS doc",
-          [docName, at],
-        );
-        row = rows[0];
-      }
-      return row?.doc ?? null;
+      return (await callAs(pool, "delta_open_at", [docName, at], auth, identity)) ?? null;
     },
   };
 }

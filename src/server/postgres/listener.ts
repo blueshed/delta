@@ -16,7 +16,7 @@ import type { WsServer } from "../server";
 import { trackSubscribe, trackUnsubscribe, onClientDrop } from "../server";
 import { createLogger } from "../logger";
 import type { Pool, PoolClient } from "pg";
-import { resolveDoc, holdAuth } from "./registry";
+import { callAs, resolveDoc, holdAuth } from "./registry";
 import type { DocType } from "./registry";
 import type { DeltaAuth } from "../auth";
 import { isAuthError } from "../auth";
@@ -534,11 +534,8 @@ export async function createDocListener<I = unknown>(
         }
         // a change named takes 001g's newer forms; none, the ones a database on 0.10.0's SQL has too
         const args = [cursor, whoOf(writer), way === "undo", msg.dry === true, msg.entry ?? null, ...(change === null ? [] : [change])];
-        const [asUser, sql] = auth?.asSqlArg && identity !== undefined ? [[String(auth.asSqlArg(identity))], "delta_walk_as"] : [[], "delta_walk"];
-        const all = [...asUser, ...args];
-        const { rows } = await db.query(`SELECT ${sql}(${all.map((_, i) => `$${i + 1}`).join(", ")}) AS result`, all);
+        const result = (await callAs(db, "delta_walk", args, auth, identity)) ?? null;
         await db.query("COMMIT");
-        const result = rows[0]?.result ?? null;
         respond({ result: result && { ...result, ...(result.version != null ? { version: Number(result.version) } : {}), entry: result.entry == null ? undefined : Number(result.entry) } });
       } catch (err) {
         try { await db.query("ROLLBACK"); } catch { /* the connection may be gone */ }
