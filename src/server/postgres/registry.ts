@@ -92,11 +92,12 @@ export interface DocType<C = any, I = unknown> {
 
 const types: DocType[] = [];
 
-/** The listeners with an `auth` module now running: while there is one, every type must say who owns it. */
-const authed = new Set<object>();
-
-/** The custom documents' prefixes of the listeners now running, which no type may take (todo #76). */
-const held = new Set<string[]>();
+/**
+ * The listeners now running: their custom documents' prefixes, which no type
+ * may take (todo #76), and whether each has an `auth` module -- while one
+ * does, every type must say who owns it.
+ */
+const running = new Set<{ prefixes: string[]; auth: boolean }>();
 
 /**
  * Register a type for its prefix. One of a prefix registered already replaces
@@ -104,8 +105,8 @@ const held = new Set<string[]>();
  * answers; one of a running listener's custom document's prefix is refused.
  */
 export function registerDocType(t: DocType): void {
-  if (authed.size > 0 && !t.owns && !t.shared) throw ownerless(t.prefix);
-  assertOnePrefix([t.prefix], (p) => [...held].some((ps) => ps.includes(p)));
+  if ([...running].some((l) => l.auth) && !t.owns && !t.shared) throw ownerless(t.prefix);
+  assertOnePrefix([t.prefix], (p) => [...running].some((l) => l.prefixes.includes(p)));
   const earlier = types.findIndex((e) => e.prefix === t.prefix);
   if (earlier >= 0) types.splice(earlier, 1);
   types.push(t);
@@ -113,28 +114,19 @@ export function registerDocType(t: DocType): void {
 }
 
 /**
- * For `createDocListener` with `auth`: refuse if a registered type says neither
- * `owns` nor `shared`, and from now until the returned release, refuse to
- * register one.
+ * For `createDocListener`: refuse its custom documents' `prefixes` where one
+ * comes twice or a registered type has it, and with `auth` a registered type
+ * that says neither `owns` nor `shared`. From now until the returned release,
+ * refuse to register a type of one of those prefixes, or with `auth` one that
+ * says neither.
  */
-export function holdAuth(): () => void {
-  const unowned = types.find((t) => !t.owns && !t.shared);
-  if (unowned) throw ownerless(unowned.prefix);   // named where it was registered: that is where it says
-  const token = {};
-  authed.add(token);
-  return () => void authed.delete(token);
-}
-
-/**
- * For `createDocListener`: refuse custom document prefixes that come twice, or
- * that a registered type has; and from now until the returned release, refuse
- * a type of one of them.
- */
-export function holdPrefixes(prefixes: string[]): () => void {
+export function holdListener(prefixes: string[], auth: boolean): () => void {
   assertOnePrefix(prefixes, (p) => types.some((t) => t.prefix === p));
-  const mine = [...prefixes];
-  held.add(mine);
-  return () => void held.delete(mine);
+  const unowned = auth && types.find((t) => !t.owns && !t.shared);
+  if (unowned) throw ownerless(unowned.prefix);   // named where it was registered: that is where it says
+  const listener = { prefixes: [...prefixes], auth };
+  running.add(listener);
+  return () => void running.delete(listener);
 }
 
 export function resolveDoc(docName: string): { type: DocType; ctx: any } | null {
@@ -148,8 +140,7 @@ export function resolveDoc(docName: string): { type: DocType; ctx: any } | null 
 /** For tests — reset between cases. */
 export function clearRegistry(): void {
   types.length = 0;
-  authed.clear();
-  held.clear();
+  running.clear();
 }
 
 /**

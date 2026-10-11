@@ -244,6 +244,38 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- ---------------------------------------------------------------------------
+-- _delta_read_list: a list document -- the root rows `p_where` admits, and
+-- each included collection in full (list mode has no single root id to filter
+-- against, so "include" means "load it all") -- as they stand (p_at NULL), or
+-- a temporal table's as they stood at p_at. delta_open's and delta_open_at's.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION _delta_read_list(p_def _delta_docs, p_where TEXT, p_at TIMESTAMPTZ)
+RETURNS JSONB AS $$
+DECLARE
+  v_root     RECORD;
+  v_rows     JSONB;
+  v_result   JSONB;
+  v_coll_key TEXT;
+BEGIN
+  SELECT * INTO v_root FROM _delta_collections WHERE collection_key = p_def.root_collection;
+  EXECUTE format(
+    'SELECT COALESCE(jsonb_object_agg(t.id, %s), ''{}''::jsonb) FROM %I t WHERE %s AND %s',
+    CASE WHEN v_root.temporal THEN '_delta_strip_temporal(to_jsonb(t.*))' ELSE 'to_jsonb(t.*)' END,
+    _delta_source_view(v_root.table_name, v_root.temporal, p_at),
+    CASE WHEN v_root.temporal AND p_at IS NOT NULL THEN _delta_temporal_where(p_at) ELSE 'TRUE' END,
+    p_where
+  ) INTO v_rows;
+  v_result := jsonb_build_object(p_def.root_collection, v_rows);
+  FOREACH v_coll_key IN ARRAY p_def.include
+  LOOP
+    v_result := v_result || jsonb_build_object(v_coll_key, _delta_load_collection_all(v_coll_key, p_at));
+  END LOOP;
+  RETURN v_result;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+-- ---------------------------------------------------------------------------
 -- delta_open: load a doc from relational tables, return JSONB + version
 -- ---------------------------------------------------------------------------
 
@@ -259,7 +291,6 @@ DECLARE
   v_root_coll RECORD;
   v_view      TEXT;
   v_root_row  JSONB;
-  v_root_map  JSONB;
   v_result    JSONB;
   v_coll_key  TEXT;
   v_version   BIGINT;
@@ -295,33 +326,7 @@ BEGIN
   END IF;
 
   IF v_mode = 'list' THEN
-    -- List mode: return all matching rows as a map
-    IF v_root_coll.temporal THEN
-      EXECUTE format(
-        'SELECT COALESCE(jsonb_object_agg(t.id, _delta_strip_temporal(to_jsonb(t.*))), ''{}''::jsonb) FROM %I t WHERE %s',
-        v_view, v_where
-      ) INTO v_root_map;
-    ELSE
-      EXECUTE format(
-        'SELECT COALESCE(jsonb_object_agg(t.id, to_jsonb(t.*)), ''{}''::jsonb) FROM %I t WHERE %s',
-        v_view, v_where
-      ) INTO v_root_map;
-    END IF;
-
-    v_result := jsonb_build_object(v_def.root_collection, v_root_map);
-
-    -- Each included collection is loaded in full (no FK filter): list mode
-    -- has no single root id to filter against, so "include" means "load it
-    -- all" — catalog-shaped docs (small reference table + its children) can
-    -- be expressed declaratively instead of via a custom DocType.
-    FOREACH v_coll_key IN ARRAY v_def.include
-    LOOP
-      v_result := v_result || jsonb_build_object(
-        v_coll_key,
-        _delta_load_collection_all(v_coll_key, v_at)
-      );
-    END LOOP;
-
+    v_result := _delta_read_list(v_def, v_resolved->>'where', v_at);
   ELSE
     -- Single mode: one root row + included collections
     v_doc_id := (v_resolved->'values'->>'id')::BIGINT;

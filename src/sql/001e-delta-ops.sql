@@ -39,7 +39,6 @@ DECLARE
   v_doc_id    BIGINT;
   v_root_coll RECORD;
   v_root_row  JSONB;
-  v_root_map  JSONB;
   v_result    JSONB;
   v_coll_key  TEXT;
 BEGIN
@@ -60,29 +59,8 @@ BEGIN
       USING ERRCODE = 'P0001';
   END IF;
 
-  -- List mode (todo #74): every root row the scope admitted then, and each
-  -- included collection in full as it stood, as delta_open reads a list now
-  -- and SQLite reads one at a time. A table that keeps no history reads as it is.
-  IF v_mode = 'list' THEN
-    IF v_root_coll.temporal THEN
-      EXECUTE format(
-        'SELECT COALESCE(jsonb_object_agg(t.id, _delta_strip_temporal(to_jsonb(t.*))), ''{}''::jsonb) FROM %I t WHERE %s AND %s',
-        v_root_coll.table_name, _delta_temporal_where(p_at), v_resolved->>'where'
-      ) INTO v_root_map;
-    ELSE
-      EXECUTE format(
-        'SELECT COALESCE(jsonb_object_agg(t.id, to_jsonb(t.*)), ''{}''::jsonb) FROM %I t WHERE %s',
-        v_root_coll.table_name, v_resolved->>'where'
-      ) INTO v_root_map;
-    END IF;
-
-    v_result := jsonb_build_object(v_def.root_collection, v_root_map);
-    FOREACH v_coll_key IN ARRAY v_def.include
-    LOOP
-      v_result := v_result || jsonb_build_object(v_coll_key, _delta_load_collection_all(v_coll_key, p_at));
-    END LOOP;
-    RETURN v_result;
-  END IF;
+  -- List mode (todo #74): as delta_open reads a list, at p_at.
+  IF v_mode = 'list' THEN RETURN _delta_read_list(v_def, v_resolved->>'where', p_at); END IF;
 
   v_doc_id := (v_resolved->'values'->>'id')::BIGINT;
 

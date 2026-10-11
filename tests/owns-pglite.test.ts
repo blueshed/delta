@@ -81,6 +81,12 @@ describe("pglite: one prefix, one document (#76)", () => {
     expect((await local.call("open", { doc: "fo-board:1" })).result).toEqual({ again: true });
   });
 
+  test("a listener that fails to start holds nothing: its custom prefixes and its auth are let go", async () => {
+    const down: any = { query: async () => { throw new Error("database down"); }, connect: async () => { throw new Error("database down"); } };
+    await expect(createDocListener(createLocal().server, down, { auth, custom: [{ ...postgresInbox, owns: customOwns.inbox }] })).rejects.toThrow(/database down/);
+    registerDocType(docTypeFromDef(defineDoc(postgresInbox.prefix, { root: "households", include: [] }), pool));   // neither owned, nor a held prefix
+  });
+
   test("a document type of a running listener's custom document's prefix is refused, until it stops", async () => {
     const inbox = defineDoc(postgresInbox.prefix, { root: "households", include: [] });
     const listener = await createDocListener(createLocal().server, pool, { custom: [postgresInbox] });
