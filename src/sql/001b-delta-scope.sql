@@ -201,7 +201,9 @@ BEGIN
         -- so it compares as SQLite orders it, after every number: = > >= read no
         -- row, != < <= every row. (Single mode's id is the root's: still a 400.)
         IF v_resolved ~ '^\s*[+-]?[0-9]+\s*$' THEN
-          IF abs(v_resolved::numeric) > 9007199254740991 THEN
+          IF v_resolved !~ '^\s*[+-]?0*[0-9]{1,16}\s*$' THEN
+            v_refused := format('%s %s is past 2^53 - 1, which no number holds exactly', v_key, v_resolved);
+          ELSIF abs(v_resolved::numeric) > 9007199254740991 THEN
             v_refused := format('%s %s is past 2^53 - 1, which no number holds exactly', v_key, v_resolved);
           END IF;
         ELSIF v_resolved ~* '^\s*[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)(e[+-]?[0-9]+)?\s*$' THEN
@@ -210,8 +212,8 @@ BEGIN
           v_cond := CASE WHEN v_op IN ('!=', '<', '<=') THEN format('%I IS NOT NULL', v_key) ELSE 'FALSE' END;
         END IF;
       ELSIF v_type = 'integer' THEN
-        -- digits first, a statement of its own: the cast that follows takes only them
-        IF v_resolved !~ '^\s*[+-]?[0-9]+\s*$' THEN
+        -- at most 16 digits past any zeros (2^53 - 1 has 16), so the cast that follows cannot fail
+        IF v_resolved !~ '^\s*[+-]?0*[0-9]{1,16}\s*$' THEN
           v_refused := format('%s must be an integer, not "%s"', v_key, v_resolved);
         ELSIF abs(v_resolved::numeric) > 9007199254740991 THEN
           v_refused := format('%s must be an integer, not "%s"', v_key, v_resolved);

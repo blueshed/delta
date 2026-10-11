@@ -430,7 +430,7 @@ export function documentCases(backend: () => PathBackend): void {
       const add = [{ op: "add", path: "/slots/-", value: { weddings_id: 1, price: 1 } }];
       const refused = [
         ...["Infinity", "-Infinity", "NaN", "inf", "0x10", "1e400", "1e-400"].map((name) => `fo-slots-upto:${name}`),
-        ...["1_000", "0x10", "9007199254740992"].map((name) => `fo-seats-at:${name}`),
+        ...["1_000", "0x10", "9007199254740992", "1".repeat(131073)].map((name) => `fo-seats-at:${name}`),   // past numeric's 131072 digits too
       ];
       for (const doc of refused) {
         const open = (await b.process.call("open", { doc })).error?.code;
@@ -461,7 +461,7 @@ export function documentCases(backend: () => PathBackend): void {
       await write(b.process, "fo-slots-upto:", [{ op: "replace", path: "/slots/2/weddings_id", value: 1 }]);
       await assertCopiesHold(b, copies);
       const add = [{ op: "add", path: "/slots/-", value: { weddings_id: 1, price: 1 } }];
-      for (const doc of ["fo-slots-of:1.5", "fo-slots-of:1e0", "fo-slots-of:9007199254740992", "fo-slots-under:1.5"]) {
+      for (const doc of ["fo-slots-of:1.5", "fo-slots-of:1e0", "fo-slots-of:9007199254740992", `fo-slots-of:${"1".repeat(131073)}`, "fo-slots-under:1.5"]) {
         const open = (await b.process.call("open", { doc })).error?.code;
         const written = (await b.process.call("delta", { doc, ops: add })).error?.code;
         expect({ doc, open, written }).toEqual({ doc, open: 400, written: 400 });
