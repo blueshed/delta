@@ -18,7 +18,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { applyOps } from "../../src/core";
-import { defineDoc, defineSchema, type Snapshot } from "../../src/schema";
+import { defineDoc, defineSchema, type Snapshot, type TableDef } from "../../src/schema";
 import { waitFor } from "../../src/testing";
 
 // ---------------------------------------------------------------------------
@@ -33,7 +33,7 @@ import { waitFor } from "../../src/testing";
  * column types: an integer, a boolean and a json column. A household's `t` is
  * named as the write SQL once named its row (todo #58): a column may take any name.
  */
-export const pathSchema = defineSchema({
+export const pathSpec: Record<string, TableDef> = {
   weddings: { table: "fo_weddings", columns: { name: "text" }, temporal: false },
   households: { table: "fo_households", parent: "weddings", columns: { email: "text", t: "text?" }, temporal: false },
   courses: { table: "fo_courses", parent: "weddings", columns: { name: "text" }, temporal: false },
@@ -46,7 +46,8 @@ export const pathSchema = defineSchema({
   // a favour for a household: a child of the wedding that goes with its household too (cascadeOn), so a
   // wedding's removal reaches it twice -- as the wedding's child, and through the household
   favours: { table: "fo_favours", parent: "weddings", columns: { households_id: "integer", gift: "text" }, cascadeOn: ["households_id"], temporal: false },
-});
+};
+export const pathSchema = defineSchema(pathSpec);
 
 /** Several documents over the same rows, cut different ways. */
 export const pathDocs = [

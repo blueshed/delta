@@ -68,6 +68,8 @@ export function importTables(file: string, _schema: Schema, snapshot: Snapshot):
 /** The database a file is loaded into, and its saving: one per server and file. */
 type Engine = {
   db: Database;
+  /** The tables it loads from the file and saves to it. */
+  schema: Schema;
   /** The ledger as the file left it, until a registration that keeps one loads it. */
   unloaded: Saved["ledger"];
   ledger: boolean;
@@ -87,7 +89,12 @@ function engineOf(ws: WsServer, file: string, schema: Schema): Engine {
   const onServer = engines.get(ws) ?? new Map<string, Engine>();
   engines.set(ws, onServer);
   const known = onServer.get(resolve(file));
-  if (known) return known;
+  if (known) {
+    // its tables are the first registration's: one it does not load and save as this one would is refused, as data lost
+    const other = Object.entries(schema.tables).find(([coll, t]) => JSON.stringify(known.schema.tables[coll]) !== JSON.stringify(t));
+    if (other) throw new Error(`registerDocs: ${file} is registered on this server with a schema whose "${other[0]}" is not this one's -- its rows would not be loaded or saved: register the file with one schema (a second registration may take fewer of its tables)`);
+    return known;
+  }
   const db = new Database(":memory:");
   createTables(db, schema);
   clearStaleTemps(file);
@@ -96,7 +103,7 @@ function engineOf(ws: WsServer, file: string, schema: Schema): Engine {
 
   const log = createLogger("[delta-json]");
   const engine: Engine = {
-    db, unloaded: saved.ledger, ledger: false, saving: Promise.resolve(),
+    db, schema, unloaded: saved.ledger, ledger: false, saving: Promise.resolve(),
     save() {
       const snapshot: Saved = exportSqlite(db, schema);
       if (engine.ledger) {

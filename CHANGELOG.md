@@ -217,6 +217,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through each (each asking its own `owns`), as every Postgres listener hears it, and each copy
   is read again, so the undo answers `conflict`. The JSON file's registrations of one file on one
   server now share its database, where each had its own and their saves overwrote each other.
+  A second registration of the file whose schema has a table the first's lacks, or defines one
+  otherwise, is refused at registration, naming the table: its rows would not have been loaded
+  or saved. One with fewer of the tables, each as the first defines it, is taken.
 - **A row a write makes and its cascade takes out is told its add wherever its remove is told
   (todo #75)**, on every backend. `[add /courses/9, add /drinks/5 under it, remove /courses/9]`
   told the board and the menu the drink's remove but not its add, so an open copy met a remove

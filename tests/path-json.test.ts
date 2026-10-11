@@ -6,10 +6,10 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { exportTables, importTables, registerDocs } from "../src/server/json";
+import { defineDoc, defineSchema, exportTables, importTables, registerDocs } from "../src/server/json";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
-import { course, pathCases, pathDocs, pathPublicDocs, pathSchema, pathSeed, readAll, sqliteEmails, sqliteGuests, sqliteInbox, sqliteMenuCard, sqliteOpenSeats, write, type PathBackend } from "./helpers/path";
+import { course, pathCases, pathDocs, pathPublicDocs, pathSchema, pathSeed, pathSpec, readAll, sqliteEmails, sqliteGuests, sqliteInbox, sqliteMenuCard, sqliteOpenSeats, write, type PathBackend } from "./helpers/path";
 
 setLogLevel("silent");
 
@@ -70,6 +70,22 @@ describe("json", () => {
     // the next row the new process names follows the last one the old named
     await again.process.call("open", { doc: "fo-board:1" });
     expect((await write(again.process, "fo-board:1", [{ op: "add", path: "/courses/-", value: { name: "Cheese" } }])).ops[0].path).toBe("/courses/4");
+  });
+
+  test("a second registration of the file on a server takes its schema: one with a table it lacks, or one defined otherwise, is refused by name, the file left as it was; one with fewer of its tables, defined as it has them, shares its rows", async () => {
+    const local = createLocal();
+    registerDocs(local.server, file, pathSchema, [defineDoc("fo-board:", { root: "weddings", include: ["courses"] })]);
+    const before = readFileSync(file, "utf8");
+    const more = defineSchema({ ...pathSpec, rooms: { table: "fo_rooms", columns: { name: "text" }, temporal: false } });
+    const other = defineSchema({ ...pathSpec, courses: { table: "fo_courses", parent: "weddings", columns: { name: "text", price: "real?" }, temporal: false } });
+    for (const [schema, coll] of [[more, "rooms"], [other, "courses"]] as [typeof more, string][]) {
+      expect(() => registerDocs(local.server, file, schema, [defineDoc(`fo-${coll}-x:`, { root: coll, include: [] })])).toThrow(`${file} is registered on this server with a schema whose "${coll}" is not this one's`);
+    }
+    expect(readFileSync(file, "utf8")).toBe(before);
+    // the weddings without what hangs from them would be defined otherwise: a removal through it would not cascade
+    expect(() => registerDocs(local.server, file, defineSchema({ weddings: pathSpec.weddings! }), [defineDoc("fo-w:", { root: "weddings", include: [] })])).toThrow(`schema whose "weddings" is not this one's`);
+    registerDocs(local.server, file, defineSchema({ tags: pathSpec.tags! }), [defineDoc("fo-few:", { root: "tags", include: [] })]);
+    expect((await local.call("open", { doc: "fo-few:" })).result.tags).toEqual({ "1": { id: 1, label: "red" } });
   });
 
   test("a file that is not JSON is refused by name at the start, and left as it was", () => {
