@@ -1,28 +1,26 @@
 # @blueshed/delta
 
-**delta keeps shared documents live in every browser that has one open: plain tables underneath,
-one WebSocket between, from a JSON file on day one to a Postgres server in production.**
+**delta keeps data live between everyone who has it open: change it in one browser and every
+other browser showing it updates at once. It starts on a JSON file and grows to a Postgres
+server without changing your app.**
 
-An app is a set of documents: a venue's map, a caterer's menu, a person's calendar. Each is a
-live view over ordinary tables. A browser opens a document and changes it with three verbs
-(`add`, `replace`, `remove`) on paths like `/courses/3/name`. Every open document that
-holds a changed row hears about it straight away: the row arriving, changing, or leaving. With
-the ledger on, each person can undo their own writes while others keep writing, and a table
-keeps every version of its rows (unless you turn that off), so a document can be read as it
+Your data lives in ordinary tables. A *document* is the part of them one screen shows (a
+shopping list and its items, a venue and its rooms), named by a string such as `list:1`. A
+browser opens a document and changes it with three verbs (`add`, `replace`, `remove`) on paths
+like `/items/3/done`. The server applies the change and passes it to every open document that
+holds the row, so each one sees the row arrive, change or leave. Turn on the *ledger*, a record
+of every write, and each person can undo their own writes while others keep writing. A table
+also keeps every version of its rows (unless you turn that off), so a document can be read as it
 stood last March.
 
 Start on a JSON file, move to SQLite, then to Postgres in the same process, and deliver on a
-Postgres server. Each step changes the few lines that say where the truth lives, and nothing
-else: the schema, the documents, the writes and the data stay the same, and the rows move with
+Postgres server. Each step changes the few lines that say where the data is kept, and nothing
+else: the tables, the documents, the writes and the data stay the same, and the rows move with
 their ids. No rewrite, no second data layer, no reload logic.
-
-In one line: **live, undoable documents over plain tables, from a file to a Postgres server
-without rewriting the app.**
 
 It exists because shared, live state should be one small idea rather than a stack of fetch
 calls, caches and sockets. The whole package is small enough to read in one sitting (and to
-fit in an AI's context), and there is one way to do each thing. (The skill's *Backends side by
-side* says what is the same on every backend, and the little that differs.)
+fit in an AI's context), and there is one way to do each thing.
 
 Delta runs on [Bun](https://bun.sh). It ships TypeScript source (the exports are `.ts` files),
 the SQLite backend uses `bun:sqlite` and the server uses `Bun.serve`. The browser code needs a
@@ -54,16 +52,17 @@ const list = defineDoc("list:", { root: "lists", include: ["items"], implied: tr
 const db = new Database(":memory:");
 createTables(db, schema);
 
-// Delta in this process. registerDocs(createWs(), ...) serves the same documents to browsers.
+// Delta in this process, no network. registerDocs(createWs(), ...) serves the same documents to browsers.
 const delta = createLocal();
 registerDocs(delta.server, db, schema, [list], [], { ledger: true });
 delta.onPublish((doc, change) => console.log(doc, `v${change.v}`, JSON.stringify(change.ops)));
 
-const ada = delta.as("ada");
-const doc = "list:groceries";
+const ada = delta.as("ada");   // who is writing
+const doc = "list:1";
 await ada.call("open", { doc });
-await ada.call("delta", { doc, cursor: "tab-1", ops: [{ op: "add", path: "/items/milk", value: { text: "milk" } }] });
-await ada.call("delta", { doc, cursor: "tab-1", ops: [{ op: "replace", path: "/items/milk/done", value: true }] });
+// "-" asks the server to name the new row; it names it 1. The cursor is what undo walks back.
+await ada.call("delta", { doc, cursor: "tab-1", ops: [{ op: "add", path: "/items/-", value: { text: "milk" } }] });
+await ada.call("delta", { doc, cursor: "tab-1", ops: [{ op: "replace", path: "/items/1/done", value: true }] });
 await ada.call("undo", { cursor: "tab-1" });
 
 console.log((await ada.call("open", { doc })).result.items);
@@ -72,22 +71,22 @@ console.log((await ada.call("open", { doc })).result.items);
 Run `bun try.ts`:
 
 ```
-list:groceries v1 [{"op":"add","path":"/items/milk","value":{"id":"milk","text":"milk","lists_id":"groceries","done":false}}]
-list:groceries v2 [{"op":"replace","path":"/items/milk","value":{"id":"milk","text":"milk","lists_id":"groceries","done":true}}]
-list:groceries v3 [{"op":"replace","path":"/items/milk","value":{"id":"milk","text":"milk","lists_id":"groceries","done":false}}]
+list:1 v1 [{"op":"add","path":"/items/1","value":{"id":1,"lists_id":1,"text":"milk","done":false}}]
+list:1 v2 [{"op":"replace","path":"/items/1","value":{"id":1,"lists_id":1,"text":"milk","done":true}}]
+list:1 v3 [{"op":"replace","path":"/items/1","value":{"id":1,"lists_id":1,"text":"milk","done":false}}]
 {
-  milk: {
-    id: "milk",
+  "1": {
+    id: 1,
+    lists_id: 1,
     text: "milk",
-    lists_id: "groceries",
     done: false,
   },
 }
 ```
 
-Three writes, each heard as a change with its version. The last one is the undo, which the
-ledger worked out for itself. The document did not exist until its first write made it
-(`implied: true`).
+Three writes, each heard as a change with its version. The server named the new row `1`: ids are
+serial numbers, on every backend. The last change is the undo, which the ledger worked out for
+itself. The document did not exist until its first write made it (`implied: true`).
 
 ## Where the truth lives
 
@@ -135,10 +134,10 @@ client needs `@blueshed/railroad`: `bun add @blueshed/railroad`):
 ```ts
 import { connectWs, openDoc } from "@blueshed/delta/client";
 
-const doc = openDoc("list:groceries", connectWs("/ws"));
+const doc = openDoc("list:1", connectWs("/ws"));
 await doc.ready;
 doc.onOps((ops) => render(ops));   // every change, including your own
-await doc.send([{ op: "replace", path: "/items/milk/done", value: true }]);
+await doc.send([{ op: "replace", path: "/items/1/done", value: true }]);
 ```
 
 In a clone of this repository (`examples/` is not in the npm package),
@@ -154,9 +153,10 @@ writing, and `onPublish` is the one stream of changes to redraw from.
 - [`@blueshed/railroad`](https://www.npmjs.com/package/@blueshed/railroad) draws in the browser.
   `doc.data` is a railroad signal, so its `list()` renders a collection row by row.
 - delta keeps the documents.
-- eta, a private server-rendering kernel, builds on delta in-process through `createLocal()`.
 
-Starting a new app? `bun create blueshed my-app` sets up delta and railroad together.
+Starting a new app? `bun create blueshed my-app` makes a Bun site from
+[paintbrush](https://github.com/blueshed/paintbrush), with railroad for the page; its `evolve`
+skill turns a resource into a delta document when several people edit it at once.
 
 ## Optional peers
 
