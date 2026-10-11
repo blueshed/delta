@@ -22,7 +22,7 @@ import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
 import { applyFramework, newPool, waitFor } from "./setup";
 import {
-  assertCopiesHold, course, expectTold, field, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresEmails, postgresGuests, postgresInbox, postgresMenuCard, postgresOpenSeats, readAll, told, write,
+  assertCopiesHold, expectTold, field, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresEmails, postgresGuests, postgresInbox, postgresMenuCard, postgresOpenSeats, readAll, told, write,
   type PathBackend, type PathProcess,
 } from "./helpers/path";
 
@@ -199,7 +199,7 @@ describe("postgres: the documents open now", () => {
     const copies = await openAll(backend.process, ["fo-menu:1"]);
     expect(copies.get("fo-menu:1")._v).toBe(0);
     await write(backend.process, "fo-board:1", [{ op: "replace", path: "/courses/1/name", value: "Soup" }]);
-    await expectTold(backend, "fo-menu:1", [[{ op: "replace", path: "/courses/1", value: course(1, "Soup") }]]);
+    await expectTold(backend, "fo-menu:1", [[{ op: "replace", path: "/courses/1/name", value: "Soup" }]]);
     expect(backend.process.heard.find((h) => h.channel === "fo-menu:1")!.data.v).toBe(1);
     await assertCopiesHold(backend, copies);
   });
