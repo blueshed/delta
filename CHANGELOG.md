@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`@blueshed/delta/json` exports `defineSchema`, `defineDoc` and `defineCustomDoc`**, as
+  `./sqlite` and `./postgres` do, so an app on the JSON file imports everything from one place
+  and moving on changes the import path only.
+
 ### Fixed
 
 - **A row a write makes and its cascade takes out is told its add wherever its remove is told

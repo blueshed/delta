@@ -166,6 +166,7 @@ skill turns a resource into a delta document when several people edit it at once
 |---|---|
 | `@blueshed/delta/client` (the browser) | `@blueshed/railroad` |
 | `@blueshed/delta/postgres` | `pg` (and `@types/pg` to type-check: delta ships TypeScript source) |
+| `@blueshed/delta/pglite` | `@electric-sql/pglite` (and `@types/pg` to type-check) |
 | `@blueshed/delta/auth-jwt` | `jose` and `pg` |
 
 The core, the JSON-file and SQLite backends, `local`, `kinds`, `dom-ops` and `logger` need

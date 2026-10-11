@@ -112,6 +112,12 @@ describe("package exports", () => {
     }
   });
 
+  test('"./json" gives an app what it defines its documents with, as "./sqlite" and "./postgres" do: one import moves', async () => {
+    const json = await import("../src/server/json");
+    const sqlite = await import("../src/server/sqlite");
+    for (const name of ["defineSchema", "defineDoc", "defineCustomDoc"] as const) expect([name, json[name]]).toEqual([name, sqlite[name]]);
+  });
+
   for (const [subpath, named] of Object.entries(probes)) {
     // Keys carry the exports-map's leading "." — drop it to get the specifier
     // a consumer writes ("./core" -> "@blueshed/delta/core").

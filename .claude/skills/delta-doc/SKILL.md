@@ -172,8 +172,10 @@ Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/fi
 | `@blueshed/delta/server` | Bun | `createWs({ path?, origins?, maxHeld?, maxHeldBytes? })` (with `changesIdentity(method)`), `registerDoc` (JSON-file backend), `registerMethod`, `refuseOrigin` |
 | `@blueshed/delta/local` | Bun | `createLocal` — delta in-process, no socket |
 | `@blueshed/delta/kinds` | Bun | `registerMemory`, `registerStatic`, `registerSource` |
+| `@blueshed/delta/json` | Bun | `defineSchema`, `defineDoc`, `defineCustomDoc`, `registerDocs(ws, file, schema, docs, customDocs?, { ledger?, ... })` → `{ evict, persisted }`, `exportTables`, `importTables` |
 | `@blueshed/delta/sqlite` | Bun | `defineSchema`, `defineDoc`, `defineCustomDoc`, `createTables`, `migrateSchema`, `registerDocs(..., customDocs?, { ledger?, who?, auth?, owns?, shared? })` → `{ evict }`, `validateOps`, `inverseOf`, `loadDocAt`, snapshots |
 | `@blueshed/delta/postgres` | Bun + pg | `defineSchema`, `defineDoc`, `defineCustomDoc`, `generateSql`, `applyFramework`, `createDocListener(ws, pool, { auth?, custom?, ledger?, who? })` → `{ destroy }`, `registerDocType`, `docTypeFromDef(def, pool, { auth?, owns?, shared? })`, `withAppAuth` |
+| `@blueshed/delta/pglite` | Bun + @electric-sql/pglite | `openPglite(dir?)` → a `Pool` that `@blueshed/delta/postgres` runs on unchanged |
 | `@blueshed/delta/logger` | anywhere | railroad's logger, kept in step: `createLogger`, `setLogLevel`, `loggedRequest` |
 | `@blueshed/delta/auth` | Bun | `DeltaAuth` contract, `wireAuth`, `upgradeWithAuth` |
 | `@blueshed/delta/auth-jwt` | Bun + pg + jose | `jwtAuth({ pool, secret })`, `applyAuthJwtSchema(pool)` |

@@ -33,6 +33,9 @@ import {
 } from "./sqlite";
 
 export type { Snapshot } from "../schema";
+// What an app defines its documents with, from the same import as the backend: moving on changes the path only.
+export { defineSchema, defineDoc } from "../schema";
+export { defineCustomDoc, type CustomDocDef } from "./sqlite";
 
 /** The file: the rows and sequences, and the ledger's rows. */
 type Saved = Snapshot & { ledger?: { entries: Record<string, unknown>[]; versions: Record<string, unknown>[] } };
