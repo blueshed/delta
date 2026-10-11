@@ -62,9 +62,16 @@ describe("pglite: one prefix, one document (#76)", () => {
     await expect(listen([{ ...postgresInbox, prefix: "fo-board:" }])).rejects.toThrow(/"fo-board:" names two documents/);
   });
 
-  test("a document type of a prefix registered already is refused, and so is one of a running listener's custom document, until it stops", async () => {
+  test("a document type registered again (a hot reload) replaces the earlier: the latest answers", async () => {
     registerDocType(docTypeFromDef(pathDocs[0]!, pool));
-    expect(() => registerDocType(docTypeFromDef(pathDocs[0]!, pool))).toThrow(/"fo-board:" names two documents/);
+    const again = { ...docTypeFromDef(pathDocs[0]!, pool), open: async () => ({ result: { again: true }, version: 0 }) };
+    registerDocType(again);
+    const local = createLocal();
+    listeners.push(await createDocListener(local.server, pool, {}));
+    expect((await local.call("open", { doc: "fo-board:1" })).result).toEqual({ again: true });
+  });
+
+  test("a document type of a running listener's custom document's prefix is refused, until it stops", async () => {
     const inbox = defineDoc(postgresInbox.prefix, { root: "households", include: [] });
     const listener = await createDocListener(createLocal().server, pool, { custom: [postgresInbox] });
     expect(() => registerDocType(docTypeFromDef(inbox, pool))).toThrow(/"fo-inbox:" names two documents/);

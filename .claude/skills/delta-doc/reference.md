@@ -154,8 +154,8 @@ const auth = jwtAuth({ pool, secret: process.env.JWT_SECRET! });
 wireAuth(ws, auth);
 
 // With auth, say who owns each document: its name is the channel its writes go out on.
-// One prefix, one document: a prefix registered already, or a running listener's custom
-// document's, is refused -- a module run again (bun --hot) calls clearRegistry() first.
+// One prefix, one document: a type registered again for its prefix replaces the earlier (a module
+// run again, bun --hot, needs nothing more); one of a running listener's custom document's is refused.
 registerDocType(
   docTypeFromDef(defineDoc("items:", { root: "items", include: [], scope: { owner_id: ":id" } }), pool, {
     auth,

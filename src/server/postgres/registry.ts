@@ -98,12 +98,16 @@ const authed = new Set<object>();
 /** The custom documents' prefixes of the listeners now running, which no type may take (todo #76). */
 const held = new Set<string[]>();
 
-/** A prefix a registered type, or a running listener's custom document, has. */
-const taken = (prefix: string): boolean => types.some((t) => t.prefix === prefix) || [...held].some((ps) => ps.includes(prefix));
-
+/**
+ * Register a type for its prefix. One of a prefix registered already replaces
+ * it -- a module run again (`bun --hot`) registers again, and the latest code
+ * answers; one of a running listener's custom document's prefix is refused.
+ */
 export function registerDocType(t: DocType): void {
   if (authed.size > 0 && !t.owns && !t.shared) throw ownerless(t.prefix);
-  assertOnePrefix([t.prefix], taken);
+  assertOnePrefix([t.prefix], (p) => [...held].some((ps) => ps.includes(p)));
+  const earlier = types.findIndex((e) => e.prefix === t.prefix);
+  if (earlier >= 0) types.splice(earlier, 1);
   types.push(t);
   types.sort((a, b) => b.prefix.length - a.prefix.length);
 }

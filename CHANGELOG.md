@@ -69,10 +69,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A prefix is one document's, on every backend (todo #76).** Two documents of one prefix left one
   to answer for the other without a word: two custom documents in one registration, a custom
   document of a table document's prefix (custom documents are asked first), two table documents in
-  one `registerDocs`, a `registerDocType` of a prefix registered already, and one registered after
-  `createDocListener` started of a prefix its `custom` holds. Each now throws, naming the prefix
-  (`"fo-board:" names two documents`), and a refused registration holds no prefix. A server module
-  run again in one process (`bun --hot`) must `clearRegistry()` before it registers its types again.
+  one `registerDocs`, and a `registerDocType` after `createDocListener` started of a prefix its
+  `custom` holds. Each now throws, naming the prefix (`"fo-board:" names two documents`), and a
+  refused registration holds no prefix. A `registerDocType` of a prefix registered already replaces
+  the earlier type, where it was kept beside it and the earlier went on answering: a server module
+  run again in one process (`bun --hot`) registers the latest code.
 - **A time in a document's name (`at:`) reads the whole document as it stood then, on every
   backend.** On Postgres `delta_open` read the included collections at that time but the root as it
   is now; SQLite and the JSON file ignored the time and read it all as it is now. Now each reads
