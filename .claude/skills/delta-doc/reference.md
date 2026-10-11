@@ -336,7 +336,7 @@ One rule on every backend: the Postgres resolver (`_delta_resolve_scope`, `src/s
 | `"=:name"` | explicit equality |
 | `"<=:end"` | `col <= <end-param>` (also `>=`, `<`, `>`, `!=`) |
 | `"like:prefix"` | `col` starts with the value, any case (`ILIKE <prefix>%`) |
-| `"at:when"` | temporal snapshot (not a WHERE) |
+| `"at:when"` | the time the document is read at (not a WHERE): all of it as it stood then, its root and its included collections -- a temporal table's rows as they stood, the others as they are; a date, `YYYY-MM-DD` |
 
 Named params are resolved positionally from the colon-separated doc id. `id` always takes position 1; other names are alphabetical. `todos:5` has one param; `venue-at:42:2026-06-16` has two (`id=42`, second positional). An empty value sets no condition.
 

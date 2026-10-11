@@ -70,6 +70,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in one registration (`registerDocs`, or `createDocListener`'s `custom`) left the last to answer
   without a word, and one with a table document's prefix shadowed it. Both now throw at
   registration, naming the prefix, as a prefix another registration holds already is refused.
+- **A time in a document's name (`at:`) reads the whole document as it stood then, on every
+  backend.** On Postgres `delta_open` read the included collections at that time but the root as it
+  is now; SQLite and the JSON file ignored the time and read it all as it is now. Now each reads
+  the root and its included collections as they stood -- a temporal table's rows; the others keep no
+  history and read as they are (`venue:42:2026-06-16` over `scope: { id: ":id", at: "at:date" }`
+  and a non-temporal root reads as before). `delta_open` (`001c`, `CREATE OR REPLACE`: re-apply the
+  framework, or `bunx @blueshed/delta init --upgrade`).
 
 ## [0.12.0] - 2026-10-11
 

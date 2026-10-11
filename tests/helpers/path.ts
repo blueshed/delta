@@ -304,7 +304,7 @@ export function pathCases(backend: () => PathBackend): void {
   documentCases(backend);
   fanOutCases(backend);
   serialCases(backend);
-  listAtCases(backend);
+  asItStoodCases(backend);
 }
 
 /** A row added under an id it names moves the collection's serial past it, as importTables does (#63, #72). */
@@ -326,12 +326,13 @@ export function serialCases(backend: () => PathBackend): void {
 }
 
 /**
- * A list document read as it stood (#74): its root rows as its scope admits
- * them, and each included collection in full -- a temporal table's rows as they
- * stood, the others as they are (they keep no history).
+ * A document read as it stood -- by open_at, or a time in its name (`at:`):
+ * a list's root rows as its scope admits them and each included collection in
+ * full (#74), a single document's root and its children; a temporal table's
+ * rows as they stood, the others as they are (they keep no history).
  */
-export function listAtCases(backend: () => PathBackend): void {
-  describe("a list document read as it stood", () => {
+export function asItStoodCases(backend: () => PathBackend): void {
+  describe("a document read as it stood", () => {
     const at = (b: PathBackend, doc: string, when: string) => b.process.call("open_at", { doc, at: when }).then((r) => content(r.result));
     const note = (id: number, text: string) => ({ id, weddings_id: 1, text });
 
@@ -350,6 +351,22 @@ export function listAtCases(backend: () => PathBackend): void {
       expect(await at(b, "fo-all-notes:", "2021-01-01T00:00:00.000Z")).toEqual({ notes: { "1": note(1, "bring chairs") } });
       expect(await at(b, "fo-all-notes:", "2019-01-01T00:00:00.000Z")).toEqual({ notes: {} });
       expect(await at(b, "fo-all-notes:", "2999-01-01T00:00:00.000Z")).toEqual({ notes: { "2": note(2, "new") } });
+    });
+
+    test("a time in the name (at:) reads the document as it stood then, its root and its included collections, single or list", async () => {
+      const b = backend();
+      await openAll(b.process, ["fo-board:1"]);
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/notes/1/text", value: "bring tables" }, { op: "add", path: "/notes/-", value: { text: "new" } }]);
+      const open = (doc: string) => b.process.call("open", { doc }).then((r) => content(r.result));
+      const then = { "1": note(1, "bring chairs") };
+      expect((await open("fo-notes-on:2021-01-01")).notes).toEqual(then);
+      expect((await open("fo-courses-noted-on:2021-01-01")).notes).toEqual(then);
+      const board = await open("fo-board-on:1:2021-01-01");
+      expect([board.weddings, board.notes]).toEqual([{ id: 1, name: "ours" }, then]);
+      expect((await open("fo-notes-on:2019-01-01")).notes).toEqual({});
+      // no time in the name: as it is
+      expect((await open("fo-notes-on:")).notes).toEqual({ "1": note(1, "bring tables"), "2": note(2, "new") });
+      expect((await open("fo-board-on:1")).notes).toEqual({ "1": note(1, "bring tables"), "2": note(2, "new") });
     });
 
     test("a table that keeps no history reads as it is, through the list's scope", async () => {
