@@ -170,17 +170,19 @@ CREATE OR REPLACE FUNCTION _delta_hanging_rows(p_collection_key TEXT, p_id BIGIN
 RETURNS JSONB AS $$
 DECLARE
   v_child RECORD;
-  v_row   JSONB;
+  v_part  JSONB;
   v_rows  JSONB := '[]'::jsonb;
 BEGIN
-  FOR v_child IN SELECT * FROM _delta_collections WHERE parent_collection = p_collection_key LOOP
-    FOR v_row IN EXECUTE format('SELECT to_jsonb(t.*) FROM %I t WHERE %I = $1',
-                                _delta_source_view(v_child.table_name, v_child.temporal), v_child.parent_fk) USING p_id
-    LOOP
-      v_rows := v_rows
-        || jsonb_build_array(jsonb_build_object('coll', v_child.collection_key, 'id', v_row->'id', 'row', _delta_strip_temporal(v_row)))
-        || _delta_hanging_rows(v_child.collection_key, (v_row->>'id')::BIGINT);
-    END LOOP;
+  -- a child collection at a time, in one aggregate: each row by id, the rows under it after it
+  FOR v_child IN SELECT * FROM _delta_collections WHERE parent_collection = p_collection_key ORDER BY collection_key COLLATE "C" LOOP
+    EXECUTE format(
+      'SELECT COALESCE(jsonb_agg(e ORDER BY t.id, n), ''[]''::jsonb) FROM %I t,
+         jsonb_array_elements(jsonb_build_array(jsonb_build_object(''coll'', %L, ''id'', t.id, ''row'', _delta_strip_temporal(to_jsonb(t.*))))
+                              || _delta_hanging_rows(%L, t.id)) WITH ORDINALITY AS x(e, n)
+        WHERE t.%I = $1',
+      _delta_source_view(v_child.table_name, v_child.temporal), v_child.collection_key, v_child.collection_key, v_child.parent_fk
+    ) INTO v_part USING p_id;
+    v_rows := v_rows || v_part;
   END LOOP;
   RETURN v_rows;
 END;

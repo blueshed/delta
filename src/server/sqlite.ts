@@ -396,11 +396,11 @@ export function registerDocs<I = unknown>(
     return row;
   }
 
-  /** The rows that hang from a row of `table` -- its children, theirs, and on down -- parent first. */
+  /** The rows that hang from a row of `table` -- its children, theirs, and on down -- parent first, as `_delta_hanging_rows` orders them. */
   function hanging(table: ResolvedTable, id: string | number, out: { table: ResolvedTable; row: any }[] = []): { table: ResolvedTable; row: any }[] {
-    for (const childKey of table.children) {
+    for (const childKey of table.children.toSorted()) {
       const child = schema.tables[childKey]!;
-      for (const row of db.query(`SELECT * FROM ${current(child)} WHERE ${child.parent!.fkColumn} = ?`).all(id as any) as any[]) {
+      for (const row of db.query(`SELECT * FROM ${current(child)} WHERE ${child.parent!.fkColumn} = ? ORDER BY id`).all(id as any) as any[]) {
         decodeRow(child, row);
         out.push({ table: child, row });
         hanging(child, row.id, out);
