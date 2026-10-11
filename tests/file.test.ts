@@ -5,7 +5,7 @@
  * symlink to the real file, and a temp a crash left behind is cleared at start.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import fs, { chmodSync, lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -57,6 +57,17 @@ describe("a save", () => {
     });
   }
 
+  for (const [name, save] of writers) {
+    test(`${name}: a rename that fails (onto a folder) leaves no temp behind`, async () => {
+      const f = join(dir, "a.json");
+      mkdirSync(f);   // a folder where the file goes: the rename fails
+      let failed = false;
+      try { await save(f, "{}"); } catch { failed = true; }
+      expect(failed).toBe(true);
+      expect(readdirSync(dir)).toEqual(["a.json"]);
+    });
+  }
+
   test("writeFileAtomic syncs the temp before the rename, and the folder after", async () => {
     const f = join(dir, "a.json");
     const probe = await open(dir, "r");
@@ -94,6 +105,20 @@ describe("a temp a crash left", () => {
     for (const name of [`a.json.${gone}.1.tmp`, `a.json.${gone}.12.tmp`, `b.json.${gone}.1.tmp`, `a.json.${process.pid}.1.tmp`, "a.json.x.1.tmp"]) writeFileSync(join(dir, name), "{");
     clearStaleTemps(f);
     expect(readdirSync(dir).sort()).toEqual(["a.json", `a.json.${process.pid}.1.tmp`, "a.json.x.1.tmp", `b.json.${gone}.1.tmp`]);
+  });
+
+  test("a temp of a process still running (not this one) is kept", async () => {
+    const f = join(dir, "a.json");
+    writeFileSync(f, "{}");
+    const child = Bun.spawn(["bun", "-e", "await Bun.sleep(10_000)"]);
+    try {
+      writeFileSync(join(dir, `a.json.${child.pid}.1.tmp`), "{");
+      clearStaleTemps(f);
+      expect(readdirSync(dir).sort()).toEqual(["a.json", `a.json.${child.pid}.1.tmp`]);
+    } finally {
+      child.kill();
+      await child.exited;
+    }
   });
 
   test("registerDoc and the JSON file clear them when they start", async () => {
