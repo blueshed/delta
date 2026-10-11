@@ -153,7 +153,8 @@ BEGIN
   IF v_unknown IS NOT NULL THEN
     RAISE EXCEPTION 'Unknown field: % (not a column of %)', v_unknown, p_collection USING ERRCODE = '22023';
   END IF;
-  -- the parent key, given, is an id: a whole number, or text (a number's digits)
+  -- the parent key, given, is a whole number or text; text that is no number's digits is
+  -- refused when the column casts it (22P02, 400), as SQLite refuses a key that names no row
   IF p_parent_fk IS NOT NULL AND p_value ? p_parent_fk AND jsonb_typeof(p_value->p_parent_fk) <> 'null'
      AND NOT (jsonb_typeof(p_value->p_parent_fk) = 'string'
               OR (jsonb_typeof(p_value->p_parent_fk) = 'number' AND (p_value->>p_parent_fk)::numeric = trunc((p_value->>p_parent_fk)::numeric))) THEN
@@ -161,14 +162,15 @@ BEGIN
   END IF;
   -- each column's value of its type, as SQLite's validateOps asks: not cast (5 into a text column is "5")
   SELECT string_agg(format('%s must be %s', k, CASE c->>'type' WHEN 'text' THEN 'a string' WHEN 'integer' THEN 'an integer'
-           WHEN 'real' THEN 'a number' WHEN 'boolean' THEN 'a boolean' ELSE 'an ISO-8601 string' END), '; ' ORDER BY k) INTO v_unknown
+           WHEN 'real' THEN 'a number' WHEN 'boolean' THEN 'a boolean' ELSE 'an ISO-8601 time' END), '; ' ORDER BY k) INTO v_unknown
     FROM jsonb_each(p_value) AS v(k, val), LATERAL (SELECT p_columns->k AS c) col
    WHERE c IS NOT NULL AND jsonb_typeof(val) <> 'null' AND NOT CASE c->>'type'
      WHEN 'text' THEN jsonb_typeof(val) = 'string'
      WHEN 'integer' THEN jsonb_typeof(val) = 'number' AND val::text::numeric = trunc(val::text::numeric)
      WHEN 'real' THEN jsonb_typeof(val) = 'number'
      WHEN 'boolean' THEN jsonb_typeof(val) = 'boolean'
-     WHEN 'timestamptz' THEN jsonb_typeof(val) = 'string'
+     -- ISO-8601, as isIsoTime (src/schema.ts) reads it; a day off the calendar is refused by the cast (22008, 400)
+     WHEN 'timestamptz' THEN jsonb_typeof(val) = 'string' AND (val #>> '{}') ~ '^\d{4}-\d{2}-\d{2}([T ]([01]\d|2[0-3]):[0-5]\d(:[0-5]\d(\.\d{1,6})?)?(Z|[+-]([01]\d|2[0-3])(:?[0-5]\d)?)?)?$'
      ELSE TRUE END;
   IF v_unknown IS NOT NULL THEN
     RAISE EXCEPTION '%', v_unknown USING ERRCODE = '22023';

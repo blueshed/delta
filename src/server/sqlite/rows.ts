@@ -1,5 +1,5 @@
 /** A row as SQLite keeps it: written, closed, read back, and each value as its column stores it. */
-import { defaultForType, isoTime, type ColumnDef, type DocDef, type ResolvedTable, type Schema } from "../../schema";
+import { defaultForType, isoTime, utcTime, type ColumnDef, type DocDef, type ResolvedTable, type Schema } from "../../schema";
 import { rowId } from "../scope";
 
 /** The view a collection's current rows are read from. */
@@ -152,6 +152,8 @@ export function encodeValue(table: ResolvedTable, col: string, value: unknown): 
   if (def.type === "boolean") {
     return value == null ? null : (value ? 1 : 0);
   }
+  // a time kept as Postgres gives it back, in UTC, so the same document reads alike on both
+  if (def.type === "timestamptz") return utcTime(value) ?? null;
   return value ?? null;
 }
 
@@ -165,5 +167,6 @@ export function decodeRow(table: ResolvedTable, row: any) {
     if (def.type === "boolean" && row[col] != null) {
       row[col] = !!row[col];
     }
+    if (def.type === "timestamptz" && row[col] != null) row[col] = utcTime(row[col]);   // one kept before in another form
   }
 }

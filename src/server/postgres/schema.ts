@@ -14,6 +14,7 @@ import {
   type Schema,
   type DocDef,
   type ValidationError,
+  isIsoTime,
 } from "../../schema";
 import { pastSafeId, resolveScope } from "../scope";
 
@@ -104,7 +105,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
       // a value of its column's type, not cast (_delta_assert_fields)
       const of: Record<string, [boolean, string]> = {
         text: [typeof v === "string", "a string"], integer: [Number.isInteger(v), "an integer"], real: [typeof v === "number", "a number"],
-        boolean: [typeof v === "boolean", "a boolean"], timestamptz: [typeof v === "string", "an ISO-8601 string"],
+        boolean: [typeof v === "boolean", "a boolean"], timestamptz: [isIsoTime(v) || v instanceof Date, "an ISO-8601 time"],
       };
       const [ok, what] = of[col.type] ?? [true, ""];
       return ok ? null : `${field} must be ${what}`;

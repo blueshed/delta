@@ -1,6 +1,6 @@
 /** What a write may say (`validateOps`): its paths, collections, fields and values, against the schema. */
 import { joinPath, splitPath, type DeltaOp } from "../../core";
-import { holdsField, type ColumnDef, type DocDef, type ResolvedTable, type Schema, type ValidationError } from "../../schema";
+import { holdsField, isIsoTime, type ColumnDef, type DocDef, type ResolvedTable, type Schema, type ValidationError } from "../../schema";
 import { pastSafeId, rowId, sameId } from "../scope";
 
 /**
@@ -213,10 +213,8 @@ function validateFieldType(def: ColumnDef, field: string, value: unknown): strin
     case "json":
       break; // any type is valid for json
     case "timestamptz":
-      // SQLite stores as TEXT (ISO-8601). Accept strings or Date instances.
-      if (typeof value !== "string" && !(value instanceof Date)) {
-        return `${field} must be an ISO-8601 string or Date`;
-      }
+      // ISO-8601 (isIsoTime), as Postgres asks it; kept in UTC as Postgres gives it back
+      if (!isIsoTime(value) && !(value instanceof Date && Number.isFinite(value.getTime()))) return `${field} must be an ISO-8601 time`;
       break;
   }
   return null;

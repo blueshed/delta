@@ -3,7 +3,11 @@
  * asked of registerDocs over an in-memory database, seeded through the carry
  * tool (`importTables`), with a ledger kept.
  */
-import { beforeEach, describe } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import * as json from "../src/server/json";
 import { Database } from "bun:sqlite";
 import { createTables, exportTables, importTables, registerDocs } from "../src/server/sqlite";
 import { createLocal } from "../src/server/local";
@@ -35,3 +39,27 @@ beforeEach(() => {
 });
 
 describe("sqlite", () => pathCases(() => backend));
+
+/**
+ * A database that has minted nothing yet holds no sequence rows (Postgres's sequences are there from
+ * the start): an id a write named still moves the next past it once its row is gone, as setval does
+ * (review). A refused write names none, on every backend (#71).
+ */
+test("sqlite and json: a fresh store keeps an id a write named once its row is gone: the next is past it, as on Postgres", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "delta-fresh-"));
+  try {
+    const db = new Database(":memory:");
+    createTables(db, pathSchema);
+    for (const register of [(l: ReturnType<typeof createLocal>) => registerDocs(l.server, db, pathSchema, pathDocs), (l: ReturnType<typeof createLocal>) => json.registerDocs(l.server, join(dir, "data.json"), pathSchema, pathDocs)]) {
+      const local = createLocal();
+      register(local);
+      await local.call("open", { doc: "fo-weddings:" });
+      for (const op of [{ op: "add", path: "/weddings/50", value: { name: "x" } }, { op: "remove", path: "/weddings/50" }]) {
+        expect((await local.call("delta", { doc: "fo-weddings:", ops: [op] })).error).toBeUndefined();
+      }
+      expect((await local.call("delta", { doc: "fo-weddings:", ops: [{ op: "add", path: "/weddings/-", value: { name: "y" } }], inverse: true })).result.ops[0].path).toBe("/weddings/51");
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

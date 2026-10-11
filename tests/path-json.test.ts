@@ -88,6 +88,16 @@ describe("json", () => {
     expect((await local.call("open", { doc: "fo-few:" })).result.tags).toEqual({ "1": { id: 1, label: "red" } });
   });
 
+  test("the serials a refused write spent are in the file: a process started on it names the next row past them (review)", async () => {
+    await backend.process.call("open", { doc: "fo-board:1" });
+    const refused = await backend.process.call("delta", { doc: "fo-board:1", ops: [{ op: "add", path: "/courses/-", value: { name: "Fish" } }, { op: "remove", path: "/courses/99" }] });
+    expect(refused.error?.code).toBe(404);
+    await (backend as ReturnType<typeof open>).persisted();
+    const again = open();
+    await again.process.call("open", { doc: "fo-board:1" });
+    expect((await write(again.process, "fo-board:1", [{ op: "add", path: "/courses/-", value: { name: "Stew" } }])).ops[0].path).toBe("/courses/4");
+  });
+
   test("a file that is not JSON is refused by name at the start, and left as it was", () => {
     for (const text of ["not json", "{", " "]) {
       writeFileSync(file, text);

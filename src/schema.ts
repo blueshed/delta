@@ -315,6 +315,30 @@ export function lastId(snapshot: Snapshot, key: string): number {
   return Math.max(said ?? 0, most);
 }
 
+/**
+ * A time a write may give a timestamptz column: ISO-8601, a date or a date and
+ * time (to the microsecond), with a zone or without (UTC), on the calendar.
+ * `_delta_assert_fields` (001a) asks the same of a value on Postgres.
+ */
+const ISO = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,6})?)?(?:Z|[+-](?:[01]\d|2[0-3])(?::?[0-5]\d)?)?)?$/;
+export function isIsoTime(value: unknown): boolean {
+  const m = typeof value === "string" ? ISO.exec(value) : null;
+  if (!m) return false;
+  const day = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  return day.getUTCMonth() === Number(m[2]) - 1 && day.getUTCDate() === Number(m[3]);
+}
+
+/**
+ * A time as a Postgres document reads a timestamptz in UTC: "2021-01-01T08:00:00+00:00",
+ * milliseconds where there are any. A time with no zone is UTC; text that is no time stays as it is.
+ */
+export function utcTime(value: unknown): unknown {
+  if (!(value instanceof Date) && (typeof value !== "string" || !isIsoTime(value))) return value;
+  const t = typeof value === "string" ? value.replace(" ", "T") : "";
+  const d = value instanceof Date ? value : new Date(/T/.test(t) ? (/(Z|[+-]\d{2}(:?\d{2})?)$/.test(t.slice(10)) ? t : `${t}Z`) : `${t}T00:00:00Z`);
+  return d.toISOString().replace(/\.000Z$/, "+00:00").replace(/(\.\d*?)0*Z$/, "$1+00:00");
+}
+
 /** A timestamp as a snapshot carries it: ISO-8601 in UTC, or null. */
 export function isoTime(value: unknown): string | null {
   if (value === null || value === undefined) return null;

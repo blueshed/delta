@@ -413,6 +413,37 @@ export function drivenCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
+    // A refused write names none ("a write refused part way names no id", #71); a write that lands keeps it passed
+    test("an id a write named stays passed once its row is gone, as setval's does: the next is past it on every backend (review)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-slots-of:1"]);
+      await write(b.process, "fo-slots-of:1", [{ op: "add", path: "/slots/50", value: {} }]);
+      await write(b.process, "fo-slots-of:1", [{ op: "remove", path: "/slots/50" }]);
+      const { ops } = await write(b.process, "fo-slots-of:1", [{ op: "add", path: "/slots/-", value: {} }]);
+      expect(ops.map((o: any) => o.path)).toEqual(["/slots/51"]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a value is of its column's type on every backend: a time is ISO-8601 (400 for anything else, not a 500) and reads back in UTC as Postgres gives it; a parent key that is text and no number is a mistake (400) (review)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-slots-of:1", "fo-seating:1", "fo-all-courses:"]);
+      const code = async (doc: string, ops: unknown[]) => (await b.process.call("delta", { doc, ops })).error?.code;
+      for (const starts of ["nope", "2021-02-30", "2021-01-01T24:00", "Jan 1 2021", 5]) {
+        expect({ starts, code: await code("fo-slots-of:1", [{ op: "add", path: "/slots/-", value: { starts } }]) }).toEqual({ starts, code: 400 });
+      }
+      const { ops } = await write(b.process, "fo-slots-of:1", [
+        { op: "add", path: "/slots/-", value: { starts: "2021-01-01T10:00:00+02:00", price: 3 } },
+        { op: "add", path: "/slots/-", value: { starts: "2021-01-01" } },
+        { op: "add", path: "/slots/-", value: { starts: "2021-01-01 10:00:00.5" } },
+      ]);
+      expect(ops.map((o: any) => o.value.starts)).toEqual(["2021-01-01T08:00:00+00:00", "2021-01-01T00:00:00+00:00", "2021-01-01T10:00:00.5+00:00"]);
+      expect(await code("fo-seating:1", [{ op: "add", path: "/seats/-", value: { table_no: 5, kept: 1 } }])).toBe(400);
+      expect(await code("fo-seating:1", [{ op: "add", path: "/seats/-", value: { table_no: "5", kept: true } }])).toBe(400);
+      expect(await code("fo-seating:1", [{ op: "replace", path: "/seats/1/weddings_id", value: "abc" }])).toBe(400);
+      expect(await code("fo-all-courses:", [{ op: "add", path: "/courses/-", value: { name: "x", weddings_id: "abc" } }])).toBe(400);
+      await assertCopiesHold(b, copies);
+    });
+
     test("a row is never added or moved under a parent that is not there (404), whatever document it comes through -- a list names a parent only by key; an implied plan's wedding is there once the plan is written (seeds 2 to 5)", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-all-courses:", "fo-catalog:", "fo-plan:7", "fo-all-households:"]);

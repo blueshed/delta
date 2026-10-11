@@ -233,6 +233,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     as Postgres does (it answered 404 when the parent was not there either).
   - **A recompute custom document whose read comes back null is let go (404)**, every backend: its
     subscribers were told nothing, and kept the menu card of a wedding that was gone.
+  - **Serials and values alike on every backend (review)**: an id a refused write named stays
+    passed on SQLite too where no sequence was kept yet (a fresh database minted 1 where Postgres
+    minted 51), and the JSON file saves the serials a refused write spent (a restart lost them).
+    A `timestamptz` value is ISO-8601 on every backend (`nope` was a 500 on Postgres and stored on
+    SQLite; `_delta_assert_fields`, `001a`; 22007 and 22008 answer 400), and SQLite keeps and reads
+    it in UTC as Postgres gives it (`2021-01-01T08:00:00+00:00`, not the text it was given). A parent
+    key written as text that is no number and names no row is a 400 on SQLite too.
   - **A write is asked op by op on every backend** (the driver now makes mistakes too: a bad
     path, an unknown field, a value not of its type). SQLite validated the whole batch before
     any op, so `[add /courses/-, add with an unknown field]` spent a serial on Postgres and not

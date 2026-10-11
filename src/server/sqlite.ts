@@ -536,11 +536,17 @@ export function registerDocs<I = unknown>(
   }
 
   /**
-   * An id a write named moves its collection's sequence past it, never back, so a later `add /<coll>/-` does not meet it (#72) -- Postgres's `_delta_serial_past`.
-   * Rolled back with a refused write, as Postgres passes it only once the write is done (#71): a write refused part way names none.
+   * An id a write named moves its collection's sequence past it, never back, so a later `add /<coll>/-` does not
+   * meet it (#72) -- Postgres's `_delta_serial_past`. A collection with no sequence yet starts one, from the
+   * largest id it holds, as `nextId` would, so the id stays passed once its row is gone, as setval's does.
+   * Rolled back with a refused write, as Postgres passes it only once the write is done (#71): a write refused
+   * part way names none.
    */
   function passId(table: ResolvedTable, id: string | number): void {
-    if (typeof id === "number") db.run("UPDATE _delta_sequences SET last = ? WHERE collection = ? AND last < ?", [id, table.docKey, id]);
+    if (typeof id !== "number") return;
+    db.run(
+      `INSERT INTO _delta_sequences (collection, last) VALUES (?1, MAX(?2, COALESCE((SELECT MAX(id) FROM ${table.name} WHERE typeof(id) = 'integer'), 0)))
+       ON CONFLICT (collection) DO UPDATE SET last = MAX(last, ?2)`, [table.docKey, id]);
   }
 
   /**
@@ -629,6 +635,15 @@ export function registerDocs<I = unknown>(
       touched.push(...carried);   // after the row they hang from, unchanged
     };
 
+    /**
+     * A parent a row may not go under: not there, or not the document's (404) -- or, named by text that is
+     * no number, a mistake (400), as Postgres refuses to cast it. (A text id SQLite keeps is there.)
+     */
+    const noParent = (coll: string, id: unknown): never =>
+      typeof id === "string" && !/^\s*[+-]?\d+\s*$/.test(id)
+        ? refuse(400, `${coll} "${id}" names no row: an id is a whole number`)
+        : refuse(404, `Row not found: ${coll}/${id ?? ""}`);
+
     /** Is row `id` of `coll` there now? A parent a row is added or moved under must be -- Postgres's `_delta_row_there`. */
     const there = (coll: string, id: unknown): boolean => readRow(schema.tables[coll]!, rowId(id as string | number)) != null;
 
@@ -674,7 +689,7 @@ export function registerDocs<I = unknown>(
       const from = parent ? run.row[parent.fkColumn] : undefined;   // as this write has it so far
       if (parent && to != null && !(from != null && sameId(rowId(to as string | number), rowId(from as string | number)))
           && ((!(list && parent.collection !== def.root) && !parentHeld(parent.collection, to)) || !there(parent.collection, to))) {
-        refuse(404, `Row not found: ${parent.collection}/${to}`);
+        noParent(parent.collection, to);
       }
       // (of the columns this document holds: it leaves the rest as they are)
       if (whole) for (const [col, colDef] of Object.entries(table.columns)) if (holdsField(def, schema, collKey, col)) run.row[col] = leftOut(colDef);
@@ -793,12 +808,12 @@ export function registerDocs<I = unknown>(
           const parent = table.parent;
           if (!isRoot && !outside && parent && (list ? parent.collection === def.root : parent.collection !== def.root)) {
             const fk = row[parent.fkColumn];
-            if (!parentHeld(parent.collection, fk)) refuse(404, `Row not found: ${parent.collection}/${fk ?? ""}`);
+            if (!parentHeld(parent.collection, fk)) noParent(parent.collection, fk);
           }
           // ... and whatever the document, the parent it names must be there (a list names it only by key;
           // a single document's child goes under its root, gone if a walk puts the child back after it)
           const fk = parent && !list && !isRoot && parent.collection === def.root ? rootId : parent ? row[parent.fkColumn] : undefined;
-          if (parent && fk != null && !there(parent.collection, fk)) refuse(404, `Row not found: ${parent.collection}/${fk}`);
+          if (parent && fk != null && !there(parent.collection, fk)) noParent(parent.collection, fk);
           const fullRow = insertCollectionRow(db, schema, table, id, rootId, def, row, ts, list);
           passId(table, id);
           // A root row added through a document is one it holds: a list's, given
@@ -1019,6 +1034,7 @@ export function registerDocs<I = unknown>(
       if (ops.length > 0) implied.delete(docName);
     } catch (err: any) {
       for (const take of spent) take();
+      if (spent.length) options.committed?.();   // the serials it spent are kept: the JSON file saves them
       if (cache.has(docName)) cache.set(docName, snapshot); // restore in-memory cache (a rootless walk's copy was never in it)
       named(err);
       log.error(`delta failed: ${err.message}`);
