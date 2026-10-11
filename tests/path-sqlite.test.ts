@@ -8,7 +8,7 @@ import { Database } from "bun:sqlite";
 import { createTables, exportTables, importTables, registerDocs } from "../src/server/sqlite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
-import { pathCases, pathDocs, pathSchema, pathSeed, sqliteEmails, sqliteGuests, sqliteInbox, sqliteMenuCard, sqliteOpenSeats, type PathBackend } from "./helpers/path";
+import { pathCases, pathDocs, pathPublicDocs, pathSchema, pathSeed, sqliteEmails, sqliteGuests, sqliteInbox, sqliteMenuCard, sqliteOpenSeats, type PathBackend } from "./helpers/path";
 
 setLogLevel("silent");
 
@@ -22,6 +22,7 @@ beforeEach(() => {
   const heard: { channel: string; data: any }[] = [];
   local.onPublish((channel, data) => heard.push({ channel, data }));
   registerDocs(local.server, db, pathSchema, pathDocs, [sqliteInbox, sqliteOpenSeats, sqliteMenuCard, sqliteEmails, sqliteGuests], { ledger: true });
+  registerDocs(local.server, db, pathSchema, pathPublicDocs);   // a second registration over the same rows
   backend = {
     process: { call: (action, msg) => local.call(action, msg), heard },
     quiet: async () => {}, // in-process: told before the write answers

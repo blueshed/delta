@@ -12,7 +12,7 @@ import { openPglite } from "../src/server/pglite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
 import {
-  assertCopiesHold, expectTold, field, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresEmails, postgresGuests, postgresInbox, postgresMenuCard, postgresOpenSeats, told, write, type PathBackend,
+  assertCopiesHold, expectTold, field, household, openAll, pathCases, pathDocs, pathPublicDocs, pathSchema, pathSeed, postgresEmails, postgresGuests, postgresInbox, postgresMenuCard, postgresOpenSeats, told, write, type PathBackend,
 } from "./helpers/path";
 import { waitFor } from "../src/testing";
 
@@ -26,7 +26,7 @@ const tables = Object.values(pathSchema.tables).map((t) => t.name);
 beforeAll(async () => {
   pool = await openPglite();
   await applyFramework(pool);
-  await applySql(pool, generateSql(pathSchema, pathDocs));
+  await applySql(pool, generateSql(pathSchema, [...pathDocs, ...pathPublicDocs]));
 });
 
 afterAll(async () => {
@@ -39,7 +39,7 @@ beforeEach(async () => {
   const local = createLocal();
   const heard: { channel: string; data: any }[] = [];
   local.onPublish((channel, data) => heard.push({ channel, data }));
-  listeners.push(await createDocListener(local.server, pool, { types: pathDocs.map((def) => docTypeFromDef(def, pool)), ledger: true, custom: [postgresInbox, postgresOpenSeats, postgresMenuCard, postgresEmails, postgresGuests] }));
+  listeners.push(await createDocListener(local.server, pool, { types: [...pathDocs, ...pathPublicDocs].map((def) => docTypeFromDef(def, pool)), ledger: true, custom: [postgresInbox, postgresOpenSeats, postgresMenuCard, postgresEmails, postgresGuests] }));
   backend = {
     process: { call: (action, msg) => local.call(action, msg), heard },
     // NOTIFY is heard after the write's commit, and fetched then: a beat.
@@ -302,7 +302,7 @@ describe("pglite: a listener on framework SQL older than it", () => {
       const heard: { channel: string; data: any }[] = [];
       local.onPublish((channel, data) => heard.push({ channel, data }));
       setLogLevel("warn");
-      listeners.push(await createDocListener(local.server, behind, { types: pathDocs.map((def) => docTypeFromDef(def, behind)), ledger: true, custom: [postgresInbox, postgresOpenSeats, postgresMenuCard, postgresEmails, postgresGuests] }));
+      listeners.push(await createDocListener(local.server, behind, { types: [...pathDocs, ...pathPublicDocs].map((def) => docTypeFromDef(def, behind)), ledger: true, custom: [postgresInbox, postgresOpenSeats, postgresMenuCard, postgresEmails, postgresGuests] }));
       setLogLevel("silent");
       const b: PathBackend = {
         process: { call: (action, msg) => local.call(action, msg), heard },
@@ -359,7 +359,7 @@ describe("pglite: a listener hears each entry once, however late its notificatio
     const local = createLocal();
     const heard: { channel: string; data: any }[] = [];
     local.onPublish((channel, data) => heard.push({ channel, data }));
-    listeners.push(await createDocListener(local.server, slow, { types: pathDocs.map((def) => docTypeFromDef(def, pool)), custom: [postgresInbox] }));
+    listeners.push(await createDocListener(local.server, slow, { types: [...pathDocs, ...pathPublicDocs].map((def) => docTypeFromDef(def, pool)), custom: [postgresInbox] }));
     const other: PathBackend = { ...backend, process: { call: (action, msg) => local.call(action, msg), heard } };
     await openAll(other.process, ["fo-inbox:a@x"]);
     await openAll(backend.process, ["fo-board:1"]);
@@ -387,7 +387,7 @@ describe("pglite: a listener hears each entry once, however late its notificatio
     const local = createLocal();
     const heard: { channel: string; data: any }[] = [];
     local.onPublish((channel, data) => heard.push({ channel, data }));
-    listeners.push(await createDocListener(local.server, lossy, { types: pathDocs.map((def) => docTypeFromDef(def, pool)) }));
+    listeners.push(await createDocListener(local.server, lossy, { types: [...pathDocs, ...pathPublicDocs].map((def) => docTypeFromDef(def, pool)) }));
     const other: PathBackend = { ...backend, process: { call: (action, msg) => local.call(action, msg), heard } };
     const copies = await openAll(other.process, ["fo-menu:1"]);
     errors.at(-1)!(new Error("connection lost"));   // it reconnects after a second, and resyncs

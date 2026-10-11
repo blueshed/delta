@@ -23,7 +23,7 @@ import { setLogLevel } from "../src/server/logger";
 import { applyFramework, newPool } from "./setup";
 import { waitFor } from "../src/testing";
 import {
-  assertCopiesHold, expectTold, field, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresEmails, postgresGuests, postgresInbox, postgresMenuCard, postgresOpenSeats, readAll, told, write,
+  assertCopiesHold, course, expectTold, field, household, openAll, pathCases, pathDocs, pathPublicDocs, pathSchema, pathSeed, postgresEmails, postgresGuests, postgresInbox, postgresMenuCard, postgresOpenSeats, readAll, told, write,
   type PathBackend, type PathProcess,
 } from "./helpers/path";
 
@@ -38,12 +38,12 @@ beforeAll(async () => {
   pool = await newPool();
   await applyFramework(pool);
   await pool.query(`DROP TABLE IF EXISTS ${tables.join(", ")} CASCADE`);
-  await applySql(pool, generateSql(pathSchema, pathDocs));
+  await applySql(pool, generateSql(pathSchema, [...pathDocs, ...pathPublicDocs]));
 });
 
 afterAll(async () => {
   await pool.query(`DROP TABLE IF EXISTS ${tables.join(", ")} CASCADE`);
-  await pool.query("DELETE FROM _delta_docs WHERE prefix = ANY($1)", [pathDocs.map((d) => d.prefix)]);
+  await pool.query("DELETE FROM _delta_docs WHERE prefix = ANY($1)", [[...pathDocs, ...pathPublicDocs].map((d) => d.prefix)]);
   await pool.query("DELETE FROM _delta_collections WHERE collection_key = ANY($1)", [Object.keys(pathSchema.tables)]);
   await pool.end();
 });
@@ -53,7 +53,7 @@ async function processOn(): Promise<PathProcess> {
   const local = createLocal();
   const heard: { channel: string; data: any }[] = [];
   local.onPublish((channel, data) => heard.push({ channel, data }));
-  listeners.push(await createDocListener(local.server, pool, { types: pathDocs.map((def) => docTypeFromDef(def, pool)), ledger: true, custom: [postgresInbox, postgresOpenSeats, postgresMenuCard, postgresEmails, postgresGuests] }));
+  listeners.push(await createDocListener(local.server, pool, { types: [...pathDocs, ...pathPublicDocs].map((def) => docTypeFromDef(def, pool)), ledger: true, custom: [postgresInbox, postgresOpenSeats, postgresMenuCard, postgresEmails, postgresGuests] }));
   return { call: (action, msg) => local.call(action, msg), heard };
 }
 

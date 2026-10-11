@@ -196,6 +196,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   place).
 - **On Postgres without a ledger, a write's answered `version` is a number**, as it is with one:
   a hand-written `DocType` that read it as pg gives a `BIGINT` (a string) passed the string on.
+- **Two registrations over the same rows: an undo through one is guarded by a write through the
+  other (todo #64)**, on SQLite and the JSON file. Ada renamed course 1 through `fo-board:1`, Bob
+  through a public `fo-pub-courses:` registered in a second `registerDocs` on the same database,
+  and Ada's undo planned from her registration's copy, still holding her name: it put the old
+  name back over Bob's with no conflict, and a write of hers after his recorded an inverse that
+  undid to her name, not his. A registration now notices a write by another on the same
+  database handle (as it notices another process's, by `PRAGMA data_version`) and reads its
+  copies again before it serves, writes or walks: the undo answers `conflict`. The JSON file's
+  registrations of one file on one server now share its database, where each had its own and
+  their saves overwrote each other. Postgres guarded it already. Each registration still tells
+  only its own open documents.
 - **A row a write makes and its cascade takes out is told its add wherever its remove is told
   (todo #75)**, on every backend. `[add /courses/9, add /drinks/5 under it, remove /courses/9]`
   told the board and the menu the drink's remove but not its add, so an open copy met a remove

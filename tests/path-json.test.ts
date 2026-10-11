@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { exportTables, importTables, registerDocs } from "../src/server/json";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
-import { course, pathCases, pathDocs, pathSchema, pathSeed, readAll, sqliteEmails, sqliteGuests, sqliteInbox, sqliteMenuCard, sqliteOpenSeats, write, type PathBackend } from "./helpers/path";
+import { course, pathCases, pathDocs, pathPublicDocs, pathSchema, pathSeed, readAll, sqliteEmails, sqliteGuests, sqliteInbox, sqliteMenuCard, sqliteOpenSeats, write, type PathBackend } from "./helpers/path";
 
 setLogLevel("silent");
 
@@ -22,6 +22,7 @@ function open(): PathBackend & { persisted(): Promise<void> } {
   const heard: { channel: string; data: any }[] = [];
   local.onPublish((channel, data) => heard.push({ channel, data }));
   const store = registerDocs(local.server, file, pathSchema, pathDocs, [sqliteInbox, sqliteOpenSeats, sqliteMenuCard, sqliteEmails, sqliteGuests], { ledger: true });
+  registerDocs(local.server, file, pathSchema, pathPublicDocs);   // a second registration over the same file
   return {
     process: { call: (action, msg) => local.call(action, msg), heard },
     quiet: async () => {}, // in-process: told before the write answers

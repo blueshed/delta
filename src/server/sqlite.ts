@@ -89,6 +89,13 @@ const log = createLogger("[delta-sqlite]");
 const registrations = new WeakMap<object, Map<symbol, string[]>>();
 
 /**
+ * The writes committed through each database handle, by every registration on
+ * it: one that finds the count moved past its own knows another wrote on this
+ * connection, which `PRAGMA data_version` does not count (todo #64).
+ */
+const commitsOn = new WeakMap<object, number>();
+
+/**
  * Claim `prefixes` on `ws` for one registration (refused if one comes twice, or
  * another registration holds one of them), and answer whether a document of
  * prefix length `mine` answers a name: whether no prefix on the server matching
@@ -195,19 +202,24 @@ export function registerDocs<I = unknown>(
   // In-memory doc cache: docName → loaded doc object
   const cache = new Map<string, any>();
 
-  // Several processes on one file (todo #1): a copy read before another
-  // connection committed is stale, and a write merged over one would put back
-  // what the other wrote. `PRAGMA data_version` moves when another connection
-  // commits (never for this one's own writes), so before a copy is served or
-  // written from, every copy is dropped when it has moved, and read again from
-  // the tables. A document open here is not told of another process's write:
-  // it reads it when it is next opened, or written through.
+  // Several processes on one file (todo #1), or another registration on this
+  // handle (todo #64): a copy read before the other committed is stale, and a
+  // write merged over one -- or a walk planned from one -- would put back what
+  // the other wrote. `PRAGMA data_version` moves when another connection
+  // commits (never for this one's own writes), and `commitsOn` when another
+  // registration on this one does, so before a copy is served or written from,
+  // every copy is dropped when either has moved, and read again from the
+  // tables. A document open here is not told of the other's write: it reads it
+  // when it is next opened, or written through.
   const dataVersion = db.query("PRAGMA data_version");
   let seenVersion = (dataVersion.get() as { data_version: number }).data_version;
+  let seenCommits = commitsOn.get(db) ?? 0;
   function heardElsewhere(): boolean {
     const now = (dataVersion.get() as { data_version: number }).data_version;
-    if (now === seenVersion) return false;
+    const commits = commitsOn.get(db) ?? 0;
+    if (now === seenVersion && commits === seenCommits) return false;
     seenVersion = now;
+    seenCommits = commits;
     cache.clear();
     implied.clear();
     custom.forget();
@@ -959,6 +971,7 @@ export function registerDocs<I = unknown>(
         const recorded = ledger?.record({ doc: docName, ops: done.applied, inverse, ...by });
         return { ops: done.applied, inverse, version: recorded?.version, entry: recorded?.entry };
       }).immediate();
+      commitsOn.set(db, ++seenCommits);   // heard by the other registrations on this handle, not by this one
       if (ops.length > 0) implied.delete(docName);
     } catch (err: any) {
       if (cache.has(docName)) cache.set(docName, snapshot); // restore in-memory cache (a rootless walk's copy was never in it)

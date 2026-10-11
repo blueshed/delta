@@ -119,6 +119,14 @@ export const pathDocs = [
 ];
 
 /**
+ * Documents an app registers apart, over the same rows (todo #64): on SQLite
+ * and the JSON file a second `registerDocs` on the same server and database --
+ * a public set beside the private one, keeping no ledger -- and on Postgres
+ * beside the rest, as one registry is all it has.
+ */
+export const pathPublicDocs = [defineDoc("fo-pub-courses:", { root: "courses", include: [] })];
+
+/**
  * A custom document (`defineCustomDoc`, membership) beside them: the
  * households of one email, told of a write to a household row whichever
  * document it came through. Only the first read differs by backend (SQLite and
@@ -354,6 +362,40 @@ export function pathCases(backend: () => PathBackend): void {
   fanOutCases(backend);
   serialCases(backend);
   asItStoodCases(backend);
+  registrationCases(backend);
+}
+
+/**
+ * Two registrations over the same rows (todo #64): a walk is guarded by every
+ * write to the rows it sets back, whichever registration made it, as by one
+ * through its own. What one registration tells the other's open documents is
+ * not asked here: on SQLite and the JSON file it tells only its own (the
+ * reference's limit), so no copy is held across the case.
+ */
+export function registrationCases(backend: () => PathBackend): void {
+  describe("two registrations over the same rows (todo #64)", () => {
+    test("Ada's undo through the board meets Bob's rename since, through the public courses, as a conflict and leaves it; her next write is undone to his name, not hers before it", async () => {
+      const b = backend();
+      for (const doc of ["fo-board:1", "fo-pub-courses:"]) await b.process.call("open", { doc });
+      const rename = (doc: string, name: string, cursor: string) => write(b.process, doc, [{ op: "replace", path: "/courses/1/name", value: name }], { cursor });
+      const walked = async (way: string) => {
+        const { result, error } = await b.process.call(way, { cursor: "ada" });
+        return { error, ops: result?.ops, conflict: result?.conflict };
+      };
+      const name = async () => (await b.process.call("open", { doc: "fo-pub-courses:" })).result.courses["1"].name;
+      await rename("fo-board:1", "Broth", "ada");
+      await rename("fo-pub-courses:", "Bisque", "bob");
+      expect(await walked("undo")).toEqual({ error: undefined, ops: [], conflict: ["/courses/1"] });
+      expect(await name()).toBe("Bisque");
+      await rename("fo-board:1", "Consomme", "ada");
+      expect(await walked("undo")).toEqual({ error: undefined, ops: [{ op: "replace", path: "/courses/1", value: course(1, "Bisque") }], conflict: undefined });
+      expect(await name()).toBe("Bisque");
+      // a redo meets a write since the same way
+      await rename("fo-pub-courses:", "Gazpacho", "bob");
+      expect(await walked("redo")).toEqual({ error: undefined, ops: [], conflict: ["/courses/1"] });
+      expect(await name()).toBe("Gazpacho");
+    });
+  });
 }
 
 /** A row added under an id it names moves the collection's serial past it, as importTables does (#63, #72). */
