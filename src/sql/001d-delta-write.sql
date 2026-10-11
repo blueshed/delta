@@ -26,6 +26,26 @@ DO $$ BEGIN
 END $$;
 
 -- ---------------------------------------------------------------------------
+-- _delta_serial_new: whether an id is past every one a collection's serial has
+-- handed out (minted, or passed for an add that named it): what an add may
+-- name (todo #71). The serial is read as the framework's owner, as
+-- _delta_serial_past sets it.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION _delta_serial_new(p_table TEXT, p_id BIGINT)
+RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
+DECLARE
+  v_new BOOLEAN;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM _delta_collections WHERE table_name = p_table) THEN
+    RETURN FALSE;
+  END IF;
+  EXECUTE format('SELECT $1 >= last_value + is_called::int FROM %I', 'seq_' || p_table) INTO v_new USING p_id;
+  RETURN v_new;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
 -- _delta_cascade_remove: remove a row + cascade to children & referencedBy,
 -- as the schema says, whichever document the removal is written through: one
 -- that does not include the drinks still takes a course's drinks (no orphans).
@@ -664,23 +684,38 @@ BEGIN
       ELSE
         v_id := _delta_row_id(v_coll_key, v_id_text);
       END IF;
-      -- An add names a new row. A temporal key is (id, valid_from), so nothing
-      -- in the table stops a second live version of an id (todo #16): a mint
-      -- can meet an id a client named, and two writers through two documents
-      -- can name one id at once. A lock on the id, held to commit, and the live
-      -- check under it do: a second add waits for the first, then sees its row
-      -- (each statement reads what is committed) and is refused (SQLSTATE
+      -- An add makes a new row, under an id the serial has not handed out
+      -- (todo #71): one it has (minted, or passed for an add that named it) is
+      -- refused, whether a row holds it now or none does -- or RLS hides it --
+      -- so the answer says nothing of rows the writer may not read. But for
+      -- ids the writer has read: a walk puts back the rows its entry took, a
+      -- single document names its own root (checked above), and a write may
+      -- add back a row it has itself written. SQLite's applyOps keeps the
+      -- same rule.
+      --
+      -- A temporal key is (id, valid_from), so nothing in the table stops a
+      -- second live version of an id (todo #16): a mint can meet a row put in
+      -- by hand, and two writers through two documents can name one id at
+      -- once. A lock on the id, held to commit, and the checks under it do: a
+      -- second add waits for the first, then sees the serial past it (and its
+      -- row: each statement reads what is committed) and is refused (SQLSTATE
       -- 23505, 409 on the wire), as a plain table's key refuses it.
       IF v_coll.temporal THEN
         PERFORM pg_advisory_xact_lock(hashtext('delta-row:' || v_coll.table_name), hashtext(v_id::text));
       END IF;
-      IF v_id_text <> '-' OR v_coll.temporal THEN
+      v_exists := FALSE;
+      IF v_id_text <> '-' AND NOT COALESCE(p_walk, FALSE)
+         AND (v_is_list OR v_coll_key IS DISTINCT FROM v_def.root_collection)
+         AND NOT v_touched @> jsonb_build_array(jsonb_build_object('coll', v_coll_key, 'id', v_id)) THEN
+        v_exists := NOT _delta_serial_new(v_coll.table_name, v_id);
+      END IF;
+      IF NOT v_exists AND (v_id_text <> '-' OR v_coll.temporal) THEN
         EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I WHERE id = $1)', v_view) INTO v_exists USING v_id;
-        IF v_exists THEN
-          RAISE EXCEPTION 'row already exists: % -- replace it, or add to % for a new id',
-            _delta_build_path(v_coll_key, v_id::text), _delta_build_path(v_coll_key, '-')
-            USING ERRCODE = '23505';
-        END IF;
+      END IF;
+      IF v_exists THEN
+        RAISE EXCEPTION 'id already taken: % -- add to % for a new id',
+          _delta_build_path(v_coll_key, v_id::text), _delta_build_path(v_coll_key, '-')
+          USING ERRCODE = '23505';
       END IF;
       -- The path names the row, whatever the value says.
       v_new_row := (v_op->'value') || jsonb_build_object('id', v_id);

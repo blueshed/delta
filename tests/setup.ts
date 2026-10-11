@@ -52,6 +52,8 @@ export async function resetState(pool: Pool): Promise<void> {
     BEGIN
       IF to_regclass('items') IS NOT NULL THEN
         EXECUTE 'TRUNCATE items RESTART IDENTITY CASCADE';
+        -- delta's serial is not owned by the table (RESTART IDENTITY leaves it): each test names ids anew (#71)
+        EXECUTE 'ALTER SEQUENCE seq_items RESTART';
       END IF;
       IF to_regclass('users') IS NOT NULL THEN
         EXECUTE 'TRUNCATE users RESTART IDENTITY CASCADE';

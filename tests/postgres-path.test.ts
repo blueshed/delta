@@ -128,17 +128,19 @@ describe("postgres: what only a database shared by processes has", () => {
     const other = await pool.connect();
     try {
       await other.query("BEGIN");
-      await other.query(`SELECT delta_apply('fo-notes:1', '[{"op":"add","path":"/notes/11","value":{"text":"b"}}]'::jsonb)`);
-      // this write takes note 10's lock, then waits for 11's; the other then waits for 10's
+      await other.query(`SELECT delta_apply('fo-notes:1', '[{"op":"add","path":"/notes/10","value":{"text":"b"}}]'::jsonb)`);
+      // this write takes note 11's lock, then waits for 10's; the other then waits for 11's
       const answer = backend.process.call("delta", { doc: "fo-board:1", ops: [
-        { op: "add", path: "/notes/10", value: { text: "a" } },
         { op: "add", path: "/notes/11", value: { text: "a" } },
+        { op: "add", path: "/notes/10", value: { text: "a" } },
       ] });
       await new Promise((r) => setTimeout(r, 200));
-      const theirs = other.query(`SELECT delta_apply('fo-notes:1', '[{"op":"add","path":"/notes/10","value":{"text":"b"}}]'::jsonb)`).then(() => "taken", (err: any) => err.code);
+      const theirs = other.query(`SELECT delta_apply('fo-notes:1', '[{"op":"add","path":"/notes/11","value":{"text":"b"}}]'::jsonb)`).then(() => "taken", (err: any) => err.code);
       const [mine, done] = await Promise.all([answer, theirs]);
-      // the first to wait is the first to find the cycle: this write gives way
-      expect({ mine: mine.error?.code, theirs: done }).toEqual({ mine: 409, theirs: "taken" });
+      // the first to wait is the first to find the cycle: this write gives way. The
+      // other then finds note 11 spent -- the serial passed it for this write, and
+      // a serial does not roll back -- and is refused as already there (#71)
+      expect({ mine: mine.error?.code, deadlock: /deadlock/i.test(mine.error?.message), theirs: done }).toEqual({ mine: 409, deadlock: true, theirs: "23505" });
       await other.query("COMMIT");
     } finally {
       await other.query("ROLLBACK").catch(() => {});

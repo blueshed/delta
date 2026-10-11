@@ -2023,7 +2023,7 @@ describe("an add of a row that is already there", () => {
 
   test("is a 409 that names the fix, and leaves one live row", async () => {
     const r = await delta("project:p1", [{ op: "add", path: "/tasks/t1", value: { title: "again", done: false } }]);
-    expect(r.error).toEqual({ code: 409, message: "Row already exists: /tasks/t1 -- replace it, or add to /tasks/- for a new id" });
+    expect(r.error).toEqual({ code: 409, message: "Id already taken: /tasks/t1 -- add to /tasks/- for a new id" });
     expect(liveTasks("t1")).toEqual([{ title: "first", project_id: "p1" }]);
   });
 

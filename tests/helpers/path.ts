@@ -369,6 +369,37 @@ export function serialCases(backend: () => PathBackend): void {
       const { sequences } = await b.exportTables();
       expect(sequences?.courses).toBe(6);
     });
+
+    test("an add names a new id, past the serial: one the table has handed out is refused alike (409), whether a row it may not read holds it or none does -- no answer, version or broadcast tells them apart (#71)", async () => {
+      const b = backend();
+      // wedding 2's: household 3 is there, 4 was and is not; note 2 is there, 3 was and is not
+      await openAll(b.process, ["fo-board:2"]);
+      await write(b.process, "fo-board:2", [
+        { op: "add", path: "/households/-", value: { email: "d@x" } },
+        { op: "remove", path: "/households/4" },
+        { op: "add", path: "/notes/-", value: { text: "theirs" } },
+        { op: "add", path: "/notes/-", value: { text: "gone" } },
+        { op: "remove", path: "/notes/3" },
+      ]);
+      const copies = await openAll(b.process, ["fo-board:1", "fo-board:2"]);
+      const refused = async (coll: string, id: number) => {
+        const res = await b.process.call("delta", { doc: "fo-board:1", ops: [{ op: "add", path: `/${coll}/${id}`, value: coll === "notes" ? { text: "mine" } : { email: "e@x" } }] });
+        return { code: res.error?.code, message: String(res.error?.message).replaceAll(`/${coll}/${id}`, `/${coll}/<id>`) };
+      };
+      const hidden = await refused("households", 3);   // taken, by a row fo-board:1 does not read
+      expect(hidden.code).toBe(409);
+      expect(await refused("households", 4)).toEqual(hidden);   // free, but handed out
+      expect(await refused("households", 1)).toEqual(hidden);   // taken by its own row: no other answer
+      const hiddenNote = await refused("notes", 2);
+      expect(hiddenNote.code).toBe(409);
+      expect(await refused("notes", 3)).toEqual(hiddenNote);   // a temporal row closed: free, but handed out
+      await expectSilent(b, "fo-board:1", "fo-board:2");
+      expect((await b.process.call("open", { doc: "fo-board:1" })).result._v).toBe(copies.get("fo-board:1")._v);
+      // past the serial, an id is new: a client may still name it
+      const { ops } = await write(b.process, "fo-board:1", [{ op: "add", path: "/households/5", value: { email: "e@x" } }]);
+      expect(ops).toEqual([{ op: "add", path: "/households/5", value: household(5, "e@x") }]);
+      await assertCopiesHold(b, copies);
+    });
   });
 }
 
@@ -1252,28 +1283,33 @@ export function fanOutCases(backend: () => PathBackend): void {
       const b = backend();
       const docs = ["fo-board:1", "fo-menu:1", "fo-drinks:1", "fo-catalog:", "fo-all-courses:"];
       const copies = await openAll(b.process, docs);
-      const madeCourse = { op: "add", path: "/courses/9", value: course(9, "Fish") };
-      const madeDrink = { op: "add", path: "/drinks/5", value: drink(5, 9, "Chablis") };
-      const named = { op: "replace", path: "/drinks/5", value: drink(5, 9, "Muscadet") };
-      const namedTold = field("/drinks/5/name", "Muscadet");
-      const goneCourse = { op: "remove", path: "/courses/9" };
-      const goneDrink = { op: "remove", path: "/drinks/5" };
+      // a course and a drink, as told: the second write's ids are new, as an add's must be (#71)
+      const life = (c: number, d: number) => ({
+        madeCourse: { op: "add", path: `/courses/${c}`, value: course(c, "Fish") },
+        madeDrink: { op: "add", path: `/drinks/${d}`, value: drink(d, c, "Chablis") },
+        named: { op: "replace", path: `/drinks/${d}`, value: drink(d, c, "Muscadet") },
+        namedTold: field(`/drinks/${d}/name`, "Muscadet"),
+        goneCourse: { op: "remove", path: `/courses/${c}` },
+        goneDrink: { op: "remove", path: `/drinks/${d}` },
+      });
+      const first = life(9, 5);
+      const second = life(10, 6);
       const made = await write(b.process, "fo-board:1", [
         { op: "add", path: "/courses/9", value: { name: "Fish" } },
         { op: "add", path: "/drinks/5", value: { courses_id: 9, name: "Chablis" } },
         { op: "remove", path: "/courses/9" },
       ], { cursor: "m1" });
-      expect({ ops: made.ops, inverse: made.inverse }).toEqual({ ops: [madeCourse, madeDrink, goneCourse, goneDrink], inverse: [] });
+      expect({ ops: made.ops, inverse: made.inverse }).toEqual({ ops: [first.madeCourse, first.madeDrink, first.goneCourse, first.goneDrink], inverse: [] });
       const renamed = await write(b.process, "fo-board:1", [
-        { op: "add", path: "/courses/9", value: { name: "Fish" } },
-        { op: "add", path: "/drinks/5", value: { courses_id: 9, name: "Chablis" } },
-        { op: "replace", path: "/drinks/5/name", value: "Muscadet" },
-        { op: "remove", path: "/courses/9" },
+        { op: "add", path: "/courses/10", value: { name: "Fish" } },
+        { op: "add", path: "/drinks/6", value: { courses_id: 10, name: "Chablis" } },
+        { op: "replace", path: "/drinks/6/name", value: "Muscadet" },
+        { op: "remove", path: "/courses/10" },
       ]);
-      expect(renamed.ops).toEqual([madeCourse, madeDrink, named, goneCourse, goneDrink]);
-      for (const doc of ["fo-board:1", "fo-menu:1", "fo-catalog:"]) await expectTold(b, doc, [made.ops, [madeCourse, madeDrink, namedTold, goneCourse, goneDrink]]);
-      await expectTold(b, "fo-drinks:1", [[madeDrink, goneDrink], [madeDrink, namedTold, goneDrink]]);
-      await expectTold(b, "fo-all-courses:", [[madeCourse, goneCourse], [madeCourse, goneCourse]]);
+      expect(renamed.ops).toEqual([second.madeCourse, second.madeDrink, second.named, second.goneCourse, second.goneDrink]);
+      for (const doc of ["fo-board:1", "fo-menu:1", "fo-catalog:"]) await expectTold(b, doc, [made.ops, [second.madeCourse, second.madeDrink, second.namedTold, second.goneCourse, second.goneDrink]]);
+      await expectTold(b, "fo-drinks:1", [[first.madeDrink, first.goneDrink], [second.madeDrink, second.namedTold, second.goneDrink]]);
+      await expectTold(b, "fo-all-courses:", [[first.madeCourse, first.goneCourse], [second.madeCourse, second.goneCourse]]);
       await assertCopiesHold(b, copies);
     });
 
@@ -1633,7 +1669,8 @@ export function fanOutCases(backend: () => PathBackend): void {
       const copies = await openAll(b.process, ["fo-board:1"]);
       const add = { op: "add", path: "/notes/7", value: { text: "seven" } };
       const remove = { op: "remove", path: "/notes/7" };
-      expect((await write(b.process, "fo-board:1", [add, remove], { cursor: "m1" })).inverse).toEqual([]);
+      // a write names only a new id, or one it has written (#71): /notes/6 here, /notes/7 below
+      expect((await write(b.process, "fo-board:1", [{ ...add, path: "/notes/6" }, { ...remove, path: "/notes/6" }], { cursor: "m1" })).inverse).toEqual([]);
       const board = async () => content((await b.process.call("open", { doc: "fo-board:1" })).result);
       const was = await board();
       const made = await write(b.process, "fo-board:1", [

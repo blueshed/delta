@@ -100,6 +100,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sockets still had it open, and they heard no more of it. A Postgres document keeps no copy to
   read again, so there is nothing to evict. Migration: drop the call.
 
+- **Breaking: an add names a new id, so its answer tells nothing of rows the writer may not
+  read (todo #71)**, on every backend. `add /households/3` through `fo-board:1` was a 409 when
+  household 3 lived anywhere -- another wedding's, or a row RLS hides -- and a success when no
+  row held 3, so a writer could probe which ids exist outside what it reads (and on Postgres
+  under RLS, an add of a hidden temporal row's id made a second live version of it). Now a
+  numeric id the collection's serial has handed out (minted by `/-`, or passed for an add that
+  named it) is a 409 whether a row holds it or not, with one message (`id already taken:
+  /households/3 -- add to /households/- for a new id`); an id past the serial adds as before
+  and moves the serial on. The serial was never a secret: `/-` echoes it. Still let through,
+  each a row the writer has read: an undo or redo, putting rows back under their ids; a single
+  document's own root (`[remove /venues/42, add /venues/42 {...}]`); a row the same write
+  removed or made. A text id (SQLite and the JSON file) is the client's own key, which no
+  serial hands out: a taken one is still a 409 wherever it is, so it is as private as it is
+  unguessable (a uuid). `_delta_serial_new` is new in `001d` and `delta_apply` is replaced in
+  place: re-apply the framework (`applyFramework`, or `bunx @blueshed/delta init --upgrade`).
+  **Migration:** a later write that re-adds a removed row under its old id sends `add
+  /<coll>/-` and reads the id from the echo, or undoes the removal; a Postgres test that empties
+  tables between cases restarts `seq_<table>` too (`TRUNCATE ... RESTART IDENTITY` leaves it:
+  the table does not own it).
+
 ### Fixed
 
 - **Postgres: a SECURITY DEFINER function no longer searches the caller's temporary tables

@@ -49,6 +49,10 @@ async function reset(): Promise<void> {
       IF to_regclass('customers') IS NOT NULL THEN EXECUTE 'TRUNCATE customers RESTART IDENTITY CASCADE'; END IF;
       IF to_regclass('_delta_versions') IS NOT NULL THEN EXECUTE 'TRUNCATE _delta_versions'; END IF;
       IF to_regclass('_delta_ops_log')  IS NOT NULL THEN EXECUTE 'TRUNCATE _delta_ops_log RESTART IDENTITY'; END IF;
+      -- delta's serials are not owned by their tables (RESTART IDENTITY leaves them): each case names ids anew (#71)
+      IF to_regclass('seq_artworks') IS NOT NULL THEN EXECUTE 'ALTER SEQUENCE seq_artworks RESTART'; END IF;
+      IF to_regclass('seq_brands')   IS NOT NULL THEN EXECUTE 'ALTER SEQUENCE seq_brands RESTART'; END IF;
+      IF to_regclass('seq_customers') IS NOT NULL THEN EXECUTE 'ALTER SEQUENCE seq_customers RESTART'; END IF;
     END $$;
   `);
 }

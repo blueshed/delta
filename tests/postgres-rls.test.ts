@@ -118,7 +118,8 @@ let clients: MockClient[];
 let listener: Awaited<ReturnType<typeof createDocListener>> | undefined;
 
 beforeEach(async () => {
-  await admin.query("TRUNCATE rls_items RESTART IDENTITY; TRUNCATE _delta_ops_log RESTART IDENTITY; TRUNCATE _delta_versions;");
+  // delta's serials are not owned by their tables (RESTART IDENTITY leaves them): each test names ids anew (#71)
+  await admin.query("TRUNCATE rls_items RESTART IDENTITY; ALTER SEQUENCE seq_rls_items RESTART; ALTER SEQUENCE seq_rls_notes RESTART; TRUNCATE _delta_ops_log RESTART IDENTITY; TRUNCATE _delta_versions;");
   // Bob already owns a row; Alice owns none.
   await admin.query("INSERT INTO rls_items (id, owner_id, name) VALUES (nextval('seq_rls_items'), 2, 'bob private')");
   clients = [];
@@ -209,6 +210,34 @@ describe("RLS and the broadcast channel (NOSUPERUSER role)", () => {
     expect((await sendAndAwait(ws, alice, { action: "delta", doc: "rls-mine:1", ops: [{ op: "add", path: "/rls_items/7", value: { name: "named" } }] })).error).toBeUndefined();
     expect((await sendAndAwait(ws, alice, { action: "delta", doc: "rls-mine:1", ops: [{ op: "add", path: "/rls_items/-", value: { name: "minted" } }] })).error).toBeUndefined();
     expect((await admin.query("SELECT id::int, name FROM rls_items WHERE owner_id = 1 ORDER BY id")).rows).toEqual([{ id: 7, name: "named" }, { id: 8, name: "minted" }]);
+  });
+
+  test("a writer cannot tell an id whose row RLS hides from one no row holds: an add of either is refused alike (409), told nothing, its version kept (#71)", async () => {
+    listener = await createDocListener(ws, app, { types: [docTypeFromDef(everyone, app, { auth, shared: true }), docTypeFromDef(notes, app, { auth, shared: true })], auth });
+    const id = async (sql: string) => Number((await admin.query(sql)).rows[0].id);
+    await admin.query("TRUNCATE rls_notes; INSERT INTO rls_notes (id, owner_id, text) VALUES (nextval('seq_rls_notes'), 2, 'bob')");
+    const hidden = { rls_items: await id("SELECT id FROM rls_items WHERE owner_id = 2"), rls_notes: await id("SELECT id FROM rls_notes WHERE owner_id = 2") };
+    // handed out by the serial, and no row holds it
+    const spent = { rls_items: await id("SELECT nextval('seq_rls_items') AS id"), rls_notes: await id("SELECT nextval('seq_rls_notes') AS id") };
+    const alice = person(1);
+    const opened = { "rls-all:": (await sendAndAwait(ws, alice, { action: "open", doc: "rls-all:" })).result._v, "rls-notes:": (await sendAndAwait(ws, alice, { action: "open", doc: "rls-notes:" })).result._v };
+    const add = async (doc: string, coll: "rls_items" | "rls_notes", n: number) => {
+      const value = coll === "rls_items" ? { owner_id: 1, name: "mine" } : { owner_id: 1, text: "mine" };
+      const res = await sendAndAwait(ws, alice, { action: "delta", doc, ops: [{ op: "add", path: `/${coll}/${n}`, value }] });
+      return { code: res.error?.code, message: String(res.error?.message).replace(`/${coll}/${n}`, `/${coll}/<id>`) };
+    };
+    for (const [doc, coll] of [["rls-all:", "rls_items"], ["rls-notes:", "rls_notes"]] as const) {
+      const refused = await add(doc, coll, hidden[coll]);
+      expect(refused.code).toBe(409);
+      expect(await add(doc, coll, spent[coll])).toEqual(refused);
+    }
+    await settle();
+    expect([...heard(alice, "rls-all:"), ...heard(alice, "rls-notes:")]).toEqual([]);
+    for (const doc of ["rls-all:", "rls-notes:"] as const) expect((await sendAndAwait(ws, alice, { action: "open", doc })).result._v).toBe(opened[doc]);
+    // bob's rows as they were: no second live note under his id
+    expect((await admin.query("SELECT owner_id::int FROM rls_notes WHERE valid_to IS NULL")).rows).toEqual([{ owner_id: 2 }]);
+    // past the serial, an id is new
+    expect((await sendAndAwait(ws, alice, { action: "delta", doc: "rls-all:", ops: [{ op: "add", path: `/rls_items/${spent.rls_items + 1}`, value: { owner_id: 1, name: "mine" } }] })).error).toBeUndefined();
   });
 
   test("an undo is a write: once the identity no longer owns the document, its undo is a 404 too", async () => {

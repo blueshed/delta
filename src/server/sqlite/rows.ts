@@ -1,5 +1,4 @@
 /** A row as SQLite keeps it: written, closed, read back, and each value as its column stores it. */
-import { joinPath } from "../../core";
 import { defaultForType, isoTime, type ColumnDef, type DocDef, type ResolvedTable, type Schema } from "../../schema";
 import { rowId } from "../scope";
 
@@ -84,12 +83,6 @@ export function insertCollectionRow(
   ts: string,
   list = false,
 ): any {
-  // An add names a new row. On a temporal table the key is (id, valid_from),
-  // so an add of a live id would insert a second live version of it (and on a
-  // plain table fail UNIQUE as a 500): refuse it, in any document's scope.
-  if (db.query(`SELECT 1 FROM ${current(table)} WHERE id = ?`).get(id)) {
-    refuse(409, `Row already exists: ${joinPath(table.docKey, String(id))} -- replace it, or add to ${joinPath(table.docKey, "-")} for a new id`);
-  }
   const fullRow: any = { id, ...row };
   fullRow.id = id;   // the path names the row, whatever the value says
 

@@ -473,11 +473,15 @@ export function registerDocs<I = unknown>(
    * any id a write named (`passId`).
    */
   function nextId(table: ResolvedTable): number {
-    const seq = db.query("SELECT last FROM _delta_sequences WHERE collection = ?").get(table.docKey) as { last: number } | null;
-    const start = seq?.last ?? ((db.query(`SELECT MAX(id) AS m FROM ${table.name} WHERE typeof(id) = 'integer'`).get() as { m: number | null } | null)?.m ?? 0);
-    const next = start + 1;
+    const next = serial(table) + 1;
     db.run("INSERT INTO _delta_sequences (collection, last) VALUES (?, ?) ON CONFLICT (collection) DO UPDATE SET last = excluded.last", [table.docKey, next]);
     return next;
+  }
+
+  /** The last id a collection's serial handed out: its sequence, or before it has one, the largest id the table holds. */
+  function serial(table: ResolvedTable): number {
+    const seq = db.query("SELECT last FROM _delta_sequences WHERE collection = ?").get(table.docKey) as { last: number } | null;
+    return seq?.last ?? ((db.query(`SELECT MAX(id) AS m FROM ${table.name} WHERE typeof(id) = 'integer'`).get() as { m: number | null } | null)?.m ?? 0);
   }
 
   /** An id a write named moves its collection's sequence past it, never back, so a later `add /<coll>/-` does not meet it (#72) -- Postgres's `_delta_serial_past`. */
@@ -690,8 +694,23 @@ export function registerDocs<I = unknown>(
         }
         // `add /<coll>/-` is a new row the store names: the next serial, as
         // Postgres takes nextval -- carried by the broadcast path and the row.
-        const id = op.op === "add" && parts[1] === "-" ? nextId(table) : rowId(parts[1]!);
+        const mint = op.op === "add" && parts[1] === "-";
+        const id = mint ? nextId(table) : rowId(parts[1]!);
         if (op.op === "add") {
+          // An add makes a new row, under an id the serial has not handed out
+          // (#71): one it has (minted, or passed for an add that named it) is
+          // refused, whether a row holds it now or none does, so the answer
+          // says nothing of rows the writer may not read. But for ids the
+          // writer has read: a walk puts back the rows its entry took, a single
+          // document names its own root, and a write may add back a row it
+          // has itself written. A live id is refused all the same (on a
+          // temporal table it would be a second live version, #16): a text id,
+          // the client's own key, which no serial hands out, or a row put in by
+          // hand past the serial. delta_apply keeps the same rule.
+          const named = !mint && !walk && !isRoot && !touched.some((t) => t.coll === collKey && sameId(t.id, id));
+          const taken = (named && typeof id === "number" && id <= serial(table))
+            || db.query(`SELECT 1 FROM ${current(table)} WHERE id = ?`).get(id);
+          if (taken) refuse(409, `Id already taken: ${joinPath(collKey, String(id))} -- add to ${joinPath(collKey, "-")} for a new id`);
           // Add row
           const row = { ...((op as any).value as Record<string, unknown>) };
           // A list-mode document's root row is given its scope's equality bindings, as on Postgres:
