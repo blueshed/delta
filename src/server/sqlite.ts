@@ -330,8 +330,12 @@ export function registerDocs<I = unknown>(
   // Delta ops → SQL
   // ---------------------------------------------------------------------------
 
-  /** A row of the write, for the telling: who held it before, and what it is now (null: gone). */
-  type Touched = { coll: string; id: string | number; before: string[]; after: any | null };
+  /**
+   * A row of the write, for the telling: who held it before, and what it is now
+   * (null: gone). A `carried` row is one the write did not change but moved, under
+   * a parent it moved: it is told only where it arrives or leaves (todo #62).
+   */
+  type Touched = { coll: string; id: string | number; before: string[]; after: any | null; carried?: boolean };
 
   /**
    * The id of the `root` row that `row` (of `coll`) hangs from, following parent
@@ -390,6 +394,19 @@ export function registerDocs<I = unknown>(
     if (!row) return null;
     decodeRow(table, row);
     return row;
+  }
+
+  /** The rows that hang from a row of `table` -- its children, theirs, and on down -- parent first. */
+  function hanging(table: ResolvedTable, id: string | number, out: { table: ResolvedTable; row: any }[] = []): { table: ResolvedTable; row: any }[] {
+    for (const childKey of table.children) {
+      const child = schema.tables[childKey]!;
+      for (const row of db.query(`SELECT * FROM ${current(child)} WHERE ${child.parent!.fkColumn} = ?`).all(id as any) as any[]) {
+        decodeRow(child, row);
+        out.push({ table: child, row });
+        hanging(child, row.id, out);
+      }
+    }
+    return out;
   }
 
   /**
@@ -502,6 +519,10 @@ export function registerDocs<I = unknown>(
       if (!run) return;
       const { table, id, root, key, before, row } = run;
       run = undefined;
+      // a row moved to another parent takes the rows under it along: who holds each, asked before it moves
+      const fk = table.parent?.fkColumn;
+      const moved = fk != null && !sameId(row[fk], readRow(table, id)[fk]);
+      const carried: Touched[] = moved ? hanging(table, id).map(({ table: t, row: r }) => ({ coll: t.docKey, id: r.id, before: holders(t.docKey, r, docName), after: r, carried: true })) : [];
       if (table.temporal && !made.has(key)) {
         closeRow(db, table, id, ts);
         insertRow(db, table, row, ts);
@@ -513,6 +534,7 @@ export function registerDocs<I = unknown>(
       else doc[collKey][id] = stored;
       broadcastOps.push({ op: "replace", path: root ? joinPath(collKey) : joinPath(collKey, String(id)), value: stored });
       touched.push({ coll: collKey, id, before, after: stored });
+      touched.push(...carried);   // after the row they hang from, unchanged
     };
 
     // Does a parent the document does not include hang from its root? Asked of the tables (todo #32).
@@ -740,7 +762,7 @@ export function registerDocs<I = unknown>(
       for (const t of rows) {
         const was = t.before.includes(target);
         const is = t.now.includes(target);
-        if (!was && !is) continue;
+        if ((!was && !is) || (t.carried && was && is)) continue;
         const root = single && t.coll === m.def.root;
         const path = root ? joinPath(t.coll) : joinPath(t.coll, String(t.id));
         if (is) ops.push({ op: was || root ? "replace" : "add", path, value: t.after });

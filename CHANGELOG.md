@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its course is told `replace` then `remove`, as a drink written and then removed is, where it was
   told only `remove`. In `tell` (`sqlite.ts`) and `_delta_tell` (`001d`, replaced in place: apply
   it again).
+- **A row moved to another parent takes the rows under it along (todo #62)**, on every backend.
+  A course moved to wedding 2 (`replace /courses/1/weddings_id 2` through a list of courses)
+  told wedding 1's board the course left but not its drinks, and wedding 2's board the course
+  arrived without them: each copy then differed from a fresh open. The rows under a moved row
+  are now told, after it, where they leave and where they arrive -- nowhere they stay -- and a
+  course moved out and back in one write tells each step. In `applyOps` and `tell`
+  (`sqlite.ts`) and `delta_apply`, `_delta_tell` and a new `_delta_hanging_rows` (`001d`,
+  replaced in place: apply it again).
 
 ## [0.12.0] - 2026-10-11
 
