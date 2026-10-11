@@ -164,11 +164,16 @@ $$ LANGUAGE plpgsql STABLE;
 -- changed for it (todo #28), and answer the writer's new version.
 --
 -- `p_touched` is the write's rows in order, each {coll, id, before, after}:
--- `before` the documents that held it before the write (_delta_holders, asked
--- then), `after` the row as it now is (null when it is gone). For each
--- document that held it before or holds it now: a row that arrives is an add,
--- one that stays a replace, one that leaves a remove -- and where the row is
--- the document's root, a replace of the root (null when it leaves). The
+-- `before` the documents that held it before that touch (_delta_holders, asked
+-- then), `after` the row as the touch left it (null when it is gone). Each
+-- touch is told in turn: the documents that hold the row after it are those
+-- that held it at the row's next touch, or after its last, those that hold it
+-- once the write is done -- so a row made and then taken out (a drink, with its
+-- course) is told its add wherever its remove is told (todo #75; tell in
+-- sqlite.ts). For each document that held it before or holds it after: a row
+-- that arrives is an add, one that stays a replace, one that leaves a remove --
+-- and where the row is the document's root, a replace of the root (null when
+-- it leaves). The
 -- writer's document is always told, and told first; each other document is
 -- told only what concerns it, with a version of its own, one per write.
 -- `p_applied`, the write as applied, is logged once, on the writer's entry,
@@ -195,14 +200,19 @@ DECLARE
   v_root    BOOLEAN;
   v_path    TEXT;
   v_version BIGINT;
-  v_has     JSONB;   -- what the target's copy holds, row by row, as told so far
+  v_next    JSONB := '{}'::jsonb;   -- a row's holders, as its next touch found them
   v_key     TEXT;
+  v_i       INT;
 BEGIN
-  -- who holds each row now, and every document concerned
-  FOR v_t IN SELECT jsonb_array_elements(p_touched) LOOP
+  -- who holds each row after each touch, last touch first, and every document concerned
+  FOR v_i IN REVERSE COALESCE(jsonb_array_length(p_touched), 0) - 1 .. 0 LOOP
+    v_t := p_touched->v_i;
+    v_key := (v_t->>'coll') || '/' || (v_t->>'id');
     v_after := CASE WHEN jsonb_typeof(v_t->'after') = 'object' THEN v_t->'after' END;
-    v_t := v_t || jsonb_build_object('holders', to_jsonb(_delta_holders(v_t->>'coll', v_after, p_writer)));
-    v_rows := v_rows || jsonb_build_array(v_t);
+    v_t := v_t || jsonb_build_object('holders',
+      COALESCE(v_next->v_key, to_jsonb(_delta_holders(v_t->>'coll', v_after, p_writer))));
+    v_next := v_next || jsonb_build_object(v_key, v_t->'before');
+    v_rows := jsonb_build_array(v_t) || v_rows;
     v_targets := v_targets
       || ARRAY(SELECT jsonb_array_elements_text(v_t->'before'))
       || ARRAY(SELECT jsonb_array_elements_text(v_t->'holders'));
@@ -217,15 +227,10 @@ BEGIN
     CONTINUE WHEN v_def.prefix IS NULL;
     v_single := (_delta_resolve_scope(v_def, v_target)->>'mode') = 'single';
     v_told := '[]'::jsonb;
-    v_has := '{}'::jsonb;
     FOR v_t IN SELECT jsonb_array_elements(v_rows) LOOP
-      -- a row the write touches twice is told from where the first telling left
-      -- it: never removed twice, nor replaced once it is told gone (tell in sqlite.ts)
-      v_key := (v_t->>'coll') || '/' || (v_t->>'id');
-      v_was := CASE WHEN v_has ? v_key THEN (v_has->>v_key)::boolean ELSE (v_t->'before') ? v_target END;
+      v_was := (v_t->'before') ? v_target;
       v_is  := (v_t->'holders') ? v_target;
       CONTINUE WHEN NOT v_was AND NOT v_is;
-      v_has := v_has || jsonb_build_object(v_key, v_is);
       v_root := v_single AND (v_t->>'coll') = v_def.root_collection;
       v_path := CASE WHEN v_root THEN _delta_build_path(v_t->>'coll') ELSE _delta_build_path(v_t->>'coll', v_t->>'id') END;
       IF v_is THEN

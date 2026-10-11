@@ -925,7 +925,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("a drink written and then taken with its course, in one write, is told gone once to each document that held it; undone, both come back", async () => {
+    test("a drink written and then taken with its course, in one write, is told as written -- written, then gone once -- to each document that held it, as a drink written and removed is; undone, both come back (todo #75)", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1", "fo-course:1", "fo-all-courses:"]);
       const { ops } = await write(b.process, "fo-board:1", [
@@ -937,11 +937,39 @@ export function fanOutCases(backend: () => PathBackend): void {
       const undone = await b.process.call("undo", { cursor: "s1" });
       const back = [{ op: "add", path: "/courses/1", value: course(1, "Soup") }, { op: "add", path: "/drinks/1", value: drink(1, 1, "Sherry") }];
       expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: back, conflict: undefined });
-      await expectTold(b, "fo-board:1", [gone, back]);
-      await expectTold(b, "fo-menu:1", [gone, back]);
+      await expectTold(b, "fo-board:1", [ops, back]);
+      await expectTold(b, "fo-menu:1", [ops, back]);
       // the course's own document holds the drink by its key until the course is told gone (null), then hears the drink go
       await expectTold(b, "fo-course:1", [[ops[0], { op: "replace", path: "/courses", value: null }, gone[0]], [{ op: "replace", path: "/courses", value: course(1, "Soup") }, back[1]]]);
       await expectTold(b, "fo-all-courses:", [[gone[1]], [back[0]]]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a course and its drink made and then taken out in one write -- the drink by the course's cascade, written first or not -- are told as written, add before remove, to each document that held them: the board, the menu, the drinks alone, the lists; none is told a remove of a row it never had (todo #75)", async () => {
+      const b = backend();
+      const docs = ["fo-board:1", "fo-menu:1", "fo-drinks:1", "fo-catalog:", "fo-all-courses:"];
+      const copies = await openAll(b.process, docs);
+      const madeCourse = { op: "add", path: "/courses/9", value: course(9, "Fish") };
+      const madeDrink = { op: "add", path: "/drinks/5", value: drink(5, 9, "Chablis") };
+      const named = { op: "replace", path: "/drinks/5", value: drink(5, 9, "Muscadet") };
+      const goneCourse = { op: "remove", path: "/courses/9" };
+      const goneDrink = { op: "remove", path: "/drinks/5" };
+      const made = await write(b.process, "fo-board:1", [
+        { op: "add", path: "/courses/9", value: { name: "Fish" } },
+        { op: "add", path: "/drinks/5", value: { courses_id: 9, name: "Chablis" } },
+        { op: "remove", path: "/courses/9" },
+      ], { cursor: "m1" });
+      expect({ ops: made.ops, inverse: made.inverse }).toEqual({ ops: [madeCourse, madeDrink, goneCourse, goneDrink], inverse: [] });
+      const renamed = await write(b.process, "fo-board:1", [
+        { op: "add", path: "/courses/9", value: { name: "Fish" } },
+        { op: "add", path: "/drinks/5", value: { courses_id: 9, name: "Chablis" } },
+        { op: "replace", path: "/drinks/5/name", value: "Muscadet" },
+        { op: "remove", path: "/courses/9" },
+      ]);
+      expect(renamed.ops).toEqual([madeCourse, madeDrink, named, goneCourse, goneDrink]);
+      for (const doc of ["fo-board:1", "fo-menu:1", "fo-catalog:"]) await expectTold(b, doc, [made.ops, renamed.ops]);
+      await expectTold(b, "fo-drinks:1", [[madeDrink, goneDrink], [madeDrink, named, goneDrink]]);
+      await expectTold(b, "fo-all-courses:", [[madeCourse, goneCourse], [madeCourse, goneCourse]]);
       await assertCopiesHold(b, copies);
     });
 

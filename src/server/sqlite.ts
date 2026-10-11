@@ -714,9 +714,21 @@ export function registerDocs<I = unknown>(
    * one that stays a replace, one that leaves a remove; where the row is the
    * document's root, a replace of the root (null when it leaves -- or, for an
    * implied document, the empty root it then opens with).
+   *
+   * Each touch is told in turn, so a copy is told every step of a row the write
+   * touches twice: who holds the row after a touch is who held it at its next,
+   * and after its last, who holds it once the write is done. A row made and
+   * then taken out (a drink, with its course) is told its add wherever its
+   * remove is told, never a remove alone (todo #75). `_delta_tell` keeps the same.
    */
   function tell(writer: string, touched: Touched[]): Map<string, DeltaOp[]> {
-    const rows = touched.map((t) => ({ ...t, now: holders(t.coll, t.after, writer) }));
+    const rows = touched.map((t) => ({ ...t, now: [] as string[] }));
+    const next = new Map<string, string[]>();   // a row's holders, as its next touch found them
+    for (const t of rows.toReversed()) {
+      const key = `${t.coll}/${t.id}`;
+      t.now = next.get(key) ?? holders(t.coll, t.after, writer);
+      next.set(key, t.before);
+    }
     const targets = new Set<string>([writer]);
     for (const t of rows) for (const name of [...t.before, ...t.now]) targets.add(name);
     const told = new Map<string, DeltaOp[]>();
@@ -725,17 +737,10 @@ export function registerDocs<I = unknown>(
       if (!m) continue;
       const single = resolveScope(m.def, m.docId).mode === "single";
       const ops: DeltaOp[] = [];
-      // What the target's copy holds, row by row, as told so far in this write:
-      // a row the write touches twice is told from where the first telling left
-      // it -- never removed twice (a drink written, then taken with its course),
-      // nor replaced once it is told gone. `_delta_tell` keeps the same.
-      const has = new Map<string, boolean>();
       for (const t of rows) {
-        const key = `${t.coll}/${t.id}`;
-        const was = has.get(key) ?? t.before.includes(target);
+        const was = t.before.includes(target);
         const is = t.now.includes(target);
         if (!was && !is) continue;
-        has.set(key, is);
         const root = single && t.coll === m.def.root;
         const path = root ? joinPath(t.coll) : joinPath(t.coll, String(t.id));
         if (is) ops.push({ op: was || root ? "replace" : "add", path, value: t.after });

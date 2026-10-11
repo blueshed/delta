@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A row a write makes and its cascade takes out is told its add wherever its remove is told
+  (todo #75)**, on every backend. `[add /courses/9, add /drinks/5 under it, remove /courses/9]`
+  told the board and the menu the drink's remove but not its add, so an open copy met a remove
+  of a row it never had (and a client applying it errored). Each touch of a row is now told in
+  turn, judged by who holds the row at its next touch (after its last, once the write is done):
+  the drink is told `add` then `remove`, as the course is. So a drink written and then taken with
+  its course is told `replace` then `remove`, as a drink written and then removed is, where it was
+  told only `remove`. In `tell` (`sqlite.ts`) and `_delta_tell` (`001d`, replaced in place: apply
+  it again).
+
 ## [0.12.0] - 2026-10-11
 
 ### Changed
