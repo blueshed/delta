@@ -21,13 +21,13 @@ Bun only: never `npm`, `npx` or `node`.
 | Task | Command |
 |---|---|
 | Install | `bun install` |
-| Typecheck | `bun check` (Bun's type check, TypeScript 7; no `check` script, which would shadow it) |
+| Typecheck | `bun check` (Bun's type check, TypeScript 7; no `check` script, which would shadow it), and `bun check -p examples/kanban` for its JSX |
 | Fast tests, no database | `bun run test`: every file that needs no Postgres server (PGlite runs in process) |
 | One file | `bun test tests/local.test.ts` (Postgres needed by `postgres*`, `auth-jwt`, `review-findings`, `write-scope`, `create-row` and `error-codes`; a new file that needs no Postgres goes into `test` too) |
 | Start / stop Postgres | `bun run db:up` / `bun run db:down` (Docker, `compose.yml`) |
 | Postgres tests | `bun run db:up`, then `bun run test:pg` or `bun test tests/postgres-ledger.test.ts` |
 | Everything | `bun run test:all` (Postgres must be up) |
-| **The gate** | **`bun run ci`**: `db:up` → `bun check` → `test:all` → `db:down` |
+| **The gate** | **`bun run ci`**: `db:up` → `bun check` (and kanban's) → `test:all` → `db:down` |
 | Benchmarks | `bun run db:up`, then `bun run bench` (it needs Postgres; `BENCH_PG_URL` to point elsewhere) |
 | Release | `/publish patch\|minor\|major` (`.claude/commands/publish.md`, shared with railroad and eta) |
 
@@ -161,7 +161,9 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
   `walkVectors` (the two-language rules' cases, `src/*-vectors.json`), for delta's tests and a consumer's.
   `tests/setup.ts`: the Postgres ones (`newPool`, `applyFramework`, `resetState`). `createLocal()` is
   the lighter harness for SQLite and the kinds.
-- `examples/`: `shared-state`, `sites-bbox`, `kanban`, `todos-vs-rls`.
+- `examples/`: `shared-state`, `sites-bbox`, `kanban`, `todos-vs-rls`, each run as its README says by
+  `tests/recipe.test.ts`, `tests/examples.test.ts` and `tests/postgres-examples.test.ts`
+  (`tests/helpers/examples.ts`).
 
 ## Notes
 
@@ -184,7 +186,7 @@ exports `DELTA_TEST_PG_URL`. By hand, the same is
 The gate there, in place of `bun run ci`:
 
 ```bash
-bun check && DELTA_TEST_PG_URL="postgres://delta:delta@localhost:5432/delta_test" bun test tests/
+bun check && bun check -p examples/kanban && DELTA_TEST_PG_URL="postgres://delta:delta@localhost:5432/delta_test" bun test tests/
 ```
 
 A psql shell: `PGPASSWORD=delta psql -h localhost -p 5432 -U delta -d delta_test`. Nothing in

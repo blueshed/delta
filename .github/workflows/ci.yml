@@ -26,7 +26,7 @@ jobs:
         run: docker compose up -d --wait
 
       - name: Type check
-        run: bun check
+        run: bun check && bun check -p examples/kanban
 
       - name: Run tests
         run: bun test tests/
