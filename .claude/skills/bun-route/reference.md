@@ -1,5 +1,18 @@
 # Bun HTML Routes — Reference
 
+## Contents
+
+- [How it works](#how-it-works)
+- [HTML template](#html-template)
+- [CSS strategy](#css-strategy--self-contained-per-route)
+- [Client-side script by mode](#client-side-script-by-mode): js/ts, tsx-railroad, tsx-react
+- [Server registration](#server-registration-serverts-or-serverjs)
+- [API routes alongside HTML routes](#api-routes-alongside-html-routes)
+- [Production build & deploy](#production-build--deploy)
+- [Key rules](#key-rules)
+- [Testing routes with `Bun.WebView`](#testing-routes-with-bunwebview): the server factory, test skeleton, API surface, footguns, polling, synthetic events, running the suite
+- [tsconfig.json](#tsconfigjson): the complete block for each mode
+
 ## How it works
 
 Bun's `serve({ routes })` accepts imported HTML files as route values. When Bun encounters an HTML import from server-side code, it:
@@ -178,7 +191,7 @@ bun build --compile server.ts --outfile myapp
 
 ## Testing routes with `Bun.WebView`
 
-Bun ships a headless browser as the global `Bun.WebView` — no import, no extra install. The global appeared in 1.3.12, but **these patterns assume Bun 1.3.14+**, where the options used below (`clickCount`, per-click `timeout`, constructor `console`/`dataStore`) and the test-runner flags landed. Tests run via plain `bun test`; no `--browser` flag. On macOS it uses system WKWebView; pass `backend: "chrome"` on Linux/Windows. Input is dispatched as real OS events (`isTrusted: true`), and selector methods (`click`, `type`) auto-wait for actionability — there is **no** `waitForSelector` or `waitForFunction`, but selector clicks take a per-call `timeout` (default 30000ms).
+Bun ships a headless browser as the global `Bun.WebView`: no import, no extra install. The global appeared in 1.3.12. The options used below (`clickCount`, per-click `timeout`, constructor `console`/`dataStore`) need **1.3.14**, and the test-runner flags in *Running the suite* need **1.3.13**. Tests run via plain `bun test`; no `--browser` flag. On macOS it uses system WKWebView; pass `backend: "chrome"` on Linux/Windows. Input is dispatched as real OS events (`isTrusted: true`), and selector methods (`click`, `type`) auto-wait until the element is attached, visible, stable and not obscured (not until it is enabled) — there is **no** `waitForSelector` or `waitForFunction`, but selector clicks take a per-call `timeout` (default 30000ms).
 
 Two constructor options are worth knowing for tests:
 

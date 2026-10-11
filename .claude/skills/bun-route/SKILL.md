@@ -1,94 +1,100 @@
 ---
 name: bun-route
-version: 0.15.0
-description: Scaffold a new Bun HTML route with bundled CSS and TypeScript/JavaScript. Use when the user wants to add a page/route to a Bun fullstack app.
-argument-hint: [route-path] [description]
+metadata:
+  version: 0.15.1
+description: "Scaffold a new page or route in a Bun fullstack app: an HTML entry, bundled CSS, a TypeScript, JavaScript or TSX client script, registered on the server. Also writes Bun.WebView browser tests for a route's interaction. Use when the user wants to add a page or route, or to test one in a real browser."
+argument-hint: "[route-path] [description]"
 ---
 
 # Bun Route Scaffolding
 
-Create a new route for a Bun fullstack app using HTML imports.
+Create a route for a Bun fullstack app that uses HTML imports.
 
 Read `${CLAUDE_SKILL_DIR}/reference.md` for the full API patterns and file templates before scaffolding.
 
-## Step 1 — Detect the environment
+## Step 1: Detect the environment
 
-Before creating files, determine what kind of project this is by checking:
+Before creating files, determine the project type from:
 
-1. **Existing HTML files** — look at `<script src="...">` tags. What extension do they use? `.js`, `.ts`, `.tsx`?
-2. **tsconfig.json** — does it exist? Does it have `jsxImportSource`?
-3. **package.json** — check dependencies for `@blueshed/railroad`, `react`, or nothing (plain JS).
-4. **Existing route files** — match the patterns already in use.
+1. **Existing HTML files.** Check the `<script src="...">` extensions: `.js`, `.ts` or `.tsx`.
+2. **tsconfig.json.** Does it exist, and does it set `jsxImportSource`?
+3. **package.json.** Are `@blueshed/railroad`, `react` or neither in the dependencies?
+4. **Existing route files.** Match the patterns already in use.
 
-This determines the **mode**:
+That determines the **mode**:
 
 | Signal | Mode | Script ext | JSX framework |
 |--------|------|-----------|---------------|
-| No tsconfig, no JSX deps | **js** | `.js` | None — plain DOM |
-| tsconfig exists, no JSX deps | **ts** | `.ts` | None — plain DOM |
+| No tsconfig, no JSX deps | **js** | `.js` | None: plain DOM |
+| tsconfig exists, no JSX deps | **ts** | `.ts` | None: plain DOM |
 | `@blueshed/railroad` in deps | **tsx-railroad** | `.tsx` | `@blueshed/railroad` |
 | `react` in deps | **tsx-react** | `.tsx` | `react` |
 
-If nothing gives away the mode, **ask the user**.
+If nothing settles the mode, ask the user.
 
 ### Bootstrap (empty project)
 
-If no `package.json` or server entry file exists, bootstrap the project first:
+If there is no `package.json` and no server entry file, bootstrap first:
 
-1. Run `bun init -y` to create `package.json` and `tsconfig.json`
-2. Remove the generated `index.ts` — the route files replace it
-3. Install dependencies **only as needed by the detected mode**:
-   - **js** — no extra dependencies
-   - **ts** — `bun add -d bun-types`
-   - **tsx-railroad** — `bun add @blueshed/railroad && bun add -d bun-types`
-   - **tsx-react** — `bun add react react-dom && bun add -d bun-types @types/react @types/react-dom`
-4. For **ts** or **tsx** modes, replace `compilerOptions` in tsconfig with the complete block for the mode — see reference.md (do not partial-merge two snippets).
-5. Create the server entry file (`server.js` or `server.ts` depending on mode) using `Bun.serve({ routes, development: { hmr: true, console: true } })`. Always enable `development.hmr` and `development.console` — they're free wins, stripped automatically in production, and the headline reason to use Bun's fullstack server. See reference.md for the full template.
-6. Then proceed to create the route files as normal.
+1. Run `bun init -y` to create `package.json` and `tsconfig.json`.
+2. Delete the generated `index.ts`. The route files replace it.
+3. Install only what the mode needs:
+   - **js**: nothing extra.
+   - **ts**: `bun add -d bun-types`.
+   - **tsx-railroad**: `bun add @blueshed/railroad && bun add -d bun-types`.
+   - **tsx-react**: `bun add react react-dom && bun add -d bun-types @types/react @types/react-dom`.
+4. For **ts** or **tsx** modes, replace `compilerOptions` in the tsconfig with the complete block for the mode from reference.md. Don't merge two snippets.
+5. Create the server entry (`server.js` or `server.ts`) with `Bun.serve({ routes, development: { hmr: true, console: true } })`. Always enable `development.hmr` and `development.console`. They are stripped automatically in production. See reference.md for the template.
+6. Create the route files as in Step 3.
 
-## Step 2 — Parse arguments
+## Step 2: Parse arguments
 
-`$ARGUMENTS` should contain a route path (e.g., `/about`) and optionally a description. If no arguments, ask the user.
+`$ARGUMENTS` should contain a route path (for example `/about`) and optionally a description. If there are no arguments, ask the user.
 
-## Step 3 — Create the route files
+## Step 3: Create the route files
 
-For non-root routes, create in a directory matching the route name:
-- `<name>.html` — the HTML entry point, referencing the CSS and script with relative paths
-- `<name>.css` — all styles for this route (resets, layout, route-specific)
-- `<name>.<ext>` — client-side script (extension determined by mode)
+For a non-root route, create a directory named after the route:
+- `<name>.html`: the entry point, referencing the CSS and script by relative paths.
+- `<name>.css`: all the styles for this route. It is self-contained.
+- `<name>.<ext>`: the client script. The extension comes from the mode.
 
-**Root route (`/`, `index`, `home`)**: place files in the project root as `index.html`, `index.css`, `index.<ext>` — do not create an `index/` subdirectory.
+**Root route** (`/`, `index`, `home`): put the files in the project root as `index.html`, `index.css` and `index.<ext>`. Don't create an `index/` directory.
 
-Match the style of existing route CSS files in the project. Each route's CSS is self-contained — no separate `base.css`.
+Each route's CSS is self-contained, with resets, layout and typography in the file itself. Don't create a shared `base.css`. Match the style of the existing route CSS files.
 
-## Step 4 — Register the route
+## Step 4: Register the route
 
-Find the server entry file — look for `server.ts`, `server.js`, or whichever file calls `Bun.serve()`:
+Find the server entry: the file that calls `Bun.serve()`, usually `server.ts` or `server.js`.
 - Add an import: `import <name>Page from "./<path>/<name>.html";`
 - Add to the `routes` object: `"/<route>": <name>Page,`
 
-If the file still uses `import { serve } from "bun"`, leave it; both work. New scaffolds should use `Bun.serve` directly.
+If the file still uses `import { serve } from "bun"`, leave it. Both forms work. New scaffolds use `Bun.serve` directly.
 
-## Step 5 — Verify
+## Step 5: Verify
 
-Ask the user to start (or restart) the server if it's not already running. Then:
+Ask the user to start or restart the server if it is not running. Then:
 
-1. Check the server entry file for the port (default is 3000)
-2. Use `curl -s -o /dev/null -w "%{http_code}" http://localhost:<port>/<route>` to confirm the route returns 200
-3. If Playwright MCP is available, take a screenshot to visually confirm the page renders correctly (use `http://host.docker.internal:<port>` from Docker)
-4. Confirm CSS is consistent with existing pages (shared base applied, layout centred, interactive elements styled)
+1. Read the server entry for the port. The default is 3000.
+2. Run `curl -s -o /dev/null -w "%{http_code}" http://localhost:<port>/<route>` and confirm it returns `200`.
+3. If a Playwright MCP browser is available, open the page and take a screenshot to check that it renders. If that Playwright MCP runs in Docker, `localhost` inside the container is the container itself, so use `http://host.docker.internal:<port>/<route>` in its place. Use `localhost` only when the browser runs on the host.
+4. Check that the new CSS matches the existing route CSS: layout, typography and interactive elements.
 
-## Step 6 — Tests (when the route has interaction worth locking down)
+## Step 6: Tests (when the route has interaction worth locking down)
 
-Bun 1.3.12+ ships `Bun.WebView` — a real headless browser usable directly from `bun test`. If the route has non-trivial behaviour (forms, drag, WebSockets, client state), write a `bun test` against it. This skill's testing patterns assume **Bun 1.3.14+**, which is where the WebView options used below (`clickCount`, per-click `timeout`, constructor `console`/`dataStore`) and the `bun test` parallelism flags settled; on 1.3.12–1.3.13 the WebView exists but those options may be missing.
+`Bun.WebView` is a real headless browser that `bun test` can drive directly. Write a test when the route has non-trivial behaviour: forms, drag, WebSockets or client state.
 
-The testing flow requires the server to be **importable** — refactor its entry into an exported `startServer(opts)` factory so tests can bind to `port: 0` and inject throwaway paths. Then `await using view = new Bun.WebView(...)` and drive it with `navigate`, `click`, `evaluate`.
+Minimum versions:
+- **1.3.12**: the `Bun.WebView` global and the basic methods.
+- **1.3.13**: the test-runner flags `--isolate`, `--parallel`, `--shard` and `--changed`.
+- **1.3.14**: the WebView options `clickCount`, the per-call `timeout`, and the constructor's `console` and `dataStore`.
 
-Three footguns worth knowing before you start:
-- `view.evaluate` takes a single **expression**, not statement bodies. For multi-statement code, wrap with `Function("…; return …;")()`.
-- `view.evaluate<T = unknown>` defaults to `unknown`, which makes bun:test's `expect()` pick the wrong overload. Always pass an explicit type arg: `view.evaluate<string>(...)`, `evaluate<number>(...)`, `evaluate<boolean>(...)`.
-- There is no `waitForSelector` / `waitForFunction` — selector methods auto-wait on actionability (with a per-call `timeout`, default 30000ms), but for anything else (async WS updates landing in the DOM, file-system persistence) write a small `waitFor(fn, pred, ms)` poll helper.
+Check `bun --version` before relying on a 1.3.14 option, and tell the user if the project's Bun is older.
 
-Double-click is now native — `view.click(selector, { clickCount: 2 })` (1–3) — so the old synthetic-`dblclick` recipe is no longer needed. Pointer-drag and wheel still have no helper and need dispatched events.
+The server must be **importable**. Refactor its entry into an exported `startServer(opts)` factory so tests can bind to `port: 0` and inject throwaway paths. Then use `await using view = new Bun.WebView(...)` and drive it with `navigate`, `click` and `evaluate`.
 
-Full patterns, the `Function(...)()` wrapping idiom, synthetic-event recipes for the remaining gaps (pointer-drag, wheel), and order-independent test structure are in `reference.md` → **Testing routes with `Bun.WebView`**.
+Three footguns:
+- `view.evaluate` takes one **expression**, not statement bodies. For multi-statement code, wrap it in `Function("…; return …;")()`.
+- `view.evaluate<T = unknown>` defaults to `unknown`, which makes `expect()` pick the wrong overload. Always pass a type argument: `evaluate<string>(...)`, `evaluate<number>(...)`, `evaluate<boolean>(...)`.
+- There is no `waitForSelector` or `waitForFunction`. Selector methods auto-wait until the element is attached, visible, stable and not obscured, with a per-call `timeout` (default 30000 ms). They do **not** wait for it to be enabled: wait for a disabled button to enable before clicking it. For anything else, such as an async WebSocket update landing in the DOM or a file write, poll with a small `waitFor` helper.
+
+The full patterns, the `Function(...)()` idiom, synthetic events for pointer-drag and wheel, and the order-independent test structure are in reference.md under **Testing routes with `Bun.WebView`**.

@@ -1,332 +1,151 @@
 ---
 name: railroad
-version: 0.15.0
+metadata:
+  version: 0.15.1
 description: "Railroad — reactive UI for the Bun fullstack runtime. Signals, JSX, hash router, DI, logger. Use when writing JSX with signals, when()/list()/routes(), or any import from @blueshed/railroad. Pair with @blueshed/delta for WebSocket document sync."
 ---
 
-Railroad is the reactive layer that fits the Bun 1.3 fullstack pipeline. **For scaffolding routes, server entries, or `Bun.WebView` test files, invoke the `bun-route` skill** — it auto-detects `@blueshed/railroad` in `package.json` and uses tsx-railroad mode. This skill covers what's railroad-specific: how the reactive primitives behave and the gotchas that bite in JSX.
+Railroad is the reactive layer for the Bun 1.3 fullstack pipeline. For scaffolding routes, server entries or `Bun.WebView` tests, use the `bun-route` skill: it detects `@blueshed/railroad` in `package.json` and scaffolds in its TSX mode. This skill is the checklist of what bites in railroad code.
 
-Source files (each has a JSDoc header — read for full API): `signals.ts` · `jsx.ts` · `routes.ts` · `shared.ts` · `logger.ts`
+Each source file's JSDoc header is the contract: `signals.ts` · `jsx.ts` · `routes.ts` · `shared.ts` · `logger.ts`.
 
-Read `${CLAUDE_SKILL_DIR}/reference.md` for the full manual: setup, the signals/JSX/props/routes API tour, realtime patterns, testing, DI and logger, and the complete sharp-edges list. This file is the checklist of what bites.
+Read `${CLAUDE_SKILL_DIR}/reference.md` for the full manual: setup, every API, realtime, testing, DI and the logger. Each rule below has its reasons and edge cases in reference.md › *The nine mistakes, in full*, under the same number.
 
-## What railroad gives you on top of Bun
+There is no global `JSX` namespace. Annotate with `import type { JSX } from "@blueshed/railroad"`.
 
-Bun 1.3 already ships HTML imports, HMR, TSX bundling, `--compile`, and `Bun.WebView`. Railroad adds:
+## The nine things that bite
 
-- **Signals** — push-based reactive primitives (Vue/Solid/Preact family; not TC39). Propagation is topologically ordered, so a diamond settles in one consistent pass, and so does a computed that switches *which* signals it reads: no effect runs on half-updated values.
-- **JSX runtime** — components run once, return real DOM nodes, signals and functions bind to text and attributes automatically; `style` takes a CSS string or an object (static or reactive, custom properties such as `"--accent"` included), and a reactive object style clears keys the next value omits. `<select value>`, `htmlFor` and `className` do what React habits expect, and a child holding `null`, `undefined` or a boolean renders nothing, whether static, a signal or a function. There is no global `JSX` namespace (so React's types can sit beside it): annotate with `import type { JSX } from "@blueshed/railroad"`, where `JSX.Element` is a DOM `Node`.
-- **`when()` / `list()` / `mount()`** — reactive conditionals, keyed lists, and a root scope helper, all with auto-disposal.
-- **Hash router** — `routes(target, table, options)`, `route()` for sub-navigation, reactive `params$` so `/users/1` → `/users/2` updates without remounting (the handler itself runs once per pattern, so read ids through `params$`, or mark the route `keyed`, §9); `navigate()` is current as it returns; supports `options.onError` boundary callback.
-- **DI / logger** — typed `provide`/`inject` with phantom-typed keys; leveled console output.
-- **Realtime escape hatches** — `.touch()`, `.mutate()`, `.patch()` for in-place document mutation under WebSocket / CRDT / `LISTEN/NOTIFY` patch streams.
-
-## The nine things that bite if you're not careful
-
-### 1. Do NOT call `.get()` in JSX children
+### 1. Don't `.get()` in JSX or in a render body
 
 ```tsx
 // ❌ Reads once, never updates
 <span>{count.get()}</span>
 
-// ✅ Bare signal — auto-reactive text node
+// ✅ Bind the signal, or derive from it
 <span>{count}</span>
-
-// ✅ Function child — auto-tracks reads
 <span>{() => count.get() > 5 ? "High" : "Low"}</span>
-
-// ✅ .map() or a function for derived attrs / list content
-<input disabled={count.map(n => n > 10)} />
-<div class={() => count.get() > 10 ? "hot" : "cold"} />
-{list(todos, t => t.id, (todo$) => <li>{todo$.map(t => t.text)}</li>)}
 ```
 
-#1 bug. `{count}` puts the Signal *itself* into JSX, where the runtime registers a reactive text node. `{count.get()}` puts a plain number in, never reactive again.
+A component body, a `when()` branch, a `list()` row, a route handler and `mount()`'s render all run once and untracked. A `.get()` there subscribes nothing, and railroad warns in development. Use `.peek()` when a one-shot read is what you mean. A function child must return text, not a Node: use `when()` for an element and `list()` for a collection.
 
-The same goes for a `.get()` anywhere a render runs: a component body, a `when()` branch, a `list()` row, a route handler, `mount()`'s render. Those run once and **untracked**, so the read is a snapshot and subscribes nothing around it; bind the signal (`class={() => sel.get() === id ? "on" : ""}`) where the value should stay live. In development railroad warns once per render body, naming it (`.get() in a render body (<View>) reads once`, or `(a list() row)`: once for a component however often it renders, once for a row function however many rows); for a one-shot read you mean, use `.peek()`, which doesn't.
-
-A function child must also return **text**, not a Node. `{() => cond ? <A/> : <B/>}` renders the *stringified* element (e.g. `[object SVGElement]`), not the element — railroad warns on the console (dev and prod alike). To render elements conditionally use `when()`; for collections use `list()`.
-
-### 2. `list()` keyed render gets `Signal<T>`, not `T`
+### 2. `list()` rows are `Signal<T>`, not `T`
 
 ```tsx
-// ❌ Destructuring the signal turns it into a plain value (no reactivity)
+// ❌ Destructuring reads the value once
 {list(rows, r => r.id, ({ text }) => <li>{text}</li>)}
 
-// ✅ Use .map() to derive reactive content
+// ✅ Derive from the row signal
 {list(rows, r => r.id, (row$) => <li>{row$.map(r => r.text)}</li>)}
-
-// ✅ .peek() for one-shot reads (key/attribute that won't change)
-{list(rows, r => r.id, (row$) => <li data-id={row$.peek().id}>{row$.map(r => r.text)}</li>)}
 ```
 
-Index-based form (no keyFn) gets raw values and recreates the row on change — fine for static lists, wasteful for editable ones.
+Key by a unique, stable id. For rows changed in place by `.touch()`, add `{ equals: () => false }` as the fourth argument.
 
-`keyFn` must return a **unique** key per item. Duplicate keys collapse to a single row and silently drop the others (railroad warns on the console) — key by a stable unique id (`r => r.id`), not by a value that can repeat.
+### 3. SVG tags need no help, except four shared with HTML
 
-When rows arrive by **in-place mutation + `.touch()`** in a patch stream you wrote yourself, pass `{ equals: () => false }` as the keyed form's fourth argument — the sync re-delivers the *same row reference*, and the default `Object.is` swallows it, leaving that row's DOM silently stale:
+`circle`, `g`, `path`, `linearGradient`, `foreignObject` and the rest are created in the SVG namespace wherever they appear. `a`, `script`, `style` and `title` are created as HTML and adopted when placed inside `<svg>`. On that path, use `on*` props: hand-attached listeners are lost.
 
-```tsx
-{list(rows, r => r.id, (row$) => <li>{row$.map(r => r.text)}</li>, { equals: () => false })}
-```
-
-Row-level `.map()` computeds still bail on unchanged values, so DOM writes stay minimal. Streams that replace whole row objects keep the default — including `@blueshed/delta`, whose every backend broadcasts a changed row as a whole-row replace.
-
-A keyed reorder moves only the rows that changed position, so a row being typed in keeps its focus when another row jumps past it.
-
-### 3. SVG is first-class — tags get the SVG namespace at creation
-
-SVG-only tags (`circle`, `g`, `path`, `linearGradient`, `clipPath`, `foreignObject`, `fe*` filters, …) are created directly in the SVG namespace, wherever they appear — components returning `<circle>`, fragments, `when()`/`list()` renders. camelCase is preserved; `<foreignObject>` children stay HTML.
+### 4. Effects auto-dispose only inside a parent scope
 
 ```tsx
-// ✅ All of this just works, with refs firing once and listeners surviving
-<svg>
-  <defs><linearGradient id="g"><stop offset="0" stop-color="red" /></linearGradient></defs>
-  {list(shapes, s => s.id, (s$) => <circle r={s$.map(s => s.r)} fill="url(#g)" />)}
-  <foreignObject width="100" height="100"><div>html island</div></foreignObject>
-</svg>
-```
+// ❌ Module top level: never disposed
+effect(() => console.log(c.get()));
 
-Two edges remain:
-
-- The four tags shared with HTML — `a`, `script`, `style`, `title` — are created as HTML and **adopted** when appended inside `<svg>`. On that path only, a `ref` fires twice (use the last call) and manual `addEventListener` calls are lost — use `on*` props, which are re-applied.
-- An SVG element still needs an `<svg>` ancestor in the document to *render* — that's SVG itself, not railroad. Hand-built `createElementNS` elements pass through unchanged.
-
-Prefer `href` over `xlink:href` on `<use>`/`<textPath>` — railroad sets plain attributes, which is exactly SVG2's `href`.
-
-### 4. Effects auto-dispose **only** inside a parent scope — root apps with `mount()`
-
-```tsx
-// ✅ Inside a component / route / when / list / mount — auto-disposed on teardown
+// ✅ Inside a component, route handler, when(), list() or mount()
 function Counter() {
   const c = signal(0);
   effect(() => console.log(c.get()));
   return <span>{c}</span>;
 }
-
-// ✅ App root without a router — mount() brackets a scope, returns the disposer
-const dispose = mount(document.getElementById("root")!, () => <App />);
-
-// ❌ Module top-level — never disposed (leaks until process exit)
-const c = signal(0);
-effect(() => console.log(c.get()));
 ```
 
-Dispose scopes are pushed by `createElement(Component)`, a `routes()` handler, `when()`, `list()`, and `mount()` — for the effects/computeds created **inside** them. Every `effect()`/`computed()` run is a scope too (0.12+): whatever its body creates — computeds, `.map()`s, nested effects, `when()`/`list()`, components, anything registered with `trackDispose()` — is disposed before the next run and when the effect is disposed, so building computeds or UI inside an effect doesn't pile up. `route()` (singular) is **not** a scope provider: it returns a `ReadonlySignal` and does not dispose children for you.
+Every effect run owns what its body creates, so anything that must outlive a run is created outside the body. Keep the disposer of any top-level effect.
+
+### 5. For large documents, mutate in place and `touch()`
 
 ```tsx
-// ❌ Cached across runs — but released when the effect re-runs, so it goes dead
-let doc: Doc<Board> | undefined;       // (@blueshed/delta's openDoc registers with trackDispose)
-let title: ReadonlySignal<string> | undefined;
-effect(() => {
-  filter.get();
-  doc ??= openDoc<Board>("board:1");
-  title ??= name.map(n => n.toUpperCase());
-});
+// ❌ Clones the whole document on every patch
+doc.set({ ...doc.peek(), ...applyPatch(doc.peek(), patch) });
 
-// ✅ Long-lived resources and derivations live outside the effect body
-const doc = openDoc<Board>("board:1");
-const title = name.map(n => n.toUpperCase());
-effect(() => { filter.get(); /* use doc, title */ });
+// ✅ Mutate, then notify (applyPatch is any JSON-Patch applier that mutates)
+applyPatch(doc.peek(), patch);
+doc.touch();
 ```
 
-Opening a fresh resource on every run is fine when that *is* the intent (e.g. `` openDoc(`room:${room.get()}`) `` to follow `room`): the previous run's one is released for you.
+`.mutate(fn)` clones, mutates and notifies, so it is the safer middle ground. A computed that returns the same reference bails, so project to fresh values.
 
-Three consequences worth internalising:
-
-- Anything meant to outlive one run of an effect must be created outside its body.
-- A top-level `effect()` you create yourself leaks unless you keep its disposer. So does one created in an event handler: `onclick` is not a scope, so a `computed()`, `.map()` or `effect()` made there lives until you dispose it. Derive in the component body instead.
-- `when()` / `list()` created **outside** any parent scope leak — their driving effect's disposer is unreachable, so railroad **warns on the console**. Mount UI through a component, a `routes()` handler, or `mount()`. For an advanced custom root, bracket it yourself: `pushDisposeScope()` … build UI … `const dispose = popDisposeScope()`, or register cleanups with `trackDispose(fn)`; `hasActiveDisposeScope()` tells you whether one is open.
-
-### 5. Use the realtime escape hatches for large documents
-
-Railroad is push-based and synchronous — `set()` notifies subscribers immediately. For large objects mutated by patch streams, don't `set()` a fresh clone every time:
+### 6. Handlers are lowercase functions
 
 ```tsx
-// ❌ Wasteful — clones whole document on every patch
-ws.onmessage = (ev) => {
-  doc.set({ ...doc.peek(), ...applyPatch(doc.peek(), JSON.parse(ev.data)) });
-};
+// ❌ React's casing; a call at render; a Signal (handlers are not reactive)
+<button onClick={inc}>+</button>
+<button onclick={inc()}>+</button>
+<button onclick={count}>+</button>
 
-// ✅ Mutate in place, then touch() to notify without replacing the ref
-ws.onmessage = (ev) => {
-  applyPatch(doc.peek(), JSON.parse(ev.data));
-  doc.touch();
-};
-
-// .mutate(fn) is the safer middle ground: structuredClone, mutate, notify
-doc.mutate(d => { d.items.push(newRow); });
-
-// .patch(partial) is shallow-merge for object signals
-filter.patch({ color: "blue" });
+// ✅
+<button onclick={() => count.update(n => n + 1)}>+</button>
 ```
 
-`.touch()` propagates to effects and primitive-returning computeds. A computed that returns the same reference (`computed(() => doc.get().items)`) bails via its own `equals` guard — by design. Two consequences: project to fresh values (`Object.values(...)`, primitives) or pass `{ equals: () => false }` to `.map()`; and a keyed `list()` fed by an in-place stream needs `{ equals: () => false }` as its fourth argument (see §2), or edited rows go stale.
+Use `oninput` for every keystroke. `onchange` on a text input fires on commit.
 
-### 6. Event handlers are lowercase HTML, not React PascalCase
-
-Railroad is HTML-flavoured JSX — it uses `class`, not `className`; `onclick`, not `onClick`; `tabindex`, not `tabIndex`. Each tag's props are typed from the DOM's own element types, so `onClick`, `tabIndex` or a typo (`clas`) doesn't compile ("Did you mean 'onclick'?"); a handler's event and a `ref`'s element are typed (`oninput={(e) => e.currentTarget.value}`). `className` and `htmlFor` compile, for React habits. Any attribute with a hyphen (`data-*`, `aria-*`, `hx-get`) takes any value, and so does every attribute on an SVG tag or a custom element (`<my-widget>`): SVG's element types don't name their attributes.
-
-The value must be a **function** — `onclick={handler}`, never `onclick={handler()}` (that calls it at render) and never a Signal (handlers are not reactive; pass a function that reads the signal). A non-function warns on the console and attaches nothing. `onclick={maybeHandler}` with null/undefined is fine — no handler, no warning.
+### 7. A changing-length array needs `list()`
 
 ```tsx
-// ✅ Lowercase HTML — matches `class`, `srcdoc`, `tabindex` etc.
-<button onclick={() => count.update(n => n + 1)}>+1</button>
-<div ondragover={onDragOver} ondrop={onDrop} />
-
-// ❌ React-style PascalCase — doesn't compile (the runtime would still lowercase it)
-<button onClick={() => count.update(n => n + 1)}>+1</button>
-```
-
-The events are the DOM's, not React's: `onchange` on a text input fires when the value is committed (blur or Enter). Use `oninput` for every keystroke.
-
-### 7. Dynamic-length arrays need `list()`; plain `.map()` is fine for static collections
-
-`{arr.map(item => <Row item={item} />)}` produces a flat array of nodes. Railroad has no reconciler, so if `arr` ever *changes length* (push, splice, filter), the JSX won't react — the children are baked in at the time JSX evaluated.
-
-```tsx
-// ✅ Static collection (length never changes) — plain .map() is fine
-const COLUMNS = [{ id: "todo" }, { id: "doing" }, { id: "done" }];
-<main>{COLUMNS.map(c => <Column col={c} />)}</main>
-
-// ❌ Dynamic collection — children won't update on change
+// ❌ Baked in once; won't update when rows changes
 <ul>{rows.peek().map(r => <li>{r.text}</li>)}</ul>
 
-// ✅ Dynamic collection — list() with a key preserves identity per row
+// ✅ Keyed, reactive
 <ul>{list(rows, r => r.id, (row$) => <li>{row$.map(r => r.text)}</li>)}</ul>
 ```
 
-Rule of thumb: any array derived from a signal (`doc.data.map(d => d.cards)`, `signal([...])`, etc.) must go through `list()`. Hard-coded arrays in module scope can use `.map()`.
+A plain `.map()` is fine for a static array, such as a constant list of columns.
 
-### 8. Async components resolve to a **thunk**
-
-Components may be `async`. They render a placeholder immediately (plus an optional `fallback` thunk prop) and fill in when the promise settles. The one rule: **resolve to a thunk, not a bare Node** — the `() =>` on the return line is the entire contract:
+### 8. Async components resolve to a thunk
 
 ```tsx
-// ✅ Async component — note the `() =>` on the return line
+// ❌ Bare Node after an await: a console error, nothing renders
+async function Profile() {
+  const user = await fetchUser();
+  return <div>{user.name}</div>;
+}
+
+// ✅ The () => is the whole contract
 async function Profile() {
   const user = await fetchUser();
   return () => <div>{user.name}</div>;
 }
 <Profile fallback={() => <p>loading…</p>} />
-
-// ❌ Bare-Node resolution — pointed console.error, nothing rendered
-async function Profile() {
-  const user = await fetchUser();
-  return <div>{user.name}</div>;   // fix: return () => <div>{user.name}</div>
-}
 ```
 
-Why the thunk: effects created after an `await` have no owner scope — browser JS has no AsyncContext to carry "current scope" across suspension — so a bare-Node resolution's bindings could never be torn down. The thunk gives railroad a synchronous moment it controls: it runs under a fresh scope composed into the component's cleanup, so teardown is correct no matter when the promise settles (dispose before resolution simply drops the thunk — it never runs).
+`effect(async () => …)` is an error. Start the async work from the effect and write the result to a signal. Async `routes()` handlers resolve to a thunk too; a bare Node gets the same console error. For streaming or multi-stage states, use an effect that writes a signal, shown with `when()`.
 
-- `fallback` is a thunk too (`fallback={() => <p>…</p>}`) — rendered immediately, swapped out on settlement; a rejection clears it (no stuck spinners) and logs the error.
-- Effects created **before** the first `await` are owned by the component scope as usual.
-- Async `routes()` handlers follow the same contract — resolve to `() => <Node>` so post-await bindings die on navigation. A bare `Promise<Node>` is **deprecated**: it still renders, but anything reactive it built after the `await` outlives the route, and `routes()` given one is marked `@deprecated` (struck through in the editor). A later release drops it from the type.
-- The effect + signal + `when()` pattern is still right when you want streaming or multi-stage states rather than one fallback→content swap.
-- `effect()` itself must be synchronous. `effect(async () => …)` gets a console error: its Promise is not a cleanup, and nothing after its first `await` is tracked or owned. Start the async work from the effect and write the result into a signal. Only a returned *function* is an effect's cleanup; any other return value is ignored.
+### 9. What a render reads, it reads once
 
-### 9. What a render reads, it reads once: `when()` values and route params
-
-Two React habits show a stale value with no error. `when()` rebuilds its branch only when the condition's **truthiness** flips, not when its value changes; and a route handler runs once per **pattern**, so the `params` it was called with stay the first match.
+`when()` rebuilds its branch only when the condition's **truthiness** flips. A route handler runs once per **pattern**.
 
 ```tsx
-// ❌ /sites/42 → /sites/99 still shows "site 42": detail stays truthy, the branch never rebuilds
+// ❌ /sites/42 → /sites/99 still shows site 42
 {when(detail, () => <SiteDetail id={detail.get()!.id} />)}
-// ✅ take the value the branch is given: d$ is the current truthy value, narrowed (no `!`)
+// ✅ d$ is the current value
 {when(detail, (d$) => <SiteDetail id={d$.map(d => d.id)} />)}
 
-// ❌ /users/1 → /users/2 still shows "user 1": the handler ran once, with { id: "1" }
+// ❌ /users/1 → /users/2 still shows user 1
 routes(app, { "/users/:id": ({ id }) => <h1>user {id}</h1> });
-// ✅ read the id through params$, which updates in place (nothing remounts)
+// ✅ Read the id through params$, or mark the route keyed: true
 routes(app, { "/users/:id": (_, params$) => <h1>user {params$.map(p => p.id)}</h1> });
-// ✅ or mark the route keyed: the handler re-runs when the params change, so destructuring works
-routes(app, { "/users/:id": { keyed: true, handler: ({ id }) => <h1>user {id}</h1> } });
 ```
 
-The `when()` branch's `d$` notifies whenever the condition does while it stays truthy, an in-place `.touch()` included; it is a `ReadonlySignal`, so bind it (`d$.map(…)`, `{d$}`) rather than `.get()` it in the branch body. A keyed route disposes the old run and builds a fresh one, so its state (focus, scroll, local signals) starts over; `params$` keeps it. Don't key a wildcard layout (`"/sites/*"`): its `params["*"]` changes on every sub-path, so it would remount each time.
+## Routes
 
-## Mental model
+- **Declaration order.** The first match wins, so declare `/users/new` before `/users/:id`.
+- **Segments only.** There is no query-string handling: split `?` off yourself.
+- **A trailing slash is a segment.** `/users/42/` does not match `/users/:id`.
+- **`navigate()` is synchronous.** Setting `location.hash` yourself, or following a `#/…` link, lands on the next `hashchange`, a macrotask later.
 
-Components run **once**. They return real DOM nodes. No virtual DOM, no reconciler, no diffing. Reactivity comes from signals — bare signals as children become reactive text nodes; signals as props become reactive attributes; function children and function props (other than `ref`/`on*`) auto-track signal reads. `style` takes a CSS string or an object, static or reactive; `class`/`style` given `null`/`undefined`/`false` drop the attribute. `when()` and `list()` render their initial content synchronously, so it is in the DOM when `mount()` returns — tests need no tick after `mount()`.
+Wildcard layouts, `{ onError }` error boundaries and the rest are in reference.md › *Routes*.
 
-Effects and computeds auto-dispose when their parent scope (component, route, `when`, `list`, `mount`) tears down, or when the effect/computed whose body created them re-runs.
+## Realtime: pair with `@blueshed/delta`
 
-## Routes — wildcard layouts
-
-```tsx
-routes(app, {
-  "/":          () => <Home />,
-  "/sites/*":   () => <SitesLayout />,    // wildcard keeps layout mounted
-});
-
-function SitesLayout() {
-  const detail = route<{ id: string }>("/sites/:id");
-  return (
-    <div>
-      <SitesNav />
-      {when(detail, (d$) => <SiteDetail id={d$.map(d => d.id)} />, () => <SitesList />)}
-    </div>
-  );
-}
-```
-
-`/sites` → `/sites/42` → `/sites/99`: the layout stays mounted. `when()` swaps between list and detail; `/sites/42` → `/sites/99` keeps the same `SiteDetail`, which follows the id because it got `d$`, a signal of the current match (§9). `route()` is a `ReadonlySignal<T | null>`.
-
-Matching is purely segment-based: there is no query-string handling (`#/users/42?tab=1` matches `/users/:id` with `id === "42?tab=1"` — split on `?` yourself), and a trailing slash is a real empty segment (`/users/42/` does **not** match `/users/:id`).
-
-`navigate(path)` updates the route synchronously: `route()` and the router show the new path as it returns, so a test needs no tick after it. Setting `location.hash` yourself or following an `<a href="#/…">` lands on the next `hashchange`, a macrotask later in both happy-dom and real browsers: `await new Promise(r => setTimeout(r, 0))`.
-
-### Error Boundaries (`options.onError`)
-
-The router supports an optional third argument `options` with an `onError` boundary callback:
-
-```tsx
-routes(
-  document.getElementById("root")!,
-  {
-    "/": () => <Home />,
-    "/bad": () => { throw new Error("Sync crash"); },
-    "/bad-async": async () => { throw new Error("Async crash"); },
-  },
-  {
-    onError: (err) => {
-      console.warn("Caught route error:", err.message);
-      return <div class="error-boundary">Something went wrong.</div>;
-    }
-  }
-);
-```
-
-If a route handler throws synchronously or rejects asynchronously, the `onError` hook is executed. If it returns a standard DOM `Node`, that node is rendered in the router's container, avoiding a blank screen while keeping the internal dispose scope stack perfectly balanced. If omitted, the error is logged to `console.error`.
-
-## Realtime — pair with `@blueshed/delta`
-
-For WebSocket document sync over JSON-Patch use [`@blueshed/delta`](https://www.npmjs.com/package/@blueshed/delta). Delta declares `@blueshed/railroad` as a peer dependency and `delta/client.ts` imports `signal` directly — `openDoc("name")` returns a `Doc<T>` whose `data` field **is a railroad `Signal<T | null>`**, not a wrapper. It drops straight into JSX / `when()` / `list()` with no glue.
-
-A document lives where its truth does: a JSON file, SQLite (temporal), Postgres (RLS + LISTEN/NOTIFY), memory, an outside source, or static. The client is the same for all of them.
-
-### Server — one Bun.serve hosting both the HTML route and the WebSocket
-
-```tsx
-import home from "./index.html";
-import { createWs, registerDoc } from "@blueshed/delta/server";
-
-const ws = createWs();
-await registerDoc(ws, "board:1", {
-  file: "./board.json",
-  empty: { columns: {}, cards: {} },
-});
-
-Bun.serve({
-  routes: { "/": home, [ws.path]: ws.upgrade },
-  websocket: ws.websocket,
-  development: { hmr: true, console: true },
-});
-```
-
-### Client — `list(doc.data.map(...), keyFn, render)` is the keyed-list pattern
-
-`doc.data` is a railroad signal. To render a collection from it, **use `list()`** with a `.map()` projection — not `applyOpsToCollection` from `@blueshed/delta/dom-ops`. List's keyed form already does the surgical per-row update that `applyOpsToCollection` exists to provide for vanilla DOM, so they overlap. With railroad in the project, `list()` wins:
+For WebSocket document sync over JSON-Patch, use [`@blueshed/delta`](https://www.npmjs.com/package/@blueshed/delta). Its `openDoc()` returns a `Doc<T>` whose `data` **is** a railroad `ReadonlySignal<T | null>`, so it drops into JSX, `when()` and `list()` with no glue. It is read-only: change the document with `doc.send(ops)`, never `doc.data.set()`.
 
 ```tsx
 import { provide, list, when } from "@blueshed/railroad";
@@ -334,70 +153,45 @@ import { connectWs, WS, openDoc } from "@blueshed/delta/client";
 
 provide(WS, connectWs("/ws"));
 
-interface Card { id: number; title: string; column_id: number; }
-interface BoardDoc { columns: Record<string, Column>; cards: Record<string, Card>; }
+interface Column { id: number; title: string }
+interface Card { id: number; title: string; column_id: number }
+interface BoardDoc { columns: Record<string, Column>; cards: Record<string, Card> }
 
-const doc = openDoc<BoardDoc>("board:1");
+const doc = openDoc<BoardDoc>("board:1");   // outside any effect body
 
 function Board() {
-  // doc.data is Signal<BoardDoc | null>. .map() derives a ReadonlySignal<Card[]>
-  // that re-emits whenever the doc updates. list() then preserves DOM identity
-  // per card.id — only the changed row's signal updates, not the whole list.
+  // doc.data is ReadonlySignal<BoardDoc | null>. .map() derives the card list;
+  // list() keeps DOM identity per card.id, so only a changed card's row updates.
   const cards = doc.data.map((d) => d ? Object.values(d.cards) : []);
   return (
     <div>
       {when(doc.data, () => (
-        <ul>
-          {list(cards, (c) => c.id, (card$) => (
-            <li>{card$.map((c) => c.title)}</li>
-          ))}
-        </ul>
+        <ul>{list(cards, (c) => c.id, (card$) => <li>{card$.map((c) => c.title)}</li>)}</ul>
       ), () => <p>loading…</p>)}
     </div>
   );
 }
 
-// Sending an op — single verb, single path, signal updates automatically
-await doc.send([{ op: "add", path: "/cards/-",
-  value: { column_id: 1, title: "new card", position: 0 } }]);
+// Ops are JSON-Patch on the document: name the new card's key, and give it the id list() keys by.
+await doc.send([{ op: "add", path: "/cards/7",
+  value: { id: 7, column_id: 1, title: "new card" } }]);
 ```
 
-### When NOT to use `applyOpsToCollection`
-
-`@blueshed/delta/dom-ops` exists for projects that don't have a keyed reactive list primitive (e.g. vanilla DOM clients). Railroad's `list(..., keyFn, ...)` provides the same per-row identity preservation natively. Don't import both; pick one:
+Delta also ships `applyOpsToCollection` (`@blueshed/delta/dom-ops`) for vanilla DOM. With railroad in the project, use `list()` instead. The two overlap, so pick one:
 
 | Project shape | Use |
 |---|---|
-| Vanilla DOM (no railroad) | `applyOpsToCollection(parent, "coll", ops, { create, update })` from `@blueshed/delta/dom-ops` |
+| Vanilla DOM, no railroad | `applyOpsToCollection(parent, "coll", ops, { create, update })` |
 | Railroad in deps | `list(doc.data.map(d => Object.values(d.coll)), r => r.id, (r$) => …)` |
 
-The `delta-doc` skill (installed with `@blueshed/delta`) has the full API surface, the backends side by side, and the canonical recipe for non-railroad projects.
+The `delta-doc` skill, installed with `@blueshed/delta`, has the full API and backends. The server side is in reference.md › *Realtime*.
 
-## Local development across repos
+## One copy of railroad per page
 
-A page must load **one copy** of railroad. Each copy has its own `Signal` class, tracking, scopes and `provide`/`inject` registry, so two copies can't see each other, and railroad doesn't try to make them: `openDoc()` in a component never auto-closes, `inject(WS)` finds no provider, and an effect or function child that reads delta's `doc.data` never re-runs. Railroad says so on the console when the second copy loads: `A second copy of @blueshed/railroad has loaded (…; the first: …)`. Rendering the other copy's signal throws: `{doc.data}`, a prop, `when(doc.data, …)` or `list(…)` given it fails with `This Signal was made by another copy of @blueshed/railroad (…)`, naming both copies, rather than showing `[object Object]` or a branch that never switches.
+Two copies (usually a `file:` link or `bun link` to a delta checkout) can't see each other's signals, scopes or providers: the UI stops updating, `inject(WS)` finds no provider, `openDoc()` never auto-closes. Railroad logs `A second copy of @blueshed/railroad has loaded (…)`. The fix (install a packed tarball) is in reference.md › *Local development across repos*.
 
-The usual cause is depending on a local checkout: `"@blueshed/delta": "file:../delta"` (or `bun link`) installs the checkout *with its own* `node_modules/@blueshed/railroad`, its dev dependency. Install a packed tarball instead, which carries no `node_modules`, so delta's peer resolves to the app's railroad:
+## Don't
 
-```sh
-cd ../delta && bun pm pack               # writes blueshed-delta-<version>.tgz
-cd ../app   && bun add ../delta/blueshed-delta-<version>.tgz
-```
-
-After each change to the checkout, pack again, then remove the package before adding the tarball:
-
-```sh
-cd ../delta && bun pm pack
-cd ../app   && bun remove @blueshed/delta && bun add ../delta/blueshed-delta-<version>.tgz
-```
-
-`bun add` of the same tarball again keeps the old contents, and so do `bun install --force` and deleting `node_modules/@blueshed/delta`: `bun.lock` pins the first tarball by its integrity hash (Bun 1.4.2). Deleting `bun.lock` works too.
-
-## Anti-patterns
-
-1. **No React.** No `useState`, `useEffect`, hooks, lifecycle methods, class components, or `react`/`react-dom` imports. Railroad is its own JSX runtime via `jsxImportSource`.
-2. **No external bundler.** Don't add Vite, esbuild config, or webpack. Bun's HTML imports + `bun build` cover the entire pipeline. For project setup, use the `bun-route` skill.
-3. **No `.get()` in JSX children.** See section 1.
-4. **No shared DOM nodes across `when()` branches.** Each branch creates fresh nodes.
-5. **No effects at module top-level** unless you manually capture and dispose. See section 4.
-6. **No long-lived resources inside an effect body.** They are released on the next run (0.12+). See section 4.
+- **Use React.** No hooks, lifecycle methods, class components, or `react`/`react-dom` imports. Railroad is its own JSX runtime, selected by `jsxImportSource`.
+- **Add an external bundler.** Bun's HTML imports and `bun build` cover the pipeline. For project setup, use `bun-route`.
+- **Share DOM nodes across `when()` branches.** Each branch builds its own.
