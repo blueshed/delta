@@ -465,7 +465,7 @@ export function registerDocs<I = unknown>(
     return row;
   }
 
-  /** The rows `removeRow` would take, read before it takes them, in its order. */
+  /** A row and the rows its removal takes with it (its children, and the rows `cascadeOn` it), parent first. */
   function cascadeRows(table: ResolvedTable, id: string | number, def: DocDef): { table: ResolvedTable; row: any }[] {
     const row = readRow(table, id);
     if (!row) return [];
@@ -502,6 +502,17 @@ export function registerDocs<I = unknown>(
     return next;
   }
 
+  // You may write what you may read. Reads were always scoped; writes addressed
+  // rows by bare id, so a client holding `customer:alice` could name a row of
+  // `customer:bob` and reach it. Every row-addressed write asks `held` (in
+  // applyOps): the row as the tables stand at that point in the write, judged by
+  // the rule a document is read by (`holds`), as Postgres asks
+  // `_delta_row_in_scope` -- so a row that left the document earlier in the same
+  // write is not its to write. A row added, or moved by a parent key written, goes
+  // only under a parent the document holds (`parentHeld`; one of a collection it
+  // does not include, through the tables: `reaches`). The error message
+  // deliberately matches the "not there" case: a distinct "forbidden" would
+  // confirm the row exists to someone probing ids.
   function applyOps(docName: string, def: DocDef, doc: any, ops: DeltaOp[], walk: boolean): { applied: DeltaOp[]; touched: Touched[] } {
     const scope = resolveScope(def, docName.slice(def.prefix.length));
     const list = scope.mode === "list";
@@ -727,15 +738,16 @@ export function registerDocs<I = unknown>(
           // doc's row -- or one that has left this document earlier in the write.
           if (!held(table, id)) refuse(404, `Row not found: ${collKey}/${id}`);
           if (isRoot) rootWas = readRow(table, id);
-          // who holds the row and every row the cascade takes, asked before any is gone
-          const befores = new Map(cascadeRows(table, id, def).map(({ table: t, row }) => [`${t.docKey}/${row.id}`, holders(t.docKey, row, docName)]));
-          const cascadeOps = removeRow(db, schema, table, collKey, id, doc, def, ts);
-          if (isRoot) doc[collKey] = null;
-          broadcastOps.push(...cascadeOps);
-          for (const removed of cascadeOps) {
-            const [coll, rid] = splitPath(removed.path) as [string, string];
-            touched.push({ coll, id: rowId(rid), before: befores.get(`${coll}/${rowId(rid)}`) ?? [], after: null });
+          // the row and every row its removal takes, and who holds each, asked before any is gone
+          const cascade = cascadeRows(table, id, def).map(({ table: t, row }) => ({ t, row, before: holders(t.docKey, row, docName) }));
+          for (const { t, row, before } of cascade) {
+            if (t.temporal) closeRow(db, t, row.id, ts);
+            else db.run(`DELETE FROM ${t.name} WHERE id = ?`, [row.id]);
+            delete doc[t.docKey]?.[row.id];
+            broadcastOps.push({ op: "remove", path: joinPath(t.docKey, String(row.id)) });
+            touched.push({ coll: t.docKey, id: row.id, before, after: null });
           }
+          if (isRoot) doc[collKey] = null;
         } else if (op.op === "replace") {
           // Whole-row replace: /<coll>/<id> — a partial merge over the current
           // row (Postgres parity: delta_apply does `v_row || value`).
@@ -1794,71 +1806,6 @@ function updateRow(db: any, table: ResolvedTable, id: string | number, row: any)
   const vals = cols.map((c) => encodeValue(table, c, row[c]));
   // a temporal table's live version alone: the one a write made, rewritten as the write goes on
   db.run(`UPDATE ${table.name} SET ${sets} WHERE id = ?${table.temporal ? " AND valid_to IS NULL" : ""}`, [...vals, id]);
-}
-
-// ---------------------------------------------------------------------------
-// Write scoping
-// ---------------------------------------------------------------------------
-//
-// You may write what you may read. Reads were always scoped; writes addressed
-// rows by bare id, so a client holding `customer:alice` could name a row of
-// `customer:bob` and reach it. Every row-addressed write asks `held` (in
-// applyOps): the row as the tables stand at that point in the write, judged by
-// the rule a document is read by (`holds`), as Postgres asks
-// `_delta_row_in_scope` -- so a row that left the document earlier in the same
-// write is not its to write. A row added, or moved by a parent key written, goes
-// only under a parent the document holds (`parentHeld`; one of a collection it
-// does not include, through the tables: `reaches`). The error message
-// deliberately matches the "not there" case: a distinct "forbidden" would
-// confirm the row exists to someone probing ids.
-
-function removeRow(
-  db: any,
-  schema: Schema,
-  table: ResolvedTable,
-  collKey: string,
-  id: string | number,
-  doc: any,
-  def: DocDef,
-  ts: string,
-): DeltaOp[] {
-  const ops: DeltaOp[] = [];
-
-  if (table.temporal) {
-    closeRow(db, table, id, ts);
-  } else {
-    db.run(`DELETE FROM ${table.name} WHERE id = ?`, [id]);
-  }
-  delete doc[collKey][id];
-  ops.push({ op: "remove", path: joinPath(collKey, String(id)) });
-
-  // Cascade via parent relationship (children)
-  for (const childKey of table.children) {
-    if (!def.include.includes(childKey)) continue;
-    const childTable = schema.tables[childKey];
-    if (!childTable?.parent) continue;
-
-    const viewName = childTable.temporal ? `current_${childTable.name}` : childTable.name;
-    const childRows = db.query(`SELECT id FROM ${viewName} WHERE ${childTable.parent.fkColumn} = ?`).all(id) as any[];
-    for (const row of childRows) {
-      ops.push(...removeRow(db, schema, childTable, childKey, row.id, doc, def, ts));
-    }
-  }
-
-  // Cascade via cascadeOn references
-  for (const ref of table.referencedBy) {
-    if (!def.include.includes(ref.collection)) continue;
-    const refTable = schema.tables[ref.collection];
-    if (!refTable) continue;
-
-    const viewName = refTable.temporal ? `current_${refTable.name}` : refTable.name;
-    const refRows = db.query(`SELECT id FROM ${viewName} WHERE ${ref.fkColumn} = ?`).all(id) as any[];
-    for (const row of refRows) {
-      ops.push(...removeRow(db, schema, refTable, ref.collection, row.id, doc, def, ts));
-    }
-  }
-
-  return ops;
 }
 
 // ---------------------------------------------------------------------------
