@@ -240,9 +240,11 @@ export function registerSource<T>(ws: WsServer, options: SourceOptions<T>) {
     if (!name) return;
     f.join(client, name);
     let w = watched.get(name);
-    if (!w) {
+    while (!w) {
       if (!starting.has(name)) starting.set(name, start(name).finally(() => starting.delete(name)));
-      w = await starting.get(name)!;
+      const read = await starting.get(name)!;
+      // a start everyone left is not watched: one still here starts again; nobody here, the reading answers
+      w = watched.get(name) ?? (f.watching(name) ? undefined : read);
     }
     respond({ result: { ...w.value, _v: w.v } });
   });

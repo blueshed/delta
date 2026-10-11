@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A sourced document no longer polls forever when its only watcher leaves during the first
   reading (todo #65).** The socket's drop ran before the watch existed, so nothing stopped it;
-  `registerSource` now starts the watch only if someone still has the document open.
+  `registerSource` now starts the watch only if someone still has the document open, and one who
+  opens it just after starts it again.
 - **An add that names an id moves the table's serial past it (todos #63, #72).** `add
   /notes/7` left the serial behind, so a later `add /notes/-` met 7 as already there (409). On
   Postgres, `delta_apply` (`001d`, replaced in place: apply it again) sets `seq_<table>` to the

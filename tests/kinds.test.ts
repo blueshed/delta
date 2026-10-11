@@ -162,4 +162,25 @@ describe("source: the truth is outside", () => {
     expect(reads).toBe(1);
     r.stopAll();
   });
+
+  test("one who opens just after the first watcher left during the reading is still polled (#65 review)", async () => {
+    for (let hops = 0; hops < 6; hops++) {
+      const { local } = setup();
+      let reads = 0;
+      let release = () => {};
+      const r = registerSource(local.server, { prefix: "slow:", every: 5, read: async () => { if (reads === 0) await new Promise<void>((go) => (release = go)); return ++reads; } });
+      const opening = local.call("open", { doc: "slow:1" });
+      await Bun.sleep(1);
+      dropClientSubscriptions(local.client);
+      release();
+      let later = Promise.resolve();
+      for (let i = 0; i < hops; i++) later = later.then(() => {});
+      await later;
+      await local.as("b").call("open", { doc: "slow:1" });
+      await opening;
+      await Bun.sleep(40);
+      expect({ hops, polled: reads > 2 }).toEqual({ hops, polled: true });
+      r.stopAll();
+    }
+  });
 });
