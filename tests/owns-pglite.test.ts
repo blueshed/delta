@@ -2,7 +2,7 @@
  * With auth, every document says who owns it: the shared cases
  * (tests/helpers/owns.ts) asked of Postgres in process (PGlite).
  */
-import { afterAll, afterEach, beforeAll, describe } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import type { Pool } from "pg";
 import {
   applyFramework, applySql, clearRegistry, createDocListener, docTypeFromDef, generateSql, importTables, registerDocType, type CustomDocDef,
@@ -52,3 +52,12 @@ describe("pglite", () => ownsCases(() => ({
     };
   },
 })));
+
+describe("pglite: one prefix, one document (#76)", () => {
+  test("two custom documents of one prefix, or one of a table document's, are refused, naming it", async () => {
+    for (const def of pathDocs) registerDocType(docTypeFromDef(def, pool));
+    const listen = (custom: CustomDocDef<any, Me>[]) => createDocListener(createLocal().server, pool, { custom });
+    await expect(listen([postgresInbox, { ...postgresInbox, matches: () => true }])).rejects.toThrow(/defineCustomDoc\("fo-inbox:"\): another document of this registration has its prefix/);
+    await expect(listen([{ ...postgresInbox, prefix: "fo-board:" }])).rejects.toThrow(/defineCustomDoc\("fo-board:"\): another document of this registration has its prefix/);
+  });
+});

@@ -22,7 +22,7 @@ import type { DeltaAuth } from "../auth";
 import { isAuthError } from "../auth";
 import type { DeltaOp } from "../../core";
 import { isEntryId, ledgerWho, socketCursor } from "../ledger";
-import { assertOwned, createCustomDocs, NOT_FOUND, type CustomDoc, type Owns, type Refusal } from "../custom";
+import { assertOnePrefix, assertOwned, createCustomDocs, NOT_FOUND, type CustomDoc, type Owns, type Refusal } from "../custom";
 
 const log = createLogger("[doc]");
 
@@ -138,6 +138,7 @@ export async function createDocListener<I = unknown>(
   // one, a registered type -- says who owns it, or that it is shared. Asked
   // before the pool is touched, so a refusal leaves nothing to clean up.
   assertOwned(opts?.custom ?? [], auth);
+  assertOnePrefix(opts?.custom ?? [], (p) => resolveDoc(p)?.type.prefix === p);
   const releaseAuth = auth ? holdAuth() : () => {};
   const ledger = !!opts?.ledger;
   const whoOf = (identity: I | undefined): string | null => ledgerWho(identity, opts?.who);

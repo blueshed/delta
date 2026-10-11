@@ -66,6 +66,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   framework, or `bunx @blueshed/delta init --upgrade`) now reads the root rows its scope admitted
   then and each included collection in full, a temporal table's rows as they stood and the others
   as they are. `tests/helpers/path.ts`' list cases run on every backend.
+- **A custom document's prefix is one document's (todo #76).** Two custom documents of one prefix
+  in one registration (`registerDocs`, or `createDocListener`'s `custom`) left the last to answer
+  without a word, and one with a table document's prefix shadowed it. Both now throw at
+  registration, naming the prefix, as a prefix another registration holds already is refused.
 
 ## [0.12.0] - 2026-10-11
 

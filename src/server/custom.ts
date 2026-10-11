@@ -56,6 +56,16 @@ export function assertOwned(defs: CustomDoc[], auth: DeltaAuth<any> | undefined)
   if (wrong) throw (auth ? ownerless : authless)(wrong.prefix, "defineCustomDoc");
 }
 
+/**
+ * One prefix, one document: a custom doc's prefix is refused where another of
+ * the registration's custom docs has it, or a table document (`isTable`) --
+ * else one would silently answer for the other (todo #76).
+ */
+export function assertOnePrefix(defs: CustomDoc[], isTable: (prefix: string) => boolean): void {
+  const twice = defs.find((d, i) => isTable(d.prefix) || defs.findIndex((e) => e.prefix === d.prefix) < i);
+  if (twice) throw new Error(`defineCustomDoc("${twice.prefix}"): another document of this registration has its prefix -- a name is answered by one document: give each its own`);
+}
+
 /** Rows keyed by id. */
 export function toMap(rows: any[]): Record<string, any> {
   const m: Record<string, any> = {};

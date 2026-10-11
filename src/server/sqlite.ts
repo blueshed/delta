@@ -19,7 +19,7 @@
 import type { WsServer } from "./server";
 import { trackSubscribe, trackUnsubscribe, onClientDrop, failure } from "./server";
 import { authless, isAuthError, ownerless, type DeltaAuth } from "./auth";
-import { assertOwned, createCustomDocs, isPromise, NOT_FOUND, type CustomDoc } from "./custom";
+import { assertOnePrefix, assertOwned, createCustomDocs, isPromise, NOT_FOUND, type CustomDoc } from "./custom";
 import { type DeltaOp, splitPath, joinPath } from "../core";
 import { createLogger } from "./logger";
 import { createLedger, isEntryId, ledgerWho, planWalk, rowAt, socketCursor } from "./ledger";
@@ -161,6 +161,7 @@ export function registerDocs<I = unknown>(
     throw authless(docs.map((d) => d.prefix).join(", "), "registerDocs");
   }
   assertOwned(customDocs, auth);
+  assertOnePrefix(customDocs, (p) => docs.some((d) => d.prefix === p));
   // One name, one registration on this server: the longest prefix answers it.
   const answers = claim(ws, [...docs.map((d) => d.prefix), ...customDocs.map((d) => d.prefix)]);
   /** The gate's identity (with `auth`), or its refusal. */
