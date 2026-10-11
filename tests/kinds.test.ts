@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createLocal } from "../src/server/local";
 import { registerMemory, registerSource, registerStatic } from "../src/server/kinds";
+import { dropClientSubscriptions } from "../src/server/server";
 
 function setup() {
   const local = createLocal();
@@ -148,5 +149,17 @@ describe("source: the truth is outside", () => {
     expect(reads).toBe(1);
     expect(a.result.reading).toBe(1);
     expect(b.result.reading).toBe(1);
+  });
+
+  test("a watcher that leaves while the first reading is taken leaves nothing polling (#65)", async () => {
+    const { local } = setup();
+    let reads = 0;
+    const r = registerSource(local.server, { prefix: "slow:", read: async () => (await Bun.sleep(10), ++reads), every: 5 });
+    const opening = local.call("open", { doc: "slow:1" });
+    dropClientSubscriptions(local.client); // the socket closes before the first reading is in
+    await opening;
+    await Bun.sleep(40);
+    expect(reads).toBe(1);
+    r.stopAll();
   });
 });

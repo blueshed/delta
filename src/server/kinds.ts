@@ -26,27 +26,35 @@ import { mintIds, onClientDrop, trackSubscribe, trackUnsubscribe, type WsServer 
 
 type Respond = (response: any) => void;
 
-/** The shared bookkeeping: who has a document open, and a version per document. */
-function family(ws: WsServer, prefix: string) {
+/**
+ * What the kinds share: which documents are the prefix's, who has each open (a
+ * subscription to its channel, let go when the socket drops, the last to go
+ * calling `onLast`), and the `close` every kind answers alike.
+ */
+function family(ws: WsServer, prefix: string, onLast: (doc: string) => void = () => {}) {
   const subscribers = new Map<string, Set<any>>();
   const owns = (msg: any): string | undefined => (typeof msg.doc === "string" && msg.doc.startsWith(prefix) ? msg.doc : undefined);
-  const subscribe = (client: any, doc: string): boolean => {
-    const first = !subscribers.has(doc);
-    if (first) subscribers.set(doc, new Set());
+  const leave = (client: any, doc: string) => {
+    const subs = subscribers.get(doc);
+    if (!subs?.delete(client)) return;
+    trackUnsubscribe(client, doc);
+    if (subs.size > 0) return;
+    subscribers.delete(doc);
+    onLast(doc);
+  };
+  const join = (client: any, doc: string) => {
+    if (!subscribers.has(doc)) subscribers.set(doc, new Set());
     subscribers.get(doc)!.add(client);
     trackSubscribe(client, doc);
-    return first;
+    onClientDrop(client, (c) => leave(c, doc));
   };
-  /** Takes `client` off `doc`; true when it was the last. */
-  const unsubscribe = (client: any, doc: string): boolean => {
-    const subs = subscribers.get(doc);
-    if (!subs?.delete(client)) return false;
-    trackUnsubscribe(client, doc);
-    if (subs.size > 0) return false;
-    subscribers.delete(doc);
-    return true;
-  };
-  return { subscribers, owns, subscribe, unsubscribe, id: (doc: string) => doc.slice(prefix.length) };
+  ws.on("close", (msg, client, respond) => {
+    const name = owns(msg);
+    if (!name) return;
+    leave(client, name);
+    respond({ result: { ack: true } });
+  });
+  return { owns, join, watching: (doc: string) => subscribers.has(doc), id: (doc: string) => doc.slice(prefix.length) };
 }
 
 const refuse = (respond: Respond, why: string) => respond({ error: { code: 403, message: why } });
@@ -76,8 +84,7 @@ export function registerMemory<T>(ws: WsServer, options: MemoryOptions<T>) {
   ws.on("open", (msg, client, respond) => {
     const name = f.owns(msg);
     if (!name) return;
-    f.subscribe(client, name);
-    onClientDrop(client, (c) => f.unsubscribe(c, name));
+    f.join(client, name);
     const d = doc(name);
     respond({ result: { ...(d.value as object), _v: d.v } });
   });
@@ -100,13 +107,6 @@ export function registerMemory<T>(ws: WsServer, options: MemoryOptions<T>) {
     d.v += 1;
     ws.publish(name, { doc: name, ops, v: d.v });
     respond({ result: { ack: true, version: d.v, ops } });
-  });
-
-  ws.on("close", (msg, client, respond) => {
-    const name = f.owns(msg);
-    if (!name) return;
-    f.unsubscribe(client, name);
-    respond({ result: { ack: true } });
   });
 
   return {
@@ -149,9 +149,6 @@ export function registerStatic<T>(ws: WsServer, options: StaticOptions<T>) {
   ws.on("delta", (msg, _client, respond) => {
     if (f.owns(msg)) refuse(respond, "a static document changes with a release, not a write");
   });
-  ws.on("close", (msg, _client, respond) => {
-    if (f.owns(msg)) respond({ result: { ack: true } });
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -177,7 +174,7 @@ export interface SourceOptions<T> {
 
 /** Documents whose truth is outside: one shared reading, taken while anyone watches, stamped with its time. */
 export function registerSource<T>(ws: WsServer, options: SourceOptions<T>) {
-  const f = family(ws, options.prefix);
+  const f = family(ws, options.prefix, (name) => stop(name));
   const now = options.now ?? Date.now;
   type Watched = { value: Sourced<T>; v: number; stop: (() => void)[] };
   const watched = new Map<string, Watched>();
@@ -213,6 +210,7 @@ export function registerSource<T>(ws: WsServer, options: SourceOptions<T>) {
     } catch {
       w.value = { reading: null, at: null, stale: true };
     }
+    if (!f.watching(name)) return w; // everyone left while it was read: nothing to poll (#65)
     watched.set(name, w); // watched once it has its first reading: an opener meanwhile waits on `starting`
     if (options.every) {
       const timer = setInterval(() => void ask(name, w), options.every);
@@ -240,10 +238,7 @@ export function registerSource<T>(ws: WsServer, options: SourceOptions<T>) {
   ws.on("open", async (msg, client, respond) => {
     const name = f.owns(msg);
     if (!name) return;
-    f.subscribe(client, name);
-    onClientDrop(client, (c) => {
-      if (f.unsubscribe(c, name)) stop(name);
-    });
+    f.join(client, name);
     let w = watched.get(name);
     if (!w) {
       if (!starting.has(name)) starting.set(name, start(name).finally(() => starting.delete(name)));
@@ -253,12 +248,6 @@ export function registerSource<T>(ws: WsServer, options: SourceOptions<T>) {
   });
   ws.on("delta", (msg, _client, respond) => {
     if (f.owns(msg)) refuse(respond, "a sourced document's truth is outside: it is read, never written");
-  });
-  ws.on("close", (msg, client, respond) => {
-    const name = f.owns(msg);
-    if (!name) return;
-    if (f.unsubscribe(client, name)) stop(name);
-    respond({ result: { ack: true } });
   });
 
   return {

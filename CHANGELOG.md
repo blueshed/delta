@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A sourced document no longer polls forever when its only watcher leaves during the first
+  reading (todo #65).** The socket's drop ran before the watch existed, so nothing stopped it;
+  `registerSource` now starts the watch only if someone still has the document open.
+
+### Internal
+
+- `kinds.ts`: the three kinds share one join, leave and `close` (`family()`).
+
 ## [0.11.0] - 2026-09-28
 
 ### Changed
