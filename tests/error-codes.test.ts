@@ -46,6 +46,8 @@ function mistakes(there: string) {
     "a field named after Object.prototype": { ops: [{ op: "replace", path: `/ec_messages/${there}/toString`, value: "x" }], code: 400 },
     "an add of a row that is already there": { ops: [{ op: "add", path: `/ec_messages/${there}`, value: { text: "again" } }], code: 409 },
     "an add that leaves out a required field": { ops: [{ op: "add", path: "/ec_messages/-", value: {} }], code: 400 },
+    "a remove of a field": { ops: [{ op: "remove", path: `/ec_messages/${there}/text` }], code: 400 },
+    "an add of a field": { ops: [{ op: "add", path: `/ec_messages/${there}/text`, value: "x" }], code: 400 },
   } as Record<string, { ops: any[]; code: number }>;
 }
 

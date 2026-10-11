@@ -1869,6 +1869,13 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
       continue;
     }
 
+    // A row: add /<coll>/<id or ->, remove /<coll>/<id>, replace /<coll>/<id>[/<field>].
+    const rowOp = op.op === "add" || op.op === "remove" ? parts.length === 2 : op.op === "replace" && parts.length <= 3;
+    if (!rowOp) {
+      errors.push({ path: op.path, message: `Invalid op: ${op.op} ${op.path}` });
+      continue;
+    }
+
     // A row's id, as the path names it: digits past 2^53 - 1 are refused, as on
     // Postgres (_delta_row_id). No number holds them exactly, so the row would be
     // kept, read and told under another id.

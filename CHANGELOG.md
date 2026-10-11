@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of its day are one test.
 - `cli.ts`: one `print` for the runtime commands, the init plan and skill discovery inline, the
   header comment pointing at `usage()` (the same output for every command).
+- **SQLite: a remove or an add of a field, or a path too deep, is a 400**, as on Postgres
+  (`remove /items/1/text`, `add /tasks/t1/done/extra`). `validateOps` took them, and the write
+  then threw, so the writer was answered 500.
 
 ## [0.11.0] - 2026-09-28
 

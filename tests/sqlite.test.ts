@@ -1151,7 +1151,7 @@ describe("registerDocs", () => {
   // ---------------------------------------------------------------------------
 
   describe("invalid ops", () => {
-    test("invalid path depth throws error", async () => {
+    test("a path too deep is the writer's mistake (400)", async () => {
       seedProject("p1", "Alpha", "active");
       seedTask("t1", "p1", "Test", false);
 
@@ -1164,7 +1164,7 @@ describe("registerDocs", () => {
       }));
 
       expect(sock.sent[1].error).toBeDefined();
-      expect(sock.sent[1].error.code).toBe(500);
+      expect(sock.sent[1].error.code).toBe(400);
     });
   });
 
