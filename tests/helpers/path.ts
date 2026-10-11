@@ -71,6 +71,8 @@ export const pathDocs = [
   // list mode with a temporal include: every course, and every note
   defineDoc("fo-courses-noted:", { root: "courses", include: ["notes"] }),
   defineDoc("fo-courses-like:", { root: "courses", include: [], scope: { name: "like:start" } }),
+  // ... and with their drinks: a drink goes only under a course the list holds
+  defineDoc("fo-menu-like:", { root: "courses", include: ["drinks"], scope: { name: "like:start" } }),
   // list mode by an equality: the tags of one label, which a tag added through it is given
   defineDoc("fo-tags-labelled:", { root: "tags", include: [], scope: { label: ":label" } }),
   // the seating plan: the wedding and its seats
@@ -2508,6 +2510,18 @@ export function fanOutCases(backend: () => PathBackend): void {
   });
 
   describe("a row that moves from one document's scope to another's", () => {
+    test("a scoped list adds a child only under a root it holds: a drink under the other course, or under none, is refused (404) and nobody is told; under its own it goes", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-menu-like:So", "fo-catalog:"]);
+      const code = async (fk: number) => (await b.process.call("delta", { doc: "fo-menu-like:So", ops: [{ op: "add", path: "/drinks/-", value: { courses_id: fk, name: "graft" } }] })).error?.code;
+      expect(await code(2)).toBe(404);   // Salad: not the list's
+      expect(await code(999)).toBe(404);   // no course
+      await expectSilent(b, "fo-menu-like:So", "fo-catalog:");
+      const { ops } = await write(b.process, "fo-menu-like:So", [{ op: "add", path: "/drinks/9", value: { courses_id: 1, name: "Port" } }]);
+      expect(ops).toEqual([{ op: "add", path: "/drinks/9", value: drink(9, 1, "Port") }]);
+      await assertCopiesHold(b, copies);
+    });
+
     test("a row moved through a document to a parent it does not hold is refused (404), as an add there is -- a household to the other wedding, a drink to its course -- and nobody is told (todo #6's review)", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-board:2", "fo-menu:1", "fo-drinks:1", "fo-household:1", "fo-course:2"]);

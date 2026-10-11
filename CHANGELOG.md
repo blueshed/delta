@@ -161,6 +161,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`delta_prune_ops`) and `listener.ts`: apply the framework SQL again with this release -- a
   listener on the old SQL does not start, and the new SQL with an old listener tells only the
   writer.
+- **Postgres: a scoped list adds a child only under a root it holds**, as SQLite and the JSON
+  file did. Through `courses-like:So` (the courses whose name starts "So", with their drinks),
+  `add /drinks/- {courses_id: 2}` put a drink under Salad, which the list does not hold, and
+  one under a course that is not there at all; both are a 404 now (`delta_apply`, replaced in
+  place).
+
 - **A row a write makes and its cascade takes out is told its add wherever its remove is told
   (todo #75)**, on every backend. `[add /courses/9, add /drinks/5 under it, remove /courses/9]`
   told the board and the menu the drink's remove but not its add, so an open copy met a remove
