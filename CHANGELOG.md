@@ -55,6 +55,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The `_raw` action**: a frame with no `action` reached the handlers registered on `"_raw"`; it
   is now answered with nothing. Send an action.
 
+### Docs
+
+- **The README's first screen is in plain words** (what a document and the ledger are), and
+  its Try it makes its row with `add /items/-`, so the output it prints, run as written,
+  shows the serial the server names. `bun create blueshed` is described as it is: a
+  paintbrush site with railroad, delta added later through its `evolve` skill.
+- **The `delta-doc` skill fits Claude Code's limits**: `SKILL.md` is under 5,000 tokens (its
+  detail is in `reference.md`, which opens with a contents list), its version sits under
+  `metadata:`, and it says what this release changed (a named id moves the serial on every
+  backend, a row made and removed in one write has no inverse, the longest prefix answers a
+  custom document). `evals/delta-doc.json` holds three scenarios to try it by hand.
+- The vendored `railroad` and `bun-route` skills are railroad 0.16.0's. `examples/kanban`
+  typechecks; `examples/sites-bbox/README.md` names the files that exist.
+
 ### Internal
 
 - `kinds.ts`: the three kinds share one join, leave and `close` (`family()`).

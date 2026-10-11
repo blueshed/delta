@@ -2,6 +2,37 @@
 
 Full API, patterns, and recipes. The companion `SKILL.md` is the router; start there if you haven't.
 
+## Contents
+
+- *First-time bootstrap* — `applyFramework` / `bunx @blueshed/delta init` / `docker-entrypoint-initdb.d`
+- *Quick start (SQLite backend)* — `createTables`, single or list, `implied`, the id rule, auth without RLS, processes sharing a file
+- *Quick start (Postgres backend)* — server + client with `jwtAuth`, `owns`, `onConnect`, session restore, shutdown
+- *Contracts* — `DocType`, `DocDef`, `DeltaAuth` interfaces
+- *Schema generation* — `defineSchema`, column shorthands, `validateOps`
+- *`scope` syntax* — the colon DSL, operators, single or list, footguns
+- *Doc patterns* — list, catalog (list-mode `include`), scoped-single, the parent chain, moving a row, what a remove takes, per-user isolation, custom DocType
+  - *Custom read docs* — `defineCustomDoc` membership (`query`+`matches`) vs recompute (whole-doc); root-replace primitive
+- *Implied documents* — `implied: true`: open empty, the first write makes the root row (every backend; on Postgres, named by number)
+- *Fan-out* — which other open docs hear a write, and what each is told
+- *Authentication* — `DeltaAuth`, JWT impl, token flow, identity switching
+- *RLS with `app.user_id`* — policies, two-pool setup, error-leak rules
+- *Bun HTML route + WebSocket on the same server* — one `Bun.serve`
+  - *Origins* — who may open the socket, `createWs({ origins })`
+- *Rendering collections* — `applyOpsToCollection` recipe
+- *Railroad recipe* — `list()` / `when()` for railroad projects
+- *The write loop* — echo semantics, no-reload table, transient-feedback escape hatch
+- *In-process* — `createLocal()`, `as(identity)`, `onPublish`, savepoints inside your own transaction
+- *The ledger* — `ledger: true`, undo / redo / history, `who` and the cursor, facts, a named change, the inverse on request
+- *One stream of changes* — `{ doc, ops, v }` and `_v` on open
+- *Document kinds* — `registerMemory`, `registerSource`, `registerStatic`
+- *Stored functions* — `delta_open`, `delta_apply`, `*_as` 1-RTT variants, the ledger's `delta_apply_logged` / `delta_walk` / `delta_undo` / `delta_redo` / `delta_history`
+  - *Composing doc operations from SQL* — call `delta_open_as` / `delta_apply_as` from your own `plpgsql`; identity-binding + `SECURITY DEFINER` caveats
+- *CLI* — `bunx @blueshed/delta` runtime + build-time commands
+- *Testing* — `setup.ts` helpers, integration pattern; client-side tests and one-shot scripts
+- *Local development across repos* — a packed tarball, never `file:` (two railroads go inert)
+- *Wire-level protocol* — message shapes
+- *Why delta* — the reasoning and the lineage
+
 ## First-time bootstrap
 
 Before anything else your database needs the delta framework tables + stored functions. Two equivalent paths:
@@ -97,7 +128,7 @@ What is different from Postgres (the full list is SKILL.md → *Backends side by
 - **A document is single or list, as on Postgres** (*`scope` syntax* → *Single or list*). `defineDoc("list:", { root: "lists", … })` opened as `list:groceries` is the `lists` row `groceries`, its `todos`, and their children; `defineDoc("todos:", { root: "todos", include: [] })` opened as `todos:` is every todo.
 - **A single document's root row** must exist before the document opens — seed it with SQL, or declare the document `implied: true` and its first write makes it (*Implied documents*, below).
 - **`createTables(db, schema)` before the first open.** A missing table's error says so. `migrateSchema(db, schema)` adds columns a later schema declares.
-- **Ids are serial numbers, as on Postgres.** `add /todos/-` takes the next serial, and the echo carries it (`/todos/1`). A client-chosen id (`/todos/<id>`) works too, and may be text, as `groceries` is; on Postgres it must be a number. Digits name their number (`/todos/007` is `/todos/7`), up to 2^53 - 1; a path with an id past that is a 400 on every backend, since no JavaScript number holds it exactly (a client minting ids from `Date.now() * 1000` stays under it until the year 2255). `add` of an id that exists is a 409, on every backend and a temporal table too. An add that names an id moves the serial past it, so a later `add /todos/-` does not meet it.
+- **Ids are serial numbers, as on Postgres.** `add /todos/-` takes the next serial, and the echo carries it (`/todos/1`). A client-chosen id (`/todos/<id>`) works too, and may be text, as `groceries` is; on Postgres it must be a number. Digits name their number (`/todos/007` is `/todos/7`), up to 2^53 - 1; a path with an id past that is a 400 on every backend, since no JavaScript number holds it exactly (a client minting ids from `Date.now() * 1000` stays under it until the year 2255). `add` of an id that exists is a 409, on every backend and a temporal table too. An add that names an id moves the serial past it, so a later `add /todos/-` does not meet it, on every backend.
 - **Auth, as on Postgres, without RLS.** `registerDocs(ws, db, schema, docs, customDocs, { auth, owns })` (or `shared: true`) takes the same `DeltaAuth` (`wireAuth(ws, auth)` for its actions): every open, delta, open_at, history, undo, redo and close passes `auth.gate` (401 without an identity), and `owns(identity, docName)` says who may have each document (404 otherwise); with `auth`, `registerDocs` throws without `owns` or `shared`, and so for a custom doc with neither. One `owns` answers for every document of the call -- switch on the name's prefix -- where Postgres takes one per `docTypeFromDef`. Or register a public set and a private set in two calls on one database (`shared` on one, `owns` on the other): they share the ledger, and an undo or redo is walked by the registration whose document its entry was written through. A name is answered by the registration whose prefix matching it is longest, whichever registered first -- a public `board` never answers `board:1` beside a private `board:` -- and a prefix a registration on the server holds already is refused. Each call tells, and reads again, only its own open documents, so keep the two sets over different rows. **A known limit where they share rows: an undo can overwrite a later write with no conflict.** A write through one registration leaves the other's open copies as they were, and a walk plans from its own copy: Ada renames course 1 through `board:1`, Bob renames it through a public `courses:` registered in the other call, and Ada's undo finds her copy still holding her name, so it puts the old name back -- Bob's rename lost, no `conflict` answered. One call, or Postgres, guards it. **There is no RLS**: nothing under `owns` filters what a document reads, so a name its owner may open holds every row its scope admits. The name is the whole check: scope a per-user document by its owner (`scope: { owner_id: ":id" }`) and have `owns` say that id is the caller's; a custom doc's `query`, `matches` and `recompute` are given the identity and must check rows against it themselves. *Per-user list isolation*, below.
 - **Several processes may share the file.** A write takes the write lock first (`BEGIN IMMEDIATE`) and waits up to 5s for another process's (`PRAGMA busy_timeout`, set by `createTables` and `registerDocs` unless the app set its own), so it lands rather than failing `SQLITE_BUSY`; an undo plans and walks under that lock. A copy the backend read before another process wrote (`PRAGMA data_version` moved) is read again before it is served or written from, so an open answers what the other wrote and a write never merges over a stale row. **A document open in one process is not told of a write made in another**: it reads it when it is next opened, or written through. For live fan-out across processes, Postgres. Two costs come with it. A write from another process drops *every* copy this one keeps, each read again from the tables when next needed: with 50 documents open, a write here went from about 0.3 ms to about 7 ms when the other process wrote between each (its write included). And `bun:sqlite` is synchronous, so waiting for another process's lock blocks this process's event loop, for up to the busy timeout (5 s unless you set `PRAGMA busy_timeout` lower): keep writes short on a file processes share.
 - **Fan-out**: a write reaches every open document that holds the row (*Fan-out*, below).
@@ -144,7 +175,7 @@ await listener.destroy();
 await pool.end();
 ```
 
-`bun add pg` and, to type-check, `bun add -d @types/pg` — delta ships TypeScript source, so `skipLibCheck` does not cover its `pg` imports. Ids on Postgres are BIGINTs from `seq_<table>`: create rows with `add /<coll>/-` (a client-chosen id that is not a number, or is past 2^53 - 1, is a 400 that says so), and expect ids back as numbers.
+`bun add pg` and, to type-check, `bun add -d @types/pg` — delta ships TypeScript source, so `skipLibCheck` does not cover its `pg` imports. Ids on Postgres are BIGINTs from `seq_<table>`: create rows with `add /<coll>/-` (a client-chosen id that is not a number, or is past 2^53 - 1, is a 400 that says so; one that is moves `seq_<table>` past it, never back), and expect ids back as numbers.
 
 ```tsx
 // client.tsx
@@ -425,7 +456,7 @@ The error names the prefix and says what to add. Without `auth` nothing is asked
 
 ### Custom read docs — `defineCustomDoc`
 
-`defineCustomDoc(prefix, opts)` declares a **read-only** doc whose contents are a *derived view* over one or more watched collections — a bbox query, a tag filter, a joined summary — rather than a plain collection slice. Clients open it like any doc (`openDoc("sites-in-bbox:...")`); writes still travel the underlying collections' normal paths. Register them with `registerDocs(ws, db, schema, docs, customDocs)` (SQLite) or `createDocListener(ws, pool, { custom })` (Postgres). Two modes, selected by which fields you provide:
+`defineCustomDoc(prefix, opts)` declares a **read-only** doc whose contents are a *derived view* over one or more watched collections — a bbox query, a tag filter, a joined summary — rather than a plain collection slice. Clients open it like any doc (`openDoc("sites-in-bbox:...")`); writes still travel the underlying collections' normal paths. Register them with `registerDocs(ws, db, schema, docs, customDocs)` (SQLite) or `createDocListener(ws, pool, { custom })` (Postgres). A name goes to the longest prefix it starts with, whichever registered first, as a table document's does: `said:loud:hi` beside `said:` is `said:loud:`'s. Two modes, selected by which fields you provide:
 
 **Membership — `query` + `matches` (SQLite + Postgres).** A *flat* view: each watched collection becomes a keyed map, and the framework decides **per row** whether a changed row belongs. `query` does the initial load; `matches` is the live fan-out predicate.
 
@@ -869,7 +900,7 @@ local.onPublish((channel, change) => redraw(channel, change));   // { doc, ops, 
 
 So a rollback after delta has written means **subscribers have already heard a change that did not happen**, and the backend's cache still holds it. Evicting is not enough: `evict(docName)` makes the backend read the document again from the tables the next time it needs it, but its subscribers still hold what they heard, and with a ledger the version is taken again from what is left in the ledger, so the rolled-back version number is reused — a browser already at that `v` drops the real change as one it has. What to do:
 
-- **Close every document the rolled-back write touched, and have every subscriber re-open it.** A re-open reads the tables and resets the subscriber's version from the snapshot's `_v`. In-process that is `close` then `open`; a browser re-opens every document when its socket reconnects, so dropping its connection does it. This is what eta's story harness does between cases.
+- **Close every document the rolled-back write touched, and have every subscriber re-open it.** A re-open reads the tables and resets the subscriber's version from the snapshot's `_v`. In-process that is `close` then `open`; a browser re-opens every document when its socket reconnects, so dropping its connection does it.
 - Better still, keep writes that may roll back away from documents anyone is watching.
 
 ```ts
@@ -905,13 +936,13 @@ await createDocListener(ws, pool, { auth, ledger: true, who: (identity) => Strin
 
 Undo walks back what the cursor wrote, newest first, across documents; redo walks it forward; a fresh write by the cursor ends what could be redone. Each walk is itself a write through the same path — validated, recorded (linked to the entry it walked), broadcast — so every subscriber sees an undo as an ordinary change.
 
-**A walk sets back only what its entry changed, and only where the document still holds what the entry left.** A field someone else has written since is a **conflict**: the walk changes nothing and answers `conflict: [paths]` (a row it made and someone has edited is not removed, nor one someone has put rows under -- a venue it added, with an area another added under it; a row it removed and someone has put back is not added). Each row is walked once, by the entry's net change: a row one batch made and then changed is removed, one it removed and made again gets its fields back. A single document's root is one row whichever path the write named it by (`/venues`, `/venues/42`): removed, added back and written in one write, it is walked as one row, its fields set back at `/venues`. The walk is recorded all the same — an entry with no ops that is never redone — so the next undo goes on to the entry before it; a walk the document refuses (the row's parent is gone) is recorded the same way. `null` still means nothing to walk.
+**A walk sets back only what its entry changed, and only where the document still holds what the entry left.** A field someone else has written since is a **conflict**: the walk changes nothing and answers `conflict: [paths]` (a row it made and someone has edited is not removed, nor one someone has put rows under -- a venue it added, with an area another added under it; a row it removed and someone has put back is not added). Each row is walked once, by the entry's net change: a row one batch made and then changed is removed, one it removed and made again gets its fields back, and one it made and removed again walks nothing. A single document's root is one row whichever path the write named it by (`/venues`, `/venues/42`): removed, added back and written in one write, it is walked as one row, its fields set back at `/venues`. The walk is recorded all the same — an entry with no ops that is never redone — so the next undo goes on to the entry before it; a walk the document refuses (the row's parent is gone) is recorded the same way. `null` still means nothing to walk.
 
 **A named change.** `change: <entry id>` walks one change instead of the cursor's next: two writers on one cursor -- a person and an assistant in one browser -- each undo their own. The change is the chain that entry is in, a write and every walk of it, so the write's `entry`, its undo's and its redo's all name it. It must be the cursor's own: another cursor's, a fact, or no entry at all is 404 (`Entry 7 is no change of this cursor's`), and an id that is not a whole number from 1 is 400. `undo` walks it back if it stands, `redo` forward if it was undone (a fresh write does not end it: the guard stands in), and `null` when it goes neither way. The guard is the same as any walk's -- a field written since, by anyone or by the cursor itself, is a conflict and nothing is walked -- but a named walk that meets a conflict records nothing: no cursor has to move past it, and the change can be walked once the document holds again what it left. The gate and `owns` are asked as for `undo`. `dry` and `entry` work with it: `entry` is then the change's next.
 
 **Asking first.** `dry: true` answers what the walk would do — `{ doc, entry, ops, conflict? }` — and walks nothing, so a caller can ask whoever owns the document (a deadline, a permission) before it walks. `entry: <id>` then walks only if that is still the cursor's next entry, and answers 409 if it is not. A removed row comes back under its own id, a cascaded remove comes back parent first (and so does a redo of an undo that took a row and its children), and an undo reaches a document nobody has open (SQLite loads it for the walk and leaves it closed). `history` goes to whoever may open the document (each backend asks the gate, `owns`, and that it opens); each entry says `mine` — whether the asker's cursor wrote it — never who did, never a cursor. With `auth`, `undo` and `redo` pass the gate first (401 without an identity) and walk only into a document the walker `owns` (404); on Postgres they use the `_as` forms so RLS applies.
 
-**The inverse without a ledger (SQLite).** A `delta` message with `inverse: true` is answered `{ ack: true, ops, inverse }`: the ops as applied and what would take them back, read from the document as it was. For a writer that keeps its own history. `inverseOf(before, applied, asked?)` is exported from `@blueshed/delta/sqlite`: an add is removed, a remove added back, a replace replaced by its old self, in reverse order, except that each remove comes back with the rows its removal cascaded to, parent first; temporal storage columns are left out. `asked`, the ops as sent, tells a remove asked for from one cascaded; without it, removes one after another are taken for one cascade, so removes asked children first would come back children first. On Postgres the inverse comes with the ledger.
+**The inverse without a ledger (SQLite).** A `delta` message with `inverse: true` is answered `{ ack: true, ops, inverse }`: the ops as applied and what would take them back, read from the document as it was. A row the write makes and takes out again has no inverse, on every backend: `[add, remove]` inverts to `[]`, `[add, remove, add]` to `[remove]`. For a writer that keeps its own history. `inverseOf(before, applied, asked?)` is exported from `@blueshed/delta/sqlite`: an add is removed, a remove added back, a replace replaced by its old self, in reverse order, except that each remove comes back with the rows its removal cascaded to, parent first; temporal storage columns are left out. `asked`, the ops as sent, tells a remove asked for from one cascaded; without it, removes one after another are taken for one cascade, so removes asked children first would come back children first. On Postgres the inverse comes with the ledger.
 
 ## One stream of changes — `v` and `_v`
 
@@ -1133,7 +1164,7 @@ Server-initiated broadcasts (no id):
 | Server → Client | Shape |
 |---|---|
 | Op broadcast | `{ doc, ops: DeltaOp[], v? }` — `v` is the version after the change, where the backend versions |
-| Let go (Postgres, with `auth`) | `{ doc, error: { code, message } }` — the socket may no longer hear `doc` and is unsubscribed from it: 401, its gate refused it (the client connects again); 404, `owns` did (the client opens it again, and lets its copy go if refused) |
+| Let go (with `auth`, every backend) | `{ doc, error: { code, message } }` — the socket may no longer hear `doc` and is unsubscribed from it: 401, its gate refused it (the client connects again); 404, `owns` did (the client opens it again, and lets its copy go if refused) |
 
 Every message is JSON. Clients use `doc.send(ops)` internally; the protocol is only relevant when writing a custom action handler.
 
@@ -1152,4 +1183,4 @@ Every message is JSON. Clients use `doc.send(ops)` internally; the protocol is o
 
 Existing sync libraries are built for human developers: big API surfaces, many idioms, ecosystem dependencies. Delta is shaped for AI-driven development: the whole system fits in one context window, there is one way to do each thing, and the schema is generated from a single TypeScript source of truth. If an assistant reaches for Supabase or Firebase, that is a default trained from millions of projects; delta is not harder than those, it is smaller, and it can be read in full before a line is written.
 
-Lineage: started as dzql (Vue / Pinia, database-first), matured into seiro (CQRS over WebSocket with Preact Signals), refined in paintbrush's delta-sync, realised in clean as a Postgres-resident primitive, and extracted as this package. eta, a server-rendering kernel, now builds on it in-process.
+Lineage: started as dzql (Vue / Pinia, database-first), matured into seiro (CQRS over WebSocket with Preact Signals), refined in paintbrush's delta-sync, realised in clean as a Postgres-resident primitive, and extracted as this package.

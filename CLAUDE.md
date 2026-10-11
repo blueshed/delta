@@ -98,7 +98,7 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
 - **`who`** is `client.data.identity` on both backends, or on Postgres with an `auth` module,
   what the gate gives.
 - **Changelog**: Keep a Changelog, with `## [Unreleased]` at the top written as work lands;
-  `/publish` promotes it. The skill's `version:` is stamped by `/publish`; don't bump it by hand.
+  `/publish` promotes it. The skill's `metadata.version` is stamped by `/publish`; don't bump it by hand.
 
 ## Where the contracts live
 
