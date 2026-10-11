@@ -90,7 +90,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the version the document is at, and nothing is told. `_delta_bump_and_notify` (`001c`,
   `CREATE OR REPLACE`: re-apply the framework, or `bunx @blueshed/delta init --upgrade`). An empty
   write through a single document whose root is not there is not found (404), as on SQLite, where
-  Postgres answered it version 0 (`delta_apply`, `001d`, likewise).
+  Postgres answered it version 0 (`delta_apply`, `001d`, likewise). An empty write to an implied
+  document not yet made makes no root row, on every backend: it answers the version the document
+  opens at, and writes, logs and tells nothing; its first write that changes something makes it.
 - **History lists entries of one version in one order, on every backend.** An undo that walked
   nothing is recorded at the version of the write before it, and Postgres's `delta_history` sorted by
   version alone, so it could list the two the other way round from SQLite. Both now sort newest

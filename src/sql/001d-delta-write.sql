@@ -397,8 +397,9 @@ BEGIN
 
   -- an implied document's first write makes its root row (todo #34), told as a
   -- row carried in: an add to a list of those roots, nothing to the implied
-  -- documents, which showed it already (ensureImpliedRoot in sqlite.ts)
-  IF NOT v_is_list AND COALESCE(v_def.implied, FALSE) THEN
+  -- documents, which showed it already (ensureImpliedRoot in sqlite.ts); an
+  -- empty write makes nothing
+  IF NOT v_is_list AND COALESCE(v_def.implied, FALSE) AND jsonb_array_length(p_ops) > 0 THEN
     EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I WHERE id = $1)', v_root_view) INTO v_exists USING v_doc_id;
     PERFORM _delta_make_implied(v_def, v_doc_id, p_ops, v_ts);
     IF NOT v_exists THEN

@@ -833,6 +833,18 @@ export function documentCases(backend: () => PathBackend): void {
       expect(result.map((e: any) => [e.version - before, e.ops.length, e.mine])).toEqual([[2, 0, true], [2, 1, false], [1, 1, true]]);
     });
 
+    test("an empty write to an implied document not yet made makes nothing: no root row, no version, nothing told; the first write that changes something does", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-plan:7"]);
+      const empty = await write(b.process, "fo-plan:7", []);
+      expect(empty.version).toBe(copies.get("fo-plan:7")._v);
+      await expectSilent(b, "fo-plan:7");
+      expect((await b.process.call("open", { doc: "fo-title:7" })).error?.code).toBe(404);
+      await write(b.process, "fo-plan:7", [{ op: "replace", path: "/weddings/name", value: "planned" }]);
+      expect((await b.process.call("open", { doc: "fo-title:7" })).result.weddings).toEqual({ id: 7, name: "planned" });
+      await assertCopiesHold(b, copies);
+    });
+
     test("an empty write through a document that is not there is not found (404): never there, or its root gone since", async () => {
       const b = backend();
       await openAll(b.process, ["fo-board:1", "fo-household:2"]);

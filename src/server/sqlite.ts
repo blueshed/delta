@@ -912,14 +912,14 @@ export function registerDocs<I = unknown>(
           doc = load(docName, def, docName.slice(def.prefix.length)) ?? rootless(def, docName.slice(def.prefix.length));
           snapshot = structuredClone(doc);
         }
-        const made = implied.has(docName) && !addsRoot ? ensureImpliedRoot(def, doc, docName) : undefined;
+        const made = implied.has(docName) && !addsRoot && ops.length > 0 ? ensureImpliedRoot(def, doc, docName) : undefined;   // an empty write makes nothing
         const done = applyOps(docName, def, doc, ops, by.undoes !== undefined);
         touched = made ? [made, ...done.touched] : done.touched;
         const inverse = inverseOf(besides(snapshot, done.beyond), done.applied, ops);
         const recorded = ledger?.record({ doc: docName, ops: done.applied, inverse, ...by });
         return { ops: done.applied, inverse, version: recorded?.version, entry: recorded?.entry };
       }).immediate();
-      implied.delete(docName);
+      if (ops.length > 0) implied.delete(docName);
     } catch (err: any) {
       if (cache.has(docName)) cache.set(docName, snapshot); // restore in-memory cache (a rootless walk's copy was never in it)
       named(err);
