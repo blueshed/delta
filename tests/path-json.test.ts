@@ -57,8 +57,17 @@ describe("json", () => {
     expect((await write(again.process, "fo-board:1", [{ op: "add", path: "/courses/-", value: { name: "Cheese" } }])).ops[0].path).toBe("/courses/4");
   });
 
-  test("a newcomer's first file -- not there, empty, or {} -- opens as empty tables, takes a first write, and then holds it", async () => {
-    for (const [first, make] of [["missing", () => rmSync(file)], ["empty", () => writeFileSync(file, "")], ["{}", () => writeFileSync(file, "{}")]] as const) {
+  test("a file that is not JSON is refused by name at the start, and left as it was", () => {
+    for (const text of ["not json", "{", " "]) {
+      writeFileSync(file, text);
+      expect(() => open()).toThrow(file);
+      expect(readFileSync(file, "utf8")).toBe(text);
+    }
+  });
+
+  test("a newcomer's first file -- not there, 0 bytes, {} or any JSON with no tables -- opens as empty tables, takes a first write, and then holds it", async () => {
+    const files = [["missing", () => rmSync(file)], ["0 bytes", () => writeFileSync(file, "")], ["{}", () => writeFileSync(file, "{}")], ["null", () => writeFileSync(file, "null")], ["[]", () => writeFileSync(file, "[]")]] as const;
+    for (const [first, make] of files) {
       make();
       const fresh = open();
       expect({ first, open: (await fresh.process.call("open", { doc: "fo-all-courses:" })).result?.courses }).toEqual({ first, open: {} });

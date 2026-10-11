@@ -37,11 +37,17 @@ export type { Snapshot } from "../schema";
 /** The file: the rows and sequences, and the ledger's rows. */
 type Saved = Snapshot & { ledger?: { entries: Record<string, unknown>[]; versions: Record<string, unknown>[] } };
 
-/** The file, as a store with no rows yet when it is not there, empty, or `{}` -- a newcomer's first file. */
+/**
+ * The file: a store with no rows yet when it is not there, 0 bytes, or JSON
+ * with no tables (`{}`) -- a newcomer's first file. One that is not JSON is
+ * refused by name, and left as it is.
+ */
 function read(file: string): Saved {
-  const text = existsSync(file) ? readFileSync(file, "utf8").trim() : "";
-  const saved = (text ? JSON.parse(text) : {}) as Partial<Saved>;
-  return { ...saved, tables: saved.tables ?? {}, sequences: saved.sequences ?? {} };
+  const text = existsSync(file) ? readFileSync(file, "utf8") : "";
+  let saved: Partial<Saved> | null = null;
+  try { saved = text === "" ? null : JSON.parse(text); }
+  catch (err: any) { throw new Error(`${file} is not JSON (${err.message}): fix it, or move it aside to start empty`); }
+  return { ...saved, tables: saved?.tables ?? {}, sequences: saved?.sequences ?? {} };
 }
 
 /** Every row the file holds, and each collection's last minted id. */

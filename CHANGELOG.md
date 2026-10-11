@@ -44,9 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   could not apply. On every backend the made root is now told where it arrives, before the
   write's own ops; the implied documents, which showed it already, hear the write as written.
   In `write()` (`sqlite.ts`) and `delta_apply` (`001d`, replaced in place: apply it again).
-- **`@blueshed/delta/json` opens a newcomer's first file**: one that is not there, empty, or `{}`
-  opens as empty tables and takes a first write. `{}` crashed `registerDocs` (no `tables`), and
-  an empty file failed to parse.
+- **`@blueshed/delta/json` opens a newcomer's first file**: one that is not there, 0 bytes, or
+  JSON with no tables (`{}`) opens as empty tables and takes a first write. `{}` crashed
+  `registerDocs` (no `tables`), and an empty file failed to parse. A file that is not JSON is
+  refused at the start, by name, and left as it is.
 - **A document named with a time (`at:`) reads the past: it takes no writes and is told only what
   its time does not keep**, on every backend. A write through `notes-on:2021-01-01` changed the
   rows as they are now, and such a document open was told every current write, so its copy
