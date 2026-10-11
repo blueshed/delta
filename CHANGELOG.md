@@ -12,11 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A sourced document no longer polls forever when its only watcher leaves during the first
   reading (todo #65).** The socket's drop ran before the watch existed, so nothing stopped it;
   `registerSource` now starts the watch only if someone still has the document open.
-- **Postgres: an add that names an id moves the table's serial past it (todo #63).** `add
-  /notes/7` left `seq_<table>` behind, so a later `add /notes/-` met 7 as already there (409).
-  `delta_apply` (`001d`, replaced in place: apply it again) now sets the sequence to the id when
-  it is at or past the next serial, never back. SQLite and the JSON file still mint past their
-  own sequence alone.
+- **An add that names an id moves the table's serial past it (todos #63, #72).** `add
+  /notes/7` left the serial behind, so a later `add /notes/-` met 7 as already there (409). On
+  Postgres, `delta_apply` (`001d`, replaced in place: apply it again) sets `seq_<table>` to the
+  id when it is at or past the next serial, never back, through `_delta_serial_past`: `SECURITY
+  DEFINER`, so an app role needs no grant beyond the documented `USAGE, SELECT` on sequences.
+  SQLite and the JSON file do the same in this release.
 
 ### Removed
 

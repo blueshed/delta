@@ -3,6 +3,25 @@
 -- =========================================================================
 
 -- ---------------------------------------------------------------------------
+-- _delta_serial_past: moves a collection's serial (seq_<table>) past an id an
+-- add named, never back, so a later add at /- does not meet it (todo #63).
+-- setval needs UPDATE on the sequence, and an app role is granted USAGE,
+-- SELECT: so it runs as the framework's owner (SECURITY DEFINER), for a table
+-- delta knows and an id a path may name, and nothing else.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION _delta_serial_past(p_table TEXT, p_id BIGINT)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
+BEGIN
+  IF p_id > 9007199254740991 OR NOT EXISTS (SELECT 1 FROM _delta_collections WHERE table_name = p_table) THEN
+    RETURN;
+  END IF;
+  EXECUTE format('SELECT setval(%L, $1) FROM %I WHERE $1 >= last_value + is_called::int',
+    'seq_' || p_table, 'seq_' || p_table) USING p_id;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
 -- _delta_cascade_remove: remove a row + cascade to children & referencedBy
 -- Returns the array of broadcast ops generated.
 -- ---------------------------------------------------------------------------
@@ -608,12 +627,8 @@ BEGIN
         v_coll.table_name, v_coll.table_name
       ) INTO v_new_row USING v_new_row;
 
-      -- An id the add named moves the serial past it, never back, so a later
-      -- /- does not meet it (todo #63).
-      IF v_id_text <> '-' THEN
-        EXECUTE format('SELECT setval(%L, $1) FROM %I WHERE $1 >= last_value + is_called::int',
-          'seq_' || v_coll.table_name, 'seq_' || v_coll.table_name) USING v_id;
-      END IF;
+      -- An id the add named moves the serial past it, so a later /- does not meet it.
+      IF v_id_text <> '-' THEN PERFORM _delta_serial_past(v_coll.table_name, v_id); END IF;
 
       -- A root row added through a document is one it holds: a list's, given
       -- its bindings, must meet the rest of its conditions too (a name like

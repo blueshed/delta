@@ -162,6 +162,16 @@ describe("RLS and the broadcast channel (NOSUPERUSER role)", () => {
     expect(back.result.ops).toHaveLength(1);
   });
 
+  test("an add that names an id moves the serial past it, with the documented grants (USAGE, SELECT on sequences) (#63)", async () => {
+    registerDocType(docTypeFromDef(mine, app, { auth, owns: (who, name) => name === `rls-mine:${who.id}` }));
+    listener = await createDocListener(ws, app, { auth });
+    const alice = person(1);
+    await sendAndAwait(ws, alice, { action: "open", doc: "rls-mine:1" });
+    expect((await sendAndAwait(ws, alice, { action: "delta", doc: "rls-mine:1", ops: [{ op: "add", path: "/rls_items/7", value: { name: "named" } }] })).error).toBeUndefined();
+    expect((await sendAndAwait(ws, alice, { action: "delta", doc: "rls-mine:1", ops: [{ op: "add", path: "/rls_items/-", value: { name: "minted" } }] })).error).toBeUndefined();
+    expect((await admin.query("SELECT id::int, name FROM rls_items WHERE owner_id = 1 ORDER BY id")).rows).toEqual([{ id: 7, name: "named" }, { id: 8, name: "minted" }]);
+  });
+
   test("an undo is a write: once the identity no longer owns the document, its undo is a 404 too", async () => {
     await admin.query("TRUNCATE _delta_ledger RESTART IDENTITY");
     const members = new Set([1]);
