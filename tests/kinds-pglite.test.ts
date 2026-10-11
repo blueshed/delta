@@ -5,7 +5,7 @@
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import type { Pool } from "pg";
-import { applyFramework, applySql, clearRegistry, createDocListener, defineDoc, defineSchema, docTypeFromDef, generateSql, registerDocType } from "../src/server/postgres";
+import { applyFramework, applySql, createDocListener, defineDoc, defineSchema, docTypeFromDef, generateSql } from "../src/server/postgres";
 import { openPglite } from "../src/server/pglite";
 import { createLocal } from "../src/server/local";
 import { registerMemory } from "../src/server/kinds";
@@ -25,14 +25,13 @@ beforeAll(async () => {
   await applySql(pool, generateSql(schema, [lists]));
 });
 afterAll(async () => { await pool.end(); });
-afterEach(async () => { for (const l of listeners.splice(0)) await l.destroy(); clearRegistry(); });
+afterEach(async () => { for (const l of listeners.splice(0)) await l.destroy(); });
 
 async function serve(listenerFirst: boolean) {
   const local = createLocal();
   const memory = () => registerMemory(local.server, { prefix: "here:", empty: () => ({ people: {} }) });
-  registerDocType(docTypeFromDef(lists, pool));
   if (!listenerFirst) memory();
-  listeners.push(await createDocListener(local.server, pool));
+  listeners.push(await createDocListener(local.server, pool, { types: [docTypeFromDef(lists, pool)] }));
   if (listenerFirst) memory();
   return local;
 }

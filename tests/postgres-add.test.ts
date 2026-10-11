@@ -9,7 +9,7 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } fr
 import type { Pool } from "pg";
 import {
   applySql, generateSql, defineSchema, defineDoc,
-  createDocListener, registerDocType, docTypeFromDef, clearRegistry,
+  createDocListener, docTypeFromDef,
 } from "../src/server/postgres";
 import { createWs } from "../src/server/server";
 import { setLogLevel } from "../src/server/logger";
@@ -43,13 +43,10 @@ let ws: ReturnType<typeof createWs>;
 let listener: Awaited<ReturnType<typeof createDocListener>>;
 
 beforeEach(async () => {
-  clearRegistry();
   await pool.query("TRUNCATE add_notes, add_tags; TRUNCATE _delta_versions;");
-  registerDocType(docTypeFromDef(doc, pool));
-  registerDocType(docTypeFromDef(tags, pool));
   ws = createWs();
   ws.setServer({ publish() {} });
-  listener = await createDocListener(ws, pool);
+  listener = await createDocListener(ws, pool, { types: [docTypeFromDef(doc, pool), docTypeFromDef(tags, pool)] });
 });
 
 afterEach(async () => {

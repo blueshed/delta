@@ -28,6 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other's page shows it); start `examples/shared-state` and pass a message between two sockets;
   and check a memory document beside a Postgres one, and `jwtAuth`'s logout and identity switch.
 
+### Removed
+
+- **`registerDocType`, `resolveDoc` and `clearRegistry` (`@blueshed/delta/postgres`): a listener's
+  document types are its own.** They lived in one registry for the process, so two servers in
+  one process (tests, `bun --hot`, paintbrush) could not each have theirs. Give them to the
+  listener -- `createDocListener(ws, pool, { types: docs.map((def) => docTypeFromDef(def, pool)) })`
+  -- and add one later with the `register` it returns, which replaces the type of its prefix (a
+  module run again); its checks are the same (with `auth`, `owns` or `shared`; no prefix twice,
+  nor a custom document's). Migration: move each `registerDocType(t)` into `types: [t]`, and drop
+  `clearRegistry()`.
+
 ### Fixed
 
 - **Postgres: a write costs what is open, not every name ever opened (todo #73, #33's cost).**

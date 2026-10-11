@@ -8,7 +8,7 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import type { Pool } from "pg";
 import { splitPath, joinPath } from "../src/core";
-import { createDocListener, registerDocType, docTypeFromDef, defineDoc, clearRegistry } from "../src/server/postgres";
+import { createDocListener, docTypeFromDef, defineDoc } from "../src/server/postgres";
 import { createWs } from "../src/server/server";
 import { setLogLevel } from "../src/server/logger";
 import { newPool, applyFramework, applyItemsFixture, resetState, mockClient, sendAndAwait } from "./setup";
@@ -77,12 +77,10 @@ describe("delta_apply on the wire", () => {
   let listener: Awaited<ReturnType<typeof createDocListener>>;
 
   beforeEach(async () => {
-    clearRegistry();
     await resetState(pool);
-    registerDocType(docTypeFromDef(defineDoc("items:", { root: "items", include: [] }), pool));
     ws = createWs();
     ws.setServer({ publish() {} });
-    listener = await createDocListener(ws, pool);
+    listener = await createDocListener(ws, pool, { types: [docTypeFromDef(defineDoc("items:", { root: "items", include: [] }), pool)] });
   });
 
   const delta = async (ops: any[]) => {

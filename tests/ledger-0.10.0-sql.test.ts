@@ -5,7 +5,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Pool } from "pg";
-import { applyFramework, applySql, clearRegistry, createDocListener, docTypeFromDef, generateSql, importTables, registerDocType } from "../src/server/postgres";
+import { applyFramework, applySql, createDocListener, docTypeFromDef, generateSql, importTables } from "../src/server/postgres";
 import { openPglite } from "../src/server/pglite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
@@ -36,10 +36,8 @@ const name = (res: any) => res.result?.weddings?.name;
 
 describe("a database on 0.10.0's SQL", () => {
   test("undo and redo walk the cursor's next entry, as they did; a walk that names a change is the server's error until 001g is applied again", async () => {
-    clearRegistry();
-    for (const def of pathDocs) registerDocType(docTypeFromDef(def, pool));
     const local = createLocal();
-    const listener = await createDocListener(local.server, pool, { ledger: true });
+    const listener = await createDocListener(local.server, pool, { types: pathDocs.map((def) => docTypeFromDef(def, pool)), ledger: true });
     try {
       await local.call("open", { doc: "fo-title:1" });
       const made = (await local.call("delta", { doc: "fo-title:1", ops: [{ op: "replace", path: "/weddings/name", value: "later" }], cursor: "s1" })).result;
@@ -55,10 +53,8 @@ describe("a database on 0.10.0's SQL", () => {
   });
 
   test("signed in, undo and redo go through delta_walk_as, as they did", async () => {
-    clearRegistry();
-    for (const def of pathDocs) registerDocType(docTypeFromDef(def, pool, { auth, owns: ownsByName }));
     const local = createLocal();
-    const listener = await createDocListener(local.server, pool, { auth, ledger: true });
+    const listener = await createDocListener(local.server, pool, { types: pathDocs.map((def) => docTypeFromDef(def, pool, { auth, owns: ownsByName })), auth, ledger: true });
     try {
       const ada = local.as({ id: 1 });
       await ada.call("open", { doc: "fo-title:1" });

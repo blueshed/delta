@@ -17,7 +17,7 @@ import { createWs, registerDoc } from "../src/server/server";
 import { registerMemory } from "../src/server/kinds";
 import { defineSchema, defineDoc, createTables, registerDocs } from "../src/server/sqlite";
 import {
-  applySql, generateSql, createDocListener, registerDocType, docTypeFromDef, clearRegistry,
+  applySql, generateSql, createDocListener, docTypeFromDef,
 } from "../src/server/postgres";
 import { setLogLevel } from "../src/server/logger";
 import { newPool, applyFramework, mockClient, sendAndAwait } from "./setup";
@@ -133,10 +133,8 @@ describe("add /coll/- makes a row the server names, on every backend", () => {
     });
 
     test("Postgres", async () => {
-      clearRegistry();
-      registerDocType(docTypeFromDef(roomDoc, pool));
       const ws = createWs();
-      const listener = await createDocListener(ws, pool);
+      const listener = await createDocListener(ws, pool, { types: [docTypeFromDef(roomDoc, pool)] });
       try {
         const { view, published } = await story(ws, "cr-room:1");
         await heard(published, view, 2);

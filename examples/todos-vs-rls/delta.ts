@@ -23,7 +23,7 @@
  */
 import type { Pool } from "pg";
 import {
-  createDocListener, defineCustomDoc, docTypeFromDef, registerDocType, withAppAuth,
+  createDocListener, defineCustomDoc, docTypeFromDef, withAppAuth,
 } from "../../src/server/postgres";
 import { createLocal } from "../../src/server/local";
 import { auth, myTodos, teamTodos, type Identity } from "./setup";
@@ -58,10 +58,12 @@ export async function serveTodos(app: Pool) {
       "SELECT 1 FROM example_team_members WHERE user_id = $1 AND team_id = $2", [me.id, Number(team)]);
     return (rowCount ?? 0) > 0;
   };
-  registerDocType(docTypeFromDef<Identity>(myTodos, app, { auth, owns: (me, name) => name === `todos-mine:${me.id}` }));
-  registerDocType(docTypeFromDef<Identity>(teamTodos, app, { auth, owns: isMember }));
+  const types = [
+    docTypeFromDef<Identity>(myTodos, app, { auth, owns: (me, name) => name === `todos-mine:${me.id}` }),
+    docTypeFromDef<Identity>(teamTodos, app, { auth, owns: isMember }),
+  ];
 
   const local = createLocal();
-  const listener = await createDocListener(local.server, app, { auth, custom: [summary] });
+  const listener = await createDocListener(local.server, app, { types, auth, custom: [summary] });
   return { local, listener };
 }

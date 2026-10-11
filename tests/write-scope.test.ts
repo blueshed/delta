@@ -23,7 +23,7 @@ import {
   defineSchema, defineDoc, createTables, registerDocs,
 } from "../src/server/sqlite";
 import {
-  createDocListener, docTypeFromDef, registerDocType, clearRegistry,
+  createDocListener, docTypeFromDef,
   defineDoc as pgDefineDoc,
 } from "../src/server/postgres";
 import { createWs, type WsServer } from "../src/server/server";
@@ -259,7 +259,6 @@ describe("write scoping (postgres)", () => {
   });
 
   beforeEach(async () => {
-    clearRegistry();
     await resetState(pool);
     await pool.query(`
       TRUNCATE notes, projects, tenants RESTART IDENTITY CASCADE;
@@ -267,13 +266,11 @@ describe("write scoping (postgres)", () => {
       INSERT INTO projects (id, tenant_id, title) VALUES (10, 1, 'Alice proj'), (20, 2, 'Bob proj');
       INSERT INTO notes (id, project_id, body) VALUES (100, 10, 'alice note'), (200, 20, 'BOB SECRET');
     `);
-    registerDocType(docTypeFromDef(
-      pgDefineDoc("tenant:", { root: "tenants", include: ["projects", "notes"] }),
-      pool,
-    ));
     ws = createWs();
     ws.setServer({ publish() {} });
-    listener = await createDocListener(ws, pool);
+    listener = await createDocListener(ws, pool, {
+      types: [docTypeFromDef(pgDefineDoc("tenant:", { root: "tenants", include: ["projects", "notes"] }), pool)],
+    });
   });
 
   afterEach(async () => {
@@ -406,13 +403,12 @@ describe("write scoping (postgres)", () => {
   test("a list-mode doc can still write every row it can read", async () => {
     // List mode loads `include`d collections in FULL, so the gate must NOT
     // narrow writes there — otherwise catalog-shaped docs break.
-    clearRegistry();
     await pool.query(`
       INSERT INTO _delta_docs (prefix, root_collection, include, scope)
       VALUES ('all-tenants:', 'tenants', '{"projects","notes"}', '{}'::jsonb)
       ON CONFLICT (prefix) DO UPDATE SET include = EXCLUDED.include
     `);
-    registerDocType(docTypeFromDef(
+    listener.register(docTypeFromDef(
       pgDefineDoc("all-tenants:", { root: "tenants", include: ["projects", "notes"] }),
       pool,
     ));

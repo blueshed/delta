@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { Pool } from "pg";
 import {
-  applySql, clearRegistry, createDocListener, docTypeFromDef, exportTables, generateSql, importTables, registerDocType,
+  applySql, createDocListener, docTypeFromDef, exportTables, generateSql, importTables,
 } from "../src/server/postgres";
 import * as sqlite from "../src/server/sqlite";
 import * as json from "../src/server/json";
@@ -52,15 +52,13 @@ async function processOn(): Promise<PathProcess> {
   const local = createLocal();
   const heard: { channel: string; data: any }[] = [];
   local.onPublish((channel, data) => heard.push({ channel, data }));
-  listeners.push(await createDocListener(local.server, pool, { ledger: true, custom: [postgresInbox, postgresOpenSeats, postgresMenuCard] }));
+  listeners.push(await createDocListener(local.server, pool, { types: pathDocs.map((def) => docTypeFromDef(def, pool)), ledger: true, custom: [postgresInbox, postgresOpenSeats, postgresMenuCard] }));
   return { call: (action, msg) => local.call(action, msg), heard };
 }
 
 beforeEach(async () => {
-  clearRegistry();
   await pool.query(`TRUNCATE ${tables.join(", ")}, _delta_versions, _delta_ops_log, _delta_ledger RESTART IDENTITY`);
   await importTables(pool, pathSchema, pathSeed);
-  for (const def of pathDocs) registerDocType(docTypeFromDef(def, pool));
   backend = {
     process: await processOn(),
     // LISTEN/NOTIFY over the wire: the write answers at its commit; what it notified is fetched and published after.
@@ -274,10 +272,8 @@ describe("the whole path: one app's data, carried from a JSON file to a Postgres
       await applyFramework(lite);
       await applySql(lite, generateSql(pathSchema, pathDocs));
       await importTables(lite, pathSchema, sqlite.exportTables(db, pathSchema));
-      clearRegistry();
-      for (const def of pathDocs) registerDocType(docTypeFromDef(def, lite));
       const onLite = localOf();
-      listeners.push(await createDocListener(onLite.local.server, lite, { ledger: true }));
+      listeners.push(await createDocListener(onLite.local.server, lite, { types: pathDocs.map((def) => docTypeFromDef(def, lite)), ledger: true }));
       expect(await readAll(onLite.process)).toEqual(read2);
       expect(await add(onLite.process, "Pudding")).toBe("/courses/5");
       const read3 = await readAll(onLite.process);
@@ -285,10 +281,8 @@ describe("the whole path: one app's data, carried from a JSON file to a Postgres
       // 4. a Postgres server
       await pool.query(`TRUNCATE ${tables.join(", ")}, _delta_versions, _delta_ops_log, _delta_ledger RESTART IDENTITY`);
       await importTables(pool, pathSchema, await exportTables(lite, pathSchema));
-      clearRegistry();
-      for (const def of pathDocs) registerDocType(docTypeFromDef(def, pool));
       const onServer = localOf();
-      listeners.push(await createDocListener(onServer.local.server, pool, { ledger: true }));
+      listeners.push(await createDocListener(onServer.local.server, pool, { types: pathDocs.map((def) => docTypeFromDef(def, pool)), ledger: true }));
       expect(await readAll(onServer.process)).toEqual(read3);
       expect(await add(onServer.process, "Coffee")).toBe("/courses/6");
 

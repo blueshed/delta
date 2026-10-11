@@ -7,11 +7,11 @@
  *   - apply   — apply delta ops and return the new version.
  *   - openAt  — optional snapshot-at-timestamp read.
  *
- * Generic docs (delta-doc framework) register via `docTypeFromDef(def, pool)`.
- * Custom docs (e.g. venue-occasion) export their own `DocType` and register it.
- *
- * doc-listener consults `resolveDoc(name)` for every WS message — no other
- * place in the codebase interprets doc-name prefixes.
+ * Generic docs (delta-doc framework) are made by `docTypeFromDef(def, pool)`.
+ * Custom docs (e.g. venue-occasion) export their own `DocType`. Each is given
+ * to a listener (`createDocListener(ws, pool, { types })`), which asks its own
+ * types for every WS message -- no other place in the codebase interprets
+ * doc-name prefixes.
  */
 import type { Pool } from "pg";
 import type { DocDef } from "./schema";
@@ -74,7 +74,7 @@ export interface DocType<C = any, I = unknown> {
    * false answers 404. It asks it again before it tells a socket of a change,
    * once per identity per change, and lets go of a socket it refuses -- so keep
    * it cheap (a name check, or a membership the app caches). With auth, a type needs it or `shared: true`:
-   * `registerDocType` and `createDocListener` refuse one with neither.
+   * `createDocListener` and its `register` refuse one with neither.
    */
   owns?(identity: I, docName: string): boolean | Promise<boolean>;
 
@@ -87,60 +87,38 @@ export interface DocType<C = any, I = unknown> {
 }
 
 // ---------------------------------------------------------------------------
-// Registry — ordered by descending prefix length so longest match wins
+// A listener's types -- the longest prefix answers a name
 // ---------------------------------------------------------------------------
 
-const types: DocType[] = [];
-
 /**
- * The listeners now running: their custom documents' prefixes, which no type
- * may take (todo #76), and whether each has an `auth` module -- while one
- * does, every type must say who owns it.
+ * A listener's document types (`createDocListener`'s `types`), each server its
+ * own. With `auth`, each says who owns it (`owns`, or `shared: true`); no two
+ * have one prefix, nor one of `taken` (the listener's custom documents, todo
+ * #76). `register` adds one later, replacing the type of its prefix: a module
+ * run again (`bun --hot`) registers the latest code.
  */
-const running = new Set<{ prefixes: string[]; auth: boolean }>();
-
-/**
- * Register a type for its prefix. One of a prefix registered already replaces
- * it -- a module run again (`bun --hot`) registers again, and the latest code
- * answers; one of a running listener's custom document's prefix is refused.
- */
-export function registerDocType(t: DocType): void {
-  if ([...running].some((l) => l.auth) && !t.owns && !t.shared) throw ownerless(t.prefix);
-  assertOnePrefix([t.prefix], (p) => [...running].some((l) => l.prefixes.includes(p)));
-  const earlier = types.findIndex((e) => e.prefix === t.prefix);
-  if (earlier >= 0) types.splice(earlier, 1);
-  types.push(t);
-  types.sort((a, b) => b.prefix.length - a.prefix.length);
-}
-
-/**
- * For `createDocListener`: refuse its custom documents' `prefixes` where one
- * comes twice or a registered type has it, and with `auth` a registered type
- * that says neither `owns` nor `shared`. From now until the returned release,
- * refuse to register a type of one of those prefixes, or with `auth` one that
- * says neither.
- */
-export function holdListener(prefixes: string[], auth: boolean): () => void {
-  assertOnePrefix(prefixes, (p) => types.some((t) => t.prefix === p));
-  const unowned = auth && types.find((t) => !t.owns && !t.shared);
-  if (unowned) throw ownerless(unowned.prefix);   // named where it was registered: that is where it says
-  const listener = { prefixes: [...prefixes], auth };
-  running.add(listener);
-  return () => void running.delete(listener);
-}
-
-export function resolveDoc(docName: string): { type: DocType; ctx: any } | null {
-  for (const type of types) {
-    const ctx = type.parse(docName);
-    if (ctx !== null) return { type, ctx };
+export function docTypes(initial: DocType[], taken: string[], auth: boolean) {
+  const types: DocType[] = [];
+  assertOnePrefix([...initial.map((t) => t.prefix), ...taken]);
+  function register(t: DocType): void {
+    if (auth && !t.owns && !t.shared) throw ownerless(t.prefix, "createDocListener types");
+    assertOnePrefix([t.prefix], (p) => taken.includes(p));
+    const earlier = types.findIndex((e) => e.prefix === t.prefix);
+    if (earlier >= 0) types.splice(earlier, 1);
+    types.push(t);
+    types.sort((a, b) => b.prefix.length - a.prefix.length);
   }
-  return null;
-}
-
-/** For tests — reset between cases. */
-export function clearRegistry(): void {
-  types.length = 0;
-  running.clear();
+  initial.forEach(register);
+  return {
+    register,
+    resolve(docName: string): { type: DocType; ctx: any } | null {
+      for (const type of types) {
+        const ctx = type.parse(docName);
+        if (ctx !== null) return { type, ctx };
+      }
+      return null;
+    },
+  };
 }
 
 /**

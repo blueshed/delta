@@ -6,7 +6,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { Pool } from "pg";
 import {
-  applyFramework, applySql, clearRegistry, createDocListener, docTypeFromDef, exportTables, generateSql, importTables, registerDocType, validateOps,
+  applyFramework, applySql, createDocListener, docTypeFromDef, exportTables, generateSql, importTables, validateOps,
 } from "../src/server/postgres";
 import { openPglite } from "../src/server/pglite";
 import { createLocal } from "../src/server/local";
@@ -34,14 +34,12 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  clearRegistry();
   await pool.query(`TRUNCATE ${tables.join(", ")}, _delta_versions, _delta_ops_log, _delta_ledger RESTART IDENTITY`);
   await importTables(pool, pathSchema, pathSeed);
-  for (const def of pathDocs) registerDocType(docTypeFromDef(def, pool));
   const local = createLocal();
   const heard: { channel: string; data: any }[] = [];
   local.onPublish((channel, data) => heard.push({ channel, data }));
-  listeners.push(await createDocListener(local.server, pool, { ledger: true, custom: [postgresInbox, postgresOpenSeats, postgresMenuCard] }));
+  listeners.push(await createDocListener(local.server, pool, { types: pathDocs.map((def) => docTypeFromDef(def, pool)), ledger: true, custom: [postgresInbox, postgresOpenSeats, postgresMenuCard] }));
   backend = {
     process: { call: (action, msg) => local.call(action, msg), heard },
     // NOTIFY is heard after the write's commit, and fetched then: a beat.
@@ -278,13 +276,11 @@ describe("pglite: a listener on framework SQL older than it", () => {
       await behind.query("DROP FUNCTION _delta_fetch_log(text, bigint)");
       await applySql(behind, generateSql(pathSchema, pathDocs));
       await importTables(behind, pathSchema, pathSeed);
-      clearRegistry();
-      for (const def of pathDocs) registerDocType(docTypeFromDef(def, behind));
       const local = createLocal();
       const heard: { channel: string; data: any }[] = [];
       local.onPublish((channel, data) => heard.push({ channel, data }));
       setLogLevel("warn");
-      listeners.push(await createDocListener(local.server, behind, { ledger: true, custom: [postgresInbox, postgresOpenSeats, postgresMenuCard] }));
+      listeners.push(await createDocListener(local.server, behind, { types: pathDocs.map((def) => docTypeFromDef(def, behind)), ledger: true, custom: [postgresInbox, postgresOpenSeats, postgresMenuCard] }));
       setLogLevel("silent");
       const b: PathBackend = {
         process: { call: (action, msg) => local.call(action, msg), heard },
@@ -338,7 +334,7 @@ describe("pglite: a listener hears each entry once, however late its notificatio
     const local = createLocal();
     const heard: { channel: string; data: any }[] = [];
     local.onPublish((channel, data) => heard.push({ channel, data }));
-    listeners.push(await createDocListener(local.server, slow, { custom: [postgresInbox] }));
+    listeners.push(await createDocListener(local.server, slow, { types: pathDocs.map((def) => docTypeFromDef(def, pool)), custom: [postgresInbox] }));
     const other: PathBackend = { ...backend, process: { call: (action, msg) => local.call(action, msg), heard } };
     await openAll(other.process, ["fo-inbox:a@x"]);
     await openAll(backend.process, ["fo-board:1"]);
@@ -366,7 +362,7 @@ describe("pglite: a listener hears each entry once, however late its notificatio
     const local = createLocal();
     const heard: { channel: string; data: any }[] = [];
     local.onPublish((channel, data) => heard.push({ channel, data }));
-    listeners.push(await createDocListener(local.server, lossy, {}));
+    listeners.push(await createDocListener(local.server, lossy, { types: pathDocs.map((def) => docTypeFromDef(def, pool)) }));
     const other: PathBackend = { ...backend, process: { call: (action, msg) => local.call(action, msg), heard } };
     const copies = await openAll(other.process, ["fo-menu:1"]);
     errors.at(-1)!(new Error("connection lost"));   // it reconnects after a second, and resyncs

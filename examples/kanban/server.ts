@@ -2,8 +2,8 @@
  * Server — a real delta-doc server, 100% library surface.
  *
  *   createWs()                                    — WS action router + pub/sub
- *   createDocListener(ws, pool)                   — Postgres LISTEN → WS publish
- *   registerDocType(docTypeFromDef(docs[0], pool)) — wire the "board:" prefix
+ *   createDocListener(ws, pool, { types })        — Postgres LISTEN → WS publish,
+ *     types: [docTypeFromDef(docs[0], pool)]      — for the "board:" prefix
  *   Bun.serve({ routes, websocket })              — HTTP + WebSocket
  *
  * No hand-written SQL in the write path. `docTypeFromDef` uses `delta_open`
@@ -16,9 +16,7 @@ import type { Server } from "bun";
 import { createWs } from "../../src/server/server";
 import {
   createDocListener,
-  registerDocType,
   docTypeFromDef,
-  clearRegistry,
 } from "../../src/server/postgres";
 import { docs } from "./schema";
 
@@ -31,13 +29,8 @@ export interface KanbanServer {
 
 export async function startServer(pool: Pool): Promise<KanbanServer> {
   // One DocType per doc def — framework-generic, no custom SQL.
-  clearRegistry();
-  for (const def of docs) {
-    registerDocType(docTypeFromDef(def, pool));
-  }
-
   const ws = createWs();
-  const listener = await createDocListener(ws, pool);
+  const listener = await createDocListener(ws, pool, { types: docs.map((def) => docTypeFromDef(def, pool)) });
 
   const server = Bun.serve({
     port: 0,                                        // let the OS pick

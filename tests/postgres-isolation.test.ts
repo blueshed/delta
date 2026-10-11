@@ -14,8 +14,6 @@ import {
   createDocListener,
   defineDoc,
   docTypeFromDef,
-  registerDocType,
-  clearRegistry,
 } from "../src/server/postgres";
 import { createWs, type WsServer } from "../src/server/server";
 import { setLogLevel } from "../src/server/logger";
@@ -101,14 +99,11 @@ let bobId: string;
 let bobBrandId: string;
 
 beforeEach(async () => {
-  clearRegistry();
   await reset();
-  registerDocType(docTypeFromDef(
-    defineDoc("customer:", { root: "customers", include: ["brands", "artworks"] }),
-    pool,
-  ));
   ws = createWs();
-  listener = await createDocListener(ws, pool);
+  listener = await createDocListener(ws, pool, {
+    types: [docTypeFromDef(defineDoc("customer:", { root: "customers", include: ["brands", "artworks"] }), pool)],
+  });
   h = makePgHarness(ws);
 
   // Seed two customers, one bob-owned brand, one bob-owned artwork.

@@ -15,7 +15,7 @@ import type { Pool } from "pg";
 import { createWs, registerDoc } from "../src/server/server";
 import { defineSchema, defineDoc, createTables, registerDocs } from "../src/server/sqlite";
 import {
-  applySql, generateSql, createDocListener, registerDocType, docTypeFromDef, clearRegistry,
+  applySql, generateSql, createDocListener, docTypeFromDef,
 } from "../src/server/postgres";
 import { setLogLevel } from "../src/server/logger";
 import { newPool, applyFramework, mockClient, sendAndAwait } from "./setup";
@@ -104,11 +104,9 @@ describe("the same mistake, the same code", () => {
     });
 
     test("Postgres", async () => {
-      clearRegistry();
-      registerDocType(docTypeFromDef(roomDoc, pool));
       const ws = createWs();
       ws.setServer({ publish() {} });
-      const listener = await createDocListener(ws, pool);
+      const listener = await createDocListener(ws, pool, { types: [docTypeFromDef(roomDoc, pool)] });
       try {
         for (const [name, { ops, code }] of Object.entries(mistakes("7"))) {
           expect([name, await codeOf(ws, ops)]).toEqual([name, code]);

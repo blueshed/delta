@@ -24,8 +24,6 @@ import {
   defineCustomDoc,
   defineDoc,
   docTypeFromDef,
-  registerDocType,
-  clearRegistry,
   type CustomDocDef,
 } from "../src/server/postgres";
 import { createWs, type WsServer } from "../src/server/server";
@@ -135,12 +133,8 @@ describe("Finding #2: custom docs and auth.gate()", () => {
   };
 
   beforeEach(async () => {
-    clearRegistry();
     await resetSites();
-    registerDocType(
-      docTypeFromDef(defineDoc("world:", { root: "worlds", include: ["sites"] }), pool, { auth: requireIdentity, shared: true }),
-    );
-    await startListener({ auth: requireIdentity, custom: [sitesInBbox] });
+    await startListener({ types: [docTypeFromDef(defineDoc("world:", { root: "worlds", include: ["sites"] }), pool, { auth: requireIdentity, shared: true })], auth: requireIdentity, custom: [sitesInBbox] });
     await seedWorld();
   });
 
@@ -176,12 +170,8 @@ describe("Finding #1: concurrent writes to the same field", () => {
   let worldId: string;
 
   beforeEach(async () => {
-    clearRegistry();
     await resetSites();
-    registerDocType(
-      docTypeFromDef(defineDoc("world:", { root: "worlds", include: ["sites"] }), pool),
-    );
-    await startListener({});
+    await startListener({ types: [docTypeFromDef(defineDoc("world:", { root: "worlds", include: ["sites"] }), pool)] });
     worldId = await seedWorld();
   });
 
@@ -260,7 +250,6 @@ describe("M3: delta_apply collection scoping", () => {
   let worldId: string;
 
   beforeEach(async () => {
-    clearRegistry();
     await resetSites();
     // A doc exposing ONLY the world root — `sites` is a registered collection
     // but intentionally NOT in this doc's include.
@@ -269,10 +258,7 @@ describe("M3: delta_apply collection scoping", () => {
       VALUES ('world-bare:', 'worlds', ARRAY[]::text[], '{}'::jsonb)
       ON CONFLICT (prefix) DO UPDATE SET include = EXCLUDED.include, scope = EXCLUDED.scope
     `);
-    registerDocType(
-      docTypeFromDef(defineDoc("world-bare:", { root: "worlds", include: [] }), pool),
-    );
-    await startListener({});
+    await startListener({ types: [docTypeFromDef(defineDoc("world-bare:", { root: "worlds", include: [] }), pool)] });
     worldId = await seedWorld();
   });
 
@@ -300,12 +286,8 @@ describe("M3: delta_apply collection scoping", () => {
 
 describe("version sequence: open carries _v, broadcasts carry contiguous v", () => {
   beforeEach(async () => {
-    clearRegistry();
     await resetSites();
-    registerDocType(
-      docTypeFromDef(defineDoc("world:", { root: "worlds", include: ["sites"] }), pool),
-    );
-    await startListener({});
+    await startListener({ types: [docTypeFromDef(defineDoc("world:", { root: "worlds", include: ["sites"] }), pool)] });
   });
 
   test("open returns _v and the delta's broadcast carries v === ack version === _v + 1", async () => {

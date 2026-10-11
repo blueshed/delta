@@ -142,7 +142,7 @@ import { Pool } from "pg";
 import { createWs } from "@blueshed/delta/server";
 import {
   defineSchema, defineDoc,
-  createDocListener, registerDocType, docTypeFromDef,
+  createDocListener, docTypeFromDef,
 } from "@blueshed/delta/postgres";
 import { wireAuth } from "@blueshed/delta/auth";
 import { jwtAuth } from "@blueshed/delta/auth-jwt";
@@ -153,17 +153,16 @@ const ws = createWs();
 const auth = jwtAuth({ pool, secret: process.env.JWT_SECRET! });
 wireAuth(ws, auth);
 
+// The listener's types are its own: two servers in one process each answer for theirs.
 // With auth, say who owns each document: its name is the channel its writes go out on.
-// One prefix, one document: a type registered again for its prefix replaces the earlier (a module
-// run again, bun --hot, needs nothing more); one of a running listener's custom document's is refused.
-registerDocType(
-  docTypeFromDef(defineDoc("items:", { root: "items", include: [], scope: { owner_id: ":id" } }), pool, {
-    auth,
-    owns: (user, docName) => docName === `items:${user.id}`,   // anyone else: 404
-  })
-);
+const items = docTypeFromDef(defineDoc("items:", { root: "items", include: [], scope: { owner_id: ":id" } }), pool, {
+  auth,
+  owns: (user, docName) => docName === `items:${user.id}`,   // anyone else: 404
+});
 
-const listener = await createDocListener(ws, pool, { auth });
+const listener = await createDocListener(ws, pool, { types: [items], auth });
+// One prefix, one document: listener.register(type) later replaces the type of its prefix (a module
+// run again, bun --hot); one of the listener's custom document's is refused.
 
 const server = Bun.serve({
   routes: { [ws.path]: ws.upgrade },
@@ -250,7 +249,7 @@ interface DocType<C = any, I = unknown> {
   // Asked again before each change is told, once per identity: keep it cheap.
   owns?(identity: I, docName: string): boolean | Promise<boolean>;
   // With auth: every identity past the gate may have every name of the prefix.
-  // With auth, a type says one or the other: registerDocType / createDocListener refuse it otherwise.
+  // With auth, a type says one or the other: createDocListener and its register refuse it otherwise.
   shared?: boolean;
 }
 
@@ -426,13 +425,14 @@ export const docs = [
 
 ```ts
 // server.ts
-import { docTypeFromDef, registerDocType } from "@blueshed/delta/postgres";
+import { createDocListener, docTypeFromDef } from "@blueshed/delta/postgres";
 import type { User } from "@blueshed/delta/auth-jwt";
 
-registerDocType(docTypeFromDef<User>(docs[0], pool, {
+const todos = docTypeFromDef<User>(docs[0], pool, {
   auth,
   owns: (user, docName) => docName === `todos:${user.id}`,
-}));
+});
+await createDocListener(ws, pool, { types: [todos], auth });
 
 // SQLite or the JSON file: the same auth and owns, for the documents of the call
 registerDocs<User>(ws, db, schema, docs, [], { auth, owns: (user, docName) => docName === `todos:${user.id}` });
@@ -453,7 +453,7 @@ An `add /todos/-` on this list-mode doc takes `owner_id` from the scope (the doc
 - **SQLite and the JSON file** — `owns` or `shared: true` in `registerDocs`' options beside `auth`, for every document of the call; it throws without one, and for a custom doc with neither.
 
 - **`docTypeFromDef`** — `owns` or `shared: true` in its options; with `auth` it throws without one. Given no `auth` it makes a type with neither, which the listener then refuses.
-- **A `DocType` written by hand** — an `owns(identity, docName)` method, or `shared: true` on it. `createDocListener(ws, pool, { auth })` refuses to start while a registered type has neither, and while such a listener runs, `registerDocType` refuses one.
+- **A `DocType` written by hand** — an `owns(identity, docName)` method, or `shared: true` on it. `createDocListener(ws, pool, { types, auth })` refuses to start while one of its types has neither, and its `register` refuses one after.
 - **A custom doc** — `owns` or `shared: true` in `defineCustomDoc`; `createDocListener` (or `registerDocs`) refuses one with neither. `owns` is asked on open (a 404, and no subscription, when it says no), and again before each change the document is told, on every backend.
 
 The error names the prefix and says what to add. Without `auth` nothing is asked -- so `owns` or `shared` given without it (to `registerDocs`, `docTypeFromDef`, or a custom doc on a listener or `registerDocs` with no `auth`) is refused too, on every backend: it would say a document is guarded when every socket may open it.
@@ -524,7 +524,7 @@ The container is mutated **in place** (keys cleared then re-assigned; array spli
 **Custom DocType** — when the lens isn't expressible as `DocDef`:
 
 ```ts
-import { registerDocType, type DocType } from "@blueshed/delta/postgres";
+import { type DocType } from "@blueshed/delta/postgres";
 
 const venueAt: DocType<{ venueId: number; at: string }> = {
   prefix: "venue-at:",
@@ -548,7 +548,7 @@ const venueAt: DocType<{ venueId: number; at: string }> = {
   },
   shared: true,   // with auth: say who owns it -- owns(identity, docName), or shared
 };
-registerDocType(venueAt);
+await createDocListener(ws, pool, { types: [venueAt] });   // or listener.register(venueAt) on one running
 ```
 
 ## Implied documents
@@ -682,8 +682,7 @@ const appPool   = new Pool({ connectionString: process.env.PG_APP_URL });    // 
 const auth = jwtAuth({ pool: adminPool, secret: process.env.JWT_SECRET! });
 
 // Doc queries use the app pool so RLS policies bind.
-registerDocType(docTypeFromDef(def, appPool, { auth, owns }));
-await createDocListener(ws, appPool, { auth });
+await createDocListener(ws, appPool, { types: [docTypeFromDef(def, appPool, { auth, owns })], auth });
 ```
 
 Under this setup `withAppAuth(appPool, ...)` sets `app.user_id` as the `app` role, and the policy `USING (owner_id = current_setting('app.user_id')::bigint)` filters without the role bypassing it. A temporal table's `current_<table>` view is made `security_invoker` (Postgres 15+), so it reads as the caller and the table's policy holds through it.
@@ -1104,10 +1103,11 @@ beforeAll(async () => {
   await applyItemsFixture(pool);
 });
 beforeEach(async () => {
-  clearRegistry();
   await resetState(pool);
-  registerDocType(docTypeFromDef(defineDoc("items:", { root: "items", include: [] }), pool));
+  ws = createWs();
+  listener = await createDocListener(ws, pool, { types: [docTypeFromDef(defineDoc("items:", { root: "items", include: [] }), pool)] });
 });
+afterEach(() => listener.destroy());
 ```
 
 Run: `bun run db:up` (compose) → `bun run test:all` → `bun run db:down`. Or `bun run ci` (up + check + test + down).

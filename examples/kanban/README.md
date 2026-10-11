@@ -48,8 +48,8 @@ The runner:
 2. `applySql(pool, generateSql(schema, docs))` → generates + applies the
    `kanban_boards / kanban_columns / kanban_cards` tables and registers
    them in `_delta_collections` + `_delta_docs`. Plus seed data.
-3. **Server** — `createWs()` + `createDocListener(ws, pool)` +
-   `registerDocType(docTypeFromDef(def, pool))`, served by `Bun.serve`.
+3. **Server** — `createWs()` + `createDocListener(ws, pool, { types })`, its
+   `types` `docTypeFromDef(def, pool)` for each doc, served by `Bun.serve`.
 4. **Clients** — two `connectWs()` sessions, alice and bob, each with its
    own reactive `openDoc<BoardDoc>("board:1", wsClient)`. The per-client
    state means two independent `data` signals in one process. Bob attaches

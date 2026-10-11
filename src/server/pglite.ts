@@ -10,8 +10,7 @@
  *   const pool = await openPglite("./data");        // or openPglite() in memory
  *   await applyFramework(pool);
  *   await applySql(pool, generateSql(schema, docs));
- *   for (const def of docs) registerDocType(docTypeFromDef(def, pool));
- *   await createDocListener(ws, pool, { ledger: true });
+ *   await createDocListener(ws, pool, { types: docs.map((def) => docTypeFromDef(def, pool)), ledger: true });
  *
  * Outgrow it and move to a server: `exportTables(pool, schema)` here,
  * `importTables(server, schema, rows)` there -- the ids and sequences carry.

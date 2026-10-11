@@ -1,8 +1,8 @@
 /**
  * DocListener — one server, one LISTEN, many doc types.
  *
- * All dispatch is delegated to `./registry`. Register doc types before
- * opening WS connections (see server.ts).
+ * A listener answers for the doc types it is given (`types`, and `register`
+ * later); two servers in one process each have their own.
  *
  * Auth is pluggable via `opts.auth`. When provided, every doc message passes
  * through `auth.gate(client)` and the resulting identity is threaded into
@@ -16,7 +16,7 @@ import type { WsServer } from "../server";
 import { trackSubscribe, trackUnsubscribe, onClientDrop } from "../server";
 import { createLogger } from "../logger";
 import type { Pool, PoolClient } from "pg";
-import { callAs, resolveDoc, holdListener } from "./registry";
+import { callAs, docTypes } from "./registry";
 import type { DocType } from "./registry";
 import type { DeltaAuth } from "../auth";
 import { isAuthError } from "../auth";
@@ -125,6 +125,8 @@ export async function createDocListener<I = unknown>(
   ws: WsServer,
   pool: Pool,
   opts?: {
+    /** The documents this listener answers for: `docTypeFromDef(def, pool)`, or a `DocType` written by hand. */
+    types?: DocType<any, I>[];
     auth?: DeltaAuth<I>;
     custom?: CustomDocDef<any>[];
     /** Keep the ledger (001g): every write with its inverse, who made it and the cursor undo walks; and `undo`, `redo`, `history`. */
@@ -138,7 +140,8 @@ export async function createDocListener<I = unknown>(
   // one, a registered type -- says who owns it, or that it is shared. Asked
   // before the pool is touched, so a refusal leaves nothing to clean up.
   assertOwned(opts?.custom ?? [], auth);
-  const unhold = holdListener((opts?.custom ?? []).map((d) => d.prefix), !!auth);
+  const registry = docTypes((opts?.types ?? []) as DocType[], (opts?.custom ?? []).map((d) => d.prefix), !!auth);
+  const resolveDoc = registry.resolve;
   const ledger = !!opts?.ledger;
   const whoOf = (identity: I | undefined): string | null => ledgerWho(identity, opts?.who);
   // The cursor undo walks: named by a caller in this process, and over the
@@ -193,13 +196,8 @@ export async function createDocListener<I = unknown>(
   };
 
   // Single LISTEN connection with auto-reconnect
-  let listener: PoolClient;
-  let fetchSql: string;
-  try {
-    fetchSql = await fetchQuery(pool);
-    listener = await pool.connect();
-  }
-  catch (err) { unhold(); throw err; }
+  const fetchSql = await fetchQuery(pool);
+  let listener: PoolClient = await pool.connect();
   let destroyed = false;
   let reconnecting = false;
 
@@ -280,7 +278,6 @@ export async function createDocListener<I = unknown>(
   } catch (err) {
     detachListener(listener);
     listener.release();
-    unhold();
     throw err;
   }
 
@@ -637,13 +634,14 @@ export async function createDocListener<I = unknown>(
   }, { owned: false }));
 
   return {
+    /** Answer for one more type; one of a prefix it answers for already is replaced (`bun --hot`). */
+    register: registry.register as (type: DocType<any, I>) => void,
     evict(docName: string) {
       tracked.delete(docName);
       release(docName);
     },
     async destroy() {
       destroyed = true;
-      unhold();
       try {
         await inTurn("UNLISTEN *", []);
         await inTurn("SELECT _delta_holder_stop($1)", [holder]);

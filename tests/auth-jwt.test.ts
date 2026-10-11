@@ -9,11 +9,9 @@ import { Pool } from "pg";
 import { SignJWT } from "jose";
 import { jwtAuth } from "../src/server/auth-jwt";
 import {
-  clearRegistry,
   createDocListener,
   docTypeFromDef,
   defineDoc,
-  registerDocType,
 } from "../src/server/postgres";
 import { createWs } from "../src/server/server";
 import { wireAuth } from "../src/server/auth";
@@ -337,12 +335,11 @@ describe("jwtAuth on a socket: logout and a switch let go of every document", ()
   test("signed in, two documents open; logged out, none; signed in again, none until opened; another person, none", async () => {
     await applyItemsFixture(pool);   // items:, and a second name for the same rows
     await pool.query("INSERT INTO _delta_docs (prefix, root_collection, include, scope) VALUES ('all-items:', 'items', '{}', '{}') ON CONFLICT (prefix) DO NOTHING");
-    clearRegistry();
     const auth = jwtAuth({ pool, secret: SECRET });
-    for (const prefix of ["items:", "all-items:"]) registerDocType(docTypeFromDef(defineDoc(prefix, { root: "items", include: [] }), pool, { auth, shared: true }));
+    const types = ["items:", "all-items:"].map((prefix) => docTypeFromDef(defineDoc(prefix, { root: "items", include: [] }), pool, { auth, shared: true }));
     const ws = createWs();
     wireAuth(ws, auth);
-    const listener = await createDocListener(ws, pool, { auth });
+    const listener = await createDocListener(ws, pool, { types, auth });
     try {
       const token = async (email: string) => {
         const r = await auth.actions!.register({ name: email, email, password: "pw" }, mockClient());
@@ -375,7 +372,6 @@ describe("jwtAuth on a socket: logout and a switch let go of every document", ()
       expect(held()).toEqual([]);
     } finally {
       await listener.destroy();
-      clearRegistry();
       await pool.query("DELETE FROM _delta_docs WHERE prefix = 'all-items:'");
     }
   });

@@ -58,8 +58,8 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
   SQLSTATEs the listener maps (`CODE_OF_SQLSTATE` in `listener.ts`).
 - **With `auth`, a document says who owns it** (`owns`, or `shared: true`): its name is its
   broadcast channel, and RLS does not filter the channel. `docTypeFromDef` throws without
-  one; so does `createDocListener` with `auth` for a registered `DocType` or a custom doc
-  with neither, and `registerDocType` while such a listener runs. A membership custom doc
+  one; so does `createDocListener` with `auth` for a `DocType` in its `types` or a custom doc
+  with neither, and its `register` after. A membership custom doc
   is queried, cached and fanned out per identity. `tests/postgres-rls.test.ts` pins it as a
   `NOSUPERUSER` role.
 - **The framework SQL `src/sql/001a–001g-*.sql` is a contract.** Consumers vendor it with
@@ -132,8 +132,8 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
 - `src/schema.ts`: `defineSchema`, `defineDoc` (shared by both backends). `validateOps` is
   per backend: `sqlite/validate.ts` (the one the backend runs) and `postgres/schema.ts` (exported;
   the listener relies on `delta_apply`'s own checks).
-- `src/server/postgres/`: the Postgres backend (`listener.ts`, `registry.ts` with `DocType`
-  and `docTypeFromDef`'s `owns`, `codegen.ts`, `schema.ts`, `bootstrap.ts`, `auth.ts`).
+- `src/server/postgres/`: the Postgres backend (`listener.ts`, `registry.ts` with `DocType`,
+  a listener's own `docTypes` and `docTypeFromDef`'s `owns`, `codegen.ts`, `schema.ts`, `bootstrap.ts`, `auth.ts`).
 - `src/server/logger.ts`: a copy of railroad's `logger.ts`, so a server needs no railroad (an
   optional peer only the client imports); `tests/server.test.ts` fails when the two differ.
 - `src/sql/001a–001f-*.sql`: the stored functions; `001g-delta-ledger.sql`: the Postgres

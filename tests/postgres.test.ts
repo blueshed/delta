@@ -14,8 +14,6 @@ import {
   createDocListener,
   docTypeFromDef,
   defineDoc,
-  registerDocType,
-  clearRegistry,
   loadDocAt,
   pruneOpsLog,
 } from "../src/server/postgres";
@@ -47,10 +45,11 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  clearRegistry();
   await resetState(pool);
-  registerDocType(docTypeFromDef(defineDoc("items:", { root: "items", include: [] }), pool));
 });
+
+/** The one document the listeners answer for. */
+const items = () => docTypeFromDef(defineDoc("items:", { root: "items", include: [] }), pool);
 
 // ---------------------------------------------------------------------------
 // Smoke test — can we reach the database at all?
@@ -146,7 +145,7 @@ describe("createDocListener (end-to-end WS flow)", () => {
     const published: { channel: string; data: any }[] = [];
     ws.publish = (channel: string, data: any) => { published.push({ channel, data }); };
 
-    const listener = await createDocListener(ws, pool);
+    const listener = await createDocListener(ws, pool, { types: [items()] });
     try {
       // Open the doc so the listener starts tracking it.
       const reader = mockClient();
@@ -178,7 +177,7 @@ describe("createDocListener (end-to-end WS flow)", () => {
   test("delta without doc returns 400", async () => {
     const ws = createWs();
     ws.publish = () => {};
-    const listener = await createDocListener(ws, pool);
+    const listener = await createDocListener(ws, pool, { types: [items()] });
     try {
       const client = mockClient();
       const res = await sendAndAwait(ws, client, { action: "open" });
@@ -192,7 +191,7 @@ describe("createDocListener (end-to-end WS flow)", () => {
   test("open on unknown prefix returns 404", async () => {
     const ws = createWs();
     ws.publish = () => {};
-    const listener = await createDocListener(ws, pool);
+    const listener = await createDocListener(ws, pool, { types: [items()] });
     try {
       const client = mockClient();
       const res = await sendAndAwait(ws, client, { action: "open", doc: "ghost:" });
@@ -205,7 +204,7 @@ describe("createDocListener (end-to-end WS flow)", () => {
   test("close → unsubscribes and removes from tracked set", async () => {
     const ws = createWs();
     ws.publish = () => {};
-    const listener = await createDocListener(ws, pool);
+    const listener = await createDocListener(ws, pool, { types: [items()] });
     try {
       const client = mockClient();
       await sendAndAwait(ws, client, { action: "open", doc: "items:" });
@@ -219,11 +218,11 @@ describe("createDocListener (end-to-end WS flow)", () => {
   });
 
   test("auth gate rejects with 401 when auth is configured and gate returns error", async () => {
-    clearRegistry();   // with auth, a document says who owns it: this list is everyone's
-    registerDocType(docTypeFromDef(defineDoc("items:", { root: "items", include: [] }), pool, { auth: { gate: () => ({ error: "no" }) }, shared: true }));
     const ws = createWs();
     ws.publish = () => {};
     const listener = await createDocListener(ws, pool, {
+      // with auth, a document says who owns it: this list is everyone's
+      types: [docTypeFromDef(defineDoc("items:", { root: "items", include: [] }), pool, { auth: { gate: () => ({ error: "no" }) }, shared: true })],
       auth: {
         gate: () => ({ error: "no" }),
       },

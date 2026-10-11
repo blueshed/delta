@@ -7,7 +7,7 @@
  * The write's cost should not grow with them.
  */
 import { Pool } from "pg";
-import { createDocListener, defineDoc, defineSchema, docTypeFromDef, generateSql, registerDocType, clearRegistry } from "../../src/server/postgres";
+import { createDocListener, defineDoc, defineSchema, docTypeFromDef, generateSql } from "../../src/server/postgres";
 import { createWs } from "../../src/server/server";
 import { setLogLevel } from "../../src/server/logger";
 import { computeStats, type Stats } from "../adapter";
@@ -24,9 +24,7 @@ export async function runFanout(pgUrl: string, everOpened: number): Promise<Stat
   const pool = new Pool({ connectionString: pgUrl, max: 4 });
   const ws = createWs();
   ws.setServer({ publish() {} });
-  clearRegistry();
-  registerDocType(docTypeFromDef(doc, pool));
-  const listener = await createDocListener(ws, pool);
+  const listener = await createDocListener(ws, pool, { types: [docTypeFromDef(doc, pool)] });
   try {
     await pool.query(generateSql(schema, [doc]));
     await pool.query("TRUNCATE fanout_items; DELETE FROM _delta_versions WHERE doc_name LIKE 'fanout:%'");

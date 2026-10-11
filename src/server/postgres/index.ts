@@ -8,7 +8,7 @@
  *
  *   import {
  *     defineSchema, defineDoc,
- *     createDocListener, registerDocType, docTypeFromDef,
+ *     createDocListener, docTypeFromDef,
  *   } from "@blueshed/delta/postgres";
  *
  * The stored functions are `src/sql/001*.sql`: `applyFramework(pool)` applies
@@ -47,12 +47,7 @@ export {
 export { createDocListener, defineCustomDoc } from "./listener";
 export type { CustomDocDef } from "./listener";
 
-export {
-  registerDocType,
-  resolveDoc,
-  clearRegistry,
-  docTypeFromDef,
-} from "./registry";
+export { docTypeFromDef } from "./registry";
 export type { DocType, Writer } from "./registry";
 
 export { withAppAuth } from "./auth";

@@ -22,7 +22,6 @@ import {
   defineCustomDoc,
   defineDoc,
   docTypeFromDef,
-  registerDocType,
   type CustomDocDef,
 } from "../../src/server/postgres";
 import { createWs } from "../../src/server/server";
@@ -76,10 +75,8 @@ await applyFramework(pool);
 // Seed a world if none exists.
 await pool.query("INSERT INTO worlds (label) SELECT 'Earth' WHERE NOT EXISTS (SELECT 1 FROM worlds)");
 
-registerDocType(docTypeFromDef(worldDoc, pool));
-
 const ws = createWs();
-const listener = await createDocListener(ws, pool, { custom: [sitesInBbox] });
+const listener = await createDocListener(ws, pool, { types: [docTypeFromDef(worldDoc, pool)], custom: [sitesInBbox] });
 
 const server = Bun.serve({
   port: Number(process.env.PORT ?? 0),

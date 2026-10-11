@@ -46,7 +46,7 @@ only when you outgrow the one you're on:
 | When you need… | Switch to | Server-side change |
 |---|---|---|
 | relational queries, many docs, history | **SQLite** | `registerDocs(ws, db, schema, docs)` from `@blueshed/delta/sqlite` |
-| multi-process fan-out, RLS, stored auth | **Postgres** | `createDocListener(ws, pool)` + `registerDocType(...)` |
+| multi-process fan-out, RLS, stored auth | **Postgres** | `createDocListener(ws, pool, { types })` |
 
 The client never changes. Same `openDoc`. Same op verbs. Same protocol on the
 wire. Whatever browser code you wrote against this example keeps working.

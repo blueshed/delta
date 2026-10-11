@@ -4,7 +4,7 @@
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { Pool } from "pg";
-import { clearRegistry, createDocListener, defineDoc, docTypeFromDef, registerDocType } from "../src/server/postgres";
+import { createDocListener, defineDoc, docTypeFromDef } from "../src/server/postgres";
 import { createWs } from "../src/server/server";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
@@ -26,12 +26,12 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  clearRegistry();
   await resetState(pool);
-  // one list everybody writes to: the tests with an auth module say so (shared), as auth requires --
-  // and shared is said with the auth module it is asked with (without one, docTypeFromDef refuses it)
-  registerDocType(docTypeFromDef(defineDoc("items:", { root: "items", include: [] }), pool, { auth: { gate: (client: any) => client.data.identity ?? { error: "no one" } }, shared: true }));
 });
+
+// one list everybody writes to: the tests with an auth module say so (shared), as auth requires --
+// and shared is said with the auth module it is asked with (without one, docTypeFromDef refuses it)
+const items = () => docTypeFromDef(defineDoc("items:", { root: "items", include: [] }), pool, { auth: { gate: (client: any) => client.data.identity ?? { error: "no one" } }, shared: true });
 
 afterEach(async () => {
   for (const l of listeners.splice(0)) await l.destroy();
@@ -40,7 +40,7 @@ afterEach(async () => {
 /** A process: a WsServer with the listener on it. */
 async function process(opts: Parameters<typeof createDocListener>[2] = { ledger: true }) {
   const ws = createWs();
-  listeners.push(await createDocListener(ws, pool, opts));
+  listeners.push(await createDocListener(ws, pool, { types: [items()], ...opts }));
   return ws;
 }
 
@@ -165,7 +165,7 @@ describe("the Postgres ledger", () => {
 
   test("who, without an auth module: the identity the caller carries (createLocal().as), as the SQLite backend reads it; in-process the cursor is still named", async () => {
     const local = createLocal();
-    listeners.push(await createDocListener(local.server, pool, { ledger: true }));
+    listeners.push(await createDocListener(local.server, pool, { types: [items()], ledger: true }));
     const ada = local.as("ada");
     const write = (caller: { call: typeof local.call }, name: string, cursor: string) =>
       caller.call("delta", { doc: "items:", ops: [{ op: "add", path: "/items/-", value: { name } }], cursor });

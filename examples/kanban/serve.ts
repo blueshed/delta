@@ -1,8 +1,8 @@
 /**
  * Kanban — the canonical UX entry point.
  *
- * Boots Postgres setup, applies framework + table SQL, starts the WS listener,
- * registers the "board:" doc type, serves the HTML page that drives `client.tsx`.
+ * Boots Postgres setup, applies framework + table SQL, starts the WS listener
+ * with the "board:" doc type, serves the HTML page that drives `client.tsx`.
  *
  * Run:
  *   bun run db:up
@@ -16,22 +16,15 @@ import { newPool, applyAll, PG_URL } from "./setup";
 import { createWs } from "../../src/server/server";
 import {
   createDocListener,
-  registerDocType,
   docTypeFromDef,
-  clearRegistry,
 } from "../../src/server/postgres";
 import { docs } from "./schema";
 
 const pool = newPool();
 await applyAll(pool);
 
-clearRegistry();
-for (const def of docs) {
-  registerDocType(docTypeFromDef(def, pool));
-}
-
 const ws = createWs();
-const listener = await createDocListener(ws, pool);
+const listener = await createDocListener(ws, pool, { types: docs.map((def) => docTypeFromDef(def, pool)) });
 
 const server = Bun.serve({
   port: Number(process.env.PORT ?? 3100),

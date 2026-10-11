@@ -17,7 +17,7 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } fr
 import { Pool } from "pg";
 import {
   applySql, generateSql, defineSchema, defineDoc, defineCustomDoc, withAppAuth,
-  createDocListener, registerDocType, docTypeFromDef, clearRegistry, type DocType,
+  createDocListener, docTypeFromDef, type DocType,
 } from "../src/server/postgres";
 import type { DeltaAuth } from "../src/server/auth";
 import { createWs, type WsServer } from "../src/server/server";
@@ -89,7 +89,6 @@ let clients: MockClient[];
 let listener: Awaited<ReturnType<typeof createDocListener>> | undefined;
 
 beforeEach(async () => {
-  clearRegistry();
   await admin.query("TRUNCATE rls_items RESTART IDENTITY; TRUNCATE _delta_ops_log RESTART IDENTITY; TRUNCATE _delta_versions;");
   // Bob already owns a row; Alice owns none.
   await admin.query("INSERT INTO rls_items (id, owner_id, name) VALUES (nextval('seq_rls_items'), 2, 'bob private')");
@@ -119,8 +118,7 @@ describe("RLS and the broadcast channel (NOSUPERUSER role)", () => {
 
   test("a temporal table's rows are held by the policy too: its current_ view reads as the caller, not as its owner", async () => {
     await admin.query("TRUNCATE rls_notes; INSERT INTO rls_notes (id, owner_id, text) VALUES (nextval('seq_rls_notes'), 1, 'alice'), (nextval('seq_rls_notes'), 2, 'bob')");
-    registerDocType(docTypeFromDef(notes, app, { auth, shared: true }));
-    listener = await createDocListener(ws, app, { auth });
+    listener = await createDocListener(ws, app, { types: [docTypeFromDef(notes, app, { auth, shared: true })], auth });
     const opened = await sendAndAwait(ws, person(1), { action: "open", doc: "rls-notes:" });
     expect(Object.values(opened.result.rls_notes).map((r: any) => r.text)).toEqual(["alice"]);
   });
@@ -132,10 +130,9 @@ describe("RLS and the broadcast channel (NOSUPERUSER role)", () => {
   test("a name several people may open is refused unless it says shared (rls-broadcast)", async () => {
     // The shape round 1 leaked through: one list doc, every identity opens it,
     // RLS filters each open. It no longer registers as it was written ...
-    expect(() => registerDocType(docTypeFromDef(everyone, app, { auth }))).toThrow();
+    expect(() => docTypeFromDef(everyone, app, { auth })).toThrow();
     // ... and a document that owns names per person closes it.
-    registerDocType(docTypeFromDef(mine, app, { auth, owns: (who, name) => name === `rls-mine:${who.id}` }));
-    listener = await createDocListener(ws, app, { auth });
+    listener = await createDocListener(ws, app, { types: [docTypeFromDef(mine, app, { auth, owns: (who, name) => name === `rls-mine:${who.id}` })], auth });
     const alice = person(1);
     const bob = person(2);
     expect((await sendAndAwait(ws, alice, { action: "open", doc: "rls-mine:1" })).result).toBeDefined();
@@ -148,8 +145,7 @@ describe("RLS and the broadcast channel (NOSUPERUSER role)", () => {
   });
 
   test("Bob cannot open Alice's name, write through it, or hear it (rls-ownname)", async () => {
-    registerDocType(docTypeFromDef(mine, app, { auth, owns: (who, name) => name === `rls-mine:${who.id}` }));
-    listener = await createDocListener(ws, app, { auth });
+    listener = await createDocListener(ws, app, { types: [docTypeFromDef(mine, app, { auth, owns: (who, name) => name === `rls-mine:${who.id}` })], auth });
     const alice = person(1);
     const bob = person(2);
     await sendAndAwait(ws, alice, { action: "open", doc: "rls-mine:1" });
@@ -167,8 +163,7 @@ describe("RLS and the broadcast channel (NOSUPERUSER role)", () => {
 
   test("an add's echo is the row as stored: the owner the scope fills in is the column's integer, so its undo is no conflict with itself", async () => {
     await admin.query("TRUNCATE _delta_ledger RESTART IDENTITY");
-    registerDocType(docTypeFromDef(mine, app, { auth, owns: (who, name) => name === `rls-mine:${who.id}` }));
-    listener = await createDocListener(ws, app, { auth, ledger: true });
+    listener = await createDocListener(ws, app, { types: [docTypeFromDef(mine, app, { auth, owns: (who, name) => name === `rls-mine:${who.id}` })], auth, ledger: true });
     const alice = person(1);
     await sendAndAwait(ws, alice, { action: "open", doc: "rls-mine:1" });
     const w = await sendAndAwait(ws, alice, { action: "delta", doc: "rls-mine:1", ops: [{ op: "add", path: "/rls_items/-", value: { name: "a" } }] });
@@ -179,8 +174,7 @@ describe("RLS and the broadcast channel (NOSUPERUSER role)", () => {
   });
 
   test("an add that names an id moves the serial past it, with the documented grants (USAGE, SELECT on sequences) (#63)", async () => {
-    registerDocType(docTypeFromDef(mine, app, { auth, owns: (who, name) => name === `rls-mine:${who.id}` }));
-    listener = await createDocListener(ws, app, { auth });
+    listener = await createDocListener(ws, app, { types: [docTypeFromDef(mine, app, { auth, owns: (who, name) => name === `rls-mine:${who.id}` })], auth });
     const alice = person(1);
     await sendAndAwait(ws, alice, { action: "open", doc: "rls-mine:1" });
     expect((await sendAndAwait(ws, alice, { action: "delta", doc: "rls-mine:1", ops: [{ op: "add", path: "/rls_items/7", value: { name: "named" } }] })).error).toBeUndefined();
@@ -191,8 +185,7 @@ describe("RLS and the broadcast channel (NOSUPERUSER role)", () => {
   test("an undo is a write: once the identity no longer owns the document, its undo is a 404 too", async () => {
     await admin.query("TRUNCATE _delta_ledger RESTART IDENTITY");
     const members = new Set([1]);
-    registerDocType(docTypeFromDef(mine, app, { auth, owns: (who, name) => members.has(who.id) && name === `rls-mine:${who.id}` }));
-    listener = await createDocListener(ws, app, { auth, ledger: true });
+    listener = await createDocListener(ws, app, { types: [docTypeFromDef(mine, app, { auth, owns: (who, name) => members.has(who.id) && name === `rls-mine:${who.id}` })], auth, ledger: true });
     const alice = person(1);
     await sendAndAwait(ws, alice, { action: "open", doc: "rls-mine:1" });
     await sendAndAwait(ws, alice, { action: "delta", doc: "rls-mine:1", ops: [{ op: "add", path: "/rls_items/-", value: { name: "alice's" } }] });
@@ -207,8 +200,7 @@ describe("RLS and the broadcast channel (NOSUPERUSER role)", () => {
   });
 
   test("shared: true is the author saying every signed-in identity hears every write", async () => {
-    registerDocType(docTypeFromDef(everyone, app, { auth, shared: true }));
-    listener = await createDocListener(ws, app, { auth });
+    listener = await createDocListener(ws, app, { types: [docTypeFromDef(everyone, app, { auth, shared: true })], auth });
     const bob = person(2);
     expect((await sendAndAwait(ws, bob, { action: "open", doc: "rls-all:" })).result).toBeDefined();
   });
@@ -259,25 +251,21 @@ describe("with auth, every document says who owns it (todo #18)", () => {
     await expect(createDocListener(ws, app, { auth, custom: [unownedRecompute] })).rejects.toThrow(/rls-tally:/);
   });
 
-  test("a DocType with neither owns nor shared is refused: registered before the listener, or after it", async () => {
-    registerDocType(handWritten());
-    await expect(createDocListener(ws, app, { auth })).rejects.toThrow(/rls-raw:.*owns.*shared: true/);
-    clearRegistry();
+  test("a DocType with neither owns nor shared is refused: given to the listener, or registered with it after", async () => {
+    await expect(createDocListener(ws, app, { types: [handWritten()], auth })).rejects.toThrow(/rls-raw:.*owns.*shared: true/);
     // docTypeFromDef given no auth makes no owns either: the listener's auth is what counts
-    registerDocType(docTypeFromDef(mine, app));
-    await expect(createDocListener(ws, app, { auth })).rejects.toThrow(/rls-mine:/);
-    clearRegistry();
-    listener = await createDocListener(ws, app, { auth });
-    expect(() => registerDocType(handWritten())).toThrow(/rls-raw:.*owns.*shared: true/);
-    registerDocType(handWritten({ shared: true }));
-    registerDocType(docTypeFromDef(mine, app, { auth, owns: (who, name) => name === `rls-mine:${who.id}` }));
+    await expect(createDocListener(ws, app, { types: [docTypeFromDef(mine, app)], auth })).rejects.toThrow(/rls-mine:/);
+    const running = await createDocListener(ws, app, { auth });
+    listener = running;
+    expect(() => running.register(handWritten())).toThrow(/rls-raw:.*owns.*shared: true/);
+    running.register(handWritten({ shared: true }));
+    running.register(docTypeFromDef(mine, app, { auth, owns: (who, name) => name === `rls-mine:${who.id}` }));
   });
 
-  test("once the listener with auth is gone, a DocType needs no owner again", async () => {
+  test("a listener without auth takes a DocType with no owner, beside one with auth in the same process", async () => {
     listener = await createDocListener(ws, app, { auth });
-    await listener.destroy();
-    listener = undefined;
-    expect(() => registerDocType(handWritten())).not.toThrow();
+    const open = await createDocListener(createWs(), app, { types: [handWritten()] });
+    await open.destroy();
   });
 
   test("a custom document's owns is asked on open: a name the identity does not own is a 404, and never subscribed", async () => {
@@ -291,7 +279,7 @@ describe("with auth, every document says who owns it (todo #18)", () => {
     }
     expect((await sendAndAwait(ws, bob, { action: "open", doc: "rls-tally:2" })).result).toEqual({ n: 1 });
     // the one identity on the name hears its rows on the name's channel
-    registerDocType(docTypeFromDef(mine, app, { auth, owns: (who, name) => name === `rls-mine:${who.id}` }));
+    listener.register(docTypeFromDef(mine, app, { auth, owns: (who, name) => name === `rls-mine:${who.id}` }));
     await sendAndAwait(ws, alice, { action: "delta", doc: "rls-mine:1", ops: [{ op: "add", path: "/rls_items/-", value: { name: "alice SECRET" } }] });
     await settle();
     expect(heard(alice, "rls-bag:1")).toEqual([{ doc: "rls-bag:1", ops: [{ op: "add", path: expect.stringMatching(/^\/rls_items\/\d+$/), value: expect.objectContaining({ name: "alice SECRET" }) }] }]);
@@ -300,8 +288,7 @@ describe("with auth, every document says who owns it (todo #18)", () => {
   });
 
   test("a membership document is queried as each identity: one identity's rows are never served to another from the cache, nor fanned out to it", async () => {
-    registerDocType(docTypeFromDef(mine, app, { auth, owns: (who, name) => name === `rls-mine:${who.id}` }));
-    listener = await createDocListener(ws, app, { auth, custom: [bag({ shared: true })] });
+    listener = await createDocListener(ws, app, { types: [docTypeFromDef(mine, app, { auth, owns: (who, name) => name === `rls-mine:${who.id}` })], auth, custom: [bag({ shared: true })] });
     const alice = person(1);
     const bob = person(2);
     // Bob first: his view of the name must not become Alice's
@@ -329,8 +316,7 @@ describe("with auth, every document says who owns it (todo #18)", () => {
 describe("a socket hears a document while it may open it (todo #17)", () => {
   test("taken off a document it has open, it hears no more of it, and is let go of it: its next open is a 404", async () => {
     const members = new Map([["rls-mine:2", new Set([1, 2])]]);
-    registerDocType(docTypeFromDef(mine, app, { auth, owns: (who, name) => members.get(name)?.has(who.id) ?? false }));
-    listener = await createDocListener(ws, app, { auth });
+    listener = await createDocListener(ws, app, { types: [docTypeFromDef(mine, app, { auth, owns: (who, name) => members.get(name)?.has(who.id) ?? false })], auth });
     const alice = person(1);
     const bob = person(2);
     for (const c of [alice, bob]) expect((await sendAndAwait(ws, c, { action: "open", doc: "rls-mine:2" })).result).toBeDefined();
@@ -355,8 +341,7 @@ describe("a socket hears a document while it may open it (todo #17)", () => {
       },
       asSqlArg: (i) => i.id,
     };
-    registerDocType(docTypeFromDef(mine, app, { auth: expiring, owns: (who, name) => name === `rls-mine:${who.id}` }));
-    listener = await createDocListener(ws, app, { auth: expiring });
+    listener = await createDocListener(ws, app, { types: [docTypeFromDef(mine, app, { auth: expiring, owns: (who, name) => name === `rls-mine:${who.id}` })], auth: expiring });
     const stale = person(1);
     const fresh = person(1);
     for (const c of [stale, fresh]) await sendAndAwait(ws, c, { action: "open", doc: "rls-mine:1" });
@@ -378,8 +363,7 @@ describe("a socket hears a document while it may open it (todo #17)", () => {
       },
       asSqlArg: (i) => i.id,
     };
-    registerDocType(docTypeFromDef(mine, app, { auth: fragile, owns: (who, name) => name === `rls-mine:${who.id}` }));
-    listener = await createDocListener(ws, app, { auth: fragile });
+    listener = await createDocListener(ws, app, { types: [docTypeFromDef(mine, app, { auth: fragile, owns: (who, name) => name === `rls-mine:${who.id}` })], auth: fragile });
     const tab = person(1);
     const broken = person(1);
     for (const c of [tab, broken]) await sendAndAwait(ws, c, { action: "open", doc: "rls-mine:1" });
@@ -403,8 +387,7 @@ describe("a socket hears a document while it may open it (todo #17)", () => {
       recompute: async (pool, _c, who) => ({ n: (await rows(pool, who!)).length }),
       owns,
     });
-    registerDocType(docTypeFromDef(mine, app, { auth, owns: (who, name) => name === `rls-mine:${who.id}` }));
-    listener = await createDocListener(ws, app, { auth, custom: [bag({ owns }), teamTally] });
+    listener = await createDocListener(ws, app, { types: [docTypeFromDef(mine, app, { auth, owns: (who, name) => name === `rls-mine:${who.id}` })], auth, custom: [bag({ owns }), teamTally] });
     const alice = person(1);
     for (const doc of ["rls-bag:team", "rls-tally:team", "rls-mine:1"]) expect((await sendAndAwait(ws, alice, { action: "open", doc })).result).toBeDefined();
     await sendAndAwait(ws, alice, { action: "delta", doc: "rls-mine:1", ops: [{ op: "add", path: "/rls_items/-", value: { name: "while on" } }] });

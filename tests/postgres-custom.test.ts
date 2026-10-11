@@ -20,8 +20,6 @@ import {
   defineCustomDoc,
   defineDoc,
   docTypeFromDef,
-  registerDocType,
-  clearRegistry,
   type CustomDocDef,
 } from "../src/server/postgres";
 import { createWs, type WsServer } from "../src/server/server";
@@ -127,16 +125,7 @@ async function seedWorld(): Promise<string> {
 }
 
 beforeEach(async () => {
-  clearRegistry();
   await resetSites(pool);
-
-  // Register the standard world: doc on this pool.
-  registerDocType(
-    docTypeFromDef(
-      defineDoc("world:", { root: "worlds", include: ["sites"] }),
-      pool,
-    ),
-  );
 
   ws = createWs();
   // Mock the Bun server's publish so we can observe fan-out on mockClients.
@@ -148,7 +137,11 @@ beforeEach(async () => {
     },
   });
 
-  listener = await createDocListener(ws, pool, { custom: [sitesInBbox, worldSummary] });
+  // the standard world: doc on this pool, beside the custom ones
+  listener = await createDocListener(ws, pool, {
+    types: [docTypeFromDef(defineDoc("world:", { root: "worlds", include: ["sites"] }), pool)],
+    custom: [sitesInBbox, worldSummary],
+  });
   worldId = await seedWorld();
   clients.length = 0;
 });

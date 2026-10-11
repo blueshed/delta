@@ -99,7 +99,7 @@ same way.
 | a JSON file | `registerDocs(ws, file, schema, docs)` | `@blueshed/delta/json` |
 | a SQLite database | `registerDocs(ws, db, schema, docs)` | `@blueshed/delta/sqlite` |
 | Postgres in this process | `openPglite(dir?)`, then as a Postgres database | `@blueshed/delta/pglite` |
-| a Postgres database, shared by processes | `createDocListener(ws, pool)` and `registerDocType(docTypeFromDef(def, pool))` | `@blueshed/delta/postgres` |
+| a Postgres database, shared by processes | `createDocListener(ws, pool, { types: docs.map((def) => docTypeFromDef(def, pool)) })` | `@blueshed/delta/postgres` |
 | a free-form document (no schema, one JSON value in a file) | `await registerDoc(ws, name, { file, empty })` | `@blueshed/delta/server` |
 | this process (who is online) | `registerMemory(ws, { prefix, empty })` | `@blueshed/delta/kinds` |
 | outside (a sensor, an API) | `registerSource(ws, { prefix, read, every })` | `@blueshed/delta/kinds` |

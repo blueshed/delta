@@ -73,7 +73,7 @@ export interface DeltaAuth<Identity = unknown> {
  * `docTypeFromDef` and `createDocListener` (Postgres), `registerDocs` (the
  * JSON file and SQLite), `defineCustomDoc` on each -- or is refused with this.
  */
-export function ownerless(prefix: string, what = "registerDocType"): Error {
+export function ownerless(prefix: string, what: string): Error {
   return new Error(
     `${what}("${prefix}"): with auth, say who may open it -- ` +
     `owns: (identity, docName) => boolean, or shared: true if every signed-in identity may hear every write to it. ` +
