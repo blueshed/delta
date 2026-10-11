@@ -33,6 +33,16 @@ describe("createLocal", () => {
     expect(heard).toEqual([{ channel: "room:a", data: { doc: "room:a", ops: [{ op: "add", path: "/messages/m1", value: { id: "m1", rooms_id: "a", text: "hi" } }] } }]);
   });
 
+  test("a custom document's name is answered by the longest prefix it starts with, whichever registered first, as a table document's is", async () => {
+    const db = new Database(":memory:");
+    createTables(db, schema);
+    const local = createLocal();
+    const named = (prefix: string) => defineCustomDoc(prefix, { watch: ["messages"], parse: (id: string) => id, recompute: () => ({ prefix }) });
+    registerDocs(local.server, db, schema, [], [named("said:"), named("said:loud:")]);
+    expect((await local.call("open", { doc: "said:loud:hi" })).result).toEqual({ prefix: "said:loud:" });
+    expect((await local.call("open", { doc: "said:hi" })).result).toEqual({ prefix: "said:" });
+  });
+
   test("an unknown action answers with an error", async () => {
     expect((await setup().local.call("nope", {})).error?.message).toContain("No handler matched");
   });

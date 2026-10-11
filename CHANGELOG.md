@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now walk back nothing once the same write removes it: `[add, remove]` inverts to `[]`, `[add,
   remove, add]` to `[remove]`. In `inverseOf` and `_delta_inverse` (`001g`, replaced in place:
   apply it again).
+- **A custom document's name is answered by the longest prefix it starts with**, whichever was
+  registered first, as a table document's is: `said:loud:hi` beside `said:` is `said:loud:`'s.
+  Before, the custom prefix registered first answered it.
 
 ### Removed
 

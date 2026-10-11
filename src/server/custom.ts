@@ -109,12 +109,13 @@ export function createCustomDocs<I, H>(opts: {
   const rowsOf = (def: Def, rows: Record<string, any[]>): Rows => Object.fromEntries(def.watch.map((c) => [c, toMap(rows[c] ?? [])]));
   const watching = (def: Def, ops: DeltaOp[]) => ops.some((op) => def.watch.includes(splitPath(op.path)[0]!));
 
-  /** The custom doc a name is: the first prefix it starts with. */
+  /** The custom doc a name is: the longest prefix it starts with, as a table document's (`_delta_find_doc`). */
   function find(docName: string): { def: Def; docId: string } | null {
+    let found: Def | undefined;
     for (const [prefix, def] of byPrefix) {
-      if (docName.startsWith(prefix)) return (opts.answers?.(docName, prefix.length) ?? true) ? { def, docId: docName.slice(prefix.length) } : null;
+      if (docName.startsWith(prefix) && (!found || prefix.length > found.prefix.length)) found = def;
     }
-    return null;
+    return found && (opts.answers?.(docName, found.prefix.length) ?? true) ? { def: found, docId: docName.slice(found.prefix.length) } : null;
   }
 
   /** `client`, who is `identity`, opens `docName`: a recompute doc read as it, a membership doc its view, queried as it unless an open has. Null: not found. */
