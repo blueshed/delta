@@ -1,0 +1,43 @@
+[
+  {
+    "skills": ["delta-doc"],
+    "query": "Build a shared shopping list in a Bun app with @blueshed/delta: lists, each with items (text, done). Everyone with a list open sees the others' changes at once. Keep the data in a JSON file to start with. Then show the change that moves the same app to SQLite, keeping the browser code exactly as it is and carrying the existing lists across.",
+    "files": [],
+    "expected_behavior": [
+      "One defineSchema (items with parent: \"lists\") and one defineDoc(\"list:\", { root: \"lists\", include: [\"items\"], ... }), used unchanged by both steps",
+      "The JSON step registers with registerDocs(ws, file, schema, docs) from @blueshed/delta/json, not registerDoc from @blueshed/delta/server and not a hand-written file store",
+      "The SQLite step changes only the server's wiring: createTables(db, schema), then registerDocs(ws, db, schema, docs) from @blueshed/delta/sqlite; the schema, the document and the client are the same files",
+      "Carries the data with exportTables from @blueshed/delta/json and importTables from @blueshed/delta/sqlite, not by copying rows by hand",
+      "The client uses connectWs and openDoc from @blueshed/delta/client and installs @blueshed/railroad beside delta",
+      "New items are sent as add /items/- with the server naming the id; done is changed with replace /items/<id>/done",
+      "No optimistic update and no fetch or reload: the page changes only through onOps or doc.data, and one keyed render path (applyOpsToCollection or railroad's list()) serves the first paint and every change",
+      "The server is Bun.serve with routes { [ws.path]: ws.upgrade }, websocket: ws.websocket, then ws.setServer(server)"
+    ]
+  },
+  {
+    "skills": ["delta-doc"],
+    "query": "Our Bun app keeps a shared board in delta on SQLite (registerDocs with a board: document). Add Undo and Redo buttons to each browser. Two people edit the same board at once: my Undo must take back only my own last change, never someone else's, and must not overwrite an edit someone made after mine.",
+    "files": [],
+    "expected_behavior": [
+      "Turns on the ledger with { ledger: true } in registerDocs' options; no undo stack, inverse ops or previous values kept by hand on the client or the server",
+      "The buttons send { action: \"undo\" } and { action: \"redo\" } over the socket (the WS client's send or call) with no cursor: over a socket the connection is the cursor, so each browser walks only its own writes",
+      "Treats a null answer as nothing to undo or redo",
+      "Treats an answer with conflict as the walk refused (nothing changed) and says so, rather than forcing the old values back with its own replace ops",
+      "Does not apply the undo's ops to the page itself: the change arrives through onOps or doc.data like any other write"
+    ]
+  },
+  {
+    "skills": ["delta-doc"],
+    "query": "With delta on SQLite: each venue has rooms, and each room has bookings. Opening venue:<n> should show the venue, its rooms and their bookings. A venue does not exist until someone first adds a room to it, and opening a new venue should show an empty one, not an error. Write the schema, the document, and client code that adds a room and then a booking in that room.",
+    "files": [],
+    "expected_behavior": [
+      "defineSchema declares rooms with parent: \"venues\" and bookings with parent: \"rooms\", not hand-written foreign key columns",
+      "defineDoc(\"venue:\", { root: \"venues\", include: [\"rooms\", \"bookings\"], implied: true }) with no scope (an implied document cannot declare one: defineDoc throws)",
+      "Does not insert or seed a venues row before the first write: the first add through the document makes it",
+      "Names venues by number (venue:1), not by text, so the app moves to Postgres unchanged",
+      "Adds the room with add /rooms/- and reads its id from what comes back (the echo's /rooms/<id> path or the row's id), never by guessing or by position",
+      "Adds the booking with add /bookings/- whose value carries rooms_id set to that room's id",
+      "Calls createTables(db, schema) before registerDocs"
+    ]
+  }
+]
