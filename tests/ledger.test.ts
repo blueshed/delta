@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { applyOps } from "../src/core";
 import { createLocal } from "../src/server/local";
-import type { ActionHandler, WsServer } from "../src/server/server";
+import { createWs, type ActionHandler, type WsServer } from "../src/server/server";
+import { connectWs } from "../src/client/client";
+import { setLogLevel } from "../src/server/logger";
 import { createTables, defineDoc, defineSchema, registerDocs } from "../src/server/sqlite";
 
 const schema = defineSchema({
@@ -187,6 +189,68 @@ describe("the cursor, over a socket", () => {
     send(alice, "delta", { doc: "room:a", ops: [{ op: "add", path: "/messages/m1", value: { text: "alice" } }] });
     expect(send(mallory, "undo", {}).result).toBeNull();
     expect(send(alice, "undo", {}).result).toMatchObject({ ops: [{ op: "remove", path: "/messages/m1" }] });
+  });
+});
+
+describe("a client that chooses its clientId keeps its cursor across reconnects", () => {
+  setLogLevel("silent");
+  (globalThis as any).location ??= { href: "http://localhost/", protocol: "http:" };
+
+  async function serve() {
+    const db = new Database(":memory:");
+    createTables(db, schema);
+    const ws = createWs();
+    registerDocs(ws, db, schema, [room], [], { ledger: true });
+    const server = Bun.serve({ port: 0, routes: { [ws.path]: ws.upgrade }, websocket: ws.websocket });
+    ws.setServer(server);
+    return { server, url: `ws://localhost:${server.port}/ws` };
+  }
+
+  async function writeThenLeave(url: string, clientId: string) {
+    const tab = connectWs(url, { clientId });
+    await tab.send({ action: "open", doc: "room:a" });
+    await tab.send({ action: "delta", doc: "room:a", ops: [{ op: "add", path: "/messages/m1", value: { text: "hi" } }] });
+    tab.close();
+  }
+
+  test("written, disconnected, connected again with the same id: undo takes the write back", async () => {
+    const { server, url } = await serve();
+    try {
+      await writeThenLeave(url, "tab-7");
+      await Bun.sleep(50);   // the server has seen the close
+      const again = connectWs(url, { clientId: "tab-7" });
+      expect(await again.send({ action: "undo" })).toMatchObject({ doc: "room:a", ops: [{ op: "remove", path: "/messages/m1" }] });
+      again.close();
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("connected again while the server still holds the old socket open (a drop it has not noticed): undo takes the write back", async () => {
+    const { server, url } = await serve();
+    try {
+      const old = connectWs(url, { clientId: "tab-9" });   // never closed: half-open, as far as the server knows
+      await old.send({ action: "open", doc: "room:a" });
+      await old.send({ action: "delta", doc: "room:a", ops: [{ op: "add", path: "/messages/m1", value: { text: "hi" } }] });
+      const again = connectWs(url, { clientId: "tab-9" });
+      expect(await again.send({ action: "undo" })).toMatchObject({ doc: "room:a", ops: [{ op: "remove", path: "/messages/m1" }] });
+      again.close();
+      old.close();
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("connected again at once, while the old socket is still closing: undo takes the write back", async () => {
+    const { server, url } = await serve();
+    try {
+      await writeThenLeave(url, "tab-8");
+      const again = connectWs(url, { clientId: "tab-8" });
+      expect(await again.send({ action: "undo" })).toMatchObject({ doc: "room:a", ops: [{ op: "remove", path: "/messages/m1" }] });
+      again.close();
+    } finally {
+      server.stop(true);
+    }
   });
 });
 

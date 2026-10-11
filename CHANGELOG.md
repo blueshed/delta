@@ -118,6 +118,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so is a root collection the schema does not have. They registered, then answered 500 at open.
   A key must be `id`, the root's parent key or one of its columns, declared in the schema (a
   column added with `ALTER TABLE` and not declared is refused, as on Postgres).
+- **A client that chooses its `clientId` keeps its undo cursor when it reconnects before the
+  server has seen its old socket close** (a network drop the server has not noticed yet). The
+  server gave the new socket a fresh id, so the ledger's cursor changed and undo answered null
+  for the writes before the drop. The fresh id is still the socket's `sendTo` address (no
+  hijack, #24); the cursor stays the id it chose. Without sign-in, a second live socket that
+  names the same id now shares its cursor at once rather than once the first has gone: treat a
+  chosen id as a secret there, as before.
 
 ## [0.12.0] - 2026-10-11
 

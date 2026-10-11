@@ -423,6 +423,10 @@ export function createWs(opts?: WsOptions): WsServer {
         let clientId = ws.data.clientId;
         const existing = clientId ? clients.get(clientId) : undefined;
         if (!clientId || (existing && existing !== ws && existing.readyState === 1)) {
+          // Its address is fresh, but the id it chose stays its ledger cursor
+          // (`socketCursor`): a reconnect the server has not yet seen the old
+          // socket of (a drop it has not noticed) still undoes its own writes.
+          if (clientId) ws.data.chosenId = clientId;
           clientId = crypto.randomUUID();
         }
         ws.data.clientId = clientId;

@@ -146,7 +146,7 @@ export async function createDocListener<I = unknown>(
   // together, so another person holding the same connection id (a client may
   // choose it, to keep its cursor across a reconnect) cannot walk it.
   const cursorOf = (msg: any, client: any, identity: I | undefined): string | null =>
-    client?.data?.local ? (typeof msg.cursor === "string" ? msg.cursor : null) : socketCursor(whoOf(identity), client?.data?.clientId);
+    client?.data?.local ? (typeof msg.cursor === "string" ? msg.cursor : null) : socketCursor(whoOf(identity), client);
   // Who is writing, for the ledger: the identity the gate gives when there is
   // an auth module; without one, the identity the client carries
   // (`createLocal().as(identity)`, or one set at upgrade) -- as the SQLite backend reads it.

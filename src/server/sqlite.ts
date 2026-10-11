@@ -183,7 +183,7 @@ export function registerDocs<I = unknown>(
   // connection together, so another person holding the same connection id
   // (a client may choose it, to keep its cursor across a reconnect) cannot walk it.
   const cursorOf = (msg: any, client: any): string | null =>
-    client?.data?.local ? (typeof msg.cursor === "string" ? msg.cursor : null) : socketCursor(whoOf(client), client?.data?.clientId);
+    client?.data?.local ? (typeof msg.cursor === "string" ? msg.cursor : null) : socketCursor(whoOf(client), client);
   // Build lookup: prefix → DocDef
   const docByPrefix = new Map<string, DocDef>();
   // A scope reads the document's name by the same rule as on Postgres (./scope).

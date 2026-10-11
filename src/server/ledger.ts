@@ -291,9 +291,12 @@ export function createLedger(db: any): Ledger {
 /**
  * The cursor of a socket connection: the connection id alone for someone not signed in, and the
  * person with it for someone who is -- so undo over a socket walks only what this person wrote
- * on this connection, whoever else learns the id.
+ * on this connection, whoever else learns the id. The connection id is the one the client
+ * chose (`connectWs(url, { clientId })`) even when the server gave it a fresh address because
+ * another live socket held that id, so a reconnect keeps its cursor.
  */
-export function socketCursor(who: string | null, clientId: string | undefined): string | null {
+export function socketCursor(who: string | null, client: any): string | null {
+  const clientId: string | undefined = client?.data?.chosenId ?? client?.data?.clientId;
   if (!clientId) return null;
   return who === null ? clientId : JSON.stringify([who, clientId]);
 }
