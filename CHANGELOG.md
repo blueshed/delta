@@ -44,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   could not apply. On every backend the made root is now told where it arrives, before the
   write's own ops; the implied documents, which showed it already, hear the write as written.
   In `write()` (`sqlite.ts`) and `delta_apply` (`001d`, replaced in place: apply it again).
+- **`@blueshed/delta/json` opens a newcomer's first file**: one that is not there, empty, or `{}`
+  opens as empty tables and takes a first write. `{}` crashed `registerDocs` (no `tables`), and
+  an empty file failed to parse.
 
 ## [0.12.0] - 2026-10-11
 

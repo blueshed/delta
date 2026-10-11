@@ -3,7 +3,7 @@
  * other backend (tests/helpers/path.ts), their rows kept in one readable file.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportTables, importTables, registerDocs } from "../src/server/json";
@@ -55,5 +55,16 @@ describe("json", () => {
     // the next row the new process names follows the last one the old named
     await again.process.call("open", { doc: "fo-board:1" });
     expect((await write(again.process, "fo-board:1", [{ op: "add", path: "/courses/-", value: { name: "Cheese" } }])).ops[0].path).toBe("/courses/4");
+  });
+
+  test("a newcomer's first file -- not there, empty, or {} -- opens as empty tables, takes a first write, and then holds it", async () => {
+    for (const [first, make] of [["missing", () => rmSync(file)], ["empty", () => writeFileSync(file, "")], ["{}", () => writeFileSync(file, "{}")]] as const) {
+      make();
+      const fresh = open();
+      expect({ first, open: (await fresh.process.call("open", { doc: "fo-all-courses:" })).result?.courses }).toEqual({ first, open: {} });
+      await write(fresh.process, "fo-all-courses:", [{ op: "add", path: "/courses/-", value: { weddings_id: 1, name: "Soup" } }]);
+      await fresh.persisted();
+      expect({ first, saved: JSON.parse(readFileSync(file, "utf8")).tables.courses }).toEqual({ first, saved: [course(1, "Soup")] });
+    }
   });
 });

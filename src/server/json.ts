@@ -37,14 +37,17 @@ export type { Snapshot } from "../schema";
 /** The file: the rows and sequences, and the ledger's rows. */
 type Saved = Snapshot & { ledger?: { entries: Record<string, unknown>[]; versions: Record<string, unknown>[] } };
 
+/** The file, as a store with no rows yet when it is not there, empty, or `{}` -- a newcomer's first file. */
 function read(file: string): Saved {
-  return existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Saved) : { tables: {}, sequences: {} };
+  const text = existsSync(file) ? readFileSync(file, "utf8").trim() : "";
+  const saved = (text ? JSON.parse(text) : {}) as Partial<Saved>;
+  return { ...saved, tables: saved.tables ?? {}, sequences: saved.sequences ?? {} };
 }
 
 /** Every row the file holds, and each collection's last minted id. */
 export function exportTables(file: string, _schema: Schema): Snapshot {
   const { tables, sequences } = read(file);
-  return { tables, sequences: sequences ?? {} };
+  return { tables, sequences };
 }
 
 /** Write a snapshot's rows into the file (it starts as that). */
