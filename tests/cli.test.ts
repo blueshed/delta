@@ -123,6 +123,23 @@ describe("delta open / delta / call --json: one JSON line, stderr empty", () => 
     expect(lines).toEqual([{ ack: true, ops: [{ op: "add", path: "/lines/l1", value: "hi" }] }]);
   });
 
+  test("delta prints its own ops, not another writer's that lands between its open and its write", async () => {
+    const ws = createWs();
+    let handle: Awaited<ReturnType<typeof registerDoc>>;
+    let n = 0;
+    ws.on("open", (msg) => { if (msg.doc === "busy") setImmediate(() => handle.applyAndBroadcast([{ op: "add", path: `/lines/theirs${n++}`, value: "theirs" }])); });
+    handle = await registerDoc(ws, "busy", { file: join(dir, "busy.json"), empty: { lines: {} } });
+    const server = Bun.serve({ port: 0, routes: { [ws.path]: ws.upgrade }, websocket: ws.websocket });
+    ws.setServer(server);
+    try {
+      const { code, lines } = await run(["delta", "busy", '[{"op":"add","path":"/lines/mine","value":"mine"}]', "--url", `ws://localhost:${server.port}/ws`, "--json"]);
+      expect(code).toBe(0);
+      expect(lines).toEqual([{ ack: true, ops: [{ op: "add", path: "/lines/mine", value: "mine" }] }]);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("an error is one {error} line on stderr, nothing on stdout, exit 1", async () => {
     const { code, stdout, stderr } = await run(["open", "nobody:", "--url", open.url, "--json"]);
     expect(code).toBe(1);

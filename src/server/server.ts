@@ -65,7 +65,8 @@ export interface WsServer {
 export interface DocHandle<T> {
   getDoc(): T;
   persist(): Promise<void>;
-  applyAndBroadcast(ops: DeltaOp[]): void;
+  /** Applies `ops` and broadcasts them as applied; returns them as the writer is answered (ids minted, field writes as their rows). */
+  applyAndBroadcast(ops: DeltaOp[]): DeltaOp[];
 }
 
 export interface DocOptions<T> {
@@ -588,7 +589,7 @@ export async function registerDoc<T>(
     return done;
   }
 
-  function applyAndBroadcast(sent: DeltaOp[]) {
+  function applyAndBroadcast(sent: DeltaOp[]): DeltaOp[] {
     const ops = mintIds(doc, sent);
     applyOps(doc, ops);
     log.info(`delta [${ops.map((o) => `${o.op} ${o.path}`).join(", ")}]`);
@@ -596,6 +597,7 @@ export async function registerDoc<T>(
     // Fire-and-forget by design (the delta is already acked and broadcast), so
     // an fs failure is logged rather than left as an unhandled rejection.
     persist().catch((err: any) => log.error(`persist failed: ${err.message}`));
+    return normalizeForBroadcast(doc, ops);   // the answer keeps whole rows: its record
   }
 
   ws.on("open", (msg, client, respond) => {
@@ -607,8 +609,9 @@ export async function registerDoc<T>(
 
   ws.on("delta", (msg, _client, respond) => {
     if (msg.doc !== name) return;
-    applyAndBroadcast(msg.ops);
-    respond({ result: { ack: true } });
+    const ops = applyAndBroadcast(msg.ops);
+    // the ops as applied to a writer that asks (`inverse: true`, as SQLite takes it): it has no inverse to give
+    respond({ result: msg.inverse ? { ack: true, ops } : { ack: true } });
   });
 
   ws.on("close", (msg, client, respond) => {

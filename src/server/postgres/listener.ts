@@ -563,7 +563,7 @@ export async function createDocListener<I = unknown>(
     const writer = writerOf(identity, client);
     const by = ledger ? { who: whoOf(writer), cursor: cursorOf(msg, client, writer), undoable: msg.undoable !== false } : undefined;
     const result = await type.apply(ctx, docName, msg.ops, identity, by);
-    respond({ result: ledger ? { ack: true, version: Number(result.version), ops: result.ops, inverse: result.inverse, entry: result.entry == null ? undefined : Number(result.entry) } : { ack: true, version: Number(result.version) } });
+    respond({ result: ledger ? { ack: true, version: Number(result.version), ops: result.ops, inverse: result.inverse, entry: result.entry == null ? undefined : Number(result.entry) } : { ack: true, version: Number(result.version), ...(msg.inverse ? { ops: result.ops } : {}) } });
     log.info(`delta ${docName} v${result.version}`);
   }));
 

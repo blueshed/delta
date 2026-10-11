@@ -324,6 +324,18 @@ describe("registerDoc", () => {
     expect(persisted.items).toContain("buy milk");
   });
 
+  test("a writer that asks (inverse: true) is answered the ops as applied: ids minted, a field write as its row", async () => {
+    const ws = createWs();
+    await registerDoc(ws, "todo", { file: tmpFile, empty: { rows: { a: { id: "a", text: "x", done: false } } } as any });
+    const sock = mockSocket();
+    const ops = [{ op: "add", path: "/rows/-", value: { text: "y" } }, { op: "replace", path: "/rows/a/done", value: true }];
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "delta", doc: "todo", ops, inverse: true }));
+    const [made, row] = sock.sent[0].result.ops;
+    expect(sock.sent[0].result.ack).toBe(true);
+    expect(made).toEqual({ op: "add", path: `/rows/${made.value.id}`, value: { text: "y", id: made.value.id } });
+    expect(row).toEqual({ op: "replace", path: "/rows/a", value: { id: "a", text: "x", done: true } });
+  });
+
   test("close action unsubscribes", async () => {
     const ws = createWs();
     await registerDoc(ws, "todo", {

@@ -212,6 +212,13 @@ describe("the Postgres ledger", () => {
     expect((await sendAndAwait(ws, eta, { action: "undo", cursor: "s1" })).error?.message).toContain("Unknown action");
   });
 
+  test("without the ledger, a writer that asks (inverse: true) is answered the ops as applied, and no inverse", async () => {
+    const ws = await process({});
+    const answer = await sendAndAwait(ws, mockClient({ local: true }), { ...add("one"), inverse: true });
+    const id = answer.result.ops?.[0]?.value?.id;
+    expect(answer.result).toEqual({ ack: true, version: 1, ops: [{ op: "add", path: `/items/${id}`, value: { id, name: "one", value: 0 } }] });
+  });
+
   test("without the ledger, the answer's version is a number, as with it -- from a DocType that reads it as pg gives a BIGINT, a string", async () => {
     const items = docTypeFromDef(defineDoc("items:", { root: "items", include: [] }), pool);
     registerDocType({

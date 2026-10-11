@@ -228,21 +228,12 @@ async function cmdDelta(
   if (!docName || !opsJson) usage(1);
   const ops = parseJsonArg(opsJson, "ops");
   if (!Array.isArray(ops)) usageError("ops must be a JSON array");
-  print(await withWs(values, async ({ send, onBroadcast }) => {
+  print(await withWs(values, async ({ send }) => {
     // SQLite's registerDocs requires the doc to be cached before delta;
     // opening on the same socket is the cheapest way to guarantee it.
     await send({ action: "open", doc: docName });
-    const told: any[] = [];
-    onBroadcast((msg) => { if (msg.doc === docName && Array.isArray(msg.ops)) told.push(msg); });
-    // `inverse: true` asks SQLite and the JSON file for the ops as applied.
-    const answer = await send({ action: "delta", doc: docName, ops, inverse: true });
-    if (answer?.ops) return answer;
-    // A backend that answers { ack } alone (no ledger) told this socket the
-    // ops as applied: the broadcast of this write, at its version when it has one.
-    const mine = (msg: any) => answer?.version == null || Number(msg.v) === Number(answer.version);
-    for (let i = 0; i < 40 && !told.some(mine); i++) await Bun.sleep(25);
-    const heard = told.find(mine);
-    return heard ? { ...answer, ops: heard.ops } : answer;
+    // `inverse: true` asks for the ops as applied (and the inverse, where the backend keeps one)
+    return send({ action: "delta", doc: docName, ops, inverse: true });
   }));
 }
 
