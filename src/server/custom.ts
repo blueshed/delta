@@ -321,49 +321,63 @@ export function createCustomDocs<I, H>(opts: {
     if (isPromise(r)) settle(r);
   }
 
+  type Told = { coll: string; id: string; row: any };
+
   /**
-   * What a membership view is told of a row a write told (`row`, whole; null:
-   * gone): one that arrives is an add of the row as its query reads it (read
-   * through the query: the fields it reads, with its casts -- the told row if
-   * the query does not return it); one that stays, a replace of each field it
-   * holds that changed (`asHeld`); one that leaves, a remove.
+   * What a membership view is told of the rows one write told (`row`, whole;
+   * null: gone), in order: one that arrives is an add of the row as its query
+   * reads it (the fields it reads, with its casts -- the told row if the query
+   * does not return it), the query read once for every row that joins in the
+   * write; one that stays, a replace of each field it holds that changed
+   * (`asHeld`); one that leaves, a remove.
    */
-  function tellView(view: View, coll: string, id: string, row: any): MaybePromise<void> {
+  function tellView(view: View, rows: Told[]): MaybePromise<void> {
     const { def, doc } = view;
     if (!doc || !view.subs.size) return;
-    const was = doc[coll]![id];
-    const path = joinPath(coll, id);
-    if (row != null && def.matches!(coll, row, view.criteria, view.identity)) {
-      if (was == null) {
-        return after(def.query!(handle, view.criteria, view.identity), (r) => {
-          const now = toMap((r as Record<string, any[]>)[coll] ?? [])[id] ?? row;
-          if (view.doc !== doc) return;   // dropped meanwhile (forget): read again whole
+    const joins = ({ coll, row }: Told) => row != null && def.matches!(coll, row, view.criteria, view.identity);
+    // does a row join it in this write? held as the write goes, row by row
+    const held = new Map<string, boolean>();
+    const arrives = rows.some((r) => {
+      const key = `${r.coll}/${r.id}`;
+      const was = held.get(key) ?? doc[r.coll]![r.id] != null;
+      held.set(key, joins(r));
+      return !was && held.get(key);
+    });
+    const read = arrives ? def.query!(handle, view.criteria, view.identity) : undefined;
+    return after(read, (r) => {
+      if (view.doc !== doc) return;   // dropped meanwhile (forget): read again whole
+      const read = r ? Object.fromEntries(def.watch.map((c) => [c, toMap((r as Record<string, any[]>)[c] ?? [])])) : {};
+      for (const t of rows) {
+        const { coll, id, row } = t;
+        const was = doc[coll]![id];
+        const path = joinPath(coll, id);
+        if (joins(t)) {
+          const now = was != null ? asHeld(was, row) : read[coll]?.[id] ?? row;
           doc[coll]![id] = now;
-          send(view, [{ op: "add", path, value: now }]);
-        });
+          const told = was != null ? changedFields(path, was, now) : [{ op: "add", path, value: now } as DeltaOp];
+          if (told.length) send(view, told);
+        } else if (was != null) {
+          delete doc[coll]![id];
+          send(view, [{ op: "remove", path }]);
+        }
       }
-      const now = asHeld(was, row);
-      doc[coll]![id] = now;
-      const told = changedFields(path, was, now);
-      if (told.length) send(view, told);
-    } else if (was != null) {
-      delete doc[coll]![id];
-      send(view, [{ op: "remove", path }]);
-    }
+    });
   }
 
-  /** Each membership view, per row of `ops`, in turn (`tellView`). */
+  /** Each membership view, the rows of `ops` it watches, in turn (`tellView`). */
   function tellRows(ops: DeltaOp[]): void {
+    const rows: Told[] = [];
     for (const op of ops) {
       // A row at whatever path the write told it: /<coll>/<id>, or a single
       // document's root, /<coll>, whose id is its own. A told row is whole.
       const [coll, at] = splitPath(op.path) as [string, string | undefined];
       const row = (op as any).value as any | undefined;
       const id = at ?? (row?.id != null ? String(row.id) : undefined);
-      if (id === undefined || !watched.has(coll)) continue;
-      for (const view of views.values()) {
-        if (view.def.matches && view.def.watch.includes(coll) && view.subs.size) inTurn(view, () => tellView(view, coll, id, row));
-      }
+      if (id !== undefined && watched.has(coll)) rows.push({ coll, id, row });
+    }
+    for (const view of views.values()) {
+      const mine = rows.filter((r) => view.def.watch.includes(r.coll));
+      if (view.def.matches && view.subs.size && mine.length) inTurn(view, () => tellView(view, mine));
     }
   }
 

@@ -147,13 +147,22 @@ const guestsDoc = <Q>(prefix: string, query: Q) => ({
   query,
   matches: (_coll: string, row: any, wedding: string) => String(row.weddings_id) === wedding,
 });
-export const sqliteEmails = guestsDoc("fo-emails:", (db: any, w: string) => ({ households: db.query(`SELECT id, email FROM ${householdsTable} WHERE weddings_id = ?`).all(Number(w)) }));
+/** How often fo-emails:'s query has run, and how long it is made to take (ms): what a case asks of a view's reads. */
+export const emailsQuery = { runs: 0, delay: 0 };
+const slowed = <R>(read: () => R | Promise<R>): R | Promise<R> => {
+  emailsQuery.runs++;
+  if (!emailsQuery.delay) return read();
+  const rows = read();   // read as the query runs, answered late
+  return Bun.sleep(emailsQuery.delay).then(() => rows);
+};
+// slowed, the SQLite query answers a promise, as the backend takes it (its type says a value)
+export const sqliteEmails = guestsDoc("fo-emails:", (db: any, w: string) => slowed(() => ({ households: db.query(`SELECT id, email FROM ${householdsTable} WHERE weddings_id = ?`).all(Number(w)) as any[] })) as { households: any[] });
 export const sqliteGuests = guestsDoc("fo-guests:", (db: any, w: string) => ({
   households: db.query(`SELECT CAST(id AS TEXT) AS id, CAST(weddings_id AS TEXT) AS weddings_id, email FROM ${householdsTable} WHERE weddings_id = ?`).all(Number(w)),
 }));
-export const postgresEmails = guestsDoc("fo-emails:", async (pool: any, w: string) => ({
-  households: (await pool.query(`SELECT jsonb_build_object('id', id, 'email', email) AS row FROM ${householdsTable} WHERE weddings_id = $1`, [Number(w)])).rows.map((r: any) => r.row),
-}));
+export const postgresEmails = guestsDoc("fo-emails:", async (pool: any, w: string) => slowed(async () => ({
+  households: (await pool.query(`SELECT jsonb_build_object('id', id, 'email', email) AS row FROM ${householdsTable} WHERE weddings_id = $1`, [Number(w)])).rows.map((r: any) => r.row) as any[],
+})));
 export const postgresGuests = guestsDoc("fo-guests:", async (pool: any, w: string) => ({
   households: (await pool.query(`SELECT id::text AS id, weddings_id::text AS weddings_id, email FROM ${householdsTable} WHERE weddings_id = $1`, [Number(w)])).rows,
 }));
@@ -2304,6 +2313,34 @@ export function fanOutCases(backend: () => PathBackend): void {
       const told = [[field("/households/1/email", "z@x")], [{ op: "remove", path: "/households/2" }]];
       await expectTold(b, "fo-emails:1", [...told, ...joined((id, email) => ({ id, email }))]);
       await expectTold(b, "fo-guests:1", [...told, ...joined((id, email) => ({ id: String(id), weddings_id: "1", email }))]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("its query is read once a write, however many rows join it: fifty households added in one write, one read, each told in its shape", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-emails:1", "fo-board:1"]);
+      emailsQuery.runs = 0;
+      const many = Array.from({ length: 50 }, (_, i) => ({ op: "add", path: `/households/${100 + i}`, value: { email: `g${i}@x` } }));
+      await write(b.process, "fo-board:1", many);
+      await expectTold(b, "fo-emails:1", many.map((_, i) => [{ op: "add", path: `/households/${100 + i}`, value: { id: 100 + i, email: `g${i}@x` } }]));
+      expect(emailsQuery.runs).toBe(1);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("it hears its changes in order however slow its query: a row that joins and is removed in writes back to back is told added, then removed", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-emails:1", "fo-board:1"]);
+      emailsQuery.delay = 80;
+      try {
+        await write(b.process, "fo-board:1", [{ op: "add", path: "/households/10", value: { email: "n@x" } }]);
+        await write(b.process, "fo-board:1", [{ op: "remove", path: "/households/10" }]);
+        await waitFor(() => told(b.process, "fo-emails:1").length >= 2, { timeout: 3000 }).catch(() => {});
+        await b.quiet();
+        // op and path: on Postgres the read may run after the removal, and then the row comes as told
+        expect(told(b.process, "fo-emails:1").map((ops: any) => ops.map((o: any) => `${o.op} ${o.path}`))).toEqual([["add /households/10"], ["remove /households/10"]]);
+      } finally {
+        emailsQuery.delay = 0;
+      }
       await assertCopiesHold(b, copies);
     });
   });
