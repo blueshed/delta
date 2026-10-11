@@ -211,6 +211,25 @@ describe("the Postgres ledger", () => {
     expect((await pool.query("SELECT COUNT(*)::int AS n FROM _delta_ledger")).rows[0].n).toBe(0);
     expect((await sendAndAwait(ws, eta, { action: "undo", cursor: "s1" })).error?.message).toContain("Unknown action");
   });
+
+  test("without the ledger, the answer's version is a number, as with it -- from a DocType that reads it as pg gives a BIGINT, a string", async () => {
+    const items = docTypeFromDef(defineDoc("items:", { root: "items", include: [] }), pool);
+    registerDocType({
+      ...items,
+      prefix: "items-text:",
+      parse: () => ({}),
+      open: (ctx, _name, msg, identity) => items.open(ctx, "items:", msg, identity),
+      async apply(ctx, _name, ops, identity, by) {
+        await items.apply(ctx, "items:", ops, identity, by);
+        return { version: (await pool.query("SELECT version FROM _delta_versions WHERE doc_name = 'items:'")).rows[0].version };
+      },
+    });
+    const ws = await process({});
+    const c = mockClient({ local: true });
+    await sendAndAwait(ws, c, { action: "open", doc: "items-text:" });
+    const answer = await sendAndAwait(ws, c, { action: "delta", doc: "items-text:", ops: [{ op: "add", path: "/items/-", value: { name: "one" } }] });
+    expect(answer.result).toEqual({ ack: true, version: 1 });
+  });
 });
 
 // ---------------------------------------------------------------------------

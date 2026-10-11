@@ -189,6 +189,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one under a course that is not there at all; both are a 404 now (`delta_apply`, replaced in
   place).
 
+- **On Postgres without a ledger, a write's answered `version` is a number**, as it is with one:
+  a hand-written `DocType` that read it as pg gives a `BIGINT` (a string) passed the string on.
 - **A row a write makes and its cascade takes out is told its add wherever its remove is told
   (todo #75)**, on every backend. `[add /courses/9, add /drinks/5 under it, remove /courses/9]`
   told the board and the menu the drink's remove but not its add, so an open copy met a remove
