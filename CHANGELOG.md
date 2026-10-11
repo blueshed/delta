@@ -233,6 +233,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     as Postgres does (it answered 404 when the parent was not there either).
   - **A recompute custom document whose read comes back null is let go (404)**, every backend: its
     subscribers were told nothing, and kept the menu card of a wedding that was gone.
+  - **A write is asked op by op on every backend** (the driver now makes mistakes too: a bad
+    path, an unknown field, a value not of its type). SQLite validated the whole batch before
+    any op, so `[add /courses/-, add with an unknown field]` spent a serial on Postgres and not
+    on SQLite, and `[remove /courses/99, replace with an unknown field]` answered 404 on one and
+    400 on the other: SQLite now asks each op as it comes, as `delta_apply` does. Postgres now
+    refuses a value not of its column's type (`5` into a text column was cast to `"5"`; `true`
+    as a parent key) in `_delta_assert_fields` (`001a`, replaced in place), and asks it before a
+    replaced row (`001d`), as SQLite does; its exported `validateOps` says so ahead. A path that
+    is no JSON Pointer is refused before any op on every backend (`delta_apply` asks every path
+    first; Postgres's ledger did, by the way, and SQLite answered a closed document's 404 first).
 - **Two registrations over the same rows tell each other, and an undo through one is guarded by
   a write through the other (todo #64)**, on SQLite and the JSON file. Ada renamed course 1
   through `fo-board:1`, Bob through a public `fo-pub-courses:` registered in a second

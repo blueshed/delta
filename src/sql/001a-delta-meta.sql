@@ -131,10 +131,11 @@ BEGIN
 END;
 $$;
 
--- Refuse a value that is not an object, or names a field the collection does
--- not have (SQLSTATE 22023 → 400). It used to be merged into the broadcast
--- row, acked, and dropped by jsonb_populate_record: stored without it, told
--- with it. id, the parent key and the temporal columns are the row's own.
+-- Refuse a value that is not an object, names a field the collection does
+-- not have, or gives a column a value not of its type (SQLSTATE 22023 → 400).
+-- It used to be merged into the broadcast row, acked, and dropped (or cast) by
+-- jsonb_populate_record: stored otherwise than told. id, the parent key and
+-- the temporal columns are the row's own.
 CREATE OR REPLACE FUNCTION _delta_assert_fields(
   p_collection TEXT, p_columns JSONB, p_parent_fk TEXT, p_value JSONB
 ) RETURNS void LANGUAGE plpgsql IMMUTABLE AS $$
@@ -151,6 +152,26 @@ BEGIN
      AND k IS DISTINCT FROM p_parent_fk;
   IF v_unknown IS NOT NULL THEN
     RAISE EXCEPTION 'Unknown field: % (not a column of %)', v_unknown, p_collection USING ERRCODE = '22023';
+  END IF;
+  -- the parent key, given, is an id: a whole number, or text (a number's digits)
+  IF p_parent_fk IS NOT NULL AND p_value ? p_parent_fk AND jsonb_typeof(p_value->p_parent_fk) <> 'null'
+     AND NOT (jsonb_typeof(p_value->p_parent_fk) = 'string'
+              OR (jsonb_typeof(p_value->p_parent_fk) = 'number' AND (p_value->>p_parent_fk)::numeric = trunc((p_value->>p_parent_fk)::numeric))) THEN
+    RAISE EXCEPTION '% must be an id: an integer', p_parent_fk USING ERRCODE = '22023';
+  END IF;
+  -- each column's value of its type, as SQLite's validateOps asks: not cast (5 into a text column is "5")
+  SELECT string_agg(format('%s must be %s', k, CASE c->>'type' WHEN 'text' THEN 'a string' WHEN 'integer' THEN 'an integer'
+           WHEN 'real' THEN 'a number' WHEN 'boolean' THEN 'a boolean' ELSE 'an ISO-8601 string' END), '; ' ORDER BY k) INTO v_unknown
+    FROM jsonb_each(p_value) AS v(k, val), LATERAL (SELECT p_columns->k AS c) col
+   WHERE c IS NOT NULL AND jsonb_typeof(val) <> 'null' AND NOT CASE c->>'type'
+     WHEN 'text' THEN jsonb_typeof(val) = 'string'
+     WHEN 'integer' THEN jsonb_typeof(val) = 'number' AND val::text::numeric = trunc(val::text::numeric)
+     WHEN 'real' THEN jsonb_typeof(val) = 'number'
+     WHEN 'boolean' THEN jsonb_typeof(val) = 'boolean'
+     WHEN 'timestamptz' THEN jsonb_typeof(val) = 'string'
+     ELSE TRUE END;
+  IF v_unknown IS NOT NULL THEN
+    RAISE EXCEPTION '%', v_unknown USING ERRCODE = '22023';
   END IF;
 END;
 $$;

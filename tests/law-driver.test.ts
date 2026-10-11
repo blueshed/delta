@@ -6,7 +6,8 @@
  * a condition, and one through a second registration -- and takes random steps
  * through them as three people: adds (an id named, or /-), a field or a row
  * replaced, removes and the cascades they make, moves to another parent,
- * batches of several ops, and undo and redo on each person's cursor. The same
+ * batches of several ops, now and then an op made a mistake of (a bad path, an
+ * unknown field, a value not of its type), and undo and redo on each person's cursor. The same
  * steps go to every backend at once. After each:
  *
  * - on each backend, the law: every open copy, with what it was told applied,
@@ -261,6 +262,22 @@ function opFor(doc: string, r: ReturnType<typeof random>, k: Known): DeltaOp {
   return r.pick(choices)();
 }
 
+/**
+ * An op made a mistake of, now and then, so a batch is refused part-way as well
+ * as whole: a path no document takes, a field the row has not, a value not of
+ * its column's type. (Not a text id, which SQLite keeps and Postgres refuses.)
+ */
+function spoil(op: DeltaOp, r: ReturnType<typeof random>): DeltaOp {
+  const value = (op as any).value;
+  const kind = op.op === "remove" ? 0 : r.int(3);
+  if (kind === 0) return { ...op, path: r.pick(["/nowhere/1", "courses", "/courses/1/name/x", ""]) } as DeltaOp;
+  if (kind === 1) return { ...op, value: value !== null && typeof value === "object" ? { ...value, nope: 1 } : { nope: value } } as DeltaOp;
+  const wrong = (v: unknown) => (typeof v === "string" ? 5 : typeof v === "number" ? true : "x");
+  if (value === null || typeof value !== "object") return { ...op, value: wrong(value) } as DeltaOp;
+  const [field] = Object.keys(value);
+  return { ...op, value: { ...value, [field!]: wrong(value[field!]) } } as DeltaOp;
+}
+
 function stepOf(r: ReturnType<typeof random>, k: Known): Step {
   const cursor = r.pick(people);
   const roll = r.next();
@@ -268,7 +285,8 @@ function stepOf(r: ReturnType<typeof random>, k: Known): Step {
   if (roll < 0.22) return { kind: "redo", cursor };
   const doc = r.pick(written);
   const n = r.next() < 0.75 ? 1 : 2 + r.int(2);   // now and then a batch of several ops
-  return { kind: "delta", doc, ops: Array.from({ length: n }, () => opFor(doc, r, k)), cursor };
+  const ops = Array.from({ length: n }, () => opFor(doc, r, k)).map((op) => (r.next() < 0.06 ? spoil(op, r) : op));
+  return { kind: "delta", doc, ops, cursor };
 }
 
 // ---------------------------------------------------------------------------

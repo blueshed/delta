@@ -52,8 +52,8 @@ export async function pruneOpsLog(pool: Pool, keepInterval = "1 hour"): Promise<
  * Validate delta ops against the schema, as `delta_apply` (001d) reads them,
  * before they reach the database: it refuses each write this does (a 400), and
  * takes each this takes -- but for what only the rows can say (a row not there,
- * 404; already there, 409) and a value its column cannot cast (text into an
- * integer), which are the database's. Returns an array of errors (empty = valid).
+ * 404; already there, 409) and a value of its type its column cannot hold (a
+ * timestamp that is no date), which are the database's. Returns an array of errors (empty = valid).
  *
  * `doc`: the document's name, which says its mode and its scope's values, as
  * `delta_apply` reads them (`_delta_resolve_scope`; `resolveScope` is its
@@ -100,13 +100,20 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
         return Number.isInteger(v) || (typeof v === "string" && /^\s*[+-]?\d+\s*$/.test(v)) ? null : `${field} must be an id: an integer`;
       }
       const col = Object.hasOwn(table.columns, field) ? table.columns[field]! : undefined;
-      return col && !col.nullable && v === null ? `${field} cannot be null` : null;
+      if (!col || v === null || v === undefined) return col && !col.nullable && v === null ? `${field} cannot be null` : null;
+      // a value of its column's type, not cast (_delta_assert_fields)
+      const of: Record<string, [boolean, string]> = {
+        text: [typeof v === "string", "a string"], integer: [Number.isInteger(v), "an integer"], real: [typeof v === "number", "a number"],
+        boolean: [typeof v === "boolean", "a boolean"], timestamptz: [typeof v === "string", "an ISO-8601 string"],
+      };
+      const [ok, what] = of[col.type] ?? [true, ""];
+      return ok ? null : `${field} must be ${what}`;
     };
     // A whole-row value: an object of known keys, each field as it may be written.
     const rowErrs = (row: Record<string, unknown>, verb: "add" | "replace") => {
       for (const k of Object.keys(row)) if (!known(k)) fail(`Unknown field: ${k}`);
       for (const [k, v] of Object.entries(row)) {
-        const err = verb === "add" && k === fk ? null : fieldErr(k, v);   // an add's parent key is its document's, or found in scope
+        const err = verb === "add" && k === fk && v == null ? null : fieldErr(k, v);   // an add's parent key, left null, is its document's, or found in scope
         if (err) fail(err);
       }
     };

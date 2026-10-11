@@ -392,6 +392,27 @@ export function drivenCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
+    test("a batch is asked op by op on every backend: one the schema refuses (400) leaves the serials the ops before it took spent, and the first refusal answers -- a 404 before a 400, a 400 before a 404; but a path that is no JSON Pointer is refused before any op, and a parent key given is an id", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-board:2", "fo-course:2"]);
+      const code = async (ops: unknown[]) => (await b.process.call("delta", { doc: "fo-board:1", ops })).error?.code;
+      const fish = { op: "add", path: "/courses/-", value: { name: "Fish" } };
+      expect(await code([fish, { op: "add", path: "/courses/-", value: { nope: 1 } }])).toBe(400);
+      expect(await code([fish, { op: "replace", path: "/courses/1/name", value: 5 }])).toBe(400);
+      expect(await code([{ op: "remove", path: "/courses/99" }, { op: "replace", path: "/courses/1/nope", value: 1 }])).toBe(404);
+      expect(await code([{ op: "replace", path: "/courses/1/nope", value: 1 }, { op: "remove", path: "/courses/99" }])).toBe(400);
+      expect(await code([fish, { op: "add", path: "/nowhere/-", value: {} }])).toBe(400);
+      expect(await code([fish, { op: "remove", path: "/courses/99" }, { op: "remove", path: "courses" }])).toBe(400);   // nothing taken
+      expect(await code([fish, { op: "add", path: "/drinks/-", value: { courses_id: true, name: "Port" } }])).toBe(400);
+      const { ops } = await write(b.process, "fo-board:1", [fish]);
+      expect(ops.map((o: any) => o.path)).toEqual(["/courses/7"]);
+      // a document whose root is gone answers a path that is no pointer as the mistake it is
+      await write(b.process, "fo-board:2", [{ op: "remove", path: "/courses/2" }]);
+      const other = await b.process.call("delta", { doc: "fo-course:2", ops: [{ op: "remove", path: "courses" }] });
+      expect(other.error?.code).toBe(400);
+      await assertCopiesHold(b, copies);
+    });
+
     test("a row is never added or moved under a parent that is not there (404), whatever document it comes through -- a list names a parent only by key; an implied plan's wedding is there once the plan is written (seeds 2 to 5)", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-all-courses:", "fo-catalog:", "fo-plan:7", "fo-all-households:"]);

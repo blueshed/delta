@@ -496,6 +496,8 @@ BEGIN
   IF p_ops IS NULL OR jsonb_typeof(p_ops) != 'array' THEN
     RAISE EXCEPTION 'ops must be a JSON array';
   END IF;
+  -- every path is a JSON Pointer, asked of the whole write before any op (400): a grammar, not a row
+  PERFORM _delta_split_path(o->>'path') FROM jsonb_array_elements(p_ops) AS o;
 
   v_def := _delta_find_doc(p_doc_name);
   IF v_def.prefix IS NULL THEN
@@ -931,16 +933,9 @@ BEGIN
     IF (array_length(v_parts, 1) = 2 OR array_length(v_parts, 1) = 3) AND v_op->>'op' = 'replace' THEN
       v_id := _delta_row_id(v_coll_key, v_parts[2]);
 
-      -- Same gate as remove: the row is addressed by bare id, so it must belong
-      -- to this doc. (The single-mode root branch above never reaches here — it
-      -- targets v_doc_id directly.)
-      IF NOT _delta_row_in_scope(v_def, p_doc_name, v_coll_key, v_id) THEN
-        RAISE EXCEPTION 'row not found: %/%', v_coll_key, v_id
-          USING ERRCODE = 'P0002';
-      END IF;
-
       -- 3-segment: wrap single field into partial row value. A row's id is
-      -- not a field: its path says it.
+      -- not a field: its path says it. What the op says is asked before its
+      -- row (400 before 404), as for an add, and as SQLite's validateOps asks.
       IF array_length(v_parts, 1) = 3 THEN
         IF v_parts[3] = 'id' THEN
           RAISE EXCEPTION 'Unknown field: id (a row keeps the id its path names)' USING ERRCODE = '22023';
@@ -949,6 +944,14 @@ BEGIN
       END IF;
       PERFORM _delta_assert_fields(v_coll_key, v_cols, v_coll.parent_fk, v_op->'value');
       v_blank := CASE WHEN array_length(v_parts, 1) = 2 THEN _delta_whole(v_cols, v_op->'value') ELSE '{}'::jsonb END;
+
+      -- Same gate as remove: the row is addressed by bare id, so it must belong
+      -- to this doc. (The single-mode root branch above never reaches here — it
+      -- targets v_doc_id directly.)
+      IF NOT _delta_row_in_scope(v_def, p_doc_name, v_coll_key, v_id) THEN
+        RAISE EXCEPTION 'row not found: %/%', v_coll_key, v_id
+          USING ERRCODE = 'P0002';
+      END IF;
 
       IF v_coll.temporal THEN
         EXECUTE format(

@@ -698,12 +698,6 @@ export function registerDocs<I = unknown>(
     // op after it.
     for (const op of ops) {
       if (op.op !== "replace") endRun();
-      const parts = splitPath(op.path);
-      const collKey = parts[0]!;
-      const table = schema.tables[collKey];
-      // A single-mode document's root is one row, held at /<root>.
-      const isRoot = !list && collKey === def.root;
-
       // A single document whose root is not there takes no writes (404), as it
       // opens: asked before each op, so one that takes its root out writes
       // nothing more through it -- an add under it would be an orphan -- but
@@ -713,9 +707,21 @@ export function registerDocs<I = unknown>(
       if (!list && !walk) {
         const there = readRow(rootTable, rootId!) != null;
         opened ??= there || !!def.implied;   // an implied document always opens
-        const back = opened && op.op === "add" && isRoot && parts.length === 2 && parts[1] !== "-" && sameId(rowId(parts[1]!), rootId);
+        const named = (() => { try { return splitPath(op.path); } catch { return []; } })();
+        const back = opened && op.op === "add" && named.length === 2 && named[0] === def.root && named[1] !== "-" && sameId(rowId(named[1]!), rootId);
         if (!there && !back) refuse(404, `Document not found: ${docName} (its root, ${joinPath(def.root, String(rootId))}, is not there)`);
       }
+
+      // What the op may say (`validateOps`), asked as it comes, as delta_apply asks it: one refused
+      // leaves the ops before it to roll back, and the serials they took spent -- the same on every backend
+      const invalid = validateOps(schema, def, [op], { list, values: scope.values, walk });
+      if (invalid.length) refuse(400, invalid.map((e) => `${e.path}: ${e.message}`).join("; "));
+
+      const parts = splitPath(op.path);
+      const collKey = parts[0]!;
+      const table = schema.tables[collKey];
+      // A single-mode document's root is one row, held at /<root>.
+      const isRoot = !list && collKey === def.root;
 
       // /<root>/<id> and /<root>/<id>/<field> name it by its id, as on Postgres
       // and as a list document would say it: a replace of it, or of one field.
@@ -976,16 +982,11 @@ export function registerDocs<I = unknown>(
    * that share its rows, and to the custom documents that watch them.
    */
   function write(docName: string, def: DocDef, doc: any, ops: DeltaOp[], by: { who: string | null; cursor: string | null; undoes?: number; undoable?: boolean }): Written | Failed {
-    // Pre-flight validation — reject unknown collections/fields and bad types
-    // up front instead of silently acking an op that diverges cache/broadcast
-    // from what the DB can persist.
+    // Each op is validated as it comes (applyOps), unknown collections, fields and bad types refused
+    // rather than acked and dropped by the database.
     const scope = resolveScope(def, docName.slice(def.prefix.length));
     // a document named with a time reads it as it stood: what is written now is not its to write
     if (scope.at !== undefined) return { error: { code: 403, message: `${docName} reads ${def.root} as it stood at ${scope.at}: it takes no writes. Write through a document with no time in its name.` } };
-    const validationErrors = validateOps(schema, def, ops, { list: scope.mode === "list", values: scope.values, walk: by.undoes !== undefined });
-    if (validationErrors.length) {
-      return { error: { code: 400, message: validationErrors.map((e) => `${e.path}: ${e.message}`).join("; ") } };
-    }
 
     let snapshot = structuredClone(doc); // for rollback, and for the inverse
     spent.length = 0;
@@ -1098,6 +1099,9 @@ export function registerDocs<I = unknown>(
 
     const match = findDoc(docName);
     if (!match) return;
+    // every path is a JSON Pointer, asked of the whole write before anything else (400), as delta_apply asks it
+    try { for (const op of msg.ops as DeltaOp[]) splitPath(op.path); }
+    catch (err: any) { return respond({ error: failure(err) }); }
 
     heardElsewhere();
     reloadEvicted();

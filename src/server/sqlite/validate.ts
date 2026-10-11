@@ -150,10 +150,10 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
 
       required(value, op.op === "add" && opts.list && collKey === def.root ? opts.values : {}, op.op === "add");
 
-      // Type-check the fields that map to declared columns, and a replace's
-      // parent key (an add's is its document's root, or found in scope).
+      // Type-check the fields that map to declared columns, and the parent key
+      // given (an add's may be left out, or null: its document's root, or found in scope).
       for (const [field, fieldValue] of Object.entries(value)) {
-        const typeErr = op.op === "add" && field === fkCol ? null : fieldErr(field, fieldValue);
+        const typeErr = op.op === "add" && field === fkCol && fieldValue == null ? null : fieldErr(field, fieldValue);
         if (typeErr) errors.push({ path: `${op.path}/${field}`, message: typeErr });
       }
     }
