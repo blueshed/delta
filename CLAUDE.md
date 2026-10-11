@@ -93,11 +93,12 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
   holds a row it changed, each what changed for it (arrived: add; stayed: its changed fields; left:
   remove; the root: replaced, or null). On Postgres it is worked out in `delta_apply`
   (`_delta_holders`, `_delta_tell`, `001b`/`001d`) over the names open now (`_delta_held`, each
-  listener's), so every process hears it; on SQLite and
-  the JSON file, in `write()` (`holders`, `tell`). `tests/postgres-isolation.test.ts` and
-  `tests/sqlite-isolation.test.ts` pin that nobody else is told. On Postgres the documents
-  are those the database knows (`defineDoc`) and custom docs; a hand-written `DocType` is told
-  only its own writes (`tests/postgres.test.ts`, "a DocType written by hand").
+  listener's), so every process hears it; on SQLite and the JSON file, in `write()` (`holders`,
+  `tell`), over every registration on the database handle (`fanoutsOn`).
+  `tests/postgres-isolation.test.ts` and `tests/sqlite-isolation.test.ts` pin that nobody else
+  is told. On Postgres the documents are those the database knows (`defineDoc`) and custom
+  docs; a hand-written `DocType` is told only its own writes (`tests/postgres.test.ts`, "a
+  DocType written by hand").
 - **Rows carry from one backend to the next** with `exportTables` / `importTables` (the same
   `Snapshot` on each): every row, every temporal version, and each sequence, so the next serial
   follows on. Not the ledger: undo history starts fresh on the next backend. The free-form

@@ -89,11 +89,31 @@ const log = createLogger("[delta-sqlite]");
 const registrations = new WeakMap<object, Map<symbol, string[]>>();
 
 /**
- * The writes committed through each database handle, by every registration on
- * it: one that finds the count moved past its own knows another wrote on this
- * connection, which `PRAGMA data_version` does not count (todo #64).
+ * One registration's open documents, as a write through any registration on
+ * its database handle tells them (todo #64): every document open on the
+ * database hears a write, whichever registration it was opened through -- as
+ * every Postgres listener does.
  */
-const commitsOn = new WeakMap<object, number>();
+type Fanout = {
+  /** The documents open here (and `writer`, the one written through) that hold `row` of `coll`. */
+  holders(coll: string, row: any, writer?: string): string[];
+  /** Of those, the implied single documents: they showed a root before its row was made. */
+  showing(coll: string, row: any, writer?: string): string[];
+  /** Tell the documents open here what a write through another registration changed. */
+  announce(touched: Touched[], applied: DeltaOp[]): void;
+};
+
+/** The registrations over each database handle: a JSON file's registrations on a server share one. */
+const fanoutsOn = new WeakMap<object, Set<Fanout>>();
+
+/**
+ * A row of a write, for the telling: who held it before -- on each registration
+ * over the database -- and what it is now (null: gone); a replace's, what it was
+ * (`was`), so a document that holds it either way is told only the fields that
+ * changed. A `carried` row is one the write did not change but moved, under a
+ * parent it moved: it is told only where it arrives or leaves (todo #62).
+ */
+type Touched = { coll: string; id: string | number; before: Map<Fanout, string[]>; after: any | null; was?: any; carried?: boolean };
 
 /**
  * Claim `prefixes` on `ws` for one registration (refused if one comes twice, or
@@ -202,24 +222,20 @@ export function registerDocs<I = unknown>(
   // In-memory doc cache: docName → loaded doc object
   const cache = new Map<string, any>();
 
-  // Several processes on one file (todo #1), or another registration on this
-  // handle (todo #64): a copy read before the other committed is stale, and a
-  // write merged over one -- or a walk planned from one -- would put back what
-  // the other wrote. `PRAGMA data_version` moves when another connection
-  // commits (never for this one's own writes), and `commitsOn` when another
-  // registration on this one does, so before a copy is served or written from,
-  // every copy is dropped when either has moved, and read again from the
-  // tables. A document open here is not told of the other's write: it reads it
-  // when it is next opened, or written through.
+  // Several processes on one file (todo #1): a copy read before another
+  // connection committed is stale, and a write merged over one would put back
+  // what the other wrote. `PRAGMA data_version` moves when another connection
+  // commits (never for this one's own writes), so before a copy is served or
+  // written from, every copy is dropped when it has moved, and read again from
+  // the tables. A document open here is not told of another process's write:
+  // it reads it when it is next opened, or written through. (Another
+  // registration on this handle tells this one: `fanoutsOn`.)
   const dataVersion = db.query("PRAGMA data_version");
   let seenVersion = (dataVersion.get() as { data_version: number }).data_version;
-  let seenCommits = commitsOn.get(db) ?? 0;
   function heardElsewhere(): boolean {
     const now = (dataVersion.get() as { data_version: number }).data_version;
-    const commits = commitsOn.get(db) ?? 0;
-    if (now === seenVersion && commits === seenCommits) return false;
+    if (now === seenVersion) return false;
     seenVersion = now;
-    seenCommits = commits;
     cache.clear();
     implied.clear();
     custom.forget();
@@ -297,15 +313,29 @@ export function registerDocs<I = unknown>(
     insertRow(db, rootTable, root, ts);
     passId(rootTable, root.id);
     const row = readRow(rootTable, root.id);
-    const showed = holders(def.root, row, writer).filter((name) => {
+    const before = new Map([...fanouts].map((f) => [f, f.showing(def.root, row, f === me ? writer : undefined)]));
+    return { coll: def.root, id: row.id, before, after: row, carried: true };
+  }
+
+  /** The implied single documents open here (and `writer`) that hold `row`: they showed it before it was made. */
+  function showing(coll: string, row: any, writer?: string): string[] {
+    return holders(coll, row, writer).filter((name) => {
       const m = findDoc(name);
       return !!m?.def.implied && resolveScope(m.def, m.docId).mode === "single";
     });
-    return { coll: def.root, id: row.id, before: showed, after: row, carried: true };
   }
 
   // Who has each of these documents open, by name (for scoped fan-out)
   const subscriptions = new Map<string, Set<any>>();
+
+  // This registration among those over the database: a write through any is told to the documents open on each.
+  const me: Fanout = { holders, showing, announce };
+  const fanouts = fanoutsOn.get(db) ?? new Set<Fanout>();
+  fanoutsOn.set(db, fanouts);
+  fanouts.add(me);
+  /** Who holds `row` of `coll` on each registration over the database: the documents open there, and here `writer`. */
+  const heldBy = (coll: string, row: any, writer: string): Touched["before"] =>
+    new Map([...fanouts].map((f) => [f, f.holders(coll, row, f === me ? writer : undefined)]));
 
   /** The definition a name belongs to: the longest prefix it starts with, as Postgres's `_delta_find_doc`. */
   function findDoc(docName: string): { def: DocDef; docId: string } | null {
@@ -356,15 +386,6 @@ export function registerDocs<I = unknown>(
   // ---------------------------------------------------------------------------
   // Delta ops → SQL
   // ---------------------------------------------------------------------------
-
-  /**
-   * A row of the write, for the telling: who held it before, and what it is now
-   * (null: gone); a replace's, what it was (`was`), so a document that holds it
-   * either way is told only the fields that changed. A `carried` row is one the
-   * write did not change but moved, under a parent it moved: it is told only
-   * where it arrives or leaves (todo #62).
-   */
-  type Touched = { coll: string; id: string | number; before: string[]; after: any | null; was?: any; carried?: boolean };
 
   /** A row outside a document -- of a collection it does not include -- that a write through it reaches (a cascade). */
   type Beyond = { coll: string; row: any };
@@ -419,9 +440,10 @@ export function registerDocs<I = unknown>(
   }
 
   /** The open documents -- and the writer's own -- that hold `row` of `coll`. */
-  function holders(coll: string, row: any, writer: string): string[] {
+  function holders(coll: string, row: any, writer?: string): string[] {
     if (!row) return [];
-    const names = new Set([...subscriptions.keys(), writer]);
+    const names = new Set(subscriptions.keys());
+    if (writer !== undefined) names.add(writer);
     const out: string[] = [];
     for (const name of names) {
       const m = findDoc(name);
@@ -561,7 +583,7 @@ export function registerDocs<I = unknown>(
      * between them could see the row part-way. Postgres's `delta_apply` answers
      * such a run once too.
      */
-    let run: { table: ResolvedTable; id: string | number; root: boolean; key: string; before: string[]; was: any; row: any } | undefined;
+    let run: { table: ResolvedTable; id: string | number; root: boolean; key: string; before: Touched["before"]; was: any; row: any } | undefined;
 
     /**
      * Write the run's row: on a temporal table, the version before the write
@@ -577,7 +599,7 @@ export function registerDocs<I = unknown>(
       // a row moved to another parent takes the rows under it along: who holds each, asked before it moves
       const fk = table.parent?.fkColumn;
       const moved = fk != null && !sameId(row[fk], readRow(table, id)[fk]);
-      const carried: Touched[] = moved ? hanging(table, id).map(({ table: t, row: r }) => ({ coll: t.docKey, id: r.id, before: holders(t.docKey, r, docName), after: r, carried: true })) : [];
+      const carried: Touched[] = moved ? hanging(table, id).map(({ table: t, row: r }) => ({ coll: t.docKey, id: r.id, before: heldBy(t.docKey, r, docName), after: r, carried: true })) : [];
       if (table.temporal && !made.has(key)) {
         closeRow(db, table, id, ts);
         insertRow(db, table, row, ts);
@@ -621,7 +643,7 @@ export function registerDocs<I = unknown>(
       if (!run) {
         const present = held(table, id);
         if (!present) refuse(404, `Row not found: ${collKey}/${id}`);   // not this document's, or gone from it earlier in this write
-        run = { table, id, root, key, before: holders(collKey, present, docName), was: present, row: { ...present } };
+        run = { table, id, root, key, before: heldBy(collKey, present, docName), was: present, row: { ...present } };
       }
       // A parent key written moves the row, and only under a parent this
       // document holds, as an add names one: through it, a row is never moved
@@ -769,7 +791,7 @@ export function registerDocs<I = unknown>(
           if (isRoot) doc[collKey] = fullRow;
           else if (!outside) doc[collKey][id] = fullRow;
           broadcastOps.push({ op: "add", path: joinPath(collKey, String(id)), value: fullRow });
-          touched.push({ coll: collKey, id, before: [], after: fullRow });
+          touched.push({ coll: collKey, id, before: new Map(), after: fullRow });
         } else if (op.op === "remove") {
           // Remove row + cascades. The removal addresses rows by id ALONE, so
           // without this gate a client could name any id and delete a sibling
@@ -777,7 +799,7 @@ export function registerDocs<I = unknown>(
           if (!(outside ? readRow(table, id) : held(table, id))) refuse(404, `Row not found: ${collKey}/${id}`);
           if (isRoot) rootWas = readRow(table, id);
           // the row and every row its removal takes, and who holds each, asked before any is gone
-          const cascade = cascadeRows(table, id).map(({ table: t, row }) => ({ t, row, before: holders(t.docKey, row, docName) }));
+          const cascade = cascadeRows(table, id).map(({ table: t, row }) => ({ t, row, before: heldBy(t.docKey, row, docName) }));
           for (const { t, row, before } of cascade) {
             if (t.temporal) closeRow(db, t, row.id, ts);
             else db.run(`DELETE FROM ${t.name} WHERE id = ?`, [row.id]);
@@ -818,15 +840,15 @@ export function registerDocs<I = unknown>(
    * then taken out (a drink, with its course) is told its add wherever its
    * remove is told, never a remove alone (todo #75). `_delta_tell` keeps the same.
    */
-  function tell(writer: string, touched: Touched[]): Map<string, DeltaOp[]> {
-    const rows = touched.map((t) => ({ ...t, now: [] as string[] }));
+  function tell(writer: string | undefined, touched: Touched[]): Map<string, DeltaOp[]> {
+    const rows = touched.map((t) => ({ ...t, before: t.before.get(me) ?? [], now: [] as string[] }));
     const next = new Map<string, string[]>();   // a row's holders, as its next touch found them
     for (const t of rows.toReversed()) {
       const key = `${t.coll}/${t.id}`;
       t.now = next.get(key) ?? holders(t.coll, t.after, writer);
       next.set(key, t.before);
     }
-    const targets = new Set<string>([writer]);
+    const targets = new Set<string>(writer === undefined ? [] : [writer]);
     for (const t of rows) for (const name of [...t.before, ...t.now]) targets.add(name);
     const told = new Map<string, DeltaOp[]>();
     for (const target of targets) {
@@ -971,7 +993,6 @@ export function registerDocs<I = unknown>(
         const recorded = ledger?.record({ doc: docName, ops: done.applied, inverse, ...by });
         return { ops: done.applied, inverse, version: recorded?.version, entry: recorded?.entry };
       }).immediate();
-      commitsOn.set(db, ++seenCommits);   // heard by the other registrations on this handle, not by this one
       if (ops.length > 0) implied.delete(docName);
     } catch (err: any) {
       if (cache.has(docName)) cache.set(docName, snapshot); // restore in-memory cache (a rootless walk's copy was never in it)
@@ -989,37 +1010,49 @@ export function registerDocs<I = unknown>(
       // its write made; each other, with a version of its own. Through
       // `createLocal().onPublish`, the one stream of changes an in-process
       // caller (eta) redraws from.
-      const told = tell(docName, touched);
-      const changes: { name: string; change: Record<string, unknown> }[] = [];
-      for (const [name, tOps] of told) {
-        if (name === docName) {
-          // a write that changed nothing tells nothing, and made no version (as on Postgres)
-          if (written.ops.length > 0) changes.push({ name, change: { doc: docName, ops: tOps, ...(written.version !== undefined ? { v: written.version } : {}) } });
-        } else if (tOps.length > 0) {
-          const v = ledger?.bump(name);   // numbered as committed, told in that order
-          changes.push({ name, change: { doc: name, ops: tOps, ...(v !== undefined ? { v } : {}) } });
-        }
-        // an open copy is read again from the tables: it holds exactly what a fresh open would
-        if (cache.has(name) || name === docName) refresh(name);
-      }
-      const appliedOps = written.ops;
-      inOrder(() => {
-        // With auth, only to those who may still hear each document (todo #17's rule).
-        const asked = auth ? [...changes.map(({ name }) => custom.letGo(name, subscriptions.get(name), options.owns, { dropped: () => unheld(name) })), custom.letGoWatching(appliedOps)] : [];
-        const publish = () => {
-          for (const { name, change } of changes) ws.publish(name, change);
-          custom.tell(appliedOps);
-        };
-        const waiting = asked.filter((a): a is Promise<void> => isPromise(a));
-        if (!waiting.length) return publish();
-        return Promise.all(waiting).then(publish);
-      });
+      announce(touched, written.ops, { name: docName, version: written.version });
+      for (const f of fanouts) if (f !== me) f.announce(touched, written.ops);
       options.committed?.();
     } catch (err: any) {
       log.error(`delta fan-out failed (write committed): ${err.message}`);
     }
     log.info(`delta ${docName} [${ops.map((o: DeltaOp) => `${o.op} ${o.path}`).join(", ")}]`);
     return written;
+  }
+
+  /**
+   * Tell the documents open here what a write changed (`writer`: the one
+   * written through, if it is this registration's), and the custom documents
+   * that watch its rows. Every document that held or holds a row the write
+   * changed is told what changed for it (todo #28) -- the writer's own first,
+   * with the version its write made; each other, with a version of its own.
+   * Through `createLocal().onPublish`, the one stream of changes an in-process
+   * caller (eta) redraws from.
+   */
+  function announce(touched: Touched[], applied: DeltaOp[], writer?: { name: string; version?: number }): void {
+    const changes: { name: string; change: Record<string, unknown> }[] = [];
+    for (const [name, tOps] of tell(writer?.name, touched)) {
+      if (name === writer?.name) {
+        // a write that changed nothing tells nothing, and made no version (as on Postgres)
+        if (applied.length > 0) changes.push({ name, change: { doc: name, ops: tOps, ...(writer.version !== undefined ? { v: writer.version } : {}) } });
+      } else if (tOps.length > 0) {
+        const v = ledger?.bump(name);   // numbered as committed, told in that order
+        changes.push({ name, change: { doc: name, ops: tOps, ...(v !== undefined ? { v } : {}) } });
+      }
+      // an open copy is read again from the tables: it holds exactly what a fresh open would
+      if (cache.has(name) || name === writer?.name) refresh(name);
+    }
+    inOrder(() => {
+      // With auth, only to those who may still hear each document (todo #17's rule).
+      const asked = auth ? [...changes.map(({ name }) => custom.letGo(name, subscriptions.get(name), options.owns, { dropped: () => unheld(name) })), custom.letGoWatching(applied)] : [];
+      const publish = () => {
+        for (const { name, change } of changes) ws.publish(name, change);
+        custom.tell(applied);
+      };
+      const waiting = asked.filter((a): a is Promise<void> => isPromise(a));
+      if (!waiting.length) return publish();
+      return Promise.all(waiting).then(publish);
+    });
   }
 
   /** Read an open document's copy again from the tables. */

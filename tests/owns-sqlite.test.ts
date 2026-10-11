@@ -223,4 +223,14 @@ describe("sqlite: two registrations on one database share the ledger", () => {
       if (withAuth) expect((await local.as({ id: 2 }).call("undo", { cursor: "s" })).error).toEqual({ code: 404, message: "Not found" });
     });
   }
+
+  test("with auth, a write through the public registration is told to the private board its owner opened through the other (todo #64)", async () => {
+    const local = setup(true);
+    const heard: { channel: string }[] = [];
+    local.onPublish((channel) => heard.push({ channel }));
+    await local.as({ id: 1 }).call("open", { doc: "fo-board:1" });
+    await local.as({ id: 2 }).call("open", { doc: "pub-tags:" });
+    expect((await local.as({ id: 2 }).call("delta", { doc: "pub-tags:", ops: [{ op: "add", path: "/tags/-", value: { label: "x" } }] })).error).toBeUndefined();
+    expect(heard.map((h) => h.channel).toSorted()).toEqual(["fo-board:1", "pub-tags:"]);
+  });
 });

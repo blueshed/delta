@@ -366,17 +366,15 @@ export function pathCases(backend: () => PathBackend): void {
 }
 
 /**
- * Two registrations over the same rows (todo #64): a walk is guarded by every
- * write to the rows it sets back, whichever registration made it, as by one
- * through its own. What one registration tells the other's open documents is
- * not asked here: on SQLite and the JSON file it tells only its own (the
- * reference's limit), so no copy is held across the case.
+ * Two registrations over the same rows (todo #64): a write through either is
+ * told to the documents open through both, and a walk is guarded by every
+ * write to the rows it sets back, whichever registration made it.
  */
 export function registrationCases(backend: () => PathBackend): void {
   describe("two registrations over the same rows (todo #64)", () => {
     test("Ada's undo through the board meets Bob's rename since, through the public courses, as a conflict and leaves it; her next write is undone to his name, not hers before it", async () => {
       const b = backend();
-      for (const doc of ["fo-board:1", "fo-pub-courses:"]) await b.process.call("open", { doc });
+      const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1", "fo-pub-courses:", "fo-inbox:a@x"]);
       const rename = (doc: string, name: string, cursor: string) => write(b.process, doc, [{ op: "replace", path: "/courses/1/name", value: name }], { cursor });
       const walked = async (way: string) => {
         const { result, error } = await b.process.call(way, { cursor: "ada" });
@@ -394,6 +392,12 @@ export function registrationCases(backend: () => PathBackend): void {
       await rename("fo-pub-courses:", "Gazpacho", "bob");
       expect(await walked("redo")).toEqual({ error: undefined, ops: [], conflict: ["/courses/1"] });
       expect(await name()).toBe("Gazpacho");
+      await expectTold(b, "fo-menu:1", ["Broth", "Bisque", "Consomme", "Bisque", "Gazpacho"].map((n) => [{ op: "replace", path: "/courses/1", value: course(1, n) }]));
+      // a row added and removed through the public courses reaches the board, and a household through the board the inbox
+      const added = await write(b.process, "fo-pub-courses:", [{ op: "add", path: "/courses/-", value: { weddings_id: 1, name: "Fish" } }], { inverse: true });   // it keeps no ledger: asked for what it applied
+      await write(b.process, "fo-pub-courses:", [{ op: "remove", path: added.ops[0].path }]);
+      await write(b.process, "fo-board:1", [{ op: "add", path: "/households/-", value: { email: "a@x" } }]);
+      await assertCopiesHold(b, copies);
     });
   });
 }

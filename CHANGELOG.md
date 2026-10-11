@@ -207,6 +207,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registrations of one file on one server now share its database, where each had its own and
   their saves overwrote each other. Postgres guarded it already. Each registration still tells
   only its own open documents.
+- **Two registrations over the same rows tell each other, and an undo through one is guarded by
+  a write through the other (todo #64)**, on SQLite and the JSON file. Ada renamed course 1
+  through `fo-board:1`, Bob through a public `fo-pub-courses:` registered in a second
+  `registerDocs` on the same database: Ada's board was never told, and her undo planned from her
+  registration's stale copy, so it put the old name back over Bob's with no conflict (and a write
+  of hers after his recorded an inverse that undid to her name, not his). Every registration on
+  a database handle now shares one fan-out: a write through any is told to every document open
+  through each (each asking its own `owns`), as every Postgres listener hears it, and each copy
+  is read again, so the undo answers `conflict`. The JSON file's registrations of one file on one
+  server now share its database, where each had its own and their saves overwrote each other.
 - **A row a write makes and its cascade takes out is told its add wherever its remove is told
   (todo #75)**, on every backend. `[add /courses/9, add /drinks/5 under it, remove /courses/9]`
   told the board and the menu the drink's remove but not its add, so an open copy met a remove
