@@ -20,13 +20,13 @@ Bun only: never `npm`, `npx` or `node`.
 | Task | Command |
 |---|---|
 | Install | `bun install` |
-| Typecheck | `bun run check` |
+| Typecheck | `bun check` (Bun's type check, TypeScript 7; no `check` script, which would shadow it) |
 | Fast tests, no database | `bun run test`: every file that needs no Postgres server (PGlite runs in process) |
 | One file | `bun test tests/local.test.ts` (Postgres needed by `postgres*`, `auth-jwt`, `review-findings`, `write-scope`, `create-row` and `error-codes`; a new file that needs no Postgres goes into `test` too) |
 | Start / stop Postgres | `bun run db:up` / `bun run db:down` (Docker, `compose.yml`) |
 | Postgres tests | `bun run db:up`, then `bun run test:pg` or `bun test tests/postgres-ledger.test.ts` |
 | Everything | `bun run test:all` (Postgres must be up) |
-| **The gate** | **`bun run ci`**: `db:up` → `check` → `test:all` → `db:down` |
+| **The gate** | **`bun run ci`**: `db:up` → `bun check` → `test:all` → `db:down` |
 | Benchmarks | `bun run db:up`, then `bun run bench` (it needs Postgres; `BENCH_PG_URL` to point elsewhere) |
 | Release | `/publish patch\|minor\|major` (`.claude/commands/publish.md`, shared with railroad and eta) |
 
@@ -36,7 +36,7 @@ mapped to **localhost:5433** so it does not clash with a Postgres on 5432. The s
 `bun run db:down` removes the container and its data. GitHub Actions (`.github/workflows/ci.yml`
 on push, `publish.yml` on a published release) runs the same steps.
 
-**CI runs one Bun, pinned**: `bun-version: 1.4.2` in both workflows, the Bun the repo is
+**CI runs one Bun, pinned**: `bun-version: 1.4.3` in both workflows, the Bun the repo is
 developed on, so a Bun release cannot turn the gate red with no change here. To move it: install
 the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `publish.yml` to
 `bun --version` in one commit (`tests/package-exports.test.ts` fails if the two differ or say
@@ -161,7 +161,7 @@ exports `DELTA_TEST_PG_URL`. By hand, the same is
 The gate there, in place of `bun run ci`:
 
 ```bash
-bun run check && DELTA_TEST_PG_URL="postgres://delta:delta@localhost:5432/delta_test" bun test tests/
+bun check && DELTA_TEST_PG_URL="postgres://delta:delta@localhost:5432/delta_test" bun test tests/
 ```
 
 A psql shell: `PGPASSWORD=delta psql -h localhost -p 5432 -U delta -d delta_test`. Nothing in

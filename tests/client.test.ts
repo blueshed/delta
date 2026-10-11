@@ -763,7 +763,7 @@ describe("send resolves after its own echo", () => {
 
 describe("doc.data is read-only (#10)", () => {
   test("a write to doc.data is a type error: the echo updates it, never the page (tsc checks this)", () => {
-    // Never called: `bun run check` fails if any @ts-expect-error below is not an error.
+    // Never called: `bun check` fails if any @ts-expect-error below is not an error.
     const typeOnly = (doc: Doc<{ n: number }>) => {
       // @ts-expect-error -- an optimistic update double-applies when the op echoes back
       doc.data.set({ n: 1 });

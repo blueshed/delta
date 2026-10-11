@@ -30,14 +30,14 @@ jobs:
       # The same Bun as ci.yml (CLAUDE.md says how to move it).
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.3
 
       - run: bun install --frozen-lockfile
 
       - name: Start Postgres
         run: docker compose up -d --wait
 
-      - run: bunx tsc --noEmit
+      - run: bun check
 
       - run: bun test tests/
 

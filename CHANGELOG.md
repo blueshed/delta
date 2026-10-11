@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Type checks run with `bun check`** (Bun 1.4.3, TypeScript 7) in place of `tsc --noEmit`;
+  CI pins Bun 1.4.3. The `check` script is gone, so `bun check` is Bun's own.
+
 - **The `@blueshed/railroad` peer range takes `^0.16.0`.** 0.16.0 drops only the deprecated
   `Promise<Node>` route handler, which delta's client and `dom-ops` do not use.
 
