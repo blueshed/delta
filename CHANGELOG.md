@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `001b`'s `_delta_resolve_scope` (replaced in place, the same answers): an id's or integer's
   refusal reads its digits then its size, without a second 16-digit pattern; a date's refusals
   short of its day are one test.
+- `cli.ts`: one `print` for the runtime commands, the init plan and skill discovery inline, the
+  header comment pointing at `usage()` (the same output for every command).
 
 ## [0.11.0] - 2026-09-28
 
