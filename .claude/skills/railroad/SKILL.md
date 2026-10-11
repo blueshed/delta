@@ -1,7 +1,7 @@
 ---
 name: railroad
 metadata:
-  version: 0.15.1
+  version: 0.16.0
 description: "Railroad — reactive UI for the Bun fullstack runtime. Signals, JSX, hash router, DI, logger. Use when writing JSX with signals, when()/list()/routes(), or any import from @blueshed/railroad. Pair with @blueshed/delta for WebSocket document sync."
 ---
 
