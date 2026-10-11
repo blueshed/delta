@@ -91,6 +91,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CREATE OR REPLACE`: re-apply the framework, or `bunx @blueshed/delta init --upgrade`). An empty
   write through a single document whose root is not there is not found (404), as on SQLite, where
   Postgres answered it version 0 (`delta_apply`, `001d`, likewise).
+- **History lists entries of one version in one order, on every backend.** An undo that walked
+  nothing is recorded at the version of the write before it, and Postgres's `delta_history` sorted by
+  version alone, so it could list the two the other way round from SQLite. Both now sort newest
+  first by version, then by entry id (`001g`, `CREATE OR REPLACE`: re-apply the framework).
 - **A time in a document's name (`at:`) reads the whole document as it stood then, on every
   backend.** On Postgres `delta_open` read the included collections at that time but the root as it
   is now; SQLite and the JSON file ignored the time and read it all as it is now. Now each reads

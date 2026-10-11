@@ -219,7 +219,8 @@ export function createLedger(db: any): Ledger {
   const insertStmt = db.query(
     "INSERT INTO delta_ledger (doc, version, ops, inverse, who, cursor, at, undoes, undoable) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
   );
-  const historyStmt = db.query(`SELECT ${columns}, l.cursor FROM delta_ledger l WHERE l.doc = ? ORDER BY l.version DESC LIMIT ?`);
+  // newest first, by version then id: an undo that walked nothing shares the version of the write before it
+  const historyStmt = db.query(`SELECT ${columns}, l.cursor FROM delta_ledger l WHERE l.doc = ? ORDER BY l.version DESC, l.id DESC LIMIT ?`);
   // CROSS JOIN keeps SQLite's join order: the cursor's tips first, then each row
   // by its key. Joined the other way it scanned every row of the ledger.
   const undoStmt = db.query(`${tips}

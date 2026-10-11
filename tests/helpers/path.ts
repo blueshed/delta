@@ -822,6 +822,17 @@ export function documentCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
+    test("history lists entries of one version newest first: an undo that walked nothing after the write it met", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1"]);
+      const before = copies.get("fo-board:1")._v as number;
+      await write(b.process, "fo-board:1", [{ op: "add", path: "/notes/-", value: { text: "x" } }], { cursor: "s1" });
+      await write(b.process, "fo-board:1", [{ op: "remove", path: "/notes/2" }], { cursor: "s2" });
+      expect((await b.process.call("undo", { cursor: "s1" })).result.conflict).toBeDefined();
+      const { result } = await b.process.call("history", { doc: "fo-board:1", cursor: "s1" });
+      expect(result.map((e: any) => [e.version - before, e.ops.length, e.mine])).toEqual([[2, 0, true], [2, 1, false], [1, 1, true]]);
+    });
+
     test("an empty write through a document that is not there is not found (404): never there, or its root gone since", async () => {
       const b = backend();
       await openAll(b.process, ["fo-board:1", "fo-household:2"]);

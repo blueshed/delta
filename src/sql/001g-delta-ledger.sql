@@ -477,17 +477,19 @@ CREATE OR REPLACE FUNCTION delta_redo(p_cursor TEXT, p_who TEXT DEFAULT NULL)
 RETURNS JSONB AS $$ SELECT _delta_walk(p_cursor, p_who, FALSE); $$ LANGUAGE sql;
 
 -- delta_history: a document's newest entries, each saying whether p_cursor
--- wrote it -- never who did, never a cursor.
+-- wrote it -- never who did, never a cursor. Newest first: by version, then
+-- by id (an undo that walked nothing shares the version of the write before
+-- it), as SQLite lists them.
 CREATE OR REPLACE FUNCTION delta_history(p_doc_name TEXT, p_cursor TEXT, p_limit INT DEFAULT 50)
 RETURNS JSONB AS $$
-  SELECT COALESCE(jsonb_agg(e ORDER BY (e->>'version')::BIGINT DESC), '[]'::jsonb) FROM (
+  SELECT COALESCE(jsonb_agg(e ORDER BY (e->>'version')::BIGINT DESC, (e->>'id')::BIGINT DESC), '[]'::jsonb) FROM (
     SELECT jsonb_build_object(
       'id', id, 'doc', doc_name, 'version', version, 'ops', ops, 'inverse', inverse,
       'at', (EXTRACT(EPOCH FROM at) * 1000)::BIGINT, 'undoable', undoable,
       'mine', p_cursor IS NOT NULL AND cursor = p_cursor
     ) AS e
     FROM _delta_ledger WHERE doc_name = p_doc_name
-    ORDER BY version DESC LIMIT p_limit
+    ORDER BY version DESC, id DESC LIMIT p_limit
   ) entries;
 $$ LANGUAGE sql STABLE;
 
