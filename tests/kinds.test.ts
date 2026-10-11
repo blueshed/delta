@@ -52,6 +52,16 @@ describe("memory: live documents", () => {
     expect(heard).toHaveLength(1);   // only the write that landed
   });
 
+  test("an op that is not add, replace or remove is a 400: nothing applied, nothing heard", async () => {
+    const { local, heard } = setup();
+    const here = registerMemory(local.server, { prefix: "here:", empty: () => ({ a: { x: 1 } }) });
+    const code = async (ops: unknown[]) => (await local.call("delta", { doc: "here:a", ops })).error?.code;
+    expect(await code([{ op: "frobnicate", path: "/a", value: 9 }])).toBe(400);
+    expect(await code([{ op: "copy", from: "/a", path: "/b" }])).toBe(400);
+    expect(here.peek("here:a")).toEqual({ a: { x: 1 } });
+    expect(heard).toEqual([]);
+  });
+
   test("add /<coll>/- makes a row the server names, as the JSON file does: answered, heard and kept under its id (#14)", async () => {
     const { local, heard } = setup();
     const here = registerMemory(local.server, { prefix: "here:", empty: () => ({ people: {} as Record<string, any> }) });

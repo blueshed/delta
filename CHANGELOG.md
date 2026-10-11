@@ -104,6 +104,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   history and read as they are (`venue:42:2026-06-16` over `scope: { id: ":id", at: "at:date" }`
   and a non-temporal root reads as before). `delta_open` (`001c`, `CREATE OR REPLACE`: re-apply the
   framework, or `bunx @blueshed/delta init --upgrade`).
+- **An op whose verb is not `add`, `replace` or `remove` is refused (400)**, on the free-form
+  document (`registerDoc`), memory documents and `applyOps` itself. They applied it as a
+  replace and broadcast it; now nothing is applied, broadcast or persisted. SQLite and Postgres
+  already refused one.
 
 ## [0.12.0] - 2026-10-11
 

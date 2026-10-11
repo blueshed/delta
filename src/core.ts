@@ -24,7 +24,8 @@
  *
  * `applyOps` applies a batch whole or not at all: an op that throws undoes the
  * ops before it, in place, and the error is rethrown. Its errors carry a wire
- * `code`: 400 for a malformed or unsafe path, 404 for one that is not there
+ * `code`: 400 for a verb that is not one of the three or a malformed or
+ * unsafe path, 404 for one that is not there
  * (a parent on the way, or the target of a replace or remove).
  */
 
@@ -117,7 +118,10 @@ function keyIn(parent: any, seg: string, path: string): string | number {
   return Number(seg);
 }
 
+const VERBS = new Set(["add", "replace", "remove"]);
+
 function applyOne(doc: any, op: DeltaOp, undo: (() => void)[]): void {
+  if (!VERBS.has(op?.op)) fail(400, `Unknown op ${JSON.stringify(op?.op)}: the verbs are add, replace and remove`);
   const segments = splitPath(op.path);
   for (const seg of segments) {
     if (UNSAFE_KEYS.has(seg)) fail(400, `Unsafe path segment "${seg}" in "${op.path}"`);

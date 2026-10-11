@@ -425,6 +425,24 @@ describe("registerDoc", () => {
     try { unlinkSync(file); } catch {}
   });
 
+  test("an op that is not add, replace or remove is a 400: nothing applied, broadcast or persisted", async () => {
+    const file = `${tmpFile}.verb`;
+    await Bun.write(file, JSON.stringify({ a: { x: 1 } }));
+    const ws = createWs();
+    const published: any[] = [];
+    ws.setServer({ publish: (_ch: string, raw: string) => published.push(JSON.parse(raw)) });
+    const handle = await registerDoc(ws, "free", { file, empty: { a: {} } as any });
+    const sock = mockSocket();
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "delta", doc: "free", ops: [{ op: "frobnicate", path: "/a", value: 9 }] }));
+    await ws.websocket.message(sock, JSON.stringify({ id: 2, action: "delta", doc: "free", ops: [{ op: "move", from: "/a", path: "/b" }] }));
+    expect(sock.sent.map((m) => m.error?.code)).toEqual([400, 400]);
+    expect(handle.getDoc()).toEqual({ a: { x: 1 } });
+    expect(published).toEqual([]);
+    await handle.persist();
+    expect(await Bun.file(file).json()).toEqual({ a: { x: 1 } });
+    try { unlinkSync(file); } catch {}
+  });
+
   test("loads existing file on startup", async () => {
     await Bun.write(tmpFile, JSON.stringify({ items: ["existing"] }));
 

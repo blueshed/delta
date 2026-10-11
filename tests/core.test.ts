@@ -322,3 +322,22 @@ describe("a batch applies whole or not at all", () => {
     expect(doc).toEqual({ a: 1 });
   });
 });
+
+describe("three verbs and no others", () => {
+  test("an op that is not add, replace or remove is a 400, and the batch before it is undone", () => {
+    const doc: any = { a: { x: 1 }, b: 2 };
+    for (const op of ["move", "copy", "test", "frobnicate", undefined]) {
+      let err: any;
+      try {
+        applyOps(doc, [
+          { op: "replace", path: "/b", value: 3 },
+          { op, path: "/a", from: "/b", value: 9 } as any,
+        ]);
+      } catch (e) {
+        err = e;
+      }
+      expect([op, err?.code, err?.message]).toEqual([op, 400, expect.stringContaining("Unknown op")]);
+      expect(doc).toEqual({ a: { x: 1 }, b: 2 });
+    }
+  });
+});
