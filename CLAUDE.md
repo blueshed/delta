@@ -10,8 +10,9 @@ in-process.
 - **`delta-doc`** (`.claude/skills/delta-doc/`) is this package's published skill: `SKILL.md`
   is the router, `reference.md` the manual. It must describe `main` as it is; update it with
   any change to the API, the wire protocol or the SQL.
-- **`railroad`** and **`bun-route`** (`.claude/skills/`) are vendored from @blueshed/railroad and
-  synced at its release. Do not edit them here.
+- **`railroad`** (`.claude/skills/`) is vendored from @blueshed/railroad, for the examples, and
+  synced at its release. Do not edit it here. Its `bun-route` is not: nothing here scaffolds pages,
+  and `install-skills` gives a consumer both from railroad's own package.
 
 ## Commands and the gate
 
