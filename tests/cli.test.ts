@@ -233,6 +233,33 @@ describe("delta watch ends when told to", () => {
   });
 });
 
+describe("a server that never answers: --timeout, and --for from before connecting", () => {
+  // a port that accepts and says nothing (no upgrade), and a socket that upgrades and never answers
+  const mute = Bun.listen({ hostname: "localhost", port: 0, socket: { data() {} } });
+  const deaf = Bun.serve({ port: 0, fetch: (req, s) => (s.upgrade(req) ? undefined : new Response(null, { status: 400 })), websocket: { message() {} } });
+  afterAll(() => { mute.stop(true); deaf.stop(true); });
+
+  const timedOut = async (args: string[], within: number) => {
+    const started = Date.now();
+    const { code, stdout, stderr } = await run([...args, "--json"]);
+    expect([code, stdout]).toEqual([1, ""]);
+    expect(JSON.parse(stderr)).toEqual({ error: { code: 0, message: expect.stringContaining("no answer") } });
+    expect(Date.now() - started).toBeLessThan(within);
+  };
+
+  test("connecting to a port that never upgrades: exit 1 at --timeout", () =>
+    timedOut(["open", "items:", "--url", `ws://localhost:${mute.port}/ws`, "--timeout", "300"], 3000));
+
+  test("an open that is never answered: exit 1 at --timeout", () =>
+    timedOut(["open", "items:", "--url", `ws://localhost:${deaf.port}/ws`, "--timeout", "300"], 3000));
+
+  test("a sign-in that is never answered: exit 1 at --timeout", () =>
+    timedOut(["call", "x", "--url", `ws://localhost:${deaf.port}/ws`, "--token", "t", "--timeout", "300"], 3000));
+
+  test("watch --for counts from before connecting: never open, exit 1 when it runs out", () =>
+    timedOut(["watch", "items:", "--url", `ws://localhost:${mute.port}/ws`, "--for", "300"], 3000));
+});
+
 describe("an auth-enabled server, the token in band", () => {
   test("without a token: 401 on stderr, exit 1", async () => {
     const { code, stderr } = await run(["open", "items:", "--url", guarded.url, "--json"]);

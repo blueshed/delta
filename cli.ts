@@ -35,6 +35,7 @@ const USAGE =
     `Runtime commands take:\n` +
     `  --url <url>  |  DELTA_WS_URL  |  .delta file  |  ws://localhost:\${PORT:-3100}/ws   (in order)\n` +
     `  --token <t>  |  DELTA_TOKEN    sent as call authenticate first, never in the URL\n` +
+    `  --timeout <ms>  for connecting and for each answer (default 10000; 0 waits for ever)\n` +
     `  --json       one JSON line per event on stdout; an error is one {"error":{"code","message"}}\n` +
     `               line on stderr: code is the server's, or 0 when the CLI met it itself\n` +
     `\n` +
@@ -91,7 +92,16 @@ interface Api {
  * `call authenticate`, never in the URL), run `fn`, close.
  */
 async function withWs<T>(values: Record<string, unknown>, fn: (api: Api) => Promise<T>): Promise<T> {
-  const ws = new WebSocket(resolveWsUrl(values));
+  const url = resolveWsUrl(values);
+  const timeout = wholeNumber(values.timeout ?? "10000", "--timeout");
+  /** `p`, or an error once it has gone --timeout ms unsettled (0: wait for ever). */
+  const within = <V>(p: Promise<V>, what: string): Promise<V> => {
+    if (!timeout) return p;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer in ${timeout} ms: ${what}`)), timeout); });
+    return Promise.race([p, late]).finally(() => clearTimeout(timer));
+  };
+  const ws = new WebSocket(url);
   const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
   const broadcastHandlers = new Set<(msg: any) => void>();
   let nextId = 1;
@@ -99,10 +109,10 @@ async function withWs<T>(values: Record<string, unknown>, fn: (api: Api) => Prom
   const closed = new Promise<never>((_, reject) => (onClosed = reject));
   closed.catch(() => {});   // asked only by watch
 
-  await new Promise<void>((resolve, reject) => {
+  await within(new Promise<void>((resolve, reject) => {
     ws.onopen = () => resolve();
     ws.onerror = (e: any) => reject(new Error(`WebSocket error: ${e?.message ?? "connection failed"}`));
-  });
+  }), `connecting to ${url}`);
 
   ws.onmessage = (ev: MessageEvent) => {
     let msg: any;
@@ -141,10 +151,10 @@ async function withWs<T>(values: Record<string, unknown>, fn: (api: Api) => Prom
   const api: Api = {
     send(msg: any): Promise<any> {
       const id = nextId++;
-      return new Promise((resolve, reject) => {
+      return within(new Promise((resolve, reject) => {
         pending.set(id, { resolve, reject });
         ws.send(JSON.stringify({ ...msg, id }));
-      });
+      }), msg.action === "call" ? `call ${msg.method}` : `${msg.action} ${msg.doc}`);
     },
     onBroadcast(handler: (msg: any) => void) { broadcastHandlers.add(handler); },
     closed,
@@ -205,8 +215,12 @@ async function cmdWatch(docName: string | undefined, values: Record<string, unkn
   const line = (msg: unknown) => process.stdout.write(JSON.stringify(msg) + "\n");
   const ends = most !== undefined || ms !== undefined || until !== undefined;
   say(`watching ${docName} on ${resolveWsUrl(values)}${ends ? "" : " (Ctrl-C to stop)"}`);
-  await withWs(values, async ({ send, onBroadcast, closed }) => {
-    const end = Promise.withResolvers<void>();
+  // --for counts from now, before connecting: run out before the doc is open, and it is an error
+  const end = Promise.withResolvers<void>();
+  let opened = false;
+  const timer = ms === undefined ? undefined
+    : setTimeout(() => (opened ? end.resolve() : end.reject(new Error(`no answer in ${ms} ms (--for): open ${docName}`))), ms);
+  const watching = withWs(values, async ({ send, onBroadcast, closed }) => {
     let heard = 0;
     const enough = () => { if (most !== undefined && heard >= most) end.resolve(); };
     onBroadcast((msg) => {
@@ -218,13 +232,14 @@ async function cmdWatch(docName: string | undefined, values: Record<string, unkn
       if (until && Array.isArray(msg.ops) && msg.ops.some(until)) end.resolve();
     });
     const state = await send({ action: "open", doc: docName });
+    opened = true;
     say(`opened ${docName}`);
     line({ doc: docName, state: state ?? null });
     enough();
-    const timer = ms === undefined ? undefined : setTimeout(end.resolve, ms);
-    try { await Promise.race([end.promise, closed]); }
-    finally { clearTimeout(timer); }
+    await Promise.race([end.promise, closed]);
   });
+  try { await Promise.race([end.promise, watching]); }
+  finally { clearTimeout(timer); }
 }
 
 async function cmdDelta(
@@ -663,6 +678,7 @@ async function main() {
       count: { type: "string" },
       for: { type: "string" },
       until: { type: "string" },
+      timeout: { type: "string" },
       help: { type: "boolean", short: "h", default: false },
     },
     allowPositionals: true,

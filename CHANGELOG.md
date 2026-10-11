@@ -36,11 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on stdout and nothing else (`null` for an answer of nothing); an error is one
   `{"error":{"code","message"}}` line on stderr, `code` the server's or `0` for one the CLI met
   itself. Exit codes: `0` done, `1` an error, `2` a bad argument (a missing doc name, an unknown
-  command or flag; these exited 1 before).
-  `watch` ends, exit 0, at the first of `--count <n>`, `--for <ms>` or `--until "<op> <path>"`, and
-  with exit 1 when the server closes the socket (it used to hang). `delta` prints the ops as
-  applied on every backend, not only on a ledger: it asks for them (`inverse: true`, below).
-  Without `--json` a person's output is as it was.
+  command or flag; these exited 1 before). `watch` ends, exit 0, at the first of `--count <n>`,
+  `--for <ms>` or `--until "<op> <path>"`, and with exit 1 when the server closes the socket (it
+  used to hang); `--for` counts from before connecting. `--timeout <ms>` (default 10000) bounds
+  connecting and each answer, so a server that accepts and never answers ends a command with
+  exit 1. `delta` prints the ops as applied on every backend, not only on a ledger: it asks for
+  them (`inverse: true`, below). Without `--json` a person's output is as it was.
 - **A writer that asks with `inverse: true` is answered the ops as applied on every backend**: the
   free-form document (`registerDoc`) and Postgres without a ledger answer `{ ack: true, ops }`
   (Postgres with its `version`), as SQLite and the JSON file already answered `ops` and `inverse`;
