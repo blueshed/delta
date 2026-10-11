@@ -304,7 +304,8 @@ export async function openAll(p: PathProcess, docs: string[]): Promise<Map<strin
 /**
  * Each copy, with what its channel was told since `openAll` applied in order,
  * equals a fresh open. A document whose root row is gone opens as 404; its
- * copy must then have been told its root is null. The fresh open is a real
+ * copy must then have been told its root is null -- or, a custom document whose
+ * read is gone, let go (404), and told nothing more. The fresh open is a real
  * one: the document is closed first, so no backend answers from a copy of its
  * own -- a custom document's is the one it keeps from what it told (todo #44).
  */
@@ -312,7 +313,14 @@ export async function assertCopiesHold(b: PathBackend, copies: Map<string, any>)
   await b.quiet();
   for (const [doc, opened] of copies) {
     const copy = structuredClone(opened);
-    for (const h of b.process.heard.filter((m) => m.channel === doc)) applyOps(copy, h.data.ops);
+    const heard = b.process.heard.filter((m) => m.channel === doc);
+    // let go (a custom document whose read is gone: 404): it is no longer open, and hears nothing after
+    const gone = heard.findIndex((h) => h.data.error);
+    if (gone >= 0) {
+      expect({ doc, told: heard.slice(gone).map((h) => h.data) }).toEqual({ doc, told: [{ doc, error: { code: 404, message: "Not found" } }] });
+      continue;
+    }
+    for (const h of heard) applyOps(copy, h.data.ops);
     await b.process.call("close", { doc });
     const fresh = await b.process.call("open", { doc });
     if (fresh.error?.code === 404) {
@@ -364,6 +372,80 @@ export function pathCases(backend: () => PathBackend): void {
   serialCases(backend);
   asItStoodCases(backend);
   registrationCases(backend);
+  drivenCases(backend);
+}
+
+/**
+ * What the law over generated writes (tests/law-driver.test.ts, todo #27)
+ * found, each pinned as the seed that met it, on every backend.
+ */
+export function drivenCases(backend: () => PathBackend): void {
+  describe("found by the law over generated writes (todo #27)", () => {
+    test("a refused write spends the serials it took, as a Postgres sequence does: the next rows are named the same on every backend (seed 1)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-board:2"]);
+      // a course, and a drink under a course the other wedding's board does not hold (404)
+      const refused = await b.process.call("delta", { doc: "fo-board:2", ops: [{ op: "add", path: "/courses/-", value: { name: "Fish" } }, { op: "add", path: "/drinks/-", value: { courses_id: 1, name: "Port" } }] });
+      expect(refused.error?.code).toBe(404);
+      const { ops } = await write(b.process, "fo-board:1", [{ op: "add", path: "/courses/-", value: { name: "Stew" } }, { op: "add", path: "/drinks/-", value: { courses_id: 1, name: "Port" } }]);
+      expect(ops.map((o: any) => o.path)).toEqual(["/courses/4", "/drinks/4"]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a row is never added or moved under a parent that is not there (404), whatever document it comes through -- a list names a parent only by key; an implied plan's wedding is there once the plan is written (seeds 2 to 5)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-all-courses:", "fo-catalog:", "fo-plan:7", "fo-all-households:"]);
+      const code = async (doc: string, ops: unknown[]) => (await b.process.call("delta", { doc, ops })).error?.code;
+      expect(await code("fo-all-courses:", [{ op: "add", path: "/courses/-", value: { weddings_id: 7, name: "Fish" } }])).toBe(404);
+      expect(await code("fo-all-courses:", [{ op: "replace", path: "/courses/1/weddings_id", value: 9 }])).toBe(404);
+      expect(await code("fo-all-households:", [{ op: "replace", path: "/households/1", value: { weddings_id: 9 } }])).toBe(404);
+      expect(await code("fo-catalog:", [{ op: "add", path: "/drinks/-", value: { courses_id: 9, name: "Port" } }])).toBe(404);
+      expect(await code("fo-catalog:", [{ op: "replace", path: "/drinks/1/courses_id", value: 9 }])).toBe(404);
+      await expectSilent(b, ...copies.keys());
+      await write(b.process, "fo-plan:7", [{ op: "replace", path: "/weddings/name", value: "planned" }]);
+      await write(b.process, "fo-all-courses:", [{ op: "add", path: "/courses/-", value: { weddings_id: 7, name: "Fish" } }]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("an undo that would put a drink back through its course's own document, the course removed since, is a conflict on every backend: no drink under a course that is not there (seed 25)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-course:1", "fo-board:1", "fo-catalog:"]);
+      await write(b.process, "fo-course:1", [{ op: "remove", path: "/drinks/1" }], { cursor: "ada" });
+      await write(b.process, "fo-board:1", [{ op: "remove", path: "/courses/1" }], { cursor: "bob" });
+      const undone = await b.process.call("undo", { cursor: "ada" });
+      expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [], conflict: ["/drinks/1"] });
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a cascade is told in one order on every backend -- each child collection by key, each row by id -- a course moved in since, which Postgres keeps last, too (seeds 2, 4, 5)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:2", "fo-all-courses:"]);
+      await write(b.process, "fo-all-courses:", [{ op: "add", path: "/courses/-", value: { weddings_id: 2, name: "Fish" } }]);
+      await write(b.process, "fo-all-courses:", [{ op: "replace", path: "/courses/1/weddings_id", value: 2 }]);
+      const { ops } = await write(b.process, "fo-board:2", [{ op: "remove", path: "/weddings/2" }]);
+      expect(ops.map((o: any) => o.path)).toEqual(["/weddings/2", "/courses/1", "/drinks/1", "/courses/2", "/drinks/2", "/courses/3", "/households/3"]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("an add of a row already there is 409 before its parent is asked, on every backend (seed 8)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1"]);
+      expect((await b.process.call("delta", { doc: "fo-board:1", ops: [{ op: "add", path: "/drinks/1", value: { courses_id: 99, name: "Port" } }] })).error?.code).toBe(409);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a menu card whose wedding is removed is let go (404) and told so, not left holding the wedding; opened again once it is back (seed 6)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-menu-card:2", "fo-board:2"]);
+      await write(b.process, "fo-board:2", [{ op: "remove", path: "/weddings/2" }], { cursor: "s1" });
+      await b.quiet();
+      expect(b.process.heard.filter((h) => h.channel === "fo-menu-card:2").map((h) => h.data)).toEqual([{ doc: "fo-menu-card:2", error: { code: 404, message: "Not found" } }]);
+      expect((await b.process.call("open", { doc: "fo-menu-card:2" })).error?.code).toBe(404);
+      await assertCopiesHold(b, copies);
+      expect((await b.process.call("undo", { cursor: "s1" })).result.conflict).toBeUndefined();
+      expect((await b.process.call("open", { doc: "fo-menu-card:2" })).result).toEqual({ wedding: "theirs", courses: ["Salad"] });
+    });
+  });
 }
 
 /**

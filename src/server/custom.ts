@@ -215,11 +215,8 @@ export function createCustomDocs<I, H>(opts: {
     const asked: Asked = new Map();
     const go = (client: any, refused: Refusal | null) => {
       if (!refused) return;
-      subs.delete(client);
-      try { trackUnsubscribe(client, docName); } catch { /* the socket may be closing */ }
+      release(client, docName, subs, refused);
       dropped?.();
-      sendTo(client, { doc: docName, error: refused });
-      log.info(`let go of ${docName}: ${refused.code} ${refused.message}`);
     };
     const waiting: Promise<void>[] = [];
     for (const client of [...subs]) {
@@ -228,6 +225,14 @@ export function createCustomDocs<I, H>(opts: {
       else go(client, refused);
     }
     if (waiting.length) return Promise.all(waiting).then(() => {});
+  }
+
+  /** Take `client` off `docName` (out of `subs`), and tell it why. */
+  function release(client: any, docName: string, subs: Set<any>, refused: Refusal): void {
+    subs.delete(client);
+    try { trackUnsubscribe(client, docName); } catch { /* the socket may be closing */ }
+    sendTo(client, { doc: docName, error: refused });
+    log.info(`let go of ${docName}: ${refused.code} ${refused.message}`);
   }
 
   /** Before the custom docs watching what `ops` changed are told: let go each socket that may no longer hear one -- by its own def's owns. */
@@ -275,7 +280,8 @@ export function createCustomDocs<I, H>(opts: {
         const key = viewKey(docName, identity);
         if (!reads.has(key)) reads.set(key, def.recompute!(handle, criteria, identity));
         const doc = reads.get(key);
-        const send = (d: any) => { if (d != null) sendTo(client, { doc: docName, ops: [{ op: "replace", path: "", value: d }] }); };
+        // null when what it reads is gone (the wedding of a menu card): not found, as an open of it is -- let go, and told so
+        const send = (d: any) => (d != null ? sendTo(client, { doc: docName, ops: [{ op: "replace", path: "", value: d }] }) : release(client, docName, subs, NOT_FOUND));
         if (isPromise(doc) || last) last = (last ?? Promise.resolve()).then(() => doc).then(send, failed);
         else send(doc);
       } catch (err) {

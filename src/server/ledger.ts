@@ -114,6 +114,7 @@ export function rowAt(doc: any, path: string): any {
  * `replace` its value; a `remove` none, there was no row), so a row the entry
  * touched twice (made and changed, changed and removed) is walked by its net
  * change. Any guard that fails is a conflict, by path, and then nothing is walked.
+ * A row a removal planned before it takes with it (`under`) is left to that removal.
  *
  * A single document's root is one row at two paths: `/<root>` (a replace of it)
  * and `/<root>/<id>` (its add, its remove). Both are keyed by the second, the
@@ -166,7 +167,19 @@ export function planWalk(entry: { ops: DeltaOp[]; inverse: DeltaOp[] }, current:
       else ops.push(...fields.map((f): DeltaOp => ({ op: "replace", path: path + joinPath(f), value: was[f] ?? null })));   // each field: a replace of the row is the row whole (todo #3)
     }
   }
-  return conflict.length ? { ops: [], conflict } : { ops, conflict };
+  if (conflict.length) return { ops: [], conflict };
+  // a row the removal of one before it takes with it is taken by that removal: removed again
+  // after it, it would not be there -- a favour, a wedding's and a household's
+  const taken = new Set<string>();
+  return {
+    ops: ops.filter((op) => {
+      if (op.op !== "remove") return true;
+      if (taken.has(op.path)) return false;
+      for (const row of under(op.path)) taken.add(row);
+      return true;
+    }),
+    conflict,
+  };
 }
 
 type Row = { id: number; doc: string; version: number; ops: string; inverse: string; at: number; undoable: number; cursor?: string | null };

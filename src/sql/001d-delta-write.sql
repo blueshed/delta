@@ -69,7 +69,9 @@ END $$;
 -- as the schema says, whichever document the removal is written through: one
 -- that does not include the drinks still takes a course's drinks (no orphans).
 -- Returns the array of broadcast ops generated. (Until 0.12.0 it took the
--- writer's include, and left the rest: that form is dropped.)
+-- writer's include, and left the rest: that form is dropped.) In one order on
+-- every backend: each child collection by key, each row by id, then each
+-- collection that cascades on it (cascadeRows in sqlite.ts).
 -- ---------------------------------------------------------------------------
 
 DROP FUNCTION IF EXISTS _delta_cascade_remove(TEXT, BIGINT, TEXT[]);
@@ -117,11 +119,12 @@ BEGIN
   FOR v_child IN
     SELECT * FROM _delta_collections
      WHERE parent_collection = p_collection_key
+     ORDER BY collection_key COLLATE "C"
   LOOP
     v_view := _delta_source_view(v_child.table_name, v_child.temporal);
 
     FOR v_child_row IN
-      EXECUTE format('SELECT id FROM %I WHERE %I = $1', v_view, v_child.parent_fk)
+      EXECUTE format('SELECT id FROM %I WHERE %I = $1 ORDER BY id', v_view, v_child.parent_fk)
         USING p_id
     LOOP
       v_ops := v_ops || _delta_cascade_remove(v_child.collection_key, v_child_row.id);
@@ -136,11 +139,12 @@ BEGIN
       FROM _delta_collections c,
            jsonb_array_elements(c.cascade_on) AS elem
      WHERE elem->>'collection' = p_collection_key
+     ORDER BY c.collection_key COLLATE "C", elem->>'fk' COLLATE "C"
   LOOP
     v_view := _delta_source_view(v_ref.table_name, v_ref.temporal);
 
     FOR v_ref_row IN
-      EXECUTE format('SELECT id FROM %I WHERE %I = $1', v_view, v_ref.fk_column)
+      EXECUTE format('SELECT id FROM %I WHERE %I = $1 ORDER BY id', v_view, v_ref.fk_column)
         USING p_id
     LOOP
       v_ops := v_ops || _delta_cascade_remove(v_ref.collection_key, v_ref_row.id);
@@ -181,8 +185,9 @@ BEGIN
   FOR v_child IN
     SELECT * FROM _delta_collections
      WHERE parent_collection = p_collection_key
+     ORDER BY collection_key COLLATE "C"
   LOOP
-    FOR v_id IN EXECUTE format('SELECT id FROM %I WHERE %I = $1', _delta_source_view(v_child.table_name, v_child.temporal), v_child.parent_fk) USING p_id
+    FOR v_id IN EXECUTE format('SELECT id FROM %I WHERE %I = $1 ORDER BY id', _delta_source_view(v_child.table_name, v_child.temporal), v_child.parent_fk) USING p_id
     LOOP
       v_rows := v_rows || _delta_cascade_rows(v_child.collection_key, v_id);
     END LOOP;
@@ -192,8 +197,9 @@ BEGIN
     SELECT c.collection_key, c.table_name, c.temporal, elem->>'fk' AS fk_column
       FROM _delta_collections c, jsonb_array_elements(c.cascade_on) AS elem
      WHERE elem->>'collection' = p_collection_key
+     ORDER BY c.collection_key COLLATE "C", elem->>'fk' COLLATE "C"
   LOOP
-    FOR v_id IN EXECUTE format('SELECT id FROM %I WHERE %I = $1', _delta_source_view(v_ref.table_name, v_ref.temporal), v_ref.fk_column) USING p_id
+    FOR v_id IN EXECUTE format('SELECT id FROM %I WHERE %I = $1 ORDER BY id', _delta_source_view(v_ref.table_name, v_ref.temporal), v_ref.fk_column) USING p_id
     LOOP
       v_rows := v_rows || _delta_cascade_rows(v_ref.collection_key, v_id);
     END LOOP;
@@ -340,13 +346,35 @@ CREATE OR REPLACE FUNCTION _delta_tell(p_writer TEXT, p_touched JSONB)
 RETURNS BIGINT LANGUAGE sql AS $$ SELECT _delta_tell(p_writer, p_touched, NULL); $$;
 
 -- ---------------------------------------------------------------------------
+-- _delta_row_there: is row p_id of a collection there now? A parent a row is
+-- added or moved under must be, whatever document the write comes through: a
+-- list holds every row of its root, but names their parents only by key, and
+-- a row under a parent that is not there is no document's (an implied one
+-- not yet written opens empty). `there` in sqlite.ts.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION _delta_row_there(p_collection_key TEXT, p_id BIGINT)
+RETURNS BOOLEAN AS $$
+DECLARE
+  v_coll   RECORD;
+  v_exists BOOLEAN;
+BEGIN
+  SELECT * INTO v_coll FROM _delta_collections WHERE collection_key = p_collection_key;
+  IF NOT FOUND OR p_id IS NULL THEN RETURN FALSE; END IF;
+  EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I WHERE id = $1)', _delta_source_view(v_coll.table_name, v_coll.temporal))
+    INTO v_exists USING p_id;
+  RETURN v_exists;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+-- ---------------------------------------------------------------------------
 -- _delta_assert_parent_held: a parent key written (in `p_value`, over the row
 -- as it is, `p_row`) moves the row, and only under a parent the document holds,
 -- as an add names one: through it, a row is never moved into another
 -- document (you may write what you may read), RLS or none. A single
 -- document's own root too: it holds no parent of it, so the root moves
--- through a list that holds both (0.10.0 review). A key written as it is, is
--- no move. P0002 (404) when refused.
+-- through a list that holds both (0.10.0 review). The parent must be there
+-- (_delta_row_there). A key written as it is, is no move. P0002 (404) when refused.
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION _delta_assert_parent_held(p_def _delta_docs, p_doc_name TEXT, p_parent_fk TEXT, p_parent TEXT, p_row JSONB, p_value JSONB)
@@ -355,7 +383,8 @@ BEGIN
   IF p_parent_fk IS NOT NULL
      AND jsonb_typeof(p_value->p_parent_fk) IN ('number', 'string')
      AND (p_value->>p_parent_fk)::BIGINT IS DISTINCT FROM (p_row->>p_parent_fk)::BIGINT
-     AND NOT _delta_row_in_scope(p_def, p_doc_name, p_parent, (p_value->>p_parent_fk)::BIGINT) THEN
+     AND (NOT _delta_row_in_scope(p_def, p_doc_name, p_parent, (p_value->>p_parent_fk)::BIGINT)
+          OR NOT _delta_row_there(p_parent, (p_value->>p_parent_fk)::BIGINT)) THEN
     RAISE EXCEPTION 'row not found: %/%', p_parent, p_value->>p_parent_fk
       USING ERRCODE = 'P0002';
   END IF;
@@ -767,6 +796,12 @@ BEGIN
                (v_new_row->>v_coll.parent_fk)::BIGINT) THEN
         RAISE EXCEPTION 'row not found: %/%',
           v_coll.parent_collection, COALESCE(v_new_row->>v_coll.parent_fk, '')
+          USING ERRCODE = 'P0002';
+      END IF;
+      -- ... and whatever the document, the parent it names must be there (a list names it only by key)
+      IF v_coll.parent_fk IS NOT NULL AND v_new_row->>v_coll.parent_fk IS NOT NULL
+         AND NOT _delta_row_there(v_coll.parent_collection, (v_new_row->>v_coll.parent_fk)::BIGINT) THEN
+        RAISE EXCEPTION 'row not found: %/%', v_coll.parent_collection, v_new_row->>v_coll.parent_fk
           USING ERRCODE = 'P0002';
       END IF;
 

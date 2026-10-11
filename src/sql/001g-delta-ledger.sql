@@ -262,7 +262,8 @@ $$;
 -- the entry (every inverse op of a path carries it: an add or replace its
 -- value, a remove none) to what the entry left, so a row the entry touched
 -- twice is walked by its net change. A guard that fails is a conflict, by
--- path, and then nothing is walked. Returns { ops } or { ops: [], conflict: [paths] }.
+-- path, and then nothing is walked. A row a removal planned before it takes
+-- with it is left to that removal. Returns { ops } or { ops: [], conflict: [paths] }.
 CREATE OR REPLACE FUNCTION _delta_walk_plan(p_entry _delta_ledger)
 RETURNS JSONB AS $$
 DECLARE
@@ -359,6 +360,15 @@ BEGIN
   IF jsonb_array_length(v_conflict) > 0 THEN
     RETURN jsonb_build_object('ops', '[]'::jsonb, 'conflict', v_conflict);
   END IF;
+  -- a row the removal of one before it takes with it is taken by that removal: removed again after it, it would not be there
+  SELECT COALESCE(jsonb_agg(o ORDER BY n), '[]'::jsonb) INTO v_ops
+    FROM jsonb_array_elements(v_ops) WITH ORDINALITY AS x(o, n)
+   WHERE NOT (o->>'op' = 'remove' AND EXISTS (
+     SELECT 1 FROM jsonb_array_elements(v_ops) WITH ORDINALITY AS t(e, m),
+            LATERAL _delta_split_path(e->>'path') AS p,
+            LATERAL jsonb_array_elements(_delta_cascade_rows(p[1], _delta_row_id(p[1], p[2]))) WITH ORDINALITY AS c(r, i)
+      WHERE m < n AND e->>'op' = 'remove' AND array_length(p, 1) = 2 AND i > 1
+        AND _delta_build_path(r->>'coll', r->>'id') = o->>'path'));
   RETURN jsonb_build_object('ops', v_ops);
 END;
 $$ LANGUAGE plpgsql STABLE;

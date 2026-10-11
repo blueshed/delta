@@ -101,10 +101,13 @@ describe("json", () => {
     for (const [first, make] of files) {
       make();
       const fresh = open();
-      expect({ first, open: (await fresh.process.call("open", { doc: "fo-all-courses:" })).result?.courses }).toEqual({ first, open: {} });
-      await write(fresh.process, "fo-all-courses:", [{ op: "add", path: "/courses/-", value: { weddings_id: 1, name: "Soup" } }]);
+      expect({ first, open: (await fresh.process.call("open", { doc: "fo-weddings:" })).result }).toEqual({ first, open: { weddings: {}, courses: {}, _v: 0 } });
+      // a course needs its wedding there first (404): a row is never added under a parent that is not
+      expect((await fresh.process.call("delta", { doc: "fo-weddings:", ops: [{ op: "add", path: "/courses/-", value: { weddings_id: 1, name: "Soup" } }] })).error?.code).toBe(404);
+      await write(fresh.process, "fo-weddings:", [{ op: "add", path: "/weddings/-", value: { name: "ours" } }, { op: "add", path: "/courses/-", value: { weddings_id: 1, name: "Soup" } }]);
       await fresh.persisted();
-      expect({ first, saved: JSON.parse(readFileSync(file, "utf8")).tables.courses }).toEqual({ first, saved: [course(1, "Soup")] });
+      const { weddings, courses } = JSON.parse(readFileSync(file, "utf8")).tables;
+      expect({ first, weddings, courses }).toEqual({ first, weddings: [{ id: 1, name: "ours" }], courses: [course(2, "Soup")] });
     }
   });
 });

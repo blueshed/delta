@@ -90,6 +90,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers `replace /<coll>/<id>/<field>` ops. **Migration:** to change some fields, replace
   each (`/<coll>/<id>/<field>`; one straight after another is one write of the row), or send
   the row whole.
+- **Internal: the law over generated writes** (`tests/law-driver.test.ts`, todo #27): seeded
+  random steps through every kind of document as three people, on SQLite, the JSON file and
+  PGlite at once, the law and the answers asked after every one (`DELTA_LAW_SEEDS`,
+  `DELTA_LAW_STEPS`, `DELTA_LAW_SEED` for a longer run or one seed).
 - **The docs promise only what is so, and tests prove it.** Serial ids are the four table
   backends' (the JSON file via `./json`, SQLite, PGlite, Postgres); `registerDoc` is called "a
   free-form document" everywhere (uuid ids, no schema, not on the moving-on path), never "the
@@ -207,6 +211,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registrations of one file on one server now share its database, where each had its own and
   their saves overwrote each other. Postgres guarded it already. Each registration still tells
   only its own open documents.
+- **What the law over generated writes found (todo #27)**, each pinned as a shared case on every
+  backend (`tests/helpers/path.ts`, "found by the law over generated writes"):
+  - **A row is never added or moved under a parent that is not there** (404, every backend). A
+    list holds every course but names its wedding only by key: `add /courses/- { weddings_id: 7 }`
+    through `all-courses:` made an orphan under a wedding that was not there (an implied plan
+    not yet written), which the plan was told of but did not hold. `_delta_row_there` (`001d`,
+    new) and `_delta_assert_parent_held` and `delta_apply` (`001d`, replaced in place) ask it, as
+    SQLite and the JSON file now do. An undo that would put a row back under a parent gone since is
+    a conflict.
+  - **A cascade is told in one order on every backend**: each child collection by key, each row by
+    id, then the rows that `cascadeOn` it. Postgres read them in the order the heap kept them (a
+    course moved since came last), SQLite by rowid and the schema's order.
+    `_delta_cascade_remove` and `_delta_cascade_rows` (`001d`, replaced in place).
+  - **A walk leaves a row to a removal before it that takes it.** A redo of a wedding's removal
+    removed the household and then its favour, which the household's cascade had taken: refused,
+    so the redo was a conflict. `planWalk` and `_delta_walk_plan` (`001g`, replaced in place).
+  - **A refused write spends the serials it took on SQLite and the JSON file, as on Postgres**,
+    where a sequence is never rolled back: the next row is named the same on every backend.
+  - **SQLite and the JSON file answer an add of a row already there 409 before asking its parent**,
+    as Postgres does (it answered 404 when the parent was not there either).
+  - **A recompute custom document whose read comes back null is let go (404)**, every backend: its
+    subscribers were told nothing, and kept the menu card of a wedding that was gone.
 - **Two registrations over the same rows tell each other, and an undo through one is guarded by
   a write through the other (todo #64)**, on SQLite and the JSON file. Ada renamed course 1
   through `fo-board:1`, Bob through a public `fo-pub-courses:` registered in a second
