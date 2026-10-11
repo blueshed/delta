@@ -243,13 +243,16 @@ export function showRow(def: DocDef, schema: Schema, coll: string, row: any): an
 
 /**
  * Ops as a document shows them -- what its writer is answered (a write's ops
- * and inverse, a walk's, its history): a row's value, its columns
- * (`showRow`); a field it does not hold, no op. The ledger keeps them whole.
+ * and inverse, a walk's, its history): of the collections it holds alone (a
+ * removal's cascade into one it does not include is left out); a row's value,
+ * its columns (`showRow`); a field it does not hold, no op. The ledger keeps
+ * them whole, so undo still puts back every row and column.
  */
 export function showOps<O extends { path: string; value?: unknown }>(def: DocDef, schema: Schema, ops: O[]): O[] {
-  if (!def.columns) return ops;
   return ops.flatMap((op) => {
     const [coll, at, field] = splitPath(op.path);
+    if (coll !== def.root && !def.include.includes(coll!)) return [];
+    if (!def.columns) return [op];
     const table = schema.tables[coll!];
     // a field: /<coll>/<id>/<field>, or a single document's root's, /<root>/<field>
     const named = field ?? (at !== undefined && table && (Object.hasOwn(table.columns, at) || at === table.parent?.fkColumn) ? at : undefined);

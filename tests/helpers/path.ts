@@ -441,25 +441,30 @@ export function columnCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("its writer is answered only its columns -- a write's ops and inverse, an undo's and a redo's, a dry run's, its history -- while the ledger keeps the rows whole", async () => {
+    test("its writer is answered only what it holds -- a write's ops and inverse, an undo's and a redo's, a dry run's, its history: its columns, and not the favour a household's removal takes, which it does not include -- while the ledger keeps every row whole, and undo puts them back", async () => {
       const b = backend();
-      const copies = await openAll(b.process, ["fo-slim:1", "fo-board:1"]);
-      await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/2/t", value: "secret" }]);
-      const hidden = (what: string, x: unknown) => expect({ what, t: /"t":|secret/.test(JSON.stringify(x)) }).toEqual({ what, t: false });
-      const renamed = await write(b.process, "fo-slim:1", [{ op: "replace", path: "/households/2/email", value: "w@x" }], { cursor: "s1" });
-      expect(renamed.ops).toEqual([{ op: "replace", path: "/households/2", value: slim(2, "w@x") }]);
-      expect(renamed.inverse).toEqual([{ op: "replace", path: "/households/2", value: slim(2, "b@x") }]);
-      // household 2 has no favour: a removal's cascade beyond the document is answered as ever, rows whole
-      const removed = await write(b.process, "fo-slim:1", [{ op: "remove", path: "/households/2" }], { cursor: "s1" });
-      expect(removed.inverse).toEqual([{ op: "add", path: "/households/2", value: slim(2, "w@x") }]);
+      const copies = await openAll(b.process, ["fo-slim:1", "fo-board:1", "fo-party:1"]);
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/t", value: "secret" }]);
+      const hidden = (what: string, x: unknown) => expect({ what, leak: /"t":|secret|favour|jam/.test(JSON.stringify(x)) }).toEqual({ what, leak: false });
+      const renamed = await write(b.process, "fo-slim:1", [{ op: "replace", path: "/households/1/email", value: "w@x" }], { cursor: "s1" });
+      expect(renamed.ops).toEqual([{ op: "replace", path: "/households/1", value: slim(1, "w@x") }]);
+      expect(renamed.inverse).toEqual([{ op: "replace", path: "/households/1", value: slim(1, "a@x") }]);
+      // household 1 has a favour, which its removal takes: in the tables and the party, not in this writer's answer
+      const removed = await write(b.process, "fo-slim:1", [{ op: "remove", path: "/households/1" }], { cursor: "s1" });
+      expect({ ops: removed.ops, inverse: removed.inverse }).toEqual({ ops: [{ op: "remove", path: "/households/1" }], inverse: [{ op: "add", path: "/households/1", value: slim(1, "w@x") }] });
+      const favours = async () => (await b.exportTables()).tables.favours ?? [];
+      expect(await favours()).toEqual([]);
       hidden("dry", (await b.process.call("undo", { cursor: "s1", dry: true })).result);
       const undone = (await b.process.call("undo", { cursor: "s1" })).result;
-      expect(undone.ops).toEqual([{ op: "add", path: "/households/2", value: slim(2, "w@x") }]);
+      expect(undone.ops).toEqual([{ op: "add", path: "/households/1", value: slim(1, "w@x") }]);
       hidden("undo", undone);
+      const jam = { id: 1, weddings_id: 1, households_id: 1, gift: "jam" };
+      expect(await favours()).toEqual([jam]);   // the ledger kept it whole
       hidden("redo", (await b.process.call("redo", { cursor: "s1" })).result);
       hidden("undo again", (await b.process.call("undo", { cursor: "s1" })).result);
       hidden("history", (await b.process.call("history", { doc: "fo-slim:1", cursor: "s1" })).result);
-      expect(content((await b.process.call("open", { doc: "fo-board:1" })).result).households["2"]).toEqual(household(2, "w@x", 1, "secret"));
+      expect(content((await b.process.call("open", { doc: "fo-board:1" })).result).households["1"]).toEqual(household(1, "w@x", 1, "secret"));
+      expect(await favours()).toEqual([jam]);
       await assertCopiesHold(b, copies);
     });
   });
@@ -1064,13 +1069,13 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("a course removed through a list that does not include drinks still takes its drinks, as the schema says: every document that held them is told; undone, both come back -- and a household's favour, which cascades on it, the same", async () => {
+    test("a course removed through a list that does not include drinks still takes its drinks, as the schema says: every document that held them is told, and its writer is answered the course alone (it holds no drinks); undone, both come back -- and a household's favour, which cascades on it, the same", async () => {
       const b = backend();
       const docs = ["fo-all-courses:", "fo-board:1", "fo-menu:1", "fo-drinks:1", "fo-course:1", "fo-catalog:", "fo-all-households:", "fo-party:1"];
       const copies = await openAll(b.process, docs);
       const gone = [{ op: "remove", path: "/courses/1" }, { op: "remove", path: "/drinks/1" }];
-      const { ops } = await write(b.process, "fo-all-courses:", [gone[0]], { cursor: "c1" });
-      expect(ops).toEqual(gone);
+      const { ops, inverse } = await write(b.process, "fo-all-courses:", [gone[0]], { cursor: "c1" });
+      expect({ ops, inverse }).toEqual({ ops: [gone[0]], inverse: [{ op: "add", path: "/courses/1", value: course(1, "Soup") }] });
       await expectTold(b, "fo-all-courses:", [[gone[0]]]);
       for (const doc of ["fo-board:1", "fo-menu:1", "fo-catalog:"]) await expectTold(b, doc, [gone]);
       await expectTold(b, "fo-drinks:1", [[gone[1]]]);
@@ -1078,8 +1083,9 @@ export function fanOutCases(backend: () => PathBackend): void {
       expect((await b.exportTables()).tables.drinks).toEqual([drink(2, 2, "Water")]);
       const undone = await b.process.call("undo", { cursor: "c1" });
       expect({ ops: undone.result?.ops, conflict: undone.result?.conflict, error: undone.error }).toEqual({
-        ops: [{ op: "add", path: "/courses/1", value: course(1, "Soup") }, { op: "add", path: "/drinks/1", value: drink(1, 1, "Sherry") }], conflict: undefined, error: undefined,
+        ops: [{ op: "add", path: "/courses/1", value: course(1, "Soup") }], conflict: undefined, error: undefined,
       });
+      expect((await b.exportTables()).tables.drinks).toEqual([drink(1, 1, "Sherry"), drink(2, 2, "Water")]);   // the ledger kept it whole
       await assertCopiesHold(b, copies);
       await write(b.process, "fo-all-households:", [{ op: "remove", path: "/households/1" }]);
       expect((await b.exportTables()).tables.favours ?? []).toEqual([]);
@@ -1297,8 +1303,9 @@ export function fanOutCases(backend: () => PathBackend): void {
         { op: "replace", path: "/households/email", value: "gone@x" },
         { op: "remove", path: "/households/1" },
       ]);
-      // its favour, which cascades on it, goes with it (the board holds no favours)
-      expect(ops).toEqual([{ op: "replace", path: "/households", value: household(1, "gone@x") }, { op: "remove", path: "/households/1" }, { op: "remove", path: "/favours/1" }]);
+      // its favour, which cascades on it, goes with it -- from the tables; its writer is answered the household alone, which holds no favours
+      expect(ops).toEqual([{ op: "replace", path: "/households", value: household(1, "gone@x") }, { op: "remove", path: "/households/1" }]);
+      expect((await b.exportTables()).tables.favours ?? []).toEqual([]);
       await expectTold(b, "fo-household:1", [[field("/households/email", "gone@x"), { op: "replace", path: "/households", value: null }]]);
       await expectTold(b, "fo-board:1", [[field("/households/1/email", "gone@x"), { op: "remove", path: "/households/1" }]]);
       await expectSilent(b, "fo-household:2");
@@ -1733,21 +1740,26 @@ export function fanOutCases(backend: () => PathBackend): void {
       const favour = { id: 1, weddings_id: 1, households_id: 1, gift: "jam" };
       const favourGone = { op: "remove", path: "/favours/1" };
       const favourBack = { op: "add", path: "/favours/1", value: favour };
-      expect(written.ops).toEqual([{ op: "remove", path: "/households/1" }, favourGone, { op: "add", path: "/households/1", value: household(1, "z@x") }]);
+      // ... out of the answer: the household's document holds no favours (the ledger keeps it, whole)
+      expect(written.ops).toEqual([{ op: "remove", path: "/households/1" }, { op: "add", path: "/households/1", value: household(1, "z@x") }]);
       const dry = await b.process.call("undo", { cursor: "s1", dry: true });
-      expect({ ops: dry.result.ops, conflict: dry.result.conflict }).toEqual({ ops: [field("/households/email", "a@x"), favourBack], conflict: undefined });
+      expect({ ops: dry.result.ops, conflict: dry.result.conflict }).toEqual({ ops: [field("/households/email", "a@x")], conflict: undefined });
       const walked = async (way: string) => {
         const { result } = await b.process.call(way, { cursor: "s1" });
         return { ops: result.ops, conflict: result.conflict };
       };
       const as = (email: string) => [{ op: "replace", path: "/households", value: household(1, email) }];
-      expect(await walked("undo")).toEqual({ ops: [...as("a@x"), favourBack], conflict: undefined });
-      expect(await walked("redo")).toEqual({ ops: [favourGone, ...as("z@x")], conflict: undefined });
-      expect(await walked("undo")).toEqual({ ops: [...as("a@x"), favourBack], conflict: undefined });
+      const favours = async () => (await b.exportTables()).tables.favours ?? [];
+      expect(await walked("undo")).toEqual({ ops: as("a@x"), conflict: undefined });
+      expect(await favours()).toEqual([favour]);
+      expect(await walked("redo")).toEqual({ ops: as("z@x"), conflict: undefined });
+      expect(await favours()).toEqual([]);
+      expect(await walked("undo")).toEqual({ ops: as("a@x"), conflict: undefined });
+      expect({ gone: favourGone.path, back: favourBack.value, now: await favours() }).toEqual({ gone: "/favours/1", back: favour, now: [favour] });
       const inBoard = (email: string) => [field("/households/1/email", email)];
       const told = (email: string) => [field("/households/email", email)];
       await expectTold(b, "fo-household:1", [[{ op: "replace", path: "/households", value: null }, as("z@x")[0]], told("a@x"), told("z@x"), told("a@x")]);
-      await expectTold(b, "fo-board:1", [[written.ops[0], written.ops[2]], inBoard("a@x"), inBoard("z@x"), inBoard("a@x")]);
+      await expectTold(b, "fo-board:1", [written.ops, inBoard("a@x"), inBoard("z@x"), inBoard("a@x")]);
       await assertCopiesHold(b, copies);
     });
 
@@ -1785,12 +1797,16 @@ export function fanOutCases(backend: () => PathBackend): void {
       const copies = await openAll(b.process, ["fo-household:1", "fo-board:1", "fo-party:1"]);
       const removed = await write(b.process, "fo-household:1", [{ op: "remove", path: "/households/1" }], { cursor: "s1" });
       const favour = { id: 1, weddings_id: 1, households_id: 1, gift: "jam" };
-      expect(removed.ops).toEqual([{ op: "remove", path: "/households/1" }, { op: "remove", path: "/favours/1" }]);
+      // its writer is answered the household alone: its document holds no favours; the party, which does, is told both
+      expect(removed.ops).toEqual([{ op: "remove", path: "/households/1" }]);
       const undone = await b.process.call("undo", { cursor: "s1" });
-      expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "add", path: "/households/1", value: household(1, "a@x") }, { op: "add", path: "/favours/1", value: favour }], conflict: undefined });
+      expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "add", path: "/households/1", value: household(1, "a@x") }], conflict: undefined });
       await expectTold(b, "fo-household:1", [[{ op: "replace", path: "/households", value: null }], [{ op: "replace", path: "/households", value: household(1, "a@x") }]]);
       await expectTold(b, "fo-board:1", [[removed.ops[0]], [undone.result.ops[0]]]);
-      await expectTold(b, "fo-party:1", [removed.ops, undone.result.ops]);
+      await expectTold(b, "fo-party:1", [
+        [removed.ops[0], { op: "remove", path: "/favours/1" }],
+        [undone.result.ops[0], { op: "add", path: "/favours/1", value: favour }],
+      ]);
       await assertCopiesHold(b, copies);
     });
 

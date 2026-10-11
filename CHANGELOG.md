@@ -46,6 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two holders 168 bytes of ops; it now tells 122. **Migration:** apply broadcasts with `applyOps`
   (`@blueshed/delta/core`) or `applyOpsToCollection`; don't assume a `replace` carries the
   whole row. `changedFields` (core) is what a row that stays is told.
+- **A writer is answered only what its document holds.** A write's `ops` and `inverse` (sent
+  when the writer asks for the inverse or keeps a ledger), an undo's, a redo's, a dry run's and
+  `history` carried every row a removal's cascade took, in collections the document does not
+  include (a course removed through `all-courses:` answered its drinks). They now carry the
+  collections it holds alone, and, where it names its columns, those (`showOps`; Postgres
+  `showAnswer` in `registry.ts`). The ledger keeps every row whole, so undo puts them back.
+  Breaking for a writer that kept its own history from the answer's `inverse`: it could never
+  write rows outside its document back anyway; use `undo`.
 - **Breaking for a writer that sends part of a row: a replace of a row is the row (todo #3).**
   `replace /<coll>/<id>` (a single document's `/<root>`, or its root by its id) with a value
   merged it over the row on the table backends and replaced the row on the free-form document.

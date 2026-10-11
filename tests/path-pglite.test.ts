@@ -260,7 +260,9 @@ describe("pglite: the log keeps the write as applied only where the writer was t
     await openAll(backend.process, ["fo-household:1"]);
     const { ops } = await write(backend.process, "fo-household:1", [{ op: "remove", path: "/households/1" }]);
     await expectTold(backend, "fo-household:1", [[{ op: "replace", path: "/households", value: null }]]);
-    expect(await entries()).toEqual([["fo-household:1", ops]]);
+    // whole, its favour too, which its writer was not answered: the household's document holds no favours
+    expect(ops).toEqual([{ op: "remove", path: "/households/1" }]);
+    expect(await entries()).toEqual([["fo-household:1", [...ops, { op: "remove", path: "/favours/1" }]]]);
   });
 });
 
