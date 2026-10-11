@@ -72,10 +72,6 @@ export interface DocDef {
 }
 
 // ---------------------------------------------------------------------------
-// defineSchema — build a resolved Schema from a table-def record.
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // Identifier validation — defence-in-depth for the SQL codegen, which
 // interpolates these names into DDL. Names must be plain SQL identifiers so a
 // quote/backslash/space can never reach the generated SQL.
@@ -181,6 +177,18 @@ export function defineSchema(defs: Record<string, TableDef>): Schema {
   }
 
   return { tables };
+}
+
+/** The value a column that is neither nullable nor defaulted takes when a row leaves it out. */
+export function defaultForType(type: ColumnType): unknown {
+  switch (type) {
+    case "text": return "";
+    case "integer": return 0;
+    case "real": return 0;
+    case "boolean": return false;
+    case "json": return null;
+    case "timestamptz": return null;   // no sensible default — must be supplied
+  }
 }
 
 // ---------------------------------------------------------------------------

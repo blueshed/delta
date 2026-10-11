@@ -43,6 +43,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not hold), and on Postgres asked its `owns` of them (a socket was let go, 404). Both
   backends now run one module for custom documents (`src/server/custom.ts`).
 
+### Removed
+
+- **`createSnapshot` and `resolveSnapshot` from `@blueshed/delta/postgres`**: thin wrappers no
+  one called. Call the SQL: `SELECT delta_snapshot($1, $2)`, `SELECT delta_resolve_snapshot($1)`.
+  SQLite's stay.
+- **`setDoc` on `registerDoc`'s handle**: change the document with `applyAndBroadcast(ops)`.
+- **The `_raw` action**: a frame with no `action` reached the handlers registered on `"_raw"`; it
+  is now answered with nothing. Send an action.
+
 ### Internal
 
 - A simplicity pass over the core (todo #68): dead branches and duplicated tests gone, one

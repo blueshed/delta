@@ -152,14 +152,11 @@ describe("createWs", () => {
     expect(sock.sent).toEqual([]);
   });
 
-  test("message without action dispatches to _raw", async () => {
+  test("a frame with no action is answered with nothing", async () => {
     const ws = createWs();
-    const received: any[] = [];
-    ws.on("_raw", (msg) => { received.push(msg); });
-
     const sock = mockSocket();
-    await ws.websocket.message(sock, JSON.stringify({ data: 42 }));
-    expect(received).toEqual([{ data: 42 }]);
+    await ws.websocket.message(sock, JSON.stringify({ id: 1, data: 42 }));
+    expect(sock.sent).toEqual([]);
   });
 
   test("handler error returns error response", async () => {
@@ -788,20 +785,6 @@ describe("malformed frames", () => {
     expect(sock.sent.find((m: any) => m.id === 7)?.error?.message).toBe("kaboom");
   });
 
-  test("non-JSON frames are not misrouted to _raw handlers", async () => {
-    // `_raw` is for well-formed frames that carry no `action`; a parse failure
-    // must not look like one.
-    const ws = createWs();
-    let rawCalls = 0;
-    ws.on("_raw", () => { rawCalls++; });
-    const sock = mockSocket();
-
-    await ws.websocket.message(sock, "still not json");
-    expect(rawCalls).toBe(0);
-
-    await ws.websocket.message(sock, JSON.stringify({ hello: "world" }));
-    expect(rawCalls).toBe(1);
-  });
 });
 
 // ---------------------------------------------------------------------------

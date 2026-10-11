@@ -20,7 +20,7 @@ import type { WsServer } from "./server";
 import { trackSubscribe, trackUnsubscribe, onClientDrop, failure } from "./server";
 import { authless, isAuthError, ownerless, type DeltaAuth } from "./auth";
 import { assertOwned, createCustomDocs, isPromise, NOT_FOUND, toMap, type CustomDoc } from "./custom";
-import { applyOps as deltaApplyOps, type DeltaOp, splitPath, joinPath } from "../core";
+import { type DeltaOp, splitPath, joinPath } from "../core";
 import { createLogger } from "./logger";
 import { createLedger, isEntryId, ledgerWho, planWalk, rowAt, socketCursor } from "./ledger";
 import { meets, pastSafeId, resolveScope, rowId, sameId, whereOf, type Keep, type Scope } from "./scope";
@@ -33,6 +33,7 @@ import {
   type Snapshot,
   defineSchema as defineSchemaShared,
   defineDoc as defineDocShared,
+  defaultForType,
   isoTime,
   lastId,
 } from "../schema";
@@ -1965,13 +1966,3 @@ function decodeRow(table: ResolvedTable, row: any) {
   }
 }
 
-function defaultForType(type: ColumnDef["type"]): unknown {
-  switch (type) {
-    case "text": return "";
-    case "integer": return 0;
-    case "real": return 0;
-    case "boolean": return false;
-    case "json": return null;
-    case "timestamptz": return null;   // no sensible default — must be supplied
-  }
-}

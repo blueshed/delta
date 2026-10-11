@@ -63,7 +63,6 @@ export interface WsServer {
 
 export interface DocHandle<T> {
   getDoc(): T;
-  setDoc(d: T): void;
   persist(): Promise<void>;
   applyAndBroadcast(ops: DeltaOp[]): void;
 }
@@ -270,12 +269,7 @@ export function createWs(opts?: WsOptions): WsServer {
       msg = JSON.parse(String(raw));
       ({ id, action } = msg);
 
-      if (!action) {
-        for (const handler of actions.get("_raw") ?? []) {
-          await handler(msg, ws, () => {});
-        }
-        return;
-      }
+      if (!action) return;   // a frame that asks nothing is answered with nothing
 
       // Private methods (leading `_`) are internal helpers: composable
       // within other handlers' bodies, never reachable from the wire.
@@ -589,7 +583,7 @@ export async function registerDoc<T>(
     log.debug("closed");
   });
 
-  return { getDoc: () => doc, setDoc: (d: T) => { doc = d; }, persist, applyAndBroadcast };
+  return { getDoc: () => doc, persist, applyAndBroadcast };
 }
 
 // ---------------------------------------------------------------------------

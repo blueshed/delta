@@ -20,8 +20,6 @@ export {
   defineSchema,
   defineDoc,
   loadDocAt,
-  createSnapshot,
-  resolveSnapshot,
   pruneOpsLog,
   validateOps,
 } from "./schema";

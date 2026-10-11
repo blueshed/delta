@@ -5,7 +5,7 @@
  * DocDef, defineSchema, defineDoc) lives in `../../schema` and is identical
  * across the Postgres and SQLite backends. This module re-exports those
  * types and adds the Postgres helpers that hit the live database
- * (time-travel, snapshots, ops-log pruning, op validation).
+ * (time-travel, ops-log pruning, op validation).
  */
 import type { Pool } from "pg";
 import { type DeltaOp, joinPath, splitPath } from "../../core";
@@ -14,7 +14,7 @@ import {
   type DocDef,
   type ValidationError,
 } from "../../schema";
-import { resolveScope } from "../scope";
+import { pastSafeId, resolveScope } from "../scope";
 
 export type {
   ColumnType,
@@ -38,19 +38,6 @@ export async function loadDocAt(pool: Pool, docName: string, at: string | Date):
   return rows[0]?.doc ?? null;
 }
 
-export async function createSnapshot(pool: Pool, name: string, at?: string): Promise<string> {
-  const { rows } = await pool.query(
-    "SELECT delta_snapshot($1, $2) AS ts",
-    [name, at ?? new Date().toISOString()],
-  );
-  return rows[0]?.ts;
-}
-
-export async function resolveSnapshot(pool: Pool, name: string): Promise<string | null> {
-  const { rows } = await pool.query("SELECT delta_resolve_snapshot($1) AS ts", [name]);
-  return rows[0]?.ts ?? null;
-}
-
 export async function pruneOpsLog(pool: Pool, keepInterval = "1 hour"): Promise<number> {
   const { rows } = await pool.query("SELECT delta_prune_ops($1::interval) AS count", [keepInterval]);
   return Number(rows[0]?.count ?? 0);
@@ -59,9 +46,6 @@ export async function pruneOpsLog(pool: Pool, keepInterval = "1 hour"): Promise<
 // ---------------------------------------------------------------------------
 // validateOps — what delta_apply refuses as a mistake (400), said ahead.
 // ---------------------------------------------------------------------------
-
-/** 2^53 - 1: a path's id past it is refused, as `_delta_row_id` refuses it. */
-const MAX_ID = 9007199254740991;
 
 /**
  * Validate delta ops against the schema, as `delta_apply` (001d) reads them,
@@ -127,7 +111,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
     // A row's id, as the path names it: the number its digits name, up to 2^53 - 1 (_delta_row_id).
     const idErr = (seg: string): string | null =>
       !/^[0-9]+$/.test(seg) ? `Row id "${seg}" in ${op.path} is not a number: Postgres mints row ids -- add to ${joinPath(collKey, "-")} and read the id from the echo`
-      : Number(seg) > MAX_ID ? `Row id ${seg} in ${op.path} is past 2^53 - 1, which no number holds exactly -- add to ${joinPath(collKey, "-")} and read the id from the echo`
+      : pastSafeId(seg) ? `Row id ${seg} in ${op.path} is past 2^53 - 1, which no number holds exactly -- add to ${joinPath(collKey, "-")} and read the id from the echo`
       : null;
 
     // A single document's root: `replace /<root>` merges into it, and

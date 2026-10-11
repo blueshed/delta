@@ -17,8 +17,6 @@ import {
   registerDocType,
   clearRegistry,
   loadDocAt,
-  createSnapshot,
-  resolveSnapshot,
   pruneOpsLog,
 } from "../src/server/postgres";
 import { createWs } from "../src/server/server";
@@ -257,18 +255,13 @@ describe("snapshots + pruneOpsLog", () => {
     expect(doc).toBeNull();
   });
 
-  test("createSnapshot + resolveSnapshot round-trip", async () => {
-    const ts = await createSnapshot(pool, "pre-op");
+  test("delta_snapshot + delta_resolve_snapshot round-trip; an unknown name is null", async () => {
+    const ts = (await pool.query("SELECT delta_snapshot($1, $2) AS ts", ["pre-op", new Date().toISOString()])).rows[0]?.ts;
     expect(ts).toBeDefined();
-    const resolved = await resolveSnapshot(pool, "pre-op");
-    expect(resolved).not.toBeNull();
+    const resolve = async (name: string) => (await pool.query("SELECT delta_resolve_snapshot($1) AS ts", [name])).rows[0]?.ts ?? null;
     // Both come back as Date values from pg — compare structurally.
-    expect(resolved).toEqual(ts);
-  });
-
-  test("resolveSnapshot returns null for an unknown name", async () => {
-    const resolved = await resolveSnapshot(pool, "never-saved");
-    expect(resolved).toBeNull();
+    expect(await resolve("pre-op")).toEqual(ts);
+    expect(await resolve("never-saved")).toBeNull();
   });
 
   test("pruneOpsLog returns a non-negative count", async () => {
