@@ -43,6 +43,9 @@ export const pathSchema = defineSchema({
   seats: { table: "fo_seats", parent: "weddings", columns: { table_no: "integer", kept: "boolean", wishes: "json?" }, temporal: false },
   // the time slots of a wedding: the scopes on a real, a parent key and a time
   slots: { table: "fo_slots", parent: "weddings", columns: { price: "real?", starts: "timestamptz?" }, temporal: false },
+  // a favour for a household: a child of the wedding that goes with its household too (cascadeOn), so a
+  // wedding's removal reaches it twice -- as the wedding's child, and through the household
+  favours: { table: "fo_favours", parent: "weddings", columns: { households_id: "integer", gift: "text" }, cascadeOn: ["households_id"], temporal: false },
 });
 
 /** Several documents over the same rows, cut different ways. */
@@ -99,6 +102,8 @@ export const pathDocs = [
   defineDoc("fo-seat-of:", { root: "seats", include: [], scope: { id: ":id", table_no: ":table" } }),
   // list mode: every household, whichever wedding -- the document a household moves between weddings through
   defineDoc("fo-all-households:", { root: "households", include: [] }),
+  // the party: the wedding, its households and their favours
+  defineDoc("fo-party:", { root: "weddings", include: ["households", "favours"] }),
 ];
 
 /**
@@ -168,6 +173,7 @@ export const pathSeed: Snapshot = {
     tags: [{ id: 1, label: "red" }],
     notes: [{ id: 1, weddings_id: 1, text: "bring chairs", valid_from: "2020-01-01T00:00:00.000Z", valid_to: null }],
     seats: [{ id: 1, weddings_id: 1, table_no: 3, kept: true, wishes: { veg: true } }],
+    favours: [{ id: 1, weddings_id: 1, households_id: 1, gift: "jam" }],
   },
 };
 
@@ -317,6 +323,21 @@ export function serialCases(backend: () => PathBackend): void {
 /** What a document is, read and written through, on its own. */
 export function documentCases(backend: () => PathBackend): void {
   describe("a document, read and written", () => {
+    test("a remove whose cascade reaches a row twice -- a favour, the wedding's child and its household's -- takes it, tells it and records it once, and the undo puts it back", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-party:1"]);
+      const out = await write(b.process, "fo-party:1", [{ op: "remove", path: "/weddings/1" }], { cursor: "p1" });
+      const favour = (ops: any[]) => ops.filter((o) => o.path === "/favours/1");
+      expect({ ops: favour(out.ops), inverse: favour(out.inverse) }).toEqual({
+        ops: [{ op: "remove", path: "/favours/1" }],
+        inverse: [{ op: "add", path: "/favours/1", value: { id: 1, weddings_id: 1, households_id: 1, gift: "jam" } }],
+      });
+      await assertCopiesHold(b, copies);
+      const undone = await b.process.call("undo", { cursor: "p1" });
+      expect({ error: undone.error, conflict: undone.result?.conflict }).toEqual({ error: undefined, conflict: undefined });
+      expect(content((await b.process.call("open", { doc: "fo-party:1" })).result).favours).toEqual({ "1": { id: 1, weddings_id: 1, households_id: 1, gift: "jam" } });
+    });
+
     test("opening the board reads the rows as Postgres gives them: ids as numbers, no validity columns", async () => {
       const { result } = await backend().process.call("open", { doc: "fo-board:1" });
       expect(content(result)).toEqual({

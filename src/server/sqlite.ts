@@ -392,17 +392,24 @@ export function registerDocs<I = unknown>(
     return row;
   }
 
-  /** A row and the rows its removal takes with it (its children, and the rows `cascadeOn` it), parent first. */
-  function cascadeRows(table: ResolvedTable, id: string | number, def: DocDef): { table: ResolvedTable; row: any }[] {
-    const row = readRow(table, id);
-    if (!row) return [];
-    const out = [{ table, row }];
+  /**
+   * A row and the rows its removal takes with it (its children, and the rows
+   * `cascadeOn` it), parent first -- each once, where the walk first reaches it,
+   * as the removal then takes it: a row reached twice (a child of the removed
+   * row that also cascades on another row it takes) is not taken again.
+   */
+  function cascadeRows(table: ResolvedTable, id: string | number, def: DocDef, out: { table: ResolvedTable; row: any }[] = [], seen = new Set<string>()): { table: ResolvedTable; row: any }[] {
+    const key = `${table.docKey}/${id}`;
+    const row = seen.has(key) ? null : readRow(table, id);
+    if (!row) return out;
+    seen.add(key);
+    out.push({ table, row });
     for (const childKey of table.children) {
       if (!def.include.includes(childKey)) continue;
       const child = schema.tables[childKey];
       if (!child?.parent) continue;
       for (const r of db.query(`SELECT id FROM ${current(child)} WHERE ${child.parent.fkColumn} = ?`).all(id as any) as any[]) {
-        out.push(...cascadeRows(child, r.id, def));
+        cascadeRows(child, r.id, def, out, seen);
       }
     }
     for (const ref of table.referencedBy) {
@@ -410,7 +417,7 @@ export function registerDocs<I = unknown>(
       const refTable = schema.tables[ref.collection];
       if (!refTable) continue;
       for (const r of db.query(`SELECT id FROM ${current(refTable)} WHERE ${ref.fkColumn} = ?`).all(id as any) as any[]) {
-        out.push(...cascadeRows(refTable, r.id, def));
+        cascadeRows(refTable, r.id, def, out, seen);
       }
     }
     return out;
