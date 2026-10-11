@@ -473,7 +473,7 @@ export function createWs(opts?: WsOptions): WsServer {
  * (`/cards/5`), with the row value read from the just-applied doc state.
  *
  * The SQLite and Postgres backends already broadcast whole-row ops; without
- * this, the JSON-file backend was the one path emitting field-level ops on the
+ * this, the free-form document was the one path emitting field-level ops on the
  * wire — which keyed reactive consumers (railroad's `list()`) cannot see: the
  * client applies them by mutating the row object in place, so the row's
  * identity never changes and its DOM goes stale. Whole-row replaces give every
@@ -510,7 +510,7 @@ export function normalizeForBroadcast(doc: unknown, ops: DeltaOp[]): DeltaOp[] {
  * server names it": mint a uuid, put it in the path and in the value's `id`,
  * so the op as applied -- and as broadcast -- names the row, as the SQL
  * backends' echoes do. On an array, `/-` appends, as RFC 6902 says.
- * Shared by the JSON file (`registerDoc`) and memory documents (`kinds.ts`).
+ * Shared by the free-form document (`registerDoc`) and memory documents (`kinds.ts`).
  * @internal
  */
 export function mintIds(doc: unknown, ops: DeltaOp[]): DeltaOp[] {

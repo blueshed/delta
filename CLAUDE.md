@@ -85,7 +85,8 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
   `tests/sqlite-isolation.test.ts` pin that nobody else is told.
 - **Rows carry from one backend to the next** with `exportTables` / `importTables` (the same
   `Snapshot` on each): every row, every temporal version, and each sequence, so the next serial
-  follows on.
+  follows on. Not the ledger: undo history starts fresh on the next backend. The free-form
+  document (`registerDoc`) is not one of the four: no schema, uuid ids.
 - **A walk is guarded, the same on both backends**: `planWalk` (`src/server/ledger.ts`) and
   `_delta_walk_plan` (`001g`) set back only what an entry changed, where the document still
   holds what it left (and a row it made is removed only if nobody has put rows under it); a
@@ -108,7 +109,7 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
 - `src/client/`: `client.ts` (reconnecting socket with `onConnect`, reactive `openDoc`,
   version-gap resync, `send` after its echo), `dom-ops.ts` (`applyOpsToCollection`). It
   imports railroad's subpaths, never the root barrel.
-- `src/server/server.ts`: `createWs`, the JSON-file backend (`registerDoc`), `WsServer`.
+- `src/server/server.ts`: `createWs`, the free-form document (`registerDoc`), `WsServer`.
 - `src/server/sqlite.ts`: the SQLite backend (`registerDocs`, custom docs, fan-out, implied
   docs, `inverseOf`; with `{ ledger: true }`, `undo` / `redo` / `history`), and the package's
   `./sqlite` entry. Beside it, `src/server/sqlite/`: `ddl` (createTables, migrateSchema),

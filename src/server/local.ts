@@ -60,7 +60,7 @@ export interface Local extends Caller {
 
 /**
  * A value as the caller's own. A backend answers with, and broadcasts, objects
- * it keeps -- SQLite's cached documents, the JSON file's document, the Postgres
+ * it keeps -- SQLite's cached documents, the free-form document, the Postgres
  * listener's custom documents -- and changes them in place when it writes. A
  * socket sends a copy (JSON); here nothing is sent, so the copy is taken, when
  * the backend answers.

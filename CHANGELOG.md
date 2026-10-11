@@ -13,6 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `./sqlite` and `./postgres` do, so an app on the JSON file imports everything from one place
   and moving on changes the import path only.
 
+### Changed
+
+- **The docs promise only what is so, and tests prove it.** Serial ids are the four table
+  backends' (the JSON file via `./json`, SQLite, PGlite, Postgres); `registerDoc` is called "a
+  free-form document" everywhere (uuid ids, no schema, not on the moving-on path), never "the
+  JSON file". `/items/007` is the key `"007"` on a free-form or memory document and row 7 on a
+  table backend. Moving on with `exportTables` / `importTables` carries the rows, not the
+  ledger: undo history starts fresh on the next backend. The broadcasts without `v` are the
+  free-form document's, SQLite's and the JSON file's without a ledger, and custom documents'
+  (fan-out carries `v` wherever the backend versions). README no longer says the package fits
+  in one sitting. New tests run README's "Try it" as written, the skill's recipe over two
+  sockets, `examples/shared-state`, a memory document beside a Postgres one, and `jwtAuth`'s
+  logout and identity switch.
+
 ### Fixed
 
 - **A row a write makes and its cascade takes out is told its add wherever its remove is told

@@ -127,12 +127,12 @@ One app can live in four places, and move from one to the next unchanged -- the 
 | **SQLite** | More rows, faster queries. Processes may share the file; each reads the others' writes, but only hears its own live. | `createTables(db, schema)` then `registerDocs(ws, db, schema, docs, customDocs?, { ledger? })` from `@blueshed/delta/sqlite` |
 | **Postgres in this process** | The stored functions, with no database to run (PGlite). One process. | `openPglite(dir?)` from `@blueshed/delta/pglite`, then as Postgres |
 | **a Postgres server** | Several processes, RLS, stored-function auth. | `createDocListener(ws, pool, { custom?, ledger? })` + `registerDocType(docTypeFromDef(...))` from `@blueshed/delta/postgres` |
-| **one free-form JSON document** | A single typed document with no schema (settings, a scratchpad). | `registerDoc(ws, "name", { file, empty })` from `@blueshed/delta/server` |
+| **a free-form document** | A single typed document with no schema (settings, a scratchpad), kept as one JSON value in a file. Not on the moving-on path: no schema, no `exportTables`, uuid ids. | `registerDoc(ws, "name", { file, empty })` from `@blueshed/delta/server` |
 | **memory** | Live state that dies with the process: who is online, cursors. Written by the server. | `registerMemory(ws, { prefix, empty, writable? })` from `@blueshed/delta/kinds` |
 | **a source outside** | A reading from a sensor or an API, shared by every watcher, stamped `at`, `stale` when it goes quiet. | `registerSource(ws, { prefix, read, every?, subscribe?, stale? })` from `@blueshed/delta/kinds` |
 | **the release** | Reference data fixed until the next deploy. | `registerStatic(ws, { prefix, value })` from `@blueshed/delta/kinds` |
 
-**Moving on** is carrying the rows: `exportTables` from where they are, `importTables` into where they go (each backend has both; the `Snapshot` is the same) -- ids and sequences carry, so the next row named follows the last. The client stays the same -- `connectWs`, `openDoc`, `doc.data`, `onOps`, `send` and the three verbs. Several kinds register on one server side by side, each owning its doc-name prefix; register the Postgres listener last, since it answers 404 for any name it does not own.
+**Moving on** is carrying the rows: `exportTables` from where they are, `importTables` into where they go (each backend has both; the `Snapshot` is the same) -- ids and sequences carry, so the next row named follows the last. The ledger does not: undo history starts fresh on the next backend. The client stays the same -- `connectWs`, `openDoc`, `doc.data`, `onOps`, `send` and the three verbs. Several kinds register on one server side by side, each owning its doc-name prefix; register the Postgres listener last, since it answers 404 for any name it does not own.
 
 ## Backends side by side
 
@@ -160,7 +160,7 @@ type DeltaOp =
   | { op: "remove";  path: string };                 // delete what is there
 ```
 
-Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/field` (field), `/collection/-` (append to an array; on a collection of rows, a new row whose id the server mints). A row keeps the id its path names: an `id` in an add's or a replace's value is the path's, and `id` is not a field. Every path starts with `/`; one that doesn't is an error, never the root. Escape `~` as `~0` and `/` as `~1` in a segment (`joinPath("messages", id)` from `@blueshed/delta/core` does it), so ids containing `/` or `~` round-trip through every backend. A segment is a string unless its parent is an array: `/items/007` is the key `"007"`. The **empty path `""`** on `replace`/`remove` swaps or clears the **whole doc in place** (object↔object, array↔array) — the primitive behind recompute custom docs; `"/"` is the member named `""`, not the root. The verbs are RFC 6902's: `add` at an array index inserts before it, and `replace` or `remove` of something not there is a 404 on every backend. A batch applies whole or not at all. → `reference.md` → *Custom read docs*.
+Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/field` (field), `/collection/-` (append to an array; on a collection of rows, a new row whose id the server mints). A row keeps the id its path names: an `id` in an add's or a replace's value is the path's, and `id` is not a field. Every path starts with `/`; one that doesn't is an error, never the root. Escape `~` as `~0` and `/` as `~1` in a segment (`joinPath("messages", id)` from `@blueshed/delta/core` does it), so ids containing `/` or `~` round-trip through every backend. A segment is a string unless its parent is an array: on a free-form or memory document `/items/007` is the key `"007"`; on a table backend a row id is a number, so `/items/007` is row 7. The **empty path `""`** on `replace`/`remove` swaps or clears the **whole doc in place** (object↔object, array↔array) — the primitive behind recompute custom docs; `"/"` is the member named `""`, not the root. The verbs are RFC 6902's: `add` at an array index inserts before it, and `replace` or `remove` of something not there is a 404 on every backend. A batch applies whole or not at all. → `reference.md` → *Custom read docs*.
 
 ## Exports
 
@@ -169,7 +169,7 @@ Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/fi
 | `@blueshed/delta/core` | anywhere | `applyOps`, `DeltaOp`, `splitPath`, `joinPath`, `escapeSegment` |
 | `@blueshed/delta/client` | browser, Bun | `connectWs(url, { clientId?, onConnect? })` (with `close()`), `openDoc`, `call`, `WS`, `DeltaError` |
 | `@blueshed/delta/dom-ops` | browser | `applyOpsToCollection` — keyed-DOM op routing |
-| `@blueshed/delta/server` | Bun | `createWs({ path?, origins?, maxHeld?, maxHeldBytes? })` (with `changesIdentity(method)`), `registerDoc` (JSON-file backend), `registerMethod`, `refuseOrigin` |
+| `@blueshed/delta/server` | Bun | `createWs({ path?, origins?, maxHeld?, maxHeldBytes? })` (with `changesIdentity(method)`), `registerDoc` (a free-form document), `registerMethod`, `refuseOrigin` |
 | `@blueshed/delta/local` | Bun | `createLocal` — delta in-process, no socket |
 | `@blueshed/delta/kinds` | Bun | `registerMemory`, `registerStatic`, `registerSource` |
 | `@blueshed/delta/json` | Bun | `defineSchema`, `defineDoc`, `defineCustomDoc`, `registerDocs(ws, file, schema, docs, customDocs?, { ledger?, ... })` → `{ evict, persisted }`, `exportTables`, `importTables` |
@@ -184,7 +184,7 @@ Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/fi
 
 - **Use the canonical recipe before improvising.** Three-file recipe above — don't add Redux, REST, or a separate `state.json` you `fetch()`.
 - **One op vocabulary**: only `add` / `replace` / `remove` on `/<coll>/<id>` paths. Never invent new op verbs.
-- **Default to the smallest backend that fits, and move on without changing the app** (*Where the truth lives*, above).
+- **Default to the smallest backend that fits, and move on without changing the app** -- between the four table backends (the JSON file, SQLite, PGlite, a Postgres server), which share a schema; a free-form document has none to carry (*Where the truth lives*, above).
 - **Don't reach for React/Supabase/Firebase patterns.** `doc.data` is a Signal; `doc.onOps` is the stream. No `useEffect`, no `useQuery`, no subscription config.
 - **Never optimistically update, never brute-force reload.** `doc.send` echoes the op back through `onOps` / `doc.data`, so a local mutation applies twice (`doc.data` is a `ReadonlySignal`). Every reconnect re-opens each doc and hands `onOps` a whole-doc `replace` at `""`, which `applyOpsToCollection` reconciles. → `reference.md` → *The write loop*.
 - **Never rebuild a collection from `doc.data` inside an `effect`.** Use `applyOpsToCollection` (vanilla DOM) or `list()` (railroad). One per project; don't combine. → `reference.md` → *Rendering collections*.

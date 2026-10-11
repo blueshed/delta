@@ -15,12 +15,12 @@ stood last March.
 
 Start on a JSON file, move to SQLite, then to Postgres in the same process, and deliver on a
 Postgres server. Each step changes the few lines that say where the data is kept, and nothing
-else: the tables, the documents, the writes and the data stay the same, and the rows move with
-their ids. No rewrite, no second data layer, no reload logic.
+else: the tables, the documents and the writes stay the same, and the rows move with their
+ids. The undo history (the ledger) does not move: it starts fresh on the next backend. No
+rewrite, no second data layer, no reload logic.
 
 It exists because shared, live state should be one small idea rather than a stack of fetch
-calls, caches and sockets. The whole package is small enough to read in one sitting (and to
-fit in an AI's context), and there is one way to do each thing.
+calls, caches and sockets, and there is one way to do each thing.
 
 Delta runs on [Bun](https://bun.sh). It ships TypeScript source (the exports are `.ts` files),
 the SQLite backend uses `bun:sqlite` and the server uses `Bun.serve`. The browser code needs a
@@ -85,7 +85,8 @@ list:1 v3 [{"op":"replace","path":"/items/1","value":{"id":1,"lists_id":1,"text"
 ```
 
 Three writes, each heard as a change with its version. The server named the new row `1`: ids are
-serial numbers, on every backend. The last change is the undo, which the ledger worked out for
+serial numbers on every table backend (the JSON file, SQLite, PGlite and Postgres); a free-form
+document and a memory document name a new row with a uuid. The last change is the undo, which the ledger worked out for
 itself. The document did not exist until its first write made it (`implied: true`).
 
 ## Where the truth lives
@@ -99,7 +100,7 @@ same way.
 | a SQLite database | `registerDocs(ws, db, schema, docs)` | `@blueshed/delta/sqlite` |
 | Postgres in this process | `openPglite(dir?)`, then as a Postgres database | `@blueshed/delta/pglite` |
 | a Postgres database, shared by processes | `createDocListener(ws, pool)` and `registerDocType(docTypeFromDef(def, pool))` | `@blueshed/delta/postgres` |
-| one free-form JSON document | `await registerDoc(ws, name, { file, empty })` | `@blueshed/delta/server` |
+| a free-form document (no schema, one JSON value in a file) | `await registerDoc(ws, name, { file, empty })` | `@blueshed/delta/server` |
 | this process (who is online) | `registerMemory(ws, { prefix, empty })` | `@blueshed/delta/kinds` |
 | outside (a sensor, an API) | `registerSource(ws, { prefix, read, every })` | `@blueshed/delta/kinds` |
 | the release (countries, units) | `registerStatic(ws, { prefix, value })` | `@blueshed/delta/kinds` |
@@ -109,6 +110,8 @@ without changing the app: the same schema, the same documents, the same writes, 
 answers from each -- serial ids, a write told to every open document that holds the rows it
 changed, one scope rule. Carry the data with `exportTables` from where it is and
 `importTables` into where it goes; ids and sequences carry, so the next row named follows on.
+The ledger does not carry: undo history starts fresh on the next backend. A free-form document
+is not on this path: it has no schema and no `exportTables`.
 
 ## Undo comes with the ledger
 
@@ -141,8 +144,8 @@ await doc.send([{ op: "replace", path: "/items/1/done", value: true }]);
 ```
 
 In a clone of this repository (`examples/` is not in the npm package),
-`bun examples/shared-state/server.ts` runs a chat in two browser tabs on a JSON file, with no
-database and no schema.
+`bun examples/shared-state/server.ts` runs a chat in two browser tabs on a free-form document,
+with no database and no schema.
 
 Run in the same process with `createLocal()`, as in the example above, a server that renders
 its own pages, a job or a test speaks to delta by function call. `as(identity)` says who is
@@ -169,8 +172,8 @@ skill turns a resource into a delta document when several people edit it at once
 | `@blueshed/delta/pglite` | `@electric-sql/pglite` (and `@types/pg` to type-check) |
 | `@blueshed/delta/auth-jwt` | `jose` and `pg` |
 
-The core, the JSON-file and SQLite backends, `local`, `kinds`, `dom-ops` and `logger` need
-nothing else.
+The core, `server` (with the free-form document), `json`, `sqlite`, `local`, `kinds`,
+`dom-ops` and `logger` need nothing else.
 
 ## Where to go next
 
@@ -178,7 +181,7 @@ nothing else.
   [`reference.md`](.claude/skills/delta-doc/reference.md) has the API, patterns, auth, row-level
   security, the ledger, the kinds and the wire protocol. `bunx @blueshed/delta install-skills` copies it
   into your project for Claude Code.
-- [`examples/`](examples/): `shared-state` (JSON file), `sites-bbox` (custom views on SQLite
+- [`examples/`](examples/): `shared-state` (a free-form document), `sites-bbox` (custom views on SQLite
   and Postgres), `kanban` (Postgres with railroad), `todos-vs-rls` (row-level security).
 - [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 

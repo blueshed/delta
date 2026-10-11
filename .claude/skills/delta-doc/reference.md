@@ -841,7 +841,7 @@ Worked example: `examples/kanban/` in the repository (github.com/blueshed/delta;
 1. fires every `doc.onOps(handler)` first (DOM patchers run here), then
 2. applies the ops **in place** to `doc.data.peek()` and calls `data.touch()` — with `dataVersion` bumped in the same railroad `batch()`, so consumers see one settled flush per broadcast — and subscribers (railroad `list()`, `effect`, …) re-run.
 
-All three backends broadcast **row-level** ops: SQLite/Postgres rewrite field writes server-side, and the JSON-file backend normalizes at broadcast time (`/cards/5/title` goes out as a whole-row replace of `/cards/5`). A keyed railroad `list()` therefore always sees a fresh row reference when a row changes — its default `Object.is` equality just works. Only a *custom* stream that mutates row objects in place and `touch()`es needs railroad's `list(..., keyFn, render, { equals: () => false })` (railroad ≥ 0.10.1).
+Every backend broadcasts **row-level** ops: the table backends rewrite field writes server-side, and the free-form document (`registerDoc`) normalizes at broadcast time (`/cards/5/title` goes out as a whole-row replace of `/cards/5`). A keyed railroad `list()` therefore always sees a fresh row reference when a row changes — its default `Object.is` equality just works. Only a *custom* stream that mutates row objects in place and `touch()`es needs railroad's `list(..., keyFn, render, { equals: () => false })` (railroad ≥ 0.10.1).
 
 The sender is just another subscriber receiving its own op back (the code calls these "echoes"). **`await doc.send(ops)` resolves once that echo has been applied to `doc.data`**, on every backend: the JSON file and SQLite broadcast before they answer, and Postgres answers first, so the client waits for the version its ack names. Two consequences trip up anyone arriving from REST/Firebase/optimistic-UI habits:
 
@@ -951,7 +951,7 @@ Undo walks back what the cursor wrote, newest first, across documents; redo walk
 
 ## One stream of changes — `v` and `_v`
 
-Every change reaches subscribers as `{ doc, ops, v }` on the document's channel: `v` is the document's version after the change. `open` answers with `_v`, the version the snapshot is at, so a copy kept from the stream knows where it starts. The Postgres backend always versions; the SQLite backend versions with a ledger; the memory and source kinds always do. The browser client strips `_v` from `doc.data`, applies a broadcast whose `v` is the next one, ignores one it already has, and re-opens the document when it sees a gap, or a broadcast that does not apply to its copy (a remove of a row it does not hold: the copy has drifted, and is left as it was). Broadcasts without `v` (the JSON-file backend, SQLite without a ledger, fan-out onto other documents, custom docs) are applied as they come.
+Every change reaches subscribers as `{ doc, ops, v }` on the document's channel: `v` is the document's version after the change. `open` answers with `_v`, the version the snapshot is at, so a copy kept from the stream knows where it starts. The Postgres backend always versions; the SQLite backend versions with a ledger; the memory and source kinds always do. The browser client strips `_v` from `doc.data`, applies a broadcast whose `v` is the next one, ignores one it already has, and re-opens the document when it sees a gap, or a broadcast that does not apply to its copy (a remove of a row it does not hold: the copy has drifted, and is left as it was). Broadcasts without `v` -- the free-form document (`registerDoc`), SQLite and the JSON file without a ledger, and custom docs -- are applied as they come. A write told to other documents (fan-out) carries each one's `v` wherever the backend versions.
 
 In-process, `createLocal().onPublish` is that stream for every channel: a server that renders can redraw from it without subscribing per document.
 
@@ -968,7 +968,7 @@ here.peek("here:general");   // the value now, or undefined
 here.forget("here:general"); // starts again from empty
 ```
 
-An op that does not land is refused and changes nothing, with the code every backend gives it: 404 for what is not there (a remove or replace of a key it does not hold), 400 for a malformed op. `add /<coll>/-` on a map of rows is a new row the document names, as on the JSON file: a uuid in the path and in the value's `id` (on an array, `/-` appends). Open answers `{ ...value, _v }`; a write answers `{ ack, version, ops }` and broadcasts `{ doc, ops, v }`, the ops as applied.
+An op that does not land is refused and changes nothing, with the code every backend gives it: 404 for what is not there (a remove or replace of a key it does not hold), 400 for a malformed op. `add /<coll>/-` on a map of rows is a new row the document names, as on a free-form document: a uuid in the path and in the value's `id` (on an array, `/-` appends). Open answers `{ ...value, _v }`; a write answers `{ ack, version, ops }` and broadcasts `{ doc, ops, v }`, the ops as applied.
 
 **Source — the truth is outside** (a thermometer, an exchange rate, another API). One reading, shared by every watcher: taken when the first watcher opens the document (two opening at once share one start), then polled every `every` ms or pushed by `subscribe`, and stopped when the last watcher closes or drops.
 

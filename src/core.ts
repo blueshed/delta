@@ -77,8 +77,8 @@ export function joinPath(...segments: (string | number)[]): string {
 /**
  * Reference tokens that reach an object's prototype rather than its own data.
  *
- * Op paths and values are client-supplied on every backend — the JSON-file
- * backend applies them with no schema validation at all and then echoes them
+ * Op paths and values are client-supplied on every backend — the free-form
+ * document (`registerDoc`) applies them with no schema validation at all and then echoes them
  * verbatim to every subscriber, so one client could poison the server process
  * AND every other connected browser. The guard lives here, in the one module
  * every backend and the browser client share, so none of them can forget it.
