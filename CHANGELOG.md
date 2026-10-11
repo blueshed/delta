@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the skill's three files as written (its server, and two browsers in happy-dom: one sends, the
   other's page shows it); start `examples/shared-state` and pass a message between two sockets;
   and check a memory document beside a Postgres one, and `jwtAuth`'s logout and identity switch.
+- **Said plainly: a hand-written Postgres `DocType` is told only its own writes (todo #33).** The
+  database knows a `defineDoc` and tells it every write that changes a row it holds; it cannot
+  know what a hand-written `open` reads. Its `apply` logs with `_delta_bump_and_notify`; to hear
+  other writes, make it with `docTypeFromDef`, or watch the collections with `defineCustomDoc`.
+  `DocType`'s JSDoc and the skill say so, and `tests/postgres.test.ts` pins it.
 
 ### Removed
 

@@ -16,6 +16,7 @@ import {
   defineDoc,
   loadDocAt,
   pruneOpsLog,
+  type DocType,
 } from "../src/server/postgres";
 import { createWs } from "../src/server/server";
 import { setLogLevel } from "../src/server/logger";
@@ -169,6 +170,33 @@ describe("createDocListener (end-to-end WS flow)", () => {
       expect(published[0]!.data.doc).toBe("items:");
       expect(published[0]!.data.ops).toBeDefined();
       expect(Array.isArray(published[0]!.data.ops)).toBe(true);
+    } finally {
+      await listener.destroy();
+    }
+  });
+
+  test("a DocType written by hand is told its own writes, and no other's: the database cannot know what its open reads", async () => {
+    const ws = createWs();
+    const published: { channel: string; data: any }[] = [];
+    ws.publish = (channel: string, data: any) => { published.push({ channel, data }); };
+    // a count of the items: its open reads them, its write logs its ops for the listener to tell
+    const counted: DocType = {
+      prefix: "items-count:",
+      parse: (name) => (name === "items-count:" ? {} : null),
+      async open() { return { result: { n: (await pool.query("SELECT count(*)::int AS n FROM items")).rows[0].n }, version: 0 }; },
+      async apply(_ctx, name, ops) {
+        return { version: Number((await pool.query("SELECT _delta_bump_and_notify($1, $2::jsonb) AS v", [name, JSON.stringify(ops)])).rows[0].v) };
+      },
+    };
+    const listener = await createDocListener(ws, pool, { types: [items(), counted] });
+    try {
+      const reader = mockClient();
+      expect((await sendAndAwait(ws, reader, { action: "open", doc: "items-count:" })).result).toEqual({ n: 0 });
+      await sendAndAwait(ws, mockClient(), { action: "delta", doc: "items:", ops: [{ op: "add", path: "/items/-", value: { name: "unheard" } }] });
+      await sendAndAwait(ws, reader, { action: "delta", doc: "items-count:", ops: [{ op: "replace", path: "/n", value: 1 }] });
+      await waitFor(() => published.some((p) => p.channel === "items-count:"), { timeout: 3000 });
+      await new Promise((r) => setTimeout(r, 200));
+      expect(published.filter((p) => p.channel === "items-count:").map((p) => p.data.ops)).toEqual([[{ op: "replace", path: "/n", value: 1 }]]);
     } finally {
       await listener.destroy();
     }

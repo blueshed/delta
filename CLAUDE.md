@@ -84,7 +84,9 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
   (`_delta_holders`, `_delta_tell`, `001b`/`001d`) over the names open now (`_delta_held`, each
   listener's), so every process hears it; on SQLite and
   the JSON file, in `write()` (`holders`, `tell`). `tests/postgres-isolation.test.ts` and
-  `tests/sqlite-isolation.test.ts` pin that nobody else is told.
+  `tests/sqlite-isolation.test.ts` pin that nobody else is told. On Postgres the documents
+  are those the database knows (`defineDoc`) and custom docs; a hand-written `DocType` is told
+  only its own writes (`tests/postgres.test.ts`, "a DocType written by hand").
 - **Rows carry from one backend to the next** with `exportTables` / `importTables` (the same
   `Snapshot` on each): every row, every temporal version, and each sequence, so the next serial
   follows on. Not the ledger: undo history starts fresh on the next backend. The free-form

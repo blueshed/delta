@@ -521,7 +521,7 @@ applyOps(doc, [{ op: "remove",  path: "" }]);               // clear to {} or []
 
 The container is mutated **in place** (keys cleared then re-assigned; array spliced then refilled) rather than reassigned, because the server's doc tracking and the client's reactive `doc.data` both hold the value by reference — the client bumps `dataVersion` after `applyOps`, so a root-replace re-renders end-to-end. Containers must match kind (object↔object, array↔array) or `applyOps` throws. This is what lets recompute's whole-doc refresh ride the same op channel as every other change; you can also emit it yourself from a custom `DocType`.
 
-**Custom DocType** — when the lens isn't expressible as `DocDef`:
+**Custom DocType** — when the lens isn't expressible as `DocDef`. **It is told only its own writes**: the database knows a `defineDoc` (`_delta_docs`) and tells it every write that changes a row it holds, but cannot know what a hand-written `open` reads. Its `apply` logs what it changed with `_delta_bump_and_notify(docName, ops)`, and the listener tells its subscribers that. To hear other writes, make it from a `defineDoc` (`docTypeFromDef`), or watch the collections with a custom doc (`defineCustomDoc`, above), which hears every write to them:
 
 ```ts
 import { type DocType } from "@blueshed/delta/postgres";
