@@ -36,9 +36,8 @@ export function now(): string {
 // row's valid_from — otherwise (with monotonic sub-second now()) the close
 // lands a tick later than the reinsert, leaving a temporal overlap that makes
 // half-open time-travel reads (valid_to > at) match two versions at once.
-export function closeRow(db: any, table: ResolvedTable, id: string | number, ts: string = now()) {
+export function closeRow(db: any, table: ResolvedTable, id: string | number, ts: string): void {
   db.run(`UPDATE ${table.name} SET valid_to = ? WHERE id = ? AND valid_to IS NULL`, [ts, id]);
-  return ts;
 }
 
 /**
