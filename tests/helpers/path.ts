@@ -299,6 +299,29 @@ export function pathCases(backend: () => PathBackend): void {
   fanOutCases(backend);
 }
 
+/**
+ * A row added under an id it names moves the collection's serial past it, as
+ * importTables does (#63). Asked of the Postgres backends; SQLite and the JSON
+ * file mint past their sequence alone, so a named id above it is met later --
+ * they join here when sqlite.ts's nextId takes the larger.
+ */
+export function serialCases(backend: () => PathBackend): void {
+  describe("a serial and an id a write names", () => {
+    test("a row added under an id it names moves the serial past it: the next /- does not meet it (#63)", async () => {
+      const b = backend();
+      await openAll(b.process, ["fo-board:1"]);
+      await write(b.process, "fo-board:1", [{ op: "add", path: "/courses/4", value: { name: "Fish" } }]);
+      const { ops } = await write(b.process, "fo-board:1", [
+        { op: "add", path: "/courses/-", value: { name: "Meat" } },
+        { op: "add", path: "/courses/-", value: { name: "Cake" } },
+      ]);
+      expect(ops.map((o: any) => o.path)).toEqual(["/courses/5", "/courses/6"]);
+      const { sequences } = await b.exportTables();
+      expect(sequences?.courses).toBe(6);
+    });
+  });
+}
+
 /** What a document is, read and written through, on its own. */
 export function documentCases(backend: () => PathBackend): void {
   describe("a document, read and written", () => {
@@ -1217,15 +1240,15 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("an add never makes a second live note: one at /- that meets an id a client named is refused as already there (409), as a plain row's is (todo #16)", async () => {
+    test("an add never makes a second live note: one that meets a live id is refused as already there (409), as a plain row's is (todo #16)", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-notes:1"]);
       const code = async (ops: unknown[]) => (await b.process.call("delta", { doc: "fo-board:1", ops })).error?.code;
-      // the seed's sequences stop at the rows it holds: 2 is the next each would mint
+      // a mint that meets a row: tests/path-pglite.test.ts, "a row put in by hand"
       await write(b.process, "fo-board:1", [{ op: "add", path: "/notes/2", value: { text: "named" } }]);
-      expect(await code([{ op: "add", path: "/notes/-", value: { text: "minted" } }])).toBe(409);
+      expect(await code([{ op: "add", path: "/notes/2", value: { text: "again" } }])).toBe(409);
       await write(b.process, "fo-board:1", [{ op: "add", path: "/courses/3", value: { name: "named" } }]);
-      expect(await code([{ op: "add", path: "/courses/-", value: { name: "minted" } }])).toBe(409);
+      expect(await code([{ op: "add", path: "/courses/3", value: { name: "again" } }])).toBe(409);
       expect(content((await b.process.call("open", { doc: "fo-notes:1" })).result).notes).toEqual({
         "1": { id: 1, weddings_id: 1, text: "bring chairs" },
         "2": { id: 2, weddings_id: 1, text: "named" },

@@ -608,6 +608,13 @@ BEGIN
         v_coll.table_name, v_coll.table_name
       ) INTO v_new_row USING v_new_row;
 
+      -- An id the add named moves the serial past it, never back, so a later
+      -- /- does not meet it (todo #63).
+      IF v_id_text <> '-' THEN
+        EXECUTE format('SELECT setval(%L, $1) FROM %I WHERE $1 >= last_value + is_called::int',
+          'seq_' || v_coll.table_name, 'seq_' || v_coll.table_name) USING v_id;
+      END IF;
+
       -- A root row added through a document is one it holds: a list's, given
       -- its bindings, must meet the rest of its conditions too (a name like
       -- `So`, a price up to 5), and a single document's own root added back,

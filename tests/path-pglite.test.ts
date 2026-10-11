@@ -12,7 +12,7 @@ import { openPglite } from "../src/server/pglite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
 import {
-  assertCopiesHold, expectTold, household, openAll, pathCases, pathDocs, pathSchema, pathSeed, postgresInbox, postgresMenuCard, postgresOpenSeats, told, write, type PathBackend,
+  assertCopiesHold, expectTold, household, openAll, pathCases, serialCases, pathDocs, pathSchema, pathSeed, postgresInbox, postgresMenuCard, postgresOpenSeats, told, write, type PathBackend,
 } from "./helpers/path";
 import { waitFor } from "./setup";
 
@@ -55,6 +55,18 @@ afterEach(async () => {
 });
 
 describe("pglite", () => pathCases(() => backend));
+describe("pglite", () => serialCases(() => backend));
+
+/** A row put in by hand, outside delta, is past the serial: a mint that meets it is refused, never a second live row (todo #16). */
+describe("pglite: a row put in by hand", () => {
+  test("a note or a course minted at /- that meets it is refused as already there (409)", async () => {
+    await pool.query("INSERT INTO fo_notes (id, weddings_id, text, valid_from) VALUES (2, 1, 'by hand', now())");
+    await pool.query("INSERT INTO fo_courses (id, weddings_id, name) VALUES (3, 1, 'by hand')");
+    const code = async (ops: unknown[]) => (await backend.process.call("delta", { doc: "fo-board:1", ops })).error?.code;
+    expect(await code([{ op: "add", path: "/notes/-", value: { text: "minted" } }])).toBe(409);
+    expect(await code([{ op: "add", path: "/courses/-", value: { name: "minted" } }])).toBe(409);
+  });
+});
 
 /**
  * A name opened on framework SQL that took it, which the resolver now refuses
