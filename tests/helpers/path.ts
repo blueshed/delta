@@ -440,6 +440,28 @@ export function columnCases(backend: () => PathBackend): void {
       expect(content((await b.process.call("open", { doc: "fo-board:1" })).result).households["1"]).toEqual(household(1, "w@x", 1, "kept"));
       await assertCopiesHold(b, copies);
     });
+
+    test("its writer is answered only its columns -- a write's ops and inverse, an undo's and a redo's, a dry run's, its history -- while the ledger keeps the rows whole", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-slim:1", "fo-board:1"]);
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/2/t", value: "secret" }]);
+      const hidden = (what: string, x: unknown) => expect({ what, t: /"t":|secret/.test(JSON.stringify(x)) }).toEqual({ what, t: false });
+      const renamed = await write(b.process, "fo-slim:1", [{ op: "replace", path: "/households/2/email", value: "w@x" }], { cursor: "s1" });
+      expect(renamed.ops).toEqual([{ op: "replace", path: "/households/2", value: slim(2, "w@x") }]);
+      expect(renamed.inverse).toEqual([{ op: "replace", path: "/households/2", value: slim(2, "b@x") }]);
+      // household 2 has no favour: a removal's cascade beyond the document is answered as ever, rows whole
+      const removed = await write(b.process, "fo-slim:1", [{ op: "remove", path: "/households/2" }], { cursor: "s1" });
+      expect(removed.inverse).toEqual([{ op: "add", path: "/households/2", value: slim(2, "w@x") }]);
+      hidden("dry", (await b.process.call("undo", { cursor: "s1", dry: true })).result);
+      const undone = (await b.process.call("undo", { cursor: "s1" })).result;
+      expect(undone.ops).toEqual([{ op: "add", path: "/households/2", value: slim(2, "w@x") }]);
+      hidden("undo", undone);
+      hidden("redo", (await b.process.call("redo", { cursor: "s1" })).result);
+      hidden("undo again", (await b.process.call("undo", { cursor: "s1" })).result);
+      hidden("history", (await b.process.call("history", { doc: "fo-slim:1", cursor: "s1" })).result);
+      expect(content((await b.process.call("open", { doc: "fo-board:1" })).result).households["2"]).toEqual(household(2, "w@x", 1, "secret"));
+      await assertCopiesHold(b, copies);
+    });
   });
 }
 

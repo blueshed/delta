@@ -94,6 +94,24 @@ export interface DocType<C = any, I = unknown> {
    * for a type with no `owns`.
    */
   shared?: boolean;
+
+  /**
+   * The columns a framework document holds of a collection it names (`docTypeFromDef`
+   * copies its def's, todo #70): its writer is answered no other -- a write's, a walk's
+   * and its history's ops and inverse (`showAnswer`).
+   */
+  columns?: Record<string, string[]>;
+}
+
+/**
+ * A write's, a walk's or a history entry's ops and inverse as the document
+ * `doc` shows them (`_delta_show_ops`, 001c): asked only of one that names its
+ * columns (`columns`), which framework SQL older than it cannot have.
+ */
+export async function showAnswer<R extends { ops?: unknown; inverse?: unknown }>(q: Pick<Pool, "query">, doc: string, r: R, columns: unknown): Promise<R> {
+  if (!r || !columns) return r;
+  const { rows } = await q.query("SELECT _delta_show_ops($1, $2::jsonb) AS ops, _delta_show_ops($1, $3::jsonb) AS inverse", [doc, JSON.stringify(r.ops ?? null), JSON.stringify(r.inverse ?? null)]);
+  return { ...r, ...(r.ops ? { ops: rows[0].ops } : {}), ...(r.inverse ? { inverse: rows[0].inverse } : {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +208,7 @@ export function docTypeFromDef<I = unknown>(
     prefix: def.prefix,
     ...(opts?.owns ? { owns: opts.owns } : {}),
     ...(opts?.shared ? { shared: true } : {}),
+    ...(def.columns ? { columns: def.columns } : {}),
 
     parse(docName) {
       return docName.startsWith(def.prefix) ? {} : null;
@@ -214,7 +233,7 @@ export function docTypeFromDef<I = unknown>(
         ? await callAs(pool, "delta_apply_logged", [docName, JSON.stringify(ops), by.who, by.cursor, by.undoable !== false, by.undoes ?? null], auth, identity)
         : await callAs(pool, "delta_apply", [docName, JSON.stringify(ops)], auth, identity);
       if (!result) throw new Error(`delta_apply returned no result for ${docName}`);
-      return result;
+      return showAnswer(pool, docName, result, def.columns);   // its writer is answered only the columns it holds
     },
 
     async openAt(_ctx, docName, at, identity) {

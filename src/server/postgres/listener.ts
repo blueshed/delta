@@ -16,7 +16,7 @@ import type { WsServer } from "../server";
 import { trackSubscribe, trackUnsubscribe, onClientDrop } from "../server";
 import { createLogger } from "../logger";
 import type { Pool, PoolClient } from "pg";
-import { callAs, docTypes } from "./registry";
+import { callAs, docTypes, showAnswer } from "./registry";
 import type { DocType } from "./registry";
 import type { DeltaAuth } from "../auth";
 import { isAuthError } from "../auth";
@@ -603,7 +603,8 @@ export async function createDocListener<I = unknown>(
         }
         // a change named takes 001g's newer forms; none, the ones a database on 0.10.0's SQL has too
         const args = [cursor, whoOf(writer), way === "undo", msg.dry === true, msg.entry ?? null, ...(change === null ? [] : [change])];
-        const result = (await callAs(db, "delta_walk", args, auth, identity)) ?? null;
+        const walked = (await callAs(db, "delta_walk", args, auth, identity)) ?? null;
+        const result = walked?.doc ? await showAnswer(db, walked.doc, walked, resolveDoc(walked.doc)?.type.columns) : walked;   // as its document shows them
         await db.query("COMMIT");
         respond({ result: result && { ...result, ...(result.version != null ? { version: Number(result.version) } : {}), entry: result.entry == null ? undefined : Number(result.entry) } });
       } catch (err) {
@@ -620,7 +621,7 @@ export async function createDocListener<I = unknown>(
     ws.on("history", withDoc("history", async ({ docName, type, ctx, msg, client, respond, identity }) => {
       if (!(await type.open(ctx, docName, msg, identity))) return respond({ error: NOT_FOUND });
       const { rows } = await pool.query("SELECT delta_history($1, $2, $3) AS entries", [docName, cursorOf(msg, client, writerOf(identity, client)), msg.limit ?? 50]);
-      respond({ result: rows[0]?.entries ?? [] });
+      respond({ result: await Promise.all((rows[0]?.entries ?? []).map((e: any) => showAnswer(pool, docName, e, type.columns))) });
     }));
   }
 

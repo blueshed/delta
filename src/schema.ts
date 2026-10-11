@@ -13,6 +13,7 @@
  * backend's codegen / default / validation helpers own the per-type
  * mappings — this module is the vocabulary only.
  */
+import { splitPath } from "./core";
 
 export type ColumnType =
   | "text" | "integer" | "real" | "boolean" | "json" | "timestamptz";
@@ -238,6 +239,23 @@ export function holdsField(def: DocDef, schema: Schema, coll: string, field: str
 export function showRow(def: DocDef, schema: Schema, coll: string, row: any): any {
   if (!def.columns?.[coll] || row === null || typeof row !== "object") return row;
   return Object.fromEntries(Object.entries(row).filter(([f]) => holdsField(def, schema, coll, f)));
+}
+
+/**
+ * Ops as a document shows them -- what its writer is answered (a write's ops
+ * and inverse, a walk's, its history): a row's value, its columns
+ * (`showRow`); a field it does not hold, no op. The ledger keeps them whole.
+ */
+export function showOps<O extends { path: string; value?: unknown }>(def: DocDef, schema: Schema, ops: O[]): O[] {
+  if (!def.columns) return ops;
+  return ops.flatMap((op) => {
+    const [coll, at, field] = splitPath(op.path);
+    const table = schema.tables[coll!];
+    // a field: /<coll>/<id>/<field>, or a single document's root's, /<root>/<field>
+    const named = field ?? (at !== undefined && table && (Object.hasOwn(table.columns, at) || at === table.parent?.fkColumn) ? at : undefined);
+    if (named !== undefined) return holdsField(def, schema, coll!, named) ? [op] : [];
+    return "value" in op ? [{ ...op, value: showRow(def, schema, coll!, op.value) }] : [op];
+  });
 }
 
 /** A document as it shows: each row of a collection whose columns it names, those alone. `single`: its root is one row, not a map. */

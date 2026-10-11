@@ -24,7 +24,7 @@ import { type DeltaOp, splitPath, joinPath, changedFields } from "../core";
 import { createLogger } from "./logger";
 import { createLedger, isEntryId, ledgerWho, planWalk, rowAt, socketCursor } from "./ledger";
 import { assertScopeKeys, meets, resolveScope, rowId, sameId, whereOf, type Scope } from "./scope";
-import { defaultForType, holdsField, showDoc, showRow, type DocDef, type ResolvedTable, type Schema } from "../schema";
+import { defaultForType, holdsField, showDoc, showOps, showRow, type DocDef, type ResolvedTable, type Schema } from "../schema";
 import { waitForLocks } from "./sqlite/ddl";
 import { keeping, scopeValue } from "./sqlite/keep";
 import { loadDocAt, readDoc } from "./sqlite/read";
@@ -1016,7 +1016,9 @@ export function registerDocs<I = unknown>(
     // A writer that keeps its own history asks for the inverse (or keeps a
     // ledger): what delta applied, walked back, read from the document as it
     // was. Opt-in, so a browser writer is not sent rows it never asked for.
-    respond({ result: msg.inverse || ledger ? { ack: true, ...out } : { ack: true } });
+    // as the document shows them: its writer is answered no column it does not hold (the ledger keeps them whole)
+    const shown = (o: Written) => ({ ...o, ops: showOps(match.def, schema, o.ops), inverse: showOps(match.def, schema, o.inverse) });
+    respond({ result: msg.inverse || ledger ? { ack: true, ...shown(out) } : { ack: true } });
   }, { gatesCustom: false }));
 
   if (ledger) {
@@ -1082,10 +1084,11 @@ export function registerDocs<I = unknown>(
           return row ? [{ coll: coll!, row }] : [];
         });
         const plan = planWalk(entry, besides(implied.has(entry.doc) ? { ...doc, [match.def.root]: null } : doc, outside), under);
-        if (msg.dry) return respond({ result: { doc: entry.doc, entry: entry.id, ops: plan.ops, ...(plan.conflict.length ? { conflict: plan.conflict } : {}) } });
+        const show = (ops: DeltaOp[]) => showOps(match.def, schema, ops);   // as the document shows them (todo #70)
+        if (msg.dry) return respond({ result: { doc: entry.doc, entry: entry.id, ops: show(plan.ops), ...(plan.conflict.length ? { conflict: plan.conflict } : {}) } });
         const by = { who: whoOf(client), cursor };
         const out = plan.conflict.length || !plan.ops.length ? null : write(entry.doc, match.def, doc, plan.ops, { ...by, undoes: entry.id });
-        if (out && !("error" in out) && out.entry !== undefined) return respond({ result: { doc: entry.doc, ...out } });
+        if (out && !("error" in out) && out.entry !== undefined) return respond({ result: { doc: entry.doc, ...out, ops: show(out.ops), inverse: show(out.inverse) } });
         if (out && "error" in out && out.error.code >= 500) return respond(out);
         const conflict = plan.conflict.length ? plan.conflict : out && "error" in out ? plan.ops.map((o) => o.path) : undefined;
         const said = conflict ? { conflict } : {};
@@ -1127,7 +1130,7 @@ export function registerDocs<I = unknown>(
       try { there = match.def.implied || readDoc(db, schema, match.def, resolveScope(match.def, match.docId)); }
       catch (err: any) { return respond({ error: failure(named(err)) }); }
       if (!there) return respond({ error: NOT_FOUND });
-      respond({ result: ledger.history(msg.doc, cursorOf(msg, client), msg.limit) });
+      respond({ result: ledger.history(msg.doc, cursorOf(msg, client), msg.limit).map((e) => ({ ...e, ops: showOps(match.def, schema, e.ops), inverse: showOps(match.def, schema, e.inverse) })) });
     }));
   }
 

@@ -305,6 +305,39 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql STABLE;
 
+-- _delta_show_ops: ops as the document `p_doc_name` shows them -- what its
+-- writer is answered (a write's ops and inverse, a walk's, its history): a
+-- row's value, its columns (_delta_show); a field it does not hold
+-- (/<coll>/<id>/<field>, or a single root's /<root>/<field>), no op. The
+-- ledger keeps them whole. showOps in schema.ts.
+
+CREATE OR REPLACE FUNCTION _delta_show_ops(p_doc_name TEXT, p_ops JSONB)
+RETURNS JSONB AS $$
+DECLARE
+  v_def   _delta_docs := _delta_find_doc(p_doc_name);
+  v_out   JSONB := '[]'::jsonb;
+  v_op    JSONB;
+  v_parts TEXT[];
+  v_coll  RECORD;
+  v_field TEXT;
+BEGIN
+  IF v_def.prefix IS NULL OR COALESCE(v_def.held, '{}'::jsonb) = '{}'::jsonb OR jsonb_typeof(p_ops) <> 'array' THEN RETURN p_ops; END IF;
+  FOR v_op IN SELECT jsonb_array_elements(p_ops) LOOP
+    v_parts := _delta_split_path(v_op->>'path');
+    SELECT * INTO v_coll FROM _delta_collections WHERE collection_key = v_parts[1];
+    v_field := CASE WHEN array_length(v_parts, 1) >= 3 THEN v_parts[3]
+                    WHEN array_length(v_parts, 1) = 2 AND (v_coll.columns_def ? v_parts[2] OR v_parts[2] = v_coll.parent_fk) THEN v_parts[2] END;
+    IF v_field IS NOT NULL THEN
+      CONTINUE WHEN (v_def.held ? v_parts[1]) AND NOT ((v_def.held->v_parts[1]) ? v_field OR v_field = 'id' OR v_field = v_coll.parent_fk);
+    ELSIF v_op ? 'value' THEN
+      v_op := jsonb_set(v_op, '{value}', _delta_show(v_def, v_parts[1], v_op->'value'));
+    END IF;
+    v_out := v_out || jsonb_build_array(v_op);
+  END LOOP;
+  RETURN v_out;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
 -- ---------------------------------------------------------------------------
 -- delta_open: load a doc from relational tables, return JSONB + version -- its
 -- rows as it shows them (_delta_show_doc). _delta_open(name, TRUE) reads them

@@ -15,7 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opens (and `open_at`) with them, is told only what changes of them (a write of another column
   tells it nothing), and a write through it names them alone (another is a 400, as a column the
   table does not have). A row replaced whole through it keeps the columns it does not hold; undo
-  puts back every column. A column named that its collection lacks is thrown at registration and
+  puts back every column. Its writer is answered those columns alone -- a write's `ops` and
+  `inverse`, an undo's, a redo's, a dry run's, its `history` (`showOps`; Postgres
+  `_delta_show_ops`) -- while the ledger keeps rows whole. A column named that its collection lacks is thrown at registration and
   by `generateSql`. Postgres keeps them in `_delta_docs.held` (`001a`, added if not there), shown
   by `_delta_show` / `_delta_show_doc` (`001c`, `001d`, `001e`; `delta_open` reads through
   `_delta_open(name, whole)`, whose whole read the ledger uses): apply with `bunx @blueshed/delta
