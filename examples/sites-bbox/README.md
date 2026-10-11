@@ -10,8 +10,8 @@ there are two documents over the same rows:
 
 Open a box and you hold it: when anyone writes a site through the world, the box is told what
 changed for it, in its own shape. A site that moves into the box is added, one that moves within
-it is replaced, one that moves out or is deleted is removed, and a site outside every open box
-is sent to no one.
+it is told the fields that changed, one that moves out or is deleted is removed, and a site
+outside every open box is sent to no one.
 
 The box is a custom document (`defineCustomDoc`): `query` reads what is in it when it is opened,
 `matches` says whether a site belongs. `schema.ts` holds what both servers share; only where the

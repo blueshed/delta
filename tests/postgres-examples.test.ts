@@ -62,6 +62,9 @@ describe("kanban", () => {
     try {
       const out = await new Response(run.stdout).text();
       expect(await run.exited).toBe(0);
+      const told = out.slice(out.indexOf("bob received"), out.indexOf("3. bob.data.get()"));
+      expect(told).toContain('"path": "/kanban_columns/2/title"');   // told the fields that changed, not the rows
+      expect(told).toContain('"path": "/kanban_cards/1/kanban_columns_id"');
       const bob = out.slice(out.indexOf("3. bob.data.get()"), out.indexOf("4. charlie"));
       expect(bob).toContain('"title": "In flight"');
       expect(bob).toContain('"title": "draft release notes"');

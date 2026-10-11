@@ -46,7 +46,7 @@ const BOX = "sites-in-bbox:10,0,50,30";
  * sites-bbox's README, step by step: sites written through `world` on
  * `writer`, a box open on `viewer` (the same server, or another on the same
  * rows). Opened, the box reads the sites in it; then a site moving into it is
- * added, within it replaced, out of it or deleted removed, and a site outside
+ * added, within it told the fields that changed, out of it or deleted removed, and a site outside
  * is never sent. "Askew" sites are in on lng and out on lat: they stay out.
  */
 export async function bboxStory(writer: string, viewer: string, world: string): Promise<void> {
@@ -70,7 +70,7 @@ export async function bboxStory(writer: string, viewer: string, world: string): 
 
     const told = async (n: number) => {
       await waitFor(() => heard.length >= n);
-      return heard[n - 1]!.map(({ op, path }) => ({ op, path: path.split("/").slice(0, 3).join("/") }));   // the row, whether told whole or by field
+      return heard[n - 1]!.map(({ op, path }) => ({ op, path: path.split("/").slice(0, 3).join("/") }));   // the row an add or a remove is of
     };
 
     await doc.send([
@@ -81,7 +81,8 @@ export async function bboxStory(writer: string, viewer: string, world: string): 
     expect(await told(1)).toEqual([{ op: "add", path: `/sites/${outside}` }]);   // into the box; Askew too never sent
 
     await doc.send([{ op: "replace", path: `/sites/${inside}/lat`, value: 11 }]);
-    expect(await told(2)).toEqual([{ op: "replace", path: `/sites/${inside}` }]);   // within it
+    await told(2);
+    expect(heard[1]).toEqual([{ op: "replace", path: `/sites/${inside}/lat`, value: 11 }]);   // within it: told the field that changed
     expect(box.data.get().sites[inside].lat).toBe(11);
 
     const fresh = openDoc<any>(BOX, late);
