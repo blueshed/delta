@@ -1132,11 +1132,16 @@ function toldAt(path: string): string {
  * at two paths (`/<root>`, `/<root>/<id>`): the add that takes back its
  * removal puts it back as it was before the write, so its replaces before the
  * removal have no inverse of their own -- a walk would find `/<root>` gone.
+ *
+ * A row the write makes and takes out again never was outside it: its make,
+ * and what it had since, walk back nothing, and its removal adds nothing back
+ * -- `[add, remove]` inverts to `[]`, `[add, remove, add]` to `[remove]` (todo #67).
  */
 export function inverseOf(before: any, applied: DeltaOp[], asked?: DeltaOp[]): DeltaOp[] {
   const heads = asked && new Set(asked.filter((op) => op.op === "remove").map((op) => toldAt(op.path)));
-  const inverse: DeltaOp[] = [];
+  let inverse: DeltaOp[] = [];
   let run: DeltaOp[] = [];
+  const made = new Map<string, DeltaOp[]>();   // each row the write made, by path: its inverse since
   const flush = () => {
     inverse.unshift(...run);
     run = [];
@@ -1148,6 +1153,12 @@ export function inverseOf(before: any, applied: DeltaOp[], asked?: DeltaOp[]): D
     const parts = splitPath(op.path);
     const root = parts.length === 1 ? rootAt(parts[0]!) : undefined;
     if (op.op === "replace" && root !== undefined && (lastRemoved.get(root) ?? -1) > i) continue;
+    if (op.op === "remove" && made.has(op.path)) {
+      const since = new Set(made.get(op.path));
+      made.delete(op.path);
+      inverse = inverse.filter((back) => !since.has(back));
+      continue;
+    }
     const prior = withoutStorage(rowAt(before, op.path)) ?? null;   // null: not there before the write (made by it), as Postgres says it
     if (op.op === "remove") {
       if (heads?.has(op.path)) flush();   // a remove asked for starts its own run; one it cascaded to joins it
@@ -1155,7 +1166,10 @@ export function inverseOf(before: any, applied: DeltaOp[], asked?: DeltaOp[]): D
       continue;
     }
     flush();
-    inverse.unshift(op.op === "add" ? { op: "remove", path: op.path } : { op: "replace", path: op.path, value: prior });
+    const back: DeltaOp = op.op === "add" ? { op: "remove", path: op.path } : { op: "replace", path: op.path, value: prior };
+    inverse.unshift(back);
+    if (op.op === "add") made.set(op.path, [back]);
+    else made.get(op.path)?.push(back);
   }
   flush();
   return inverse;

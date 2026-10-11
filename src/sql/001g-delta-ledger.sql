@@ -62,7 +62,10 @@ $$;
 -- its cascade. A single document's root written and then removed by the write
 -- is one row at two paths (/root, /root/id): the add that takes back its
 -- removal puts it back as it was before the write, so its replaces before the
--- removal have no inverse of their own -- a walk would find /root gone.
+-- removal have no inverse of their own -- a walk would find /root gone. A row
+-- the write makes and takes out again never was outside it: its make, and what
+-- it had since, walk back nothing, and its removal adds nothing back --
+-- [add, remove] inverts to [], [add, remove, add] to [remove] (todo #67).
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION _delta_inverse(p_before JSONB, p_ops JSONB, p_asked JSONB)
@@ -76,6 +79,7 @@ DECLARE
   v_removed JSONB;    -- each path the write removes, at its last remove: one pass, however long the write
   v_parts   TEXT[];
   v_prior   JSONB;
+  v_made    JSONB := '{}'::jsonb;   -- each row the write made, by path: the op that made it (each inverse op carries its own, _i)
 BEGIN
   FOR v_op IN SELECT * FROM jsonb_array_elements(COALESCE(p_asked, '[]'::jsonb)) LOOP
     CONTINUE WHEN v_op->>'op' IS DISTINCT FROM 'remove';
@@ -94,6 +98,13 @@ BEGIN
     v_parts := _delta_split_path(v_op->>'path');
     CONTINUE WHEN v_op->>'op' = 'replace' AND array_length(v_parts, 1) = 1 AND p_before->v_parts[1]->>'id' IS NOT NULL
       AND (v_removed->>_delta_build_path(v_parts[1], p_before->v_parts[1]->>'id'))::bigint > v_i;
+    IF v_op->>'op' = 'remove' AND v_made ? (v_op->>'path') THEN
+      SELECT COALESCE(jsonb_agg(e ORDER BY n), '[]'::jsonb) INTO v_inverse
+        FROM jsonb_array_elements(v_inverse) WITH ORDINALITY AS x(e, n)
+       WHERE NOT COALESCE(e->>'path' = v_op->>'path' AND (e->>'_i')::bigint >= (v_made->>(v_op->>'path'))::bigint, false);
+      v_made := v_made - (v_op->>'path');
+      CONTINUE;
+    END IF;
     v_prior := _delta_row_at(p_before, v_parts);
     IF v_prior IS NOT NULL AND jsonb_typeof(v_prior) = 'object' THEN
       v_prior := _delta_strip_temporal(v_prior);
@@ -109,13 +120,16 @@ BEGIN
       v_inverse := v_run || v_inverse;
       v_run := '[]'::jsonb;
       IF v_op->>'op' = 'add' THEN
-        v_inverse := jsonb_build_array(jsonb_build_object('op', 'remove', 'path', v_op->>'path')) || v_inverse;
+        v_inverse := jsonb_build_array(jsonb_build_object('op', 'remove', 'path', v_op->>'path', '_i', v_i)) || v_inverse;
+        v_made := v_made || jsonb_build_object(v_op->>'path', v_i);
       ELSE
-        v_inverse := jsonb_build_array(jsonb_build_object('op', 'replace', 'path', v_op->>'path', 'value', v_prior)) || v_inverse;
+        v_inverse := jsonb_build_array(jsonb_build_object('op', 'replace', 'path', v_op->>'path', 'value', v_prior, '_i', v_i)) || v_inverse;
       END IF;
     END IF;
   END LOOP;
-  RETURN v_run || v_inverse;
+  SELECT COALESCE(jsonb_agg(e - '_i' ORDER BY n), '[]'::jsonb) INTO v_inverse
+    FROM jsonb_array_elements(v_run || v_inverse) WITH ORDINALITY AS x(e, n);
+  RETURN v_inverse;
 END;
 $$ LANGUAGE plpgsql IMMUTABLE;
 

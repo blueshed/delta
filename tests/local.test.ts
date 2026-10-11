@@ -316,6 +316,14 @@ describe("inverse", () => {
     const cascade = [{ op: "remove", path: "/p/1" }, { op: "remove", path: "/c/2" }, { op: "remove", path: "/c/3" }] as const;
     expect(inverseOf(before, [...cascade], [{ op: "remove", path: "/p/01" }])).toEqual([...back]);
   });
+
+  test("rows a write makes and takes out again -- a parent, and the child its removal cascades to -- have no inverse; a row removed and made again keeps its own (todo #67)", () => {
+    const before = { p: { 1: { id: 1 } }, c: {} };
+    const asked = [{ op: "add", path: "/p/9", value: { id: 9 } }, { op: "add", path: "/c/9", value: { id: 9, p_id: 9 } }, { op: "replace", path: "/c/9", value: { id: 9, p_id: 9, x: 1 } }, { op: "remove", path: "/p/9" }] as const;
+    expect(inverseOf(before, [...asked, { op: "remove", path: "/c/9" }], [...asked])).toEqual([]);
+    const again = [{ op: "remove", path: "/p/1" }, { op: "add", path: "/p/1", value: { id: 1, x: 2 } }, { op: "remove", path: "/p/1" }] as const;
+    expect(inverseOf(before, [...again], [...again])).toEqual([{ op: "add", path: "/p/1", value: { id: 1 } }]);
+  });
 });
 
 describe("fan-out onto a document whose root is the row", () => {

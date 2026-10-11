@@ -1288,6 +1288,25 @@ export function fanOutCases(backend: () => PathBackend): void {
   });
 
   describe("undo and redo are writes too", () => {
+    test("a row a write makes and takes out again has no inverse of its own: [add, remove] inverts to [], [add, remove, add] to [remove], on a plain table and a temporal one -- and the inverse sent back puts the rows back as they were (todo #67)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1"]);
+      const add = { op: "add", path: "/notes/7", value: { text: "seven" } };
+      const remove = { op: "remove", path: "/notes/7" };
+      expect((await write(b.process, "fo-board:1", [add, remove], { cursor: "m1" })).inverse).toEqual([]);
+      const board = async () => content((await b.process.call("open", { doc: "fo-board:1" })).result);
+      const was = await board();
+      const made = await write(b.process, "fo-board:1", [
+        { op: "add", path: "/courses/9", value: { name: "Fish" } },
+        { op: "remove", path: "/courses/9" },
+        add, remove, add,
+      ], { cursor: "m1" });
+      expect(made.inverse).toEqual([{ op: "remove", path: "/notes/7" }]);
+      await write(b.process, "fo-board:1", made.inverse);
+      expect(await board()).toEqual(was);
+      await assertCopiesHold(b, copies);
+    });
+
     test("undoing a course added through the board takes it out of the menu; redoing puts it back", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1"]);

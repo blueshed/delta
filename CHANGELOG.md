@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   id when it is at or past the next serial, never back, through `_delta_serial_past`: `SECURITY
   DEFINER`, so an app role needs no grant beyond the documented `USAGE, SELECT` on sequences.
   SQLite and the JSON file do the same in this release.
+- **A row a write makes and takes out again has no inverse (todo #67)**, on every backend. The
+  inverse of `[add /notes/7, remove /notes/7, add /notes/7]` held `add /notes/7` with a null
+  value, and sent back as a write it was refused (400). A row's make, and what it had since,
+  now walk back nothing once the same write removes it: `[add, remove]` inverts to `[]`, `[add,
+  remove, add]` to `[remove]`. In `inverseOf` and `_delta_inverse` (`001g`, replaced in place:
+  apply it again).
 
 ### Removed
 
