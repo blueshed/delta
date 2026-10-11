@@ -1,7 +1,4 @@
-/**
- * Shared SQL generation helpers — used by both tasks.ts (build-time)
- * and delta-postgres.ts (runtime validation).
- */
+/** SQL helpers for codegen.ts (the schema's DDL) and carry.ts (export and import). */
 import type { ColumnDef, Schema } from "./schema";
 
 export function q(id: string): string {

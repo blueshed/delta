@@ -11,9 +11,9 @@
  *     createDocListener, registerDocType, docTypeFromDef,
  *   } from "@blueshed/delta/postgres";
  *
- * SQL stored functions live alongside this module in `./sql/`. Load them
- * into your database with your preferred migration tool (they are plain
- * idempotent SQL files; order is alphabetical).
+ * The stored functions are `src/sql/001*.sql`: `applyFramework(pool)` applies
+ * them, or `bunx @blueshed/delta init <dir>` copies them for a migration tool
+ * (plain idempotent SQL; order is alphabetical).
  */
 
 export {

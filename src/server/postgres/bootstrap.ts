@@ -32,8 +32,8 @@ export function frameworkSqlFiles(): string[] {
 }
 
 /**
- * Apply the framework SQL to the given pool. Runs every file in
- * `postgres/sql/` alphabetically — 001a through 001g today. Safe to call
+ * Apply the framework SQL to the given pool. Runs every `001*` file in
+ * `src/sql/` alphabetically — 001a through 001g today. Safe to call
  * repeatedly (idempotent statements).
  */
 export async function applyFramework(pool: Pool): Promise<void> {
