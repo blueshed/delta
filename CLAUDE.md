@@ -124,7 +124,7 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
 - `src/server/local.ts`: `createLocal()`, delta in-process with no socket.
 - `src/server/kinds.ts`: `registerMemory`, `registerStatic`, `registerSource`.
 - `src/schema.ts`: `defineSchema`, `defineDoc` (shared by both backends). `validateOps` is
-  per backend: `sqlite.ts` (the one the backend runs) and `postgres/schema.ts` (exported;
+  per backend: `sqlite/validate.ts` (the one the backend runs) and `postgres/schema.ts` (exported;
   the listener relies on `delta_apply`'s own checks).
 - `src/server/postgres/`: the Postgres backend (`listener.ts`, `registry.ts` with `DocType`
   and `docTypeFromDef`'s `owns`, `codegen.ts`, `schema.ts`, `bootstrap.ts`, `auth.ts`).
