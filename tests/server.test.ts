@@ -5,7 +5,7 @@ import {
 } from "../src/server/server";
 import { wireAuth, isAuthError, type DeltaAuth } from "../src/server/auth";
 import { setLogLevel } from "../src/server/logger";
-import { mkdtempSync, readdirSync, rmSync, unlinkSync } from "node:fs";
+import { mkdtempSync, readdirSync, realpathSync, rmSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -461,7 +461,8 @@ describe("registerDoc", () => {
       (Bun as any).write = realWrite;
     }
     expect(written.length).toBeGreaterThan(0);
-    for (const to of written) expect(to).toMatch(new RegExp(`^${file}\\.\\d+\\.\\d+\\.tmp$`));   // never the file itself: a temp beside it
+    const real = realpathSync(file);   // a save goes beside the real file (on macOS /var is /private/var)
+    for (const to of written) expect(to).toMatch(new RegExp(`^${real}\\.\\d+\\.\\d+\\.tmp$`));   // never the file itself: a temp beside it
     expect(readdirSync(dir)).toEqual(["doc.json"]);
     expect((await Bun.file(file).json()).items).toEqual(["n0", "n1", "n2", "n3", "n4"]);
     rmSync(dir, { recursive: true, force: true });

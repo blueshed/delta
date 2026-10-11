@@ -140,11 +140,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A key must be `id`, the root's parent key or one of its columns, declared in the schema (a
   column added with `ALTER TABLE` and not declared is refused, as on Postgres).
 - **A save is whole or not at all**, for the free-form document (`registerDoc`) and the JSON
-  file (`./json`). Each wrote its file in place, so a crash mid-save could leave it empty or cut
-  short, and the next start failed with "Unexpected end of JSON input". A save now goes to a
-  temp file beside it, renamed over it. A file that is there but not JSON is refused at start
-  with an error naming it, never opened as `empty` and saved over (`empty` is the document while
-  there is no file).
+  file (`./json`, its saves and `importTables`). Each wrote its file in place, so a crash
+  mid-save could leave it empty or cut short, and the next start failed with "Unexpected end of
+  JSON input". A save now goes to a temp file beside the real file (through a symlink, beside
+  what it points at), given the file's mode, synced, and renamed over it; the folder is then
+  synced, so it survives a power cut too. A temp a crashed process left is cleared at start. A
+  file that is there but not JSON is refused at start with an error naming it, never opened as
+  `empty` and saved over (`empty` is the document while there is no file). A JSON-file save
+  that fails is logged and the next one writes the whole file; it was an unhandled rejection
+  that stopped every later save.
 - **A client that chooses its `clientId` keeps its undo cursor when it reconnects before the
   server has seen its old socket close** (a network drop the server has not noticed yet). The
   server gave the new socket a fresh id for good, so undo answered null for the writes before

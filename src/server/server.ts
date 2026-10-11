@@ -20,8 +20,7 @@
  *   });
  *   ws.setServer(server);
  */
-import { existsSync, readFileSync } from "node:fs";
-import { rename } from "node:fs/promises";
+import { clearStaleTemps, readJsonFile, writeFileAtomic } from "./file";
 import { createLogger } from "./logger";
 import { applyOps, splitPath, joinPath, type DeltaOp } from "../core";
 
@@ -558,35 +557,6 @@ export function mintIds(doc: unknown, ops: DeltaOp[]): DeltaOp[] {
   });
 }
 
-/**
- * A JSON file's value, or undefined when there is no file. One that is there
- * but not JSON (empty, or cut short) throws, naming the file: it holds data
- * that should not be opened as nothing and saved over.
- * @internal
- */
-export function readJsonFile(file: string): unknown {
-  if (!existsSync(file)) return undefined;
-  const text = readFileSync(file, "utf8");
-  try {
-    return JSON.parse(text);
-  } catch (err: any) {
-    throw new Error(`${file} is not JSON (${err.message}): restore it, or move it away to start from empty`);
-  }
-}
-
-let saves = 0;
-/**
- * Write `text` to `file` whole or not at all: to a temp file beside it, then
- * renamed over it (atomic on one filesystem), so a crash mid-save leaves the
- * last whole file, never a cut one.
- * @internal
- */
-export async function writeFileAtomic(file: string, text: string): Promise<void> {
-  const temp = `${file}.${process.pid}.${++saves}.tmp`;
-  await Bun.write(temp, text);
-  await rename(temp, file);
-}
-
 /** Register a persisted JSON document with the WebSocket server. */
 export async function registerDoc<T>(
   ws: Pick<WsServer, "on" | "publish">,
@@ -594,6 +564,7 @@ export async function registerDoc<T>(
   opts: DocOptions<T>,
 ): Promise<DocHandle<T>> {
   const log = createLogger(`[${name}]`);
+  clearStaleTemps(opts.file);
   const saved = readJsonFile(opts.file) as T | undefined;
   let doc: T = saved === undefined ? structuredClone(opts.empty) : { ...structuredClone(opts.empty), ...saved };
 

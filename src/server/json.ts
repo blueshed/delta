@@ -20,8 +20,10 @@
  * construction. One process owns the file.
  */
 import { Database } from "bun:sqlite";
-import { existsSync, statSync, writeFileSync } from "node:fs";
-import { readJsonFile, writeFileAtomic, type WsServer } from "./server";
+import { existsSync, statSync } from "node:fs";
+import { clearStaleTemps, readJsonFile, writeFileAtomic, writeFileAtomicSync } from "./file";
+import { createLogger } from "./logger";
+import type { WsServer } from "./server";
 import type { DocDef, Schema, Snapshot } from "../schema";
 import {
   createTables,
@@ -58,7 +60,7 @@ export function exportTables(file: string, _schema: Schema): Snapshot {
 
 /** Write a snapshot's rows into the file (it starts as that). */
 export function importTables(file: string, _schema: Schema, snapshot: Snapshot): void {
-  writeFileSync(file, JSON.stringify({ tables: snapshot.tables, sequences: snapshot.sequences ?? {} }, null, 2));
+  writeFileAtomicSync(file, JSON.stringify({ tables: snapshot.tables, sequences: snapshot.sequences ?? {} }, null, 2));
 }
 
 /**
@@ -76,9 +78,11 @@ export function registerDocs<I = unknown>(
 ) {
   const db = new Database(":memory:");
   createTables(db, schema);
+  clearStaleTemps(file);
   const saved = read(file);
   importSqlite(db, schema, saved);
 
+  const log = createLogger("[delta-json]");
   let saving: Promise<void> = Promise.resolve();
   const save = () => {
     const snapshot: Saved = exportSqlite(db, schema);
@@ -89,7 +93,11 @@ export function registerDocs<I = unknown>(
       };
     }
     const text = JSON.stringify(snapshot, null, 2);
-    saving = saving.then(() => writeFileAtomic(file, text));   // whole or not at all: a crash mid-save leaves the last whole file
+    // Whole or not at all: a crash mid-save leaves the last whole file. One that
+    // fails is logged, and the next writes the whole file: the chain goes on.
+    const done = saving.catch(() => {}).then(() => writeFileAtomic(file, text));
+    done.catch((err: any) => log.error(`${file}: save failed: ${err?.message ?? err}`));
+    saving = done;
   };
 
   const handle = registerSqlite<I>(ws, db, schema, docs, customDocs, { ...options, committed: save });

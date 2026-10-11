@@ -124,6 +124,8 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
 - `src/server/custom.ts`: custom documents (`defineCustomDoc`) on SQLite and Postgres alike --
   views, recompute reads, who may still hear a document (`letGo`), the per-row telling.
 - `src/server/ledger.ts`: the SQLite ledger (entries, the cursor's chains).
+- `src/server/file.ts`: how `registerDoc` and `./json` keep their file (a save whole or not
+  at all: temp beside the real file, its mode, synced, renamed; stale temps cleared at start).
 - `src/server/local.ts`: `createLocal()`, delta in-process with no socket.
 - `src/server/kinds.ts`: `registerMemory`, `registerStatic`, `registerSource`.
 - `src/schema.ts`: `defineSchema`, `defineDoc` (shared by both backends). `validateOps` is
