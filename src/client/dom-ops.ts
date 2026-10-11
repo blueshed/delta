@@ -196,9 +196,10 @@ export function applyOpsToCollection<T>(
         }
         // Field-level replace (`/coll/<id>/<field>`) is intentionally NOT
         // applied here: the op carries only the field value, not the whole-row
-        // shape that `col.create`/`col.update` expect. In practice every
-        // backend rewrites field writes to whole-row replace ops (the free-form
-        // document at broadcast), so this arises only from a custom stream — and there the
+        // shape that `col.create`/`col.update` expect. The table backends
+        // and the free-form document send a field write as a whole-row replace;
+        // a memory document sends its ops as applied, field paths included, and
+        // so may a custom stream -- and there the
         // full-state `doc.data` path applies the change correctly. Callers who
         // need DOM-level handling of field ops should inspect `op.path` in
         // their own `doc.onOps` handler.

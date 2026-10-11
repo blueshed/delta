@@ -67,7 +67,8 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
   only idempotently (`CREATE OR REPLACE`, `IF NOT EXISTS`) and say so in the changelog.
 - **You may write what you may read.** Every row-addressed write is gated on the same scope as
   the read, on both backends.
-- **Broadcasts are row-level**: a field write goes out as the whole row, on every backend.
+- **Broadcasts are row-level**: a field write goes out as the whole row, on every table backend
+  and the free-form document. A memory document broadcasts its ops as applied (field paths too).
 - **Opt-in stays opt-in.** Without `ledger: true` / `inverse: true`, answers and broadcasts
   keep their 0.5 shapes.
 - **One app, every backend.** The JSON file (`./json`), SQLite, Postgres in process (`./pglite`)
