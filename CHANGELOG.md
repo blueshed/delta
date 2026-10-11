@@ -28,21 +28,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A custom document's name is answered by the longest prefix it starts with**, whichever was
   registered first, as a table document's is: `said:loud:hi` beside `said:` is `said:loud:`'s.
   Before, the custom prefix registered first answered it.
-
-### Removed
-
-- **`@blueshed/delta/postgres` no longer exports codegen's SQL helpers or `frameworkSql()`**:
-  `q`, `columnSqlType`, `sqlDefault`, `findCascadeOn`, `defaultForType` (unused, deleted) and
-  `frameworkSql` (deleted). Nothing outside delta imported them. For the framework SQL, read the
-  files `frameworkSqlFiles()` names, or call `applyFramework(pool)`.
-
-### Internal
-
-- `kinds.ts`: the three kinds share one join, leave and `close` (`family()`).
-- `001b`'s `_delta_resolve_scope` (replaced in place, the same answers): a date's refusals short
-  of its day are one test.
-- `cli.ts`: one `print` for the runtime commands, the init plan and skill discovery inline, the
-  header comment pointing at `usage()` (the same output for every command).
 - **SQLite: a remove or an add of a field, or a path too deep, is a 400**, as on Postgres
   (`remove /items/1/text`, `add /tasks/t1/done/extra`). `validateOps` took them, and the write
   then threw, so the writer was answered 500.
@@ -54,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **`@blueshed/delta/postgres` no longer exports codegen's SQL helpers or `frameworkSql()`**:
+  `q`, `columnSqlType`, `sqlDefault`, `findCascadeOn`, `defaultForType` (unused, deleted) and
+  `frameworkSql` (deleted). Nothing outside delta imported them. For the framework SQL, read the
+  files `frameworkSqlFiles()` names, or call `applyFramework(pool)`.
 - **`createSnapshot` and `resolveSnapshot` from `@blueshed/delta/postgres`**: thin wrappers no
   one called. Call the SQL: `SELECT delta_snapshot($1, $2)`, `SELECT delta_resolve_snapshot($1)`.
   SQLite's stay.
@@ -63,6 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Internal
 
+- `kinds.ts`: the three kinds share one join, leave and `close` (`family()`).
+- `001b`'s `_delta_resolve_scope` (replaced in place, the same answers): a date's refusals short
+  of its day are one test.
+- `cli.ts`: one `print` for the runtime commands, the init plan and skill discovery inline, the
+  header comment pointing at `usage()` (the same output for every command).
 - A simplicity pass over the core (todo #68): dead branches and duplicated tests gone, one
   `failure(err)` answer, `db.transaction().immediate()` for the write lock. SQLite reads a
   document by one walk for open and open_at, and `sqlite.ts` is split into `src/server/sqlite/`
