@@ -243,31 +243,67 @@ describe("a client that chooses its clientId keeps its cursor across reconnects"
     }
   });
 
-  test("connected again while the server still holds the old socket open (a drop it has not noticed): undo takes the write back", async () => {
-    const { server, url } = await serve();
-    try {
-      const old = connectWs(url, { clientId: "tab-9" });   // never closed: half-open, as far as the server knows
-      await old.send({ action: "open", doc: "room:a" });
-      await old.send({ action: "delta", doc: "room:a", ops: [{ op: "add", path: "/messages/m1", value: { text: "hi" } }] });
-      const again = connectWs(url, { clientId: "tab-9" });
-      expect(await again.send({ action: "undo" })).toMatchObject({ doc: "room:a", ops: [{ op: "remove", path: "/messages/m1" }] });
-      again.close();
-      old.close();
-    } finally {
-      server.stop(true);
-    }
+  /** The same server driven socket by socket: when each opens, writes and closes is the test's to say. */
+  function sockets() {
+    const db = new Database(":memory:");
+    createTables(db, schema);
+    const ws = createWs();
+    registerDocs(ws, db, schema, [room], [], { ledger: true });
+    let n = 0;
+    const connect = (clientId: string, identity?: string) => {
+      const sock = { data: identity === undefined ? { clientId } : { clientId, identity }, readyState: 1, sent: [] as any[], send(raw: string) { this.sent.push(JSON.parse(raw)); }, subscribe() {}, unsubscribe() {} };
+      ws.websocket.open(sock);
+      return sock;
+    };
+    const ask = async (sock: ReturnType<typeof connect>, msg: object) => {
+      const id = ++n;
+      await ws.websocket.message(sock, JSON.stringify({ id, ...msg }));
+      return sock.sent.find((m) => m.id === id);
+    };
+    const write = async (sock: ReturnType<typeof connect>) => {
+      await ask(sock, { action: "open", doc: "room:a" });
+      return ask(sock, { action: "delta", doc: "room:a", ops: [{ op: "add", path: "/messages/m1", value: { text: "hi" } }] });
+    };
+    const undo = async (sock: ReturnType<typeof connect>) => (await ask(sock, { action: "undo" })).result;
+    const drop = (sock: ReturnType<typeof connect>) => { sock.readyState = 3; ws.websocket.close(sock); };
+    return { connect, write, undo, drop };
+  }
+  const undone = { doc: "room:a", ops: [{ op: "remove", path: "/messages/m1" }] };
+
+  test("connected again while the server still holds the old socket open (a drop it has not noticed): the cursor is its own once the old socket is dropped", async () => {
+    const { connect, write, undo, drop } = sockets();
+    const old = connect("tab-9");
+    await write(old);
+    const again = connect("tab-9");
+    expect(await undo(again)).toBeNull();   // the id is still held by a live socket
+    drop(old);                              // the server notices the drop
+    expect(await undo(again)).toMatchObject(undone);
   });
 
-  test("connected again at once, while the old socket is still closing: undo takes the write back", async () => {
-    const { server, url } = await serve();
-    try {
-      await writeThenLeave(url, "tab-8");
-      const again = connectWs(url, { clientId: "tab-8" });
-      expect(await again.send({ action: "undo" })).toMatchObject({ doc: "room:a", ops: [{ op: "remove", path: "/messages/m1" }] });
-      again.close();
-    } finally {
-      server.stop(true);
-    }
+  test("connected again at once, while the old socket is still closing: its close hands the new socket the id, and undo takes the write back", async () => {
+    const { connect, write, undo, drop } = sockets();
+    const old = connect("tab-8");
+    await write(old);
+    const again = connect("tab-8");   // opened before the server has run the old one's close
+    drop(old);
+    expect(await undo(again)).toMatchObject(undone);
+  });
+
+  test("without sign-in, a live socket naming another live socket's id does not walk its cursor", async () => {
+    const { connect, write, undo } = sockets();
+    const alice = connect("tab-a");
+    await write(alice);
+    const mallory = connect("tab-a");
+    expect(await undo(mallory)).toBeNull();
+    expect(await undo(alice)).toMatchObject(undone);
+  });
+
+  test("signed in, a live socket naming the id walks it only as the same person", async () => {
+    const { connect, write, undo } = sockets();
+    const alice = connect("tab-a", "alice");
+    await write(alice);
+    expect(await undo(connect("tab-a", "mallory"))).toBeNull();
+    expect(await undo(connect("tab-a", "alice"))).toMatchObject(undone);   // alice's second tab, the first still open
   });
 });
 

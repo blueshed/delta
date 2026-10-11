@@ -722,6 +722,24 @@ describe("clientId collision (#24)", () => {
     expect(ws2.sent.at(-1)).toEqual({ n: 3 });
   });
 
+  test("one that came while the id was held takes it when the holder closes -- not one that has left meanwhile", () => {
+    const ws = createWs();
+    const a = mockSocket("shared");
+    ws.websocket.open(a);
+    const left = mockSocket("shared");
+    ws.websocket.open(left);
+    const b = mockSocket("shared");
+    ws.websocket.open(b);
+    (left as any).readyState = 3;
+    ws.websocket.close(left);   // waited, and went first
+    (a as any).readyState = 3;
+    ws.websocket.close(a);
+    expect(b.data.clientId).toBe("shared");
+    ws.sendTo("shared", { to: "b" });
+    expect(b.sent.at(-1)).toEqual({ to: "b" });
+    expect(left.sent).toEqual([]);
+  });
+
   test("a different LIVE socket colliding on a clientId is given a fresh id (no hijack)", () => {
     const ws = createWs();
     const a = mockSocket("shared");

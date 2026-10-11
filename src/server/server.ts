@@ -214,6 +214,9 @@ export function createWs(opts?: WsOptions): WsServer {
   const log = createLogger("[ws]");
   const actions = new Map<string, ActionHandler[]>();
   const clients = new Map<string, any>();
+  // Sockets that chose an id a live socket holds, by that id: the first still
+  // open takes it when the holder closes.
+  const waiting = new Map<string, Set<any>>();
   let serverRef: any;
 
   const path = opts?.path ?? "/ws";
@@ -369,6 +372,22 @@ export function createWs(opts?: WsOptions): WsServer {
     }
   }
 
+  /** `id`'s holder has closed: the first socket still open that chose it takes it, address and cursor. */
+  function handOn(id: string): void {
+    const queue = waiting.get(id);
+    if (!queue) return;
+    for (const next of queue) {
+      queue.delete(next);
+      if (next.readyState !== 1 || gone.has(next)) continue;
+      clients.delete(next.data.clientId);
+      next.data.clientId = id;
+      delete next.data.chosenId;
+      clients.set(id, next);
+      break;
+    }
+    if (!queue.size) waiting.delete(id);
+  }
+
   /** Past `maxHeld` or `maxHeldBytes`: the socket is closed, and none of what it held runs. */
   function refuseHeld(ws: any, line: Line, over: string): void {
     gone.add(ws);
@@ -417,16 +436,19 @@ export function createWs(opts?: WsOptions): WsServer {
         // The clientId arrives from the upgrade query string and is therefore
         // client-controlled. Mint a fresh id ONLY when a DIFFERENT, still-open
         // socket already holds it (a genuine live collision — never let one
-        // client clobber/hijack another's `sendTo` mapping). A socket
-        // reconnecting with its own stable clientId reclaims the id once the
-        // old connection is gone/closing, preserving sendTo across reconnects.
+        // client clobber/hijack another's `sendTo` mapping or undo cursor). A
+        // socket reconnecting with its own stable clientId reclaims the id once
+        // the old connection is gone/closing, preserving sendTo and its cursor
+        // across reconnects -- and one that came while the old was still open
+        // (a drop the server had not noticed) is given the id when it closes.
         let clientId = ws.data.clientId;
         const existing = clientId ? clients.get(clientId) : undefined;
         if (!clientId || (existing && existing !== ws && existing.readyState === 1)) {
-          // Its address is fresh, but the id it chose stays its ledger cursor
-          // (`socketCursor`): a reconnect the server has not yet seen the old
-          // socket of (a drop it has not noticed) still undoes its own writes.
-          if (clientId) ws.data.chosenId = clientId;
+          if (clientId) {
+            ws.data.chosenId = clientId;   // signed in, its cursor already (`socketCursor`): the person is in it
+            if (!waiting.has(clientId)) waiting.set(clientId, new Set());
+            waiting.get(clientId)!.add(ws);
+          }
           clientId = crypto.randomUUID();
         }
         ws.data.clientId = clientId;
@@ -455,7 +477,12 @@ export function createWs(opts?: WsOptions): WsServer {
         const clientId = ws.data?.clientId;
         // Only delete our own mapping — a collision-replaced socket may now
         // own this id.
-        if (clientId && clients.get(clientId) === ws) clients.delete(clientId);
+        if (clientId && clients.get(clientId) === ws) {
+          clients.delete(clientId);
+          handOn(clientId);
+        }
+        const chosen = ws.data?.chosenId;
+        if (chosen) waiting.get(chosen)?.delete(ws);
         runClientDropHooks(ws);
         log.debug(`close id=${clientId ?? "?"}`);
       },

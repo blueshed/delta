@@ -140,11 +140,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   column added with `ALTER TABLE` and not declared is refused, as on Postgres).
 - **A client that chooses its `clientId` keeps its undo cursor when it reconnects before the
   server has seen its old socket close** (a network drop the server has not noticed yet). The
-  server gave the new socket a fresh id, so the ledger's cursor changed and undo answered null
-  for the writes before the drop. The fresh id is still the socket's `sendTo` address (no
-  hijack, #24); the cursor stays the id it chose. Without sign-in, a second live socket that
-  names the same id now shares its cursor at once rather than once the first has gone: treat a
-  chosen id as a secret there, as before.
+  server gave the new socket a fresh id for good, so undo answered null for the writes before
+  the drop. The new socket still has a fresh id while the old one is open (#24: a live socket
+  never takes another live socket's address or cursor), and now takes the chosen id, address
+  and cursor, when the old one closes. Signed in, the cursor includes the person, so a second
+  tab of the same person has it at once, and anyone else never.
 
 ## [0.12.0] - 2026-10-11
 
