@@ -41,6 +41,20 @@ export const mineDoc = <Q>(query: Q) => ({
   shared: true,
 });
 
+/**
+ * A membership document whose prefix the inbox's names start with: every
+ * household, named fo-in:every. Registered after the inbox, it answers no
+ * inbox's name, and its owns and matches are never asked of one.
+ */
+export const everyDoc = <Q>(query: Q) => ({
+  prefix: "fo-in",
+  watch: ["households"],
+  parse: (id: string) => id,
+  query,
+  matches: () => true,
+  owns: (_me: Me, docName: string) => docName === "fo-in:every",
+});
+
 /** A recompute document read as each subscriber: who it was read as. `whoamiReads` counts its reads. */
 export const whoamiReads = { n: 0 };
 export const whoamiDoc = <R extends (...args: any[]) => any>(read: R) => ({
@@ -182,6 +196,18 @@ export function ownsCases(backend: () => OwnsBackend): void {
       expect((await me.call("open", { doc: "fo-menu-card:1" })).error).toBeUndefined();
       expect((await me.call("open", { doc: "fo-inbox:b@x" })).error).toEqual({ code: 404, message: "Not found" });
       expect((await me.call("open", { doc: "fo-menu-card:2" })).error).toEqual({ code: 404, message: "Not found" });
+    });
+
+    test("a custom document is asked and told by its own definition alone: fo-in's owns and matches never reach an inbox, whose names start with its prefix", async () => {
+      const p = await backend().start({ owns: ownsByName, custom: "owned" });
+      const me = p.as(ada);
+      expect(Object.keys((await me.call("open", { doc: "fo-inbox:a@x" })).result.households)).toEqual(["1"]);
+      expect(Object.keys((await me.call("open", { doc: "fo-in:every" })).result.households)).toEqual(["1", "2", "3"]);
+      await me.call("open", { doc: "fo-board:1" });
+      await openAll(p.backend.process, []);   // what the write tells, from here
+      expect((await me.call("delta", { doc: "fo-board:1", ops: [{ op: "replace", path: "/households/2/email", value: "q@x" }] })).error).toBeUndefined();
+      await expectTold(p.backend, "fo-in:every", [[{ op: "replace", path: "/households/2", value: household(2, "q@x") }]]);
+      expect(p.backend.process.heard.filter((h) => h.channel === "fo-inbox:a@x")).toEqual([]);   // neither told a row nor let go
     });
 
     test("a membership document is queried, held and told as each identity: two on one name each hold and hear their own rows", async () => {

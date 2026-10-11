@@ -11,7 +11,7 @@ import { openPglite } from "../src/server/pglite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
 import { pathDocs, pathSchema, pathSeed, postgresInbox, postgresMenuCard } from "./helpers/path";
-import { auth, customOwns, mineDoc, ownsCases, whoamiDoc, type Me } from "./helpers/owns";
+import { auth, customOwns, everyDoc, mineDoc, ownsCases, whoamiDoc, type Me } from "./helpers/owns";
 
 setLogLevel("silent");
 
@@ -29,6 +29,7 @@ afterEach(async () => { for (const l of listeners.splice(0)) await l.destroy(); 
 
 const custom = (which?: "owned" | "neither"): CustomDocDef<any, Me>[] => which === "neither" ? [postgresInbox] : [
   { ...postgresInbox, owns: customOwns.inbox },
+  everyDoc(async (pool: any) => ({ households: (await pool.query(`SELECT to_jsonb(h) AS row FROM ${pathSchema.tables.households!.name} h`)).rows.map((r: any) => r.row) })),
   { ...postgresMenuCard, owns: customOwns.menuCard },
   whoamiDoc(async (_pool: any, _c: string, me?: Me) => ({ me: me?.id ?? null })),
   mineDoc(async (pool: any, _c: string, me?: Me) => ({ households: (await pool.query(`SELECT to_jsonb(h) AS row FROM ${pathSchema.tables.households!.name} h WHERE weddings_id = $1`, [me?.id ?? null])).rows.map((r: any) => r.row) })),

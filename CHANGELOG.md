@@ -37,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SQLite: a remove or an add of a field, or a path too deep, is a 400**, as on Postgres
   (`remove /items/1/text`, `add /tasks/t1/done/extra`). `validateOps` took them, and the write
   then threw, so the writer was answered 500.
+- **A custom document is asked and told by its own definition alone**, on every backend. Where
+  one custom prefix starts another's names (`fo-in` and `fo-inbox:`), a write told the shorter
+  one's `matches` to the longer one's views too (SQLite and Postgres: an inbox was told rows it
+  does not hold), and on Postgres asked its `owns` of them (a socket was let go, 404). Both
+  backends now run one module for custom documents (`src/server/custom.ts`).
 
 ### Internal
 

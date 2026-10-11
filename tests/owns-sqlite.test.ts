@@ -13,13 +13,14 @@ import { createWs } from "../src/server/server";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
 import { pathDocs, pathSchema, pathSeed, sqliteInbox, sqliteMenuCard } from "./helpers/path";
-import { auth, customOwns, mineDoc, ownsByName, ownsCases, whoamiDoc, type Me, type OwnsBackend } from "./helpers/owns";
+import { auth, customOwns, everyDoc, mineDoc, ownsByName, ownsCases, whoamiDoc, type Me, type OwnsBackend } from "./helpers/owns";
 import { defineDoc } from "../src/schema";
 
 setLogLevel("silent");
 
 const custom = (which?: "owned" | "neither"): CustomDocDef<any, Me>[] => which === "neither" ? [sqliteInbox] : [
   { ...sqliteInbox, owns: customOwns.inbox },
+  everyDoc((db: any) => ({ households: db.query(`SELECT * FROM ${pathSchema.tables.households!.name}`).all() })),
   { ...sqliteMenuCard, owns: customOwns.menuCard },
   whoamiDoc((_db: any, _c: string, me?: Me) => ({ me: me?.id ?? null })),
   mineDoc((db: any, _c: string, me?: Me) => ({ households: db.query(`SELECT * FROM ${pathSchema.tables.households!.name} WHERE weddings_id = ?`).all(me?.id ?? null) })),

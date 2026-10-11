@@ -16,12 +16,13 @@ import type { WsServer } from "../server";
 import { trackSubscribe, trackUnsubscribe, onClientDrop } from "../server";
 import { createLogger } from "../logger";
 import type { Pool, PoolClient } from "pg";
-import { resolveDoc, holdAuth, ownerless } from "./registry";
+import { resolveDoc, holdAuth } from "./registry";
 import type { DocType } from "./registry";
 import type { DeltaAuth } from "../auth";
-import { authless, isAuthError } from "../auth";
-import { type DeltaOp, splitPath, joinPath } from "../../core";
-import { isEntryId, socketCursor } from "../ledger";
+import { isAuthError } from "../auth";
+import type { DeltaOp } from "../../core";
+import { isEntryId, ledgerWho, socketCursor } from "../ledger";
+import { assertOwned, createCustomDocs, NOT_FOUND, type CustomDoc, type Owns } from "../custom";
 
 const log = createLogger("[doc]");
 
@@ -29,45 +30,21 @@ const log = createLogger("[doc]");
 // Custom doc — predicate-based membership view over watched collections.
 // ---------------------------------------------------------------------------
 
-export interface CustomDocDef<C = unknown, I = any> {
-  /** Doc name prefix (e.g. "sites-in-bbox:"). */
-  prefix: string;
-  /** Collections whose writes trigger fan-out (per-row for a membership def, whole-doc for a recompute def). */
-  watch: string[];
-  /** Parse the portion of docName after prefix into criteria. */
-  parse: (docId: string) => C;
-  /**
-   * MEMBERSHIP def (flat, per-row fan-out) — provide `query` + `matches`.
-   * Initial load: rows this doc exposes, keyed by collection. It runs once per
-   * doc name and identity (`identity` is the gated identity, undefined without
-   * auth), and its result is cached and shared by the subscribers of that name
-   * who are that identity -- never by another. Bind the identity yourself
-   * (`withAppAuth(pool, id, …)`) so RLS scopes what it reads, as recompute does.
-   */
+/**
+ * A custom doc on Postgres (`../custom`): its reads take the pool and answer
+ * with a promise. A membership `query` runs once per doc name and identity
+ * (the gated identity, undefined without auth), and its result is cached and
+ * shared by the subscribers of that name who are that identity -- never by
+ * another: bind the identity yourself (`withAppAuth(pool, id, …)`) so RLS
+ * scopes what it reads, as recompute does. A `recompute` reads the WHOLE doc,
+ * on open and on any write to a watched collection, and republishes it to each
+ * subscriber as a root-replace op -- for nested/joined reads a per-row
+ * `matches` can't express: re-evaluated PER SUBSCRIBER under that client's
+ * identity, so RLS applies, hence it binds `app.user_id` itself.
+ */
+export interface CustomDocDef<C = unknown, I = any> extends CustomDoc<C, I, Pool> {
   query?: (pool: Pool, criteria: C, identity?: I) => Promise<Record<string, any[]>>;
-  /**
-   * True when `row` belongs in a doc opened under `criteria` (membership def),
-   * for the subscribers who are `identity`. The row comes from the change log,
-   * which RLS does not filter: check it against the identity here.
-   */
-  matches?: (collection: string, row: any, criteria: C, identity?: I) => boolean;
-  /**
-   * RECOMPUTE def (whole-doc, identity-aware) — provide `recompute` INSTEAD of query/matches.
-   * On open, and on any write to a watched collection, the WHOLE doc is re-evaluated and
-   * republished to each subscriber as a root-replace op — for nested/joined reads a per-row
-   * `matches` can't express. Re-evaluated PER SUBSCRIBER under that client's identity (so RLS
-   * applies correctly), hence the evaluator binds `app.user_id` itself (e.g. via `withAppAuth`).
-   * `identity` is the gated WS identity, or undefined when unauthenticated.
-   */
   recompute?: (pool: Pool, criteria: C, identity?: I) => Promise<any>;
-  /**
-   * With an `auth` module: may `identity` open `docName`? False answers 404, as
-   * `DocType.owns` does. With auth, a custom doc needs this or `shared: true`:
-   * `createDocListener` refuses one with neither.
-   */
-  owns?: (identity: I, docName: string) => boolean | Promise<boolean>;
-  /** With an `auth` module: every identity that passes the gate may open every doc of this prefix. */
-  shared?: boolean;
 }
 
 export function defineCustomDoc<C, I = any>(
@@ -160,22 +137,10 @@ export async function createDocListener<I = unknown>(
   // Default-deny, as docTypeFromDef is: with auth, every document -- a custom
   // one, a registered type -- says who owns it, or that it is shared. Asked
   // before the pool is touched, so a refusal leaves nothing to clean up.
-  let releaseAuth = () => {};
-  if (auth) {
-    const unowned = (opts?.custom ?? []).find((d) => !d.owns && !d.shared);
-    if (unowned) throw ownerless(unowned.prefix, "defineCustomDoc");
-    releaseAuth = holdAuth();
-  } else {
-    // a custom doc's owns or shared with no auth module would guard nothing
-    const said = (opts?.custom ?? []).find((d) => d.owns || d.shared);
-    if (said) throw authless(said.prefix, "defineCustomDoc");
-  }
+  assertOwned(opts?.custom ?? [], auth);
+  const releaseAuth = auth ? holdAuth() : () => {};
   const ledger = !!opts?.ledger;
-  const whoOf = (identity: I | undefined): string | null => {
-    if (identity === undefined || identity === null) return null;
-    if (opts?.who) return opts.who(identity);
-    return typeof identity === "string" || typeof identity === "number" ? String(identity) : JSON.stringify(identity);
-  };
+  const whoOf = (identity: I | undefined): string | null => ledgerWho(identity, opts?.who);
   // The cursor undo walks: named by a caller in this process, and over the
   // socket the connection itself -- signed in, the person and the connection
   // together, so another person holding the same connection id (a client may
@@ -189,103 +154,16 @@ export async function createDocListener<I = unknown>(
     auth ? identity : (client?.data?.identity as I | undefined);
   const tracked = new Map<string, DocState>();
 
-  // Custom docs: prefix-keyed defs, per-docName cache + criteria + subscribers.
-  const customByPrefix = new Map<string, CustomDocDef<any>>();
-  for (const def of opts?.custom ?? []) customByPrefix.set(def.prefix, def);
-
-  const watchedCollections = new Set<string>();
-  for (const def of opts?.custom ?? []) for (const c of def.watch) watchedCollections.add(c);
-
-  // Membership docs: one view per doc name and identity (without auth, per
-  // name) -- its query's rows, and the subscribers who are that identity -- so
-  // one identity's rows are never served to another from the cache.
-  type View = { docName: string; criteria: unknown; identity: I | undefined; doc: Record<string, Record<string, any>>; subs: Set<any> };
-  const views = new Map<string, View>();
-  const identityKey = (identity: I | undefined): string =>
-    auth?.asSqlArg && identity !== undefined ? String(auth.asSqlArg(identity)) : JSON.stringify(identity);
-  const viewKey = (docName: string, identity: I | undefined): string =>
-    auth ? `${docName}\u0000${identityKey(identity)}` : docName;
-
-  // A socket hears a document while it may open it (todo #17). An open asks the
-  // gate and the document's `owns`, and so does every request; a change told
-  // asks them again of each socket it is told to, and a socket refused is let
-  // go of the document -- taken off it, or its session run out, it hears no
-  // more, though it asks for nothing, and is told so (letGo).
-  // The gate is asked of each socket (a session is a socket's), and is cheap by
-  // contract; `owns` once per identity per change (`asked`), so what a change
-  // costs is the identities a document has open, not its sockets -- one name
-  // per owner keeps that small, and a shared document asks the gate alone.
-  // Without auth nothing is asked, and publishing stays one call per change.
-  type Owns = (identity: I, docName: string) => boolean | Promise<boolean>;
-  /** Why a socket may no longer hear a document: the gate's refusal (401), or the owner's (404). */
-  type Refusal = { code: number; message: string };
-  const NOT_FOUND: Refusal = { code: 404, message: "Not found" };
-  function mayHear(client: any, docName: string, owns: Owns | undefined, asked: Map<string, Promise<Refusal | null>>, as?: string): Promise<Refusal | null> | Refusal | null {
-    const gated = auth!.gate(client);
-    if (isAuthError(gated)) return { code: 401, message: gated.error };
-    const key = identityKey(gated as I);
-    if (as !== undefined && key !== as) return NOT_FOUND;   // the socket is someone else now: its view is not theirs
-    if (!owns) return null;
-    let may = asked.get(key);
-    if (!may) {
-      may = Promise.resolve()
-        .then(() => owns(gated as I, docName))
-        .then((yes) => (yes ? null : NOT_FOUND), (err) => { log.error(`owns ${docName}: ${errMsg(err)}`); return NOT_FOUND; });
-      asked.set(key, may);
-    }
-    return may;
-  }
-  /**
-   * Let go of `docName` each of `subs` that may no longer hear it, and tell it
-   * so -- `{ doc, error: { code, message } }`, which the client acts on (a 401:
-   * it connects again, so `onConnect` signs it in and every document re-opens;
-   * a 404: it opens the document again, and lets it go when that is refused).
-   * Told nothing, its copy would stay open and stale, with no gap in the
-   * versions to show it, and a write of its own in flight would wait for an
-   * echo that never comes. A gate (or anything else) that throws for one
-   * socket refuses that socket alone: the change is still told to the rest,
-   * and the document's version moves on.
-   */
-  async function letGo(docName: string, subs: Set<any>, owns: Owns | undefined, as?: string): Promise<void> {
-    const asked = new Map<string, Promise<Refusal | null>>();
-    await Promise.all([...subs].map(async (client) => {
-      let refused: Refusal | null;
-      try { refused = await mayHear(client, docName, owns, asked, as); }
-      catch (err) { log.error(`gate for ${docName}: ${errMsg(err)}`); refused = { code: 401, message: "Authentication failed" }; }
-      if (!refused) return;
-      subs.delete(client);
-      try { trackUnsubscribe(client, docName); } catch { /* the socket may be closing */ }
-      try { if (client.readyState === undefined || client.readyState === 1) client.send(JSON.stringify({ doc: docName, error: refused })); }
-      catch { /* the socket may be closing */ }
-      log.info(`let go of ${docName}: ${refused.code} ${refused.message}`);
-    }));
-  }
-  const ownsOf = (docName: string): Owns | undefined => {
+  // The custom documents (../custom): who holds each, who may hear it, what a
+  // write tells it -- and who may still hear any document (todo #17): a change
+  // told asks the gate and `owns` again of each socket it is told to (`owns`
+  // once per identity per change), so what a change costs is the identities a
+  // document has open, not its sockets. Without auth nothing is asked.
+  const custom = createCustomDocs<I, Pool>({ defs: opts?.custom ?? [], handle: pool, auth, publish: (channel, data) => ws.publish(channel, data), log });
+  const ownsOf = (docName: string): Owns<I> | undefined => {
     const type = resolveDoc(docName)?.type;
     return type?.owns ? (identity, name) => type.owns!(identity, name) : undefined;
   };
-  // Recompute docs: evaluated per subscriber, never cached.
-  const customCriteria = new Map<string, unknown>();
-  const customSubs = new Map<string, Set<any>>();
-  // Serialize recompute pushes per doc name: a write's recompute chains after
-  // the previous one for the same doc, so a slower earlier recompute can't land
-  // after a later one and settle the client on stale data.
-  const recomputeChains = new Map<string, Promise<void>>();
-
-  function findCustom(docName: string): { def: CustomDocDef<any>; docId: string } | null {
-    for (const [prefix, def] of customByPrefix) {
-      if (docName.startsWith(prefix)) {
-        return { def, docId: docName.slice(prefix.length) };
-      }
-    }
-    return null;
-  }
-
-  function toMap(rows: any[]): Record<string, any> {
-    const m: Record<string, any> = {};
-    for (const r of rows) m[r.id] = r;
-    return m;
-  }
 
   // Single LISTEN connection with auto-reconnect
   let listener: PoolClient;
@@ -383,7 +261,7 @@ export async function createDocListener<I = unknown>(
 
       // Even without direct subscribers, we still process notifications if any
       // custom doc is registered — a watched collection's rows may need fan-out.
-      if (!state && customByPrefix.size === 0) return;
+      if (!state && custom.size === 0) return;
       if (!state) {
         // Initialize at v-1 so we fetch only the current notification's row.
         // Custom docs loaded their initial state via `def.query` on open, so
@@ -429,8 +307,8 @@ export async function createDocListener<I = unknown>(
         // Told to those who may still hear it (todo #17): the document's own
         // subscribers, and the custom documents' that watch what it changed.
         if (auth && rows.length > 0) {
-          if (state.subscribers.size > 0) await letGo(docName, state.subscribers, ownsOf(docName));
-          await letGoCustom(rows.flatMap((row: any) => (row.applied ?? row.ops) as DeltaOp[]));
+          await custom.letGo(docName, state.subscribers, ownsOf(docName));
+          await custom.letGoWatching(rows.flatMap((row: any) => (row.applied ?? row.ops) as DeltaOp[]));
         }
         for (const row of rows) {
           if (state.subscribers.size > 0) {
@@ -449,7 +327,7 @@ export async function createDocListener<I = unknown>(
           // a row that left a document is a remove, which is not a delete, and
           // a row told to two documents would be heard twice (todo #44). An
           // entry logged some other way carries null too: heard as told.
-          customFanOut((row.applied ?? row.ops) as DeltaOp[]);
+          custom.tell((row.applied ?? row.ops) as DeltaOp[]);
         }
       }
     } while (state.pending);
@@ -457,145 +335,6 @@ export async function createDocListener<I = unknown>(
 
     pruneDoc(docName);
     log.debug(`notify ${docName} v${state.version}`);
-  }
-
-  // ---------------------------------------------------------------------------
-  // Custom-doc cross-pollination
-  // ---------------------------------------------------------------------------
-
-  // Recompute defs: a write to a watched collection re-evaluates the WHOLE doc per subscriber
-  // (under that client's identity, so RLS applies) and republishes it as a root-replace op.
-  async function recomputeAndPush(def: CustomDocDef<any>, docName: string, criteria: unknown, subs: Set<any>) {
-    // Once per identity for this write, however many of the subscribers are it.
-    const reads = new Map<string, Promise<any>>();
-    for (const client of subs) {
-      try {
-        let identity: I | undefined;
-        if (auth) {
-          const g = auth.gate(client);
-          // Unauthenticated (e.g. after logout) — never push scoped recompute
-          // data to a client that has dropped its identity.
-          if (isAuthError(g)) continue;
-          identity = g as I;
-        }
-        const key = viewKey(docName, identity);
-        let read = reads.get(key);
-        if (!read) reads.set(key, (read = def.recompute!(pool, criteria, identity)));
-        const doc = await read;
-        if (doc == null) continue;
-        if (client.readyState === undefined || client.readyState === 1) {
-          client.send(JSON.stringify({ doc: docName, ops: [{ op: "replace", path: "", value: doc }] }));
-        }
-      } catch (err) {
-        log.error(`recompute ${docName}: ${errMsg(err)}`);
-      }
-    }
-  }
-
-  // Chain a recompute after the previous one for the same doc — preserves
-  // NOTIFY order so out-of-order resolution can't deliver a stale snapshot last.
-  function scheduleRecompute(def: CustomDocDef<any>, docName: string, criteria: unknown, subs: Set<any>) {
-    const prev = recomputeChains.get(docName) ?? Promise.resolve();
-    const next = prev
-      .catch(() => {})
-      .then(() => recomputeAndPush(def, docName, criteria, subs));
-    recomputeChains.set(docName, next);
-    next.finally(() => {
-      if (recomputeChains.get(docName) === next) recomputeChains.delete(docName);
-    });
-  }
-
-  /** Before a custom document is told of `ops`: let go each socket that may no longer hear it (todo #17). */
-  async function letGoCustom(ops: DeltaOp[]) {
-    if (customByPrefix.size === 0) return;
-    const touched = new Set<string>();
-    for (const op of ops) { const p = splitPath(op.path); if (p.length >= 1) touched.add(p[0]!); }
-    for (const [prefix, def] of customByPrefix) {
-      if (!def.watch.some((c) => touched.has(c))) continue;
-      const owns: Owns | undefined = def.owns ? (identity, name) => def.owns!(identity, name) : undefined;
-      if (def.recompute) {
-        for (const [docName, subs] of customSubs) {
-          if (!docName.startsWith(prefix)) continue;
-          await letGo(docName, subs, owns);
-          if (subs.size === 0) { customSubs.delete(docName); customCriteria.delete(docName); }
-        }
-        continue;
-      }
-      for (const [key, view] of views) {
-        if (!view.docName.startsWith(prefix)) continue;
-        await letGo(view.docName, view.subs, owns, identityKey(view.identity));
-        if (view.subs.size === 0) views.delete(key);
-      }
-    }
-  }
-
-  function customFanOut(ops: DeltaOp[]) {
-    if (customByPrefix.size === 0) return;
-
-    // Recompute defs — whole-doc, once per affected doc (any watched collection touched this batch).
-    let hasRecompute = false;
-    for (const def of customByPrefix.values()) if (def.recompute) { hasRecompute = true; break; }
-    if (hasRecompute) {
-      const touched = new Set<string>();
-      for (const op of ops) { const p = splitPath(op.path); if (p.length >= 1) touched.add(p[0]!); }
-      for (const [prefix, def] of customByPrefix) {
-        if (!def.recompute || !def.watch.some((c) => touched.has(c))) continue;
-        for (const [docName, subs] of customSubs) {
-          if (!docName.startsWith(prefix) || subs.size === 0) continue;
-          const criteria = customCriteria.get(docName);
-          if (criteria === undefined) continue;
-          scheduleRecompute(def, docName, criteria, subs);
-        }
-      }
-    }
-
-    // Membership defs — per-row add/replace/remove, per view.
-    const viewsOf = new Map<string, number>();
-    for (const view of views.values()) viewsOf.set(view.docName, (viewsOf.get(view.docName) ?? 0) + 1);
-    for (const op of ops) {
-      const parts = splitPath(op.path);
-      // A row at whatever path the document was told it: /<coll>/<id>, or a
-      // single document's root, /<coll>, whose id is its own (as on SQLite).
-      const coll = parts[0]!;
-      const row = (op as any).value as any | undefined;
-      const id = parts[1] ?? (row?.id != null ? String(row.id) : undefined);
-      if (id === undefined || !watchedCollections.has(coll)) continue;
-
-      for (const [prefix, def] of customByPrefix) {
-        if (!def.matches) continue; // recompute defs handled above
-        if (!def.watch.includes(coll)) continue;
-
-        for (const view of views.values()) {
-          if (!view.docName.startsWith(prefix) || view.subs.size === 0) continue;
-          const cached = view.doc;
-          const shouldBeIn = row == null ? false : def.matches!(coll, row, view.criteria, view.identity);
-          const wasIn = cached[coll]?.[id] != null;
-          const emitted: DeltaOp[] = [];
-
-          if (!wasIn && shouldBeIn) {
-            cached[coll] ??= {};
-            cached[coll]![id] = row;
-            emitted.push({ op: "add", path: joinPath(coll, id), value: row });
-          } else if (wasIn && shouldBeIn) {
-            cached[coll]![id] = row;
-            emitted.push({ op: "replace", path: joinPath(coll, id), value: row });
-          } else if (wasIn && !shouldBeIn) {
-            delete cached[coll]![id];
-            emitted.push({ op: "remove", path: joinPath(coll, id) });
-          }
-          if (!emitted.length) continue;
-
-          // The only view of its name: its subscribers are the channel's. Else
-          // each view's own subscribers, so one identity's rows reach only it.
-          const change = { doc: view.docName, ops: emitted };
-          if (viewsOf.get(view.docName) === 1) ws.publish(view.docName, change);
-          else {
-            const raw = JSON.stringify(change);
-            for (const c of view.subs) if (c.readyState === undefined || c.readyState === 1) c.send(raw);
-          }
-        }
-      }
-    }
   }
 
   function pruneDoc(docName: string) {
@@ -619,16 +358,7 @@ export async function createDocListener<I = unknown>(
       if (!state.subscribers.delete(client)) continue;
       if (state.subscribers.size === 0) tracked.delete(docName);
     }
-    for (const [docName, subs] of customSubs) {
-      if (!subs.delete(client)) continue;
-      if (subs.size === 0) {
-        customSubs.delete(docName);
-        customCriteria.delete(docName);
-      }
-    }
-    for (const [key, view] of views) {
-      if (view.subs.delete(client) && view.subs.size === 0) views.delete(key);
-    }
+    custom.leave(client);
   }
 
   // ---------------------------------------------------------------------------
@@ -684,11 +414,11 @@ export async function createDocListener<I = unknown>(
   // WS branches — custom docs first (short-circuit before standard withDoc)
   // ---------------------------------------------------------------------------
 
-  if (customByPrefix.size > 0) {
+  if (custom.size > 0) {
     ws.on("open", async (msg: any, client: any, respond: (r: any) => void) => {
       const docName = msg.doc as string;
       if (!docName) return;
-      const match = findCustom(docName);
+      const match = custom.find(docName);
       if (!match) return;                                     // fall through to standard
 
       // Gate custom docs exactly like standard docs (withDoc). Without this the
@@ -703,43 +433,15 @@ export async function createDocListener<I = unknown>(
         identity = gated as I;
       }
 
-      const { def, docId } = match;
       try {
         // As withDoc asks a type's owns: a name this identity does not own is not there for it.
-        if (auth && def.owns && !(await def.owns(identity as I, docName))) {
-          return respond({ error: { code: 404, message: "Not found" } });
-        }
-        let doc: any;
-        if (def.recompute) {
-          const criteria = customCriteria.get(docName) ?? def.parse(docId);
-          // Whole-doc, identity-aware: re-evaluate under THIS client's identity (RLS).
-          doc = await def.recompute(pool, criteria, identity);
-          if (doc == null) return respond({ error: { code: 404, message: "Not found" } });
-          // Not cached: each open and fan-out re-evaluates per identity.
-          customCriteria.set(docName, criteria);
-          if (!customSubs.has(docName)) customSubs.set(docName, new Set());
-          customSubs.get(docName)!.add(client);
-        } else {
-          // Membership: this identity's view of the name, queried as it.
-          const key = viewKey(docName, identity);
-          let view = views.get(key);
-          if (!view) {
-            const criteria = def.parse(docId);
-            const rowsByColl = await def.query!(pool, criteria, identity);
-            const loaded: Record<string, Record<string, any>> = {};
-            for (const coll of def.watch) loaded[coll] = toMap(rowsByColl[coll] ?? []);
-            view = views.get(key);   // an open of the same view may have landed meanwhile
-            if (!view) views.set(key, (view = { docName, criteria, identity, doc: loaded, subs: new Set() }));
-          }
-          view.subs.add(client);
-          doc = view.doc;
-        }
-
+        if (auth && match.def.owns && !(await match.def.owns(identity as I, docName))) return respond({ error: NOT_FOUND });
+        const doc = await custom.open(client, docName, match, identity);
+        if (doc == null) return respond({ error: NOT_FOUND });
         trackSubscribe(client, docName);
         onClientDrop(client, releaseClient);
-
         respond({ result: doc });
-        log.info(`opened ${docName} (custom${def.recompute ? ", recompute" : ""})`);
+        log.info(`opened ${docName} (custom${match.def.recompute ? ", recompute" : ""})`);
       } catch (err) {
         log.error(`open custom ${docName} failed: ${errMsg(err)}`);
         respond({ error: { code: 500, message: errMsg(err) } });
@@ -749,27 +451,16 @@ export async function createDocListener<I = unknown>(
     ws.on("delta", (msg: any, _client: any, respond: (r: any) => void) => {
       const docName = msg.doc as string;
       if (!docName) return;
-      if (!findCustom(docName)) return;                       // fall through to standard
+      if (!custom.find(docName)) return;                       // fall through to standard
       respond({ error: { code: 403, message: "Custom docs are read-only; write through the source doc." } });
     });
 
     ws.on("close", (msg: any, client: any, respond: (r: any) => void) => {
       const docName = msg.doc as string;
       if (!docName) return;
-      if (!findCustom(docName)) return;                       // fall through to standard
-
+      if (!custom.find(docName)) return;                       // fall through to standard
       trackUnsubscribe(client, docName);
-      const subs = customSubs.get(docName);
-      if (subs) {
-        subs.delete(client);
-        if (subs.size === 0) {
-          customSubs.delete(docName);
-          customCriteria.delete(docName);
-        }
-      }
-      for (const [key, view] of views) {
-        if (view.docName === docName && view.subs.delete(client) && view.subs.size === 0) views.delete(key);
-      }
+      custom.leave(client, docName);
       respond({ result: { ack: true } });
       log.debug(`closed ${docName} (custom)`);
     });

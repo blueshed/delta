@@ -94,8 +94,6 @@ const types: DocType[] = [];
 /** The listeners with an `auth` module now running: while there is one, every type must say who owns it. */
 const authed = new Set<object>();
 
-export { ownerless };
-
 export function registerDocType(t: DocType): void {
   if (authed.size > 0 && !t.owns && !t.shared) throw ownerless(t.prefix);
   types.push(t);

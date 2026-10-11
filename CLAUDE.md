@@ -116,6 +116,8 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
 - `src/server/pglite.ts`: Postgres in process -- PGlite behind the slice of `pg`'s Pool delta
   uses, so `./postgres` runs on it unchanged (from epsilon's `pglite.ts`).
 - `src/server/scope.ts`: a doc name's scope, for the backends that are not Postgres.
+- `src/server/custom.ts`: custom documents (`defineCustomDoc`) on SQLite and Postgres alike --
+  views, recompute reads, who may still hear a document (`letGo`), the per-row telling.
 - `src/server/ledger.ts`: the SQLite ledger (entries, the cursor's chains).
 - `src/server/local.ts`: `createLocal()`, delta in-process with no socket.
 - `src/server/kinds.ts`: `registerMemory`, `registerStatic`, `registerSource`.

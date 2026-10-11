@@ -297,5 +297,12 @@ export function socketCursor(who: string | null, clientId: string | undefined): 
   return who === null ? clientId : JSON.stringify([who, clientId]);
 }
 
+/** How an identity is written in the ledger: by `who`, else a string or number as it is and anything else as JSON; none, null. */
+export function ledgerWho<I>(identity: I | undefined, who?: (identity: I) => string): string | null {
+  if (identity === undefined || identity === null) return null;
+  if (who) return who(identity);
+  return typeof identity === "string" || typeof identity === "number" ? String(identity) : JSON.stringify(identity);
+}
+
 /** An entry's id, as a walk names a change by it: a whole number from 1. */
 export const isEntryId = (id: unknown): id is number => Number.isSafeInteger(id) && (id as number) > 0;
