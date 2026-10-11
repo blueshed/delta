@@ -13,8 +13,7 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connectWs, openDoc, type DeltaOp } from "../src/client/client";
-
-(globalThis as any).location ??= { href: "http://localhost/", protocol: "http:" };
+import { runExample, until, type Proc } from "./helpers/examples";
 
 const skill = await Bun.file(new URL("../.claude/skills/delta-doc/SKILL.md", import.meta.url)).text();
 
@@ -49,23 +48,10 @@ console.log("heard " + log.textContent);
 process.exit(0);
 `;
 
-/** Reads a process's stdout until `pattern` matches; fails if it exits first. */
-async function until(proc: Bun.Subprocess<"ignore", "pipe", "pipe">, pattern: RegExp): Promise<RegExpExecArray> {
-  const reader = proc.stdout.getReader();
-  let out = "";
-  for (;;) {
-    const m = pattern.exec(out);
-    if (m) { reader.releaseLock(); return m; }
-    const { value, done } = await reader.read();
-    if (done) throw new Error(`exited before ${pattern}: ${out}${await new Response(proc.stderr).text()}`);
-    out += new TextDecoder().decode(value);
-  }
-}
-
 test("SKILL.md's recipe, as written: one browser sends a message, the other's page shows it", async () => {
   const dir = new URL(`./.recipe-${process.pid}/`, import.meta.url).pathname;
   mkdirSync(dir, { recursive: true });
-  const procs: Bun.Subprocess<"ignore", "pipe", "pipe">[] = [];
+  const procs: Proc[] = [];
   const spawn = (file: string, env: Record<string, string> = {}) => {
     const p = Bun.spawn(["bun", file], { cwd: dir, env: { ...process.env, ...env }, stdout: "pipe", stderr: "pipe" });
     procs.push(p);
@@ -93,9 +79,8 @@ test("SKILL.md's recipe, as written: one browser sends a message, the other's pa
 }, 20_000);
 
 test("bun examples/shared-state/server.ts serves its page, and passes a message from one socket to another", async () => {
-  const root = new URL("..", import.meta.url).pathname;
   const cwd = mkdtempSync(join(tmpdir(), "delta-shared-state-"));   // its chat-room.json lands here, not in the repo
-  const run = Bun.spawn(["bun", join(root, "examples/shared-state/server.ts")], { cwd, env: { ...process.env, PORT: "0" }, stdout: "pipe", stderr: "pipe" });
+  const run = runExample("shared-state/server.ts", {}, cwd);
   let a: ReturnType<typeof connectWs> | undefined;
   let b: ReturnType<typeof connectWs> | undefined;
   try {

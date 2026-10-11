@@ -1,79 +1,37 @@
 /**
- * sites-bbox — Postgres twin of server.ts.
+ * sites-bbox on Postgres: the same documents as server.ts, the rows in the
+ * database. Every process serving it hears every write (LISTEN/NOTIFY), so a
+ * box open on one is told of a site moved through another.
  *
- * Same two doc types, same client code. Server-side swap:
- *   createDocListener(ws, pool, { custom: [sitesInBbox] })
- *     └─ LISTENs on delta_changes, fetches the logged ops,
- *        fans them out to direct subscribers AND runs the custom
- *        doc predicate, once per write, for every open bbox view on
- *        this Bun process.
+ *   PORT=3100 bun examples/sites-bbox/server-pg.ts
  *
- * Run (assumes compose.yml is up and `sites.sql` fixture is applied):
- *
- *   docker compose up -d --wait
- *   psql $PG_URL -f tests/fixtures/sites.sql          # one-time
- *   PG_URL=... PORT=3100 bun examples/sites-bbox/server-pg.ts
+ * PG_URL names the database (the compose one on 5433 by default).
  */
-import type { Pool as PoolT } from "pg";
 import { Pool } from "pg";
 import {
-  applyFramework,
-  createDocListener,
-  defineCustomDoc,
-  defineDoc,
-  docTypeFromDef,
-  type CustomDocDef,
+  applyFramework, applySql, createDocListener, defineCustomDoc, docTypeFromDef, generateSql,
 } from "../../src/server/postgres";
 import { createWs } from "../../src/server/server";
+import { schema, worldDoc, parse, matches, type BBox } from "./schema";
 
-// ---------------------------------------------------------------------------
-// Standard doc — read/write the whole world.
-// ---------------------------------------------------------------------------
-
-const worldDoc = defineDoc("world:", {
-  root: "worlds",
-  include: ["sites"],
-});
-
-// ---------------------------------------------------------------------------
-// Custom doc — sites inside a bounding box.
-// ---------------------------------------------------------------------------
-
-interface BBox { minLng: number; minLat: number; maxLng: number; maxLat: number }
-
-const sitesInBbox: CustomDocDef<BBox> = defineCustomDoc<BBox>("sites-in-bbox:", {
+const sitesInBbox = defineCustomDoc<BBox>("sites-in-bbox:", {
   watch: ["sites"],
-  parse: (docId) => {
-    const [minLng, minLat, maxLng, maxLat] = docId.split(",").map(Number);
-    return { minLng: minLng!, minLat: minLat!, maxLng: maxLng!, maxLat: maxLat! };
-  },
-  query: async (pool: PoolT, c) => {
+  parse,
+  query: async (pool: Pool, c) => {
     const { rows } = await pool.query(
-      "SELECT id::text, world_id::text, name, lat, lng FROM sites " +
-      "WHERE lng BETWEEN $1 AND $2 AND lat BETWEEN $3 AND $4",
+      "SELECT to_jsonb(s) AS site FROM sites s WHERE lng BETWEEN $1 AND $2 AND lat BETWEEN $3 AND $4",
       [c.minLng, c.maxLng, c.minLat, c.maxLat],
     );
-    return { sites: rows };
+    return { sites: rows.map((r) => r.site) };   // as jsonb, so ids are numbers, as in the world's rows
   },
-  matches: (_coll, row, c) =>
-    row.lng >= c.minLng && row.lng <= c.maxLng &&
-    row.lat >= c.minLat && row.lat <= c.maxLat,
+  matches,
 });
 
-// ---------------------------------------------------------------------------
-// Wire up the server.
-// ---------------------------------------------------------------------------
-
-const pool = new Pool({
-  connectionString: process.env.PG_URL ?? "postgres://delta:delta@localhost:5433/delta_test",
-});
-
-// Apply framework SQL (idempotent). The sites fixture must be applied
-// separately (see header) because it's consumer schema, not framework.
+const pool = new Pool({ connectionString: process.env.PG_URL ?? "postgres://delta:delta@localhost:5433/delta_test" });
 await applyFramework(pool);
-
-// Seed a world if none exists.
+await applySql(pool, generateSql(schema, [worldDoc]));
 await pool.query("INSERT INTO worlds (label) SELECT 'Earth' WHERE NOT EXISTS (SELECT 1 FROM worlds)");
+const { rows: [world] } = await pool.query("SELECT min(id)::int AS id FROM worlds");
 
 const ws = createWs();
 const listener = await createDocListener(ws, pool, { types: [docTypeFromDef(worldDoc, pool)], custom: [sitesInBbox] });
@@ -86,10 +44,9 @@ const server = Bun.serve({
 ws.setServer(server);
 
 console.log(`sites-bbox (Postgres) on ws://localhost:${server.port}${ws.path}`);
-console.log(`  open "world:<id>" to read/write sites (use the id from the DB)`);
-console.log(`  open "sites-in-bbox:0,0,50,50" for a live bbox-filtered view`);
+console.log(`  open "world:${world.id}" to read and write every site`);
+console.log(`  open "sites-in-bbox:0,0,50,50" for the sites in that box`);
 
-// Clean up on SIGINT.
 const shutdown = async () => {
   await listener.destroy();
   await pool.end();
