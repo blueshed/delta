@@ -127,6 +127,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Postgres test that empties tables between cases restarts `seq_<table>` too (`TRUNCATE ...
   RESTART IDENTITY` leaves it: the table does not own it).
 
+- **Breaking: a table name with capitals is refused by `defineSchema`**, on every backend.
+  Postgres folds an unquoted name to lowercase, so `PrMixed`'s generated SQL failed (`relation
+  "seq_prmixed" does not exist`), and a privilege asked of the name would be another table's.
+  The error names the fix. **Migration:** keep the key and give the table in lowercase snake
+  case: `{ prMixed: { table: "pr_mixed", ... } }`.
+
 ### Fixed
 
 - **Postgres: a SECURITY DEFINER function no longer searches the caller's temporary tables

@@ -122,6 +122,12 @@ export function defineSchema(defs: Record<string, TableDef>): Schema {
   for (const [key, def] of Object.entries(defs)) {
     assertIdentifier(key, "schema key");
     if (def.table !== undefined) assertIdentifier(def.table, "table name");
+    // Postgres folds an unquoted name to lowercase, so the table and its seq_<table> it makes and
+    // the privileges it asks of the name would be another table's: every backend refuses it (#71's review)
+    const table = def.table ?? key;
+    if (table !== table.toLowerCase()) {
+      throw new Error(`Invalid table name: ${JSON.stringify(table)} -- a table name is lowercase snake_case (${JSON.stringify(table.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase())}); give it as table: and keep the key`);
+    }
     for (const col of Object.keys(def.columns)) {
       assertColumnName(col);
     }

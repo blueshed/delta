@@ -360,6 +360,12 @@ describe("validateOps", () => {
 // ---------------------------------------------------------------------------
 
 describe("identifier validation", () => {
+  test("refuses a table name with capitals, on every backend: Postgres would fold it to another name (#71's review); a key with capitals keeps a lowercase table", () => {
+    expect(() => defineSchema({ PrMixed: { columns: { a: "text" } } })).toThrow('Invalid table name: "PrMixed" -- a table name is lowercase snake_case ("pr_mixed")');
+    expect(() => defineSchema({ mixed: { table: "PrMixed", columns: { a: "text" } } })).toThrow(/lowercase snake_case/);
+    expect(defineSchema({ prMixed: { table: "pr_mixed", columns: { a: "text" } } }).tables.prMixed!.name).toBe("pr_mixed");
+  });
+
   test("rejects a schema key with a single quote", () => {
     expect(() =>
       defineSchema({ "bad'name": { columns: { a: "text" } } }),
