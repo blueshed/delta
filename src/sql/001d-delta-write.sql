@@ -9,7 +9,8 @@
 -- SELECT: so it runs as the framework's owner (SECURITY DEFINER), for a table
 -- delta knows, an id a path may name, and a caller that may insert into the
 -- table, and nothing else. Running as the owner, current_user is the owner:
--- the caller is the role SET ROLE named, else the session's.
+-- the caller is the role SET ROLE named, else the session's. Its search_path
+-- is pinned below, pg_temp last.
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION _delta_serial_past(p_table TEXT, p_id BIGINT)
@@ -37,7 +38,7 @@ END $$;
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION _delta_serial_new(p_table TEXT, p_id BIGINT)
-RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
+RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER AS $$
 DECLARE
   v_new BOOLEAN;
 BEGIN
@@ -49,6 +50,19 @@ BEGIN
   RETURN v_new;
 END;
 $$;
+
+-- Both run as the framework's owner, so each looks its names up only in the
+-- schemas the framework is applied in, and pg_temp last: a caller's temporary
+-- _delta_collections, or a temporary table named as one of delta's, never
+-- stands in for the real one. (search_path FROM CURRENT took "$user", public,
+-- and pg_temp is searched first when it is not named.)
+DO $$
+DECLARE
+  v_path TEXT := COALESCE((SELECT string_agg(quote_ident(s), ', ') FROM unnest(current_schemas(false)) AS s), 'public') || ', pg_temp';
+BEGIN
+  EXECUTE format('ALTER FUNCTION _delta_serial_past(text, bigint) SET search_path = %s', v_path);
+  EXECUTE format('ALTER FUNCTION _delta_serial_new(text, bigint) SET search_path = %s', v_path);
+END $$;
 
 -- ---------------------------------------------------------------------------
 -- _delta_cascade_remove: remove a row + cascade to children & referencedBy,

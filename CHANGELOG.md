@@ -120,6 +120,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hands out: a taken one is still a 409 wherever it is, so it is as private as it is
   unguessable (a uuid). `_delta_serial_new` is new in `001d`; it and `_delta_serial_past` (both
   run as the framework's owner) answer only a caller that may read, or insert into, the table.
+  Both look names up only in the schemas the framework is applied in, pg_temp last, so a
+  caller's temporary table never stands in for `_delta_collections` or a table of delta's.
   `delta_apply` and `_delta_make_implied` are replaced in place: re-apply the framework
   (`applyFramework`, or `bunx @blueshed/delta init --upgrade`). **Migration:** a later write
   that re-adds a removed row under its old id -- or writes to an implied document whose root

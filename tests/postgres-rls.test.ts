@@ -289,6 +289,35 @@ describe("RLS and the broadcast channel (NOSUPERUSER role)", () => {
     }
   });
 
+  test("a caller's temporary tables never stand in for delta's: one planted as _delta_collections and as a table the role cannot read reveals nothing of its serial, nor moves it", async () => {
+    await admin.query(`DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'delta_rls_none') THEN CREATE ROLE delta_rls_none NOSUPERUSER NOBYPASSRLS; END IF; END $$;`);
+    await admin.query("DROP TABLE IF EXISTS rls_secret; DROP SEQUENCE IF EXISTS seq_rls_secret; CREATE TABLE rls_secret (id BIGINT); CREATE SEQUENCE seq_rls_secret; SELECT setval('seq_rls_secret', 41)");
+    const c = await admin.connect();
+    try {
+      await c.query("BEGIN");
+      await c.query("SET LOCAL ROLE delta_rls_none");
+      await c.query("CREATE TEMP TABLE _delta_collections (table_name TEXT); INSERT INTO _delta_collections VALUES ('rls_secret'); CREATE TEMP TABLE rls_secret (id BIGINT)");
+      // as the owner, the real serial is past 41: a planted table must not make the role a reader of it
+      expect((await c.query("SELECT _delta_serial_new('rls_secret', 42) AS new")).rows[0]).toEqual({ new: false });
+      await c.query("SELECT _delta_serial_past('rls_secret', 9007199254740991)");
+      await c.query("ROLLBACK");
+      expect(Number((await admin.query("SELECT last_value FROM seq_rls_secret")).rows[0].last_value)).toBe(41);
+    } finally {
+      await c.query("ROLLBACK").catch(() => {});
+      c.release();
+      await admin.query("DROP TABLE IF EXISTS rls_secret; DROP SEQUENCE IF EXISTS seq_rls_secret");
+    }
+  });
+
+  test("every framework function that runs as its owner looks names up with pg_temp last", async () => {
+    const { rows } = await admin.query(`SELECT proname, proconfig FROM pg_proc WHERE prosecdef AND proname ~ '^_?delta_' ORDER BY proname`);
+    expect(rows.map((r: any) => r.proname)).toEqual(expect.arrayContaining(["_delta_serial_new", "_delta_serial_past"]));
+    for (const r of rows) {
+      const path = (r.proconfig ?? []).find((c: string) => c.startsWith("search_path="));
+      expect({ fn: r.proname, endsWithTemp: /, pg_temp$/.test(path ?? "") }).toEqual({ fn: r.proname, endsWithTemp: true });
+    }
+  });
+
   test("an undo is a write: once the identity no longer owns the document, its undo is a 404 too", async () => {
     await admin.query("TRUNCATE _delta_ledger RESTART IDENTITY");
     const members = new Set([1]);
