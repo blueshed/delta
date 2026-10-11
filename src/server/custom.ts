@@ -107,7 +107,8 @@ export function createCustomDocs<I, H>(opts: {
   // one identity's rows are never served to another. A view whose rows were
   // dropped (`forget`) is queried again. Recompute docs: their criteria and
   // subscribers by name, read again per subscriber, never kept.
-  type View = { docName: string; def: Def; criteria: unknown; identity: I | undefined; doc: Rows | null; subs: Set<any> };
+  // `turn`: what the view is still being told, a row read through its query (an arrival): what it is told next waits for it
+  type View = { docName: string; def: Def; criteria: unknown; identity: I | undefined; doc: Rows | null; subs: Set<any>; turn?: Promise<void> };
   const views = new Map<string, View>();
   const recomputes = new Map<string, { def: Def; criteria: unknown; subs: Set<any> }>();
   // a recompute that waits on a read runs after the one before it of the same name, so a slow one never lands last
@@ -297,10 +298,62 @@ export function createCustomDocs<I, H>(opts: {
       return [f, typeof h === "string" && v !== null && typeof v !== "object" && typeof v !== "string" ? String(v) : v];
     }));
 
-  /** Each membership view, per row of `ops`: a row that arrives is an add, one that stays a replace of each field it holds that changed, one that leaves a remove. */
+  /** Send a view what it is told: the only view of its name, on the channel; else to its own subscribers, so one identity's rows reach only it. */
+  function send(view: View, ops: DeltaOp[]): void {
+    const change = { doc: view.docName, ops };
+    let named = 0;
+    for (const v of views.values()) if (v.subs.size && v.docName === view.docName) named++;
+    if (named === 1) return opts.publish(view.docName, change);
+    const raw = JSON.stringify(change);
+    for (const c of view.subs) sendTo(c, raw);
+  }
+
+  /** Run `step` for `view` after what it is still being told, so each view hears its changes in order. */
+  function inTurn(view: View, step: () => MaybePromise<void>): void {
+    const failed = (err: any) => log.error(`tell ${view.docName}: ${message(err)}`);
+    const settle = (p: Promise<void>) => {
+      const mine: Promise<void> = p.catch(failed).then(() => { if (view.turn === mine) view.turn = undefined; });
+      view.turn = mine;
+    };
+    if (view.turn) return settle(view.turn.then(step));
+    let r: MaybePromise<void>;
+    try { r = step(); } catch (err) { return failed(err); }
+    if (isPromise(r)) settle(r);
+  }
+
+  /**
+   * What a membership view is told of a row a write told (`row`, whole; null:
+   * gone): one that arrives is an add of the row as its query reads it (read
+   * through the query: the fields it reads, with its casts -- the told row if
+   * the query does not return it); one that stays, a replace of each field it
+   * holds that changed (`asHeld`); one that leaves, a remove.
+   */
+  function tellView(view: View, coll: string, id: string, row: any): MaybePromise<void> {
+    const { def, doc } = view;
+    if (!doc || !view.subs.size) return;
+    const was = doc[coll]![id];
+    const path = joinPath(coll, id);
+    if (row != null && def.matches!(coll, row, view.criteria, view.identity)) {
+      if (was == null) {
+        return after(def.query!(handle, view.criteria, view.identity), (r) => {
+          const now = toMap((r as Record<string, any[]>)[coll] ?? [])[id] ?? row;
+          if (view.doc !== doc) return;   // dropped meanwhile (forget): read again whole
+          doc[coll]![id] = now;
+          send(view, [{ op: "add", path, value: now }]);
+        });
+      }
+      const now = asHeld(was, row);
+      doc[coll]![id] = now;
+      const told = changedFields(path, was, now);
+      if (told.length) send(view, told);
+    } else if (was != null) {
+      delete doc[coll]![id];
+      send(view, [{ op: "remove", path }]);
+    }
+  }
+
+  /** Each membership view, per row of `ops`, in turn (`tellView`). */
   function tellRows(ops: DeltaOp[]): void {
-    const viewsOf = new Map<string, number>();
-    for (const view of views.values()) if (view.subs.size) viewsOf.set(view.docName, (viewsOf.get(view.docName) ?? 0) + 1);
     for (const op of ops) {
       // A row at whatever path the write told it: /<coll>/<id>, or a single
       // document's root, /<coll>, whose id is its own. A told row is whole.
@@ -309,27 +362,7 @@ export function createCustomDocs<I, H>(opts: {
       const id = at ?? (row?.id != null ? String(row.id) : undefined);
       if (id === undefined || !watched.has(coll)) continue;
       for (const view of views.values()) {
-        const { def, doc } = view;
-        if (!def.matches || !def.watch.includes(coll) || !view.subs.size || !doc) continue;
-        const was = doc[coll]![id];
-        let told: DeltaOp[];
-        if (row != null && def.matches(coll, row, view.criteria, view.identity)) {
-          const now = was != null ? asHeld(was, row) : row;
-          doc[coll]![id] = now;
-          told = was != null ? changedFields(joinPath(coll, id), was, now) : [{ op: "add", path: joinPath(coll, id), value: row }];
-          if (!told.length) continue;
-        } else if (was != null) {
-          delete doc[coll]![id];
-          told = [{ op: "remove", path: joinPath(coll, id) }];
-        } else continue;
-        // The only view of its name: its subscribers are the channel's. Else
-        // each view's own subscribers, so one identity's rows reach only it.
-        const change = { doc: view.docName, ops: told };
-        if (viewsOf.get(view.docName) === 1) opts.publish(view.docName, change);
-        else {
-          const raw = JSON.stringify(change);
-          for (const c of view.subs) sendTo(c, raw);
-        }
+        if (view.def.matches && view.def.watch.includes(coll) && view.subs.size) inTurn(view, () => tellView(view, coll, id, row));
       }
     }
   }

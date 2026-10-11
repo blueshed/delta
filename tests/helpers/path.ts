@@ -2288,15 +2288,22 @@ export function fanOutCases(backend: () => PathBackend): void {
   });
 
   describe("a custom document whose query reads some columns, or reads them as text", () => {
-    test("is told what changed of what it holds, in the shape its query gave: a field it does not read, nothing; one it reads, that field; a key read as text, no change (todo #69's review)", async () => {
+    test("is told what changed of what it holds, in the shape its query gave: a field it does not read, nothing; one it reads, that field; a key read as text, no change; a row that joins it, as its query reads it (todo #69's review)", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-emails:1", "fo-guests:1", "fo-board:1", "fo-all-households:"]);
       await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/t", value: "notes" }]);
       await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/email", value: "z@x" }]);
       await write(b.process, "fo-all-households:", [{ op: "replace", path: "/households/2/weddings_id", value: 2 }]);
-      for (const doc of ["fo-emails:1", "fo-guests:1"]) {
-        await expectTold(b, doc, [[field("/households/1/email", "z@x")], [{ op: "remove", path: "/households/2" }]]);
-      }
+      // joining: one added to the wedding, and one moved to it from the other
+      await write(b.process, "fo-board:1", [{ op: "add", path: "/households/-", value: { email: "n@x", t: "notes" } }]);
+      await write(b.process, "fo-all-households:", [{ op: "replace", path: "/households/3/weddings_id", value: 1 }]);
+      const joined = (shape: (id: number, email: string) => unknown) => [
+        [{ op: "add", path: "/households/4", value: shape(4, "n@x") }],
+        [{ op: "add", path: "/households/3", value: shape(3, "c@x") }],
+      ];
+      const told = [[field("/households/1/email", "z@x")], [{ op: "remove", path: "/households/2" }]];
+      await expectTold(b, "fo-emails:1", [...told, ...joined((id, email) => ({ id, email }))]);
+      await expectTold(b, "fo-guests:1", [...told, ...joined((id, email) => ({ id: String(id), weddings_id: "1", email }))]);
       await assertCopiesHold(b, copies);
     });
   });

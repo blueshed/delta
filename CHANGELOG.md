@@ -38,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PGlite and Postgres (`_delta_tell`, `001d`, replaced in place: apply it with `bunx
   @blueshed/delta init`), a membership custom document (each field it holds that changed, in
   the shape its `query` gave: a column it does not read is never told, one read as text stays
-  text), and the free-form document (`registerDoc`
+  text; a row that joins it is read through its `query`, run again for it), and the free-form document (`registerDoc`
   tells its ops as applied: `normalizeForBroadcast` is no longer called, and stays exported). A
   write's answer and ledger entry keep whole rows: they are its record, not a telling. The
   client gives the row a field op lands in a fresh reference (a collection's map is kept), so a keyed

@@ -7,6 +7,7 @@
  * supplies `start` and asks every case below of it.
  */
 import { describe, expect, test } from "bun:test";
+import { waitFor } from "../setup";
 import type { DeltaAuth } from "../../src/server/auth";
 import { expectTold, field, household, openAll, type PathBackend } from "./path";
 
@@ -222,12 +223,15 @@ export function ownsCases(backend: () => OwnsBackend): void {
       await expectTold(p.backend, "fo-mine:x", [[field("/households/1/email", "z@x")]]);
       await p.as(bob).call("open", { doc: "fo-all-households:" });
       expect((await p.as(bob).call("delta", { doc: "fo-all-households:", ops: [{ op: "replace", path: "/households/3/weddings_id", value: 1 }] })).error).toBeUndefined();   // moved through a list: it holds both weddings' households
-      await expectTold(p.backend, "fo-mine:x", [
-        [field("/households/1/email", "z@x")],
-        [{ op: "add", path: "/households/3", value: household(3, "c@x") }],   // ada's
-        [{ op: "remove", path: "/households/3" }],                                                // bob's
-      ]);
-      expect(sentTo(p, "fo-mine:x").slice(1)).toEqual([[1, { op: "add", path: "/households/3", value: household(3, "c@x") }], [2, { op: "remove", path: "/households/3" }]]);
+      // each identity's view hears its own, in its own order: ada's arrival is read through her query, bob's removal is not
+      await waitFor(() => sentTo(p, "fo-mine:x").length >= 3, { timeout: 3000 }).catch(() => {});
+      await p.backend.quiet();
+      const byWho = (sent: unknown[][]) => sent.toSorted((x, y) => Number(x[0]) - Number(y[0]));
+      expect(byWho(sentTo(p, "fo-mine:x"))).toEqual(byWho([
+        [1, field("/households/1/email", "z@x")],
+        [1, { op: "add", path: "/households/3", value: household(3, "c@x") }],   // ada's
+        [2, { op: "remove", path: "/households/3" }],                              // bob's
+      ]));
       expect(Object.keys(await rows(ada)).sort()).toEqual(["1", "2", "3"]);
       expect(await rows(bob)).toEqual({});
     });
