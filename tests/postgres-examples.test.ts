@@ -58,12 +58,18 @@ describe("kanban", () => {
 
   test("run.ts: bob's board shows alice's rename, move and new card; charlie, opening late, the same", async () => {
     const run = runExample("kanban/run.ts", env);
-    const out = await new Response(run.stdout).text();
-    expect(await run.exited).toBe(0);
-    const bob = out.slice(out.indexOf("3. bob.data.get()"), out.indexOf("4. charlie"));
-    expect(bob).toContain('"title": "In flight"');
-    expect(bob).toContain('"title": "draft release notes"');
-    expect(out.slice(out.indexOf("4. charlie"))).toContain('"title": "draft release notes"');
+    const hang = setTimeout(() => run.kill(), 15_000);   // a hang is killed before the test's timeout, so the finally runs
+    try {
+      const out = await new Response(run.stdout).text();
+      expect(await run.exited).toBe(0);
+      const bob = out.slice(out.indexOf("3. bob.data.get()"), out.indexOf("4. charlie"));
+      expect(bob).toContain('"title": "In flight"');
+      expect(bob).toContain('"title": "draft release notes"');
+      expect(out.slice(out.indexOf("4. charlie"))).toContain('"title": "draft release notes"');
+    } finally {
+      clearTimeout(hang);
+      await stop(run);   // never left running with its pool open
+    }
   }, 20_000);
 });
 

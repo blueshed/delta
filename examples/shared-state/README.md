@@ -38,11 +38,11 @@ That's it. Read the two files end-to-end — they fit on one screen.
 
 ## Where it grows
 
-A free-form document like this one does a lot on its own: no schema, any shape. When documents
-come to share rows, give the rows a schema and keep them in a JSON file (`registerDocs` from
-`@blueshed/delta/json`), or in SQLite when you want undo and history (`@blueshed/delta/sqlite`,
-the same call), or in Postgres when servers share the data or people should see only their own.
-The client opens and sends as it does here; the rows get serial ids.
+A shared JSON document does a lot on its own. SQLite earns its place when documents share the
+same rows, as a catalogue and every order do, or when you want undo and history (`registerDocs`
+from `@blueshed/delta/sqlite`, with a schema). Postgres comes in when servers share the data, or
+people should see only their own. The client opens and sends as it does here; the rows get
+serial ids.
 
 [../sites-bbox/](../sites-bbox/) shows two documents over the same rows, on SQLite and Postgres;
 [../kanban/](../kanban/) a board on Postgres; [../todos-vs-rls/](../todos-vs-rls/) people who

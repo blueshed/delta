@@ -1,6 +1,6 @@
 /**
- * Driver — start a delta server, connect two WS clients, show sync live
- * through the library's reactive `openDoc` signal.
+ * Driver: start a delta server and open board:1 over two sockets; what one
+ * client changes, the other is told, and its `openDoc` signal shows it.
  *
  *   bun run db:up
  *   bun run examples/kanban/run.ts

@@ -9,7 +9,7 @@
  *   bun examples/kanban/serve.ts        # default port 3100
  *   PORT=3199 bun examples/kanban/serve.ts
  *
- * Open http://localhost:3100 in two tabs to see the live sync.
+ * Open http://localhost:3100 in two tabs: a card moved in one moves in the other.
  */
 import index from "./index.html";
 import { newPool, applyAll, PG_URL } from "./setup";
