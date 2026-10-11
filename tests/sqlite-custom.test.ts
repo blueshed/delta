@@ -94,7 +94,7 @@ describe("custom docs — predicate-based membership", () => {
   const PAST = "2020-01-01 00:00:00";
 
   function setupWorld() {
-    db.run("INSERT INTO worlds (id, label, valid_from) VALUES ('earth', 'Earth', ?)", [PAST]);
+    db.run("INSERT INTO worlds (id, label, valid_from) VALUES (1, 'Earth', ?)", [PAST]);
   }
 
   beforeEach(() => {
@@ -106,8 +106,8 @@ describe("custom docs — predicate-based membership", () => {
   });
 
   test("initial load returns only rows matching criteria", async () => {
-    db.run("INSERT INTO sites (id, world_id, name, lat, lng, valid_from) VALUES ('a', 'earth', 'In', 10, 20, ?)", [PAST]);
-    db.run("INSERT INTO sites (id, world_id, name, lat, lng, valid_from) VALUES ('b', 'earth', 'Out', 80, 80, ?)", [PAST]);
+    db.run("INSERT INTO sites (id, world_id, name, lat, lng, valid_from) VALUES (1, 1, 'In', 10, 20, ?)", [PAST]);
+    db.run("INSERT INTO sites (id, world_id, name, lat, lng, valid_from) VALUES (2, 1, 'Out', 80, 80, ?)", [PAST]);
 
     const sock = mockSocket();
     wirePublish(ws, [sock]);
@@ -116,8 +116,8 @@ describe("custom docs — predicate-based membership", () => {
     }));
 
     const res = sock.sent[0].result;
-    expect(Object.keys(res.sites)).toEqual(["a"]);
-    expect(res.sites.a.name).toBe("In");
+    expect(Object.keys(res.sites)).toEqual(["1"]);
+    expect(res.sites[1].name).toBe("In");
   });
 
   test("add to source doc with matching row fans out to custom doc", async () => {
@@ -125,20 +125,20 @@ describe("custom docs — predicate-based membership", () => {
     const viewer = mockSocket("viewer");
     wirePublish(ws, [world, viewer]);
 
-    await ws.websocket.message(world, JSON.stringify({ id: 1, action: "open", doc: "world:earth" }));
+    await ws.websocket.message(world, JSON.stringify({ id: 1, action: "open", doc: "world:1" }));
     await ws.websocket.message(viewer, JSON.stringify({ id: 1, action: "open", doc: "sites-in-bbox:0,0,50,50" }));
 
     // World-client adds a site inside the bbox.
     await ws.websocket.message(world, JSON.stringify({
-      id: 2, action: "delta", doc: "world:earth",
-      ops: [{ op: "add", path: "/sites/s1", value: { name: "Alpha", lat: 10, lng: 20 } }],
+      id: 2, action: "delta", doc: "world:1",
+      ops: [{ op: "add", path: "/sites/-", value: { name: "Alpha", lat: 10, lng: 20 } }],
     }));
 
     // Viewer should have received an add on its own doc channel.
     const viewerBroadcasts = viewer.sent.filter((m: any) => m.doc === "sites-in-bbox:0,0,50,50");
     expect(viewerBroadcasts).toHaveLength(1);
     expect(viewerBroadcasts[0].ops).toEqual([
-      { op: "add", path: "/sites/s1", value: expect.objectContaining({ name: "Alpha", lat: 10, lng: 20 }) },
+      { op: "add", path: "/sites/1", value: expect.objectContaining({ name: "Alpha", lat: 10, lng: 20 }) },
     ]);
   });
 
@@ -147,12 +147,12 @@ describe("custom docs — predicate-based membership", () => {
     const viewer = mockSocket("v");
     wirePublish(ws, [world, viewer]);
 
-    await ws.websocket.message(world, JSON.stringify({ id: 1, action: "open", doc: "world:earth" }));
+    await ws.websocket.message(world, JSON.stringify({ id: 1, action: "open", doc: "world:1" }));
     await ws.websocket.message(viewer, JSON.stringify({ id: 1, action: "open", doc: "sites-in-bbox:0,0,50,50" }));
 
     await ws.websocket.message(world, JSON.stringify({
-      id: 2, action: "delta", doc: "world:earth",
-      ops: [{ op: "add", path: "/sites/out", value: { name: "Far", lat: 80, lng: 80 } }],
+      id: 2, action: "delta", doc: "world:1",
+      ops: [{ op: "add", path: "/sites/-", value: { name: "Far", lat: 80, lng: 80 } }],
     }));
 
     const viewerBroadcasts = viewer.sent.filter((m: any) => m.doc === "sites-in-bbox:0,0,50,50");
@@ -160,71 +160,71 @@ describe("custom docs — predicate-based membership", () => {
   });
 
   test("update moves row into bbox → add", async () => {
-    db.run("INSERT INTO sites (id, world_id, name, lat, lng, valid_from) VALUES ('s1', 'earth', 'Drifter', 80, 80, ?)", [PAST]);
+    db.run("INSERT INTO sites (id, world_id, name, lat, lng, valid_from) VALUES (1, 1, 'Drifter', 80, 80, ?)", [PAST]);
 
     const world = mockSocket("w");
     const viewer = mockSocket("v");
     wirePublish(ws, [world, viewer]);
 
-    await ws.websocket.message(world, JSON.stringify({ id: 1, action: "open", doc: "world:earth" }));
+    await ws.websocket.message(world, JSON.stringify({ id: 1, action: "open", doc: "world:1" }));
     await ws.websocket.message(viewer, JSON.stringify({ id: 1, action: "open", doc: "sites-in-bbox:0,0,50,50" }));
     expect(viewer.sent[0].result.sites).toEqual({});
 
     await ws.websocket.message(world, JSON.stringify({
-      id: 2, action: "delta", doc: "world:earth",
+      id: 2, action: "delta", doc: "world:1",
       ops: [
-        { op: "replace", path: "/sites/s1/lat", value: 10 },
-        { op: "replace", path: "/sites/s1/lng", value: 20 },
+        { op: "replace", path: "/sites/1/lat", value: 10 },
+        { op: "replace", path: "/sites/1/lng", value: 20 },
       ],
     }));
 
     const viewerBroadcasts = viewer.sent.filter((m: any) => m.doc === "sites-in-bbox:0,0,50,50");
     // Final broadcast should include an "add" (first field move still outside, second brings it in).
     const lastOps = viewerBroadcasts.flatMap((m: any) => m.ops);
-    const adds = lastOps.filter((o: any) => o.op === "add" && o.path === "/sites/s1");
+    const adds = lastOps.filter((o: any) => o.op === "add" && o.path === "/sites/1");
     expect(adds).toHaveLength(1);
     expect(adds[0].value).toMatchObject({ lat: 10, lng: 20 });
   });
 
   test("update moves row out of bbox → remove", async () => {
-    db.run("INSERT INTO sites (id, world_id, name, lat, lng, valid_from) VALUES ('s1', 'earth', 'Local', 10, 20, ?)", [PAST]);
+    db.run("INSERT INTO sites (id, world_id, name, lat, lng, valid_from) VALUES (1, 1, 'Local', 10, 20, ?)", [PAST]);
 
     const world = mockSocket("w");
     const viewer = mockSocket("v");
     wirePublish(ws, [world, viewer]);
 
-    await ws.websocket.message(world, JSON.stringify({ id: 1, action: "open", doc: "world:earth" }));
+    await ws.websocket.message(world, JSON.stringify({ id: 1, action: "open", doc: "world:1" }));
     await ws.websocket.message(viewer, JSON.stringify({ id: 1, action: "open", doc: "sites-in-bbox:0,0,50,50" }));
-    expect(Object.keys(viewer.sent[0].result.sites)).toEqual(["s1"]);
+    expect(Object.keys(viewer.sent[0].result.sites)).toEqual(["1"]);
 
     await ws.websocket.message(world, JSON.stringify({
-      id: 2, action: "delta", doc: "world:earth",
-      ops: [{ op: "replace", path: "/sites/s1/lat", value: 90 }],
+      id: 2, action: "delta", doc: "world:1",
+      ops: [{ op: "replace", path: "/sites/1/lat", value: 90 }],
     }));
 
     const viewerBroadcasts = viewer.sent.filter((m: any) => m.doc === "sites-in-bbox:0,0,50,50");
     const lastOps = viewerBroadcasts.flatMap((m: any) => m.ops);
-    expect(lastOps).toContainEqual({ op: "remove", path: "/sites/s1" });
+    expect(lastOps).toContainEqual({ op: "remove", path: "/sites/1" });
   });
 
   test("remove of matching row fans out as remove", async () => {
-    db.run("INSERT INTO sites (id, world_id, name, lat, lng, valid_from) VALUES ('s1', 'earth', 'Local', 10, 20, ?)", [PAST]);
+    db.run("INSERT INTO sites (id, world_id, name, lat, lng, valid_from) VALUES (1, 1, 'Local', 10, 20, ?)", [PAST]);
 
     const world = mockSocket("w");
     const viewer = mockSocket("v");
     wirePublish(ws, [world, viewer]);
 
-    await ws.websocket.message(world, JSON.stringify({ id: 1, action: "open", doc: "world:earth" }));
+    await ws.websocket.message(world, JSON.stringify({ id: 1, action: "open", doc: "world:1" }));
     await ws.websocket.message(viewer, JSON.stringify({ id: 1, action: "open", doc: "sites-in-bbox:0,0,50,50" }));
 
     await ws.websocket.message(world, JSON.stringify({
-      id: 2, action: "delta", doc: "world:earth",
-      ops: [{ op: "remove", path: "/sites/s1" }],
+      id: 2, action: "delta", doc: "world:1",
+      ops: [{ op: "remove", path: "/sites/1" }],
     }));
 
     const viewerBroadcasts = viewer.sent.filter((m: any) => m.doc === "sites-in-bbox:0,0,50,50");
     const lastOps = viewerBroadcasts.flatMap((m: any) => m.ops);
-    expect(lastOps).toContainEqual({ op: "remove", path: "/sites/s1" });
+    expect(lastOps).toContainEqual({ op: "remove", path: "/sites/1" });
   });
 
   test("two viewers with different bboxes each see only their own matches", async () => {
@@ -233,26 +233,26 @@ describe("custom docs — predicate-based membership", () => {
     const faraway = mockSocket("far");
     wirePublish(ws, [world, nearby, faraway]);
 
-    await ws.websocket.message(world, JSON.stringify({ id: 1, action: "open", doc: "world:earth" }));
+    await ws.websocket.message(world, JSON.stringify({ id: 1, action: "open", doc: "world:1" }));
     await ws.websocket.message(nearby, JSON.stringify({ id: 1, action: "open", doc: "sites-in-bbox:0,0,50,50" }));
     await ws.websocket.message(faraway, JSON.stringify({ id: 1, action: "open", doc: "sites-in-bbox:60,60,100,100" }));
 
     await ws.websocket.message(world, JSON.stringify({
-      id: 2, action: "delta", doc: "world:earth",
+      id: 2, action: "delta", doc: "world:1",
       ops: [
-        { op: "add", path: "/sites/close", value: { name: "C", lat: 10, lng: 20 } },
-        { op: "add", path: "/sites/far",   value: { name: "F", lat: 80, lng: 80 } },
+        { op: "add", path: "/sites/-",     value: { name: "C", lat: 10, lng: 20 } },
+        { op: "add", path: "/sites/-",     value: { name: "F", lat: 80, lng: 80 } },
       ],
     }));
 
     const nearOps = nearby.sent.filter((m: any) => m.doc?.startsWith("sites-in-bbox:")).flatMap((m: any) => m.ops);
     const farOps  = faraway.sent.filter((m: any) => m.doc?.startsWith("sites-in-bbox:")).flatMap((m: any) => m.ops);
 
-    expect(nearOps).toContainEqual(expect.objectContaining({ op: "add", path: "/sites/close" }));
-    expect(nearOps.find((o: any) => o.path === "/sites/far")).toBeUndefined();
+    expect(nearOps).toContainEqual(expect.objectContaining({ op: "add", path: "/sites/1" }));
+    expect(nearOps.find((o: any) => o.path === "/sites/2")).toBeUndefined();
 
-    expect(farOps).toContainEqual(expect.objectContaining({ op: "add", path: "/sites/far" }));
-    expect(farOps.find((o: any) => o.path === "/sites/close")).toBeUndefined();
+    expect(farOps).toContainEqual(expect.objectContaining({ op: "add", path: "/sites/2" }));
+    expect(farOps.find((o: any) => o.path === "/sites/1")).toBeUndefined();
   });
 
   test("delta against a custom doc is rejected as read-only", async () => {
@@ -261,7 +261,7 @@ describe("custom docs — predicate-based membership", () => {
     await ws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "sites-in-bbox:0,0,50,50" }));
     await ws.websocket.message(sock, JSON.stringify({
       id: 2, action: "delta", doc: "sites-in-bbox:0,0,50,50",
-      ops: [{ op: "add", path: "/sites/x", value: { name: "X", lat: 0, lng: 0 } }],
+      ops: [{ op: "add", path: "/sites/-", value: { name: "X", lat: 0, lng: 0 } }],
     }));
 
     expect(sock.sent[1].error).toBeDefined();

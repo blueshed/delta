@@ -849,7 +849,7 @@ async function Board({ id }: { id: string }) {
 
 Awaiting *before* any `openDoc` and opening synchronously in the thunk is the whole rule. If you must open post-await, keep the handle and `close()` it yourself.
 
-Worked example: `examples/kanban/` in the repository (github.com/blueshed/delta; not in the npm package) — boards → columns → cards, real-time sync via Postgres. The `serve.ts` + `client.tsx` files in that directory are the canonical railroad UX — a fullstack page using exactly the pattern above. The sibling `server.ts` + `run.ts` files are a headless three-client demo printing op transcripts to the terminal.
+Worked example: `examples/kanban/` in the repository (github.com/blueshed/delta; not in the npm package). To move a card you need the board in front of you: one document, `board:1`, over boards, columns and cards in Postgres. `serve.ts` + `client.tsx` are the page, written with exactly the pattern above: open it in two tabs and a card moved in one moves in both. `server.ts` + `run.ts` tell the same story in the terminal, printing what each client is told.
 
 ## The write loop — send, don't touch (no optimistic updates, no reloads)
 

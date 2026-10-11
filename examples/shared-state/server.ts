@@ -1,9 +1,7 @@
 /**
- * The canonical "use delta-doc for shared state" answer.
- *
- * One doc, persisted to a JSON file. Browsers connect via WebSocket; every
- * change one user makes is broadcast to every other user with the doc open.
- * No database, no schema, no codegen.
+ * A chat room: one document, `chat:room`, kept in a JSON file. Everyone who
+ * opens it holds it, and is told each message anyone sends as it is sent.
+ * No database, no schema.
  *
  * Run:
  *   bun examples/shared-state/server.ts

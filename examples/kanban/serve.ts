@@ -1,5 +1,5 @@
 /**
- * Kanban — the canonical UX entry point.
+ * Kanban: the page and its server.
  *
  * Boots Postgres setup, applies framework + table SQL, starts the WS listener
  * with the "board:" doc type, serves the HTML page that drives `client.tsx`.

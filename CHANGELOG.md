@@ -341,7 +341,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backends (`world:1`, `add /sites/-`, where SQLite used `world:earth` and `/sites/s1`), shares
   its schema between the two servers, and `server-pg.ts` makes its own tables (no `psql -f
   tests/fixtures/sites.sql`) and reads a box's first rows with numeric ids, as its live ones.
-  Each README opens with what someone needs in front of them, in plain words.
+  Each README opens with what someone needs in front of them, in plain words, as do the
+  examples' headers and the skill's pointer to kanban (no longer "the canonical UX").
+  `tests/sqlite-custom.test.ts` names its rows by serial too.
 
 ## [0.12.0] - 2026-10-11
 

@@ -1,7 +1,7 @@
 /**
- * The canonical railroad UX for a delta-doc Postgres-backed app.
+ * The kanban page: the board is one document, `board:1`, rendered with railroad.
  *
- * Three patterns to copy verbatim:
+ * Three patterns:
  *
  *   1. provide(WS, connectWs("/ws"))             — DI: openDoc(name) finds the WS
  *   2. doc.data.map(d => …)                       — derive sorted lists from the doc
