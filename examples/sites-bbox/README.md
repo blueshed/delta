@@ -1,101 +1,65 @@
-# sites-bbox — custom docs with a predicate-based view (SQLite)
+# sites-bbox
 
-This example shows how to define a **custom doc type** whose contents are
-decided by a user-supplied predicate rather than a fixed FK scope.
+Someone looking at a map needs the sites in front of them, not every site in the world. So
+there are two documents over the same rows:
 
-Two doc types coexist on the same WebSocket server:
+| Document | What it holds |
+|---|---|
+| `world:1` | the world and every site in it, to read and write |
+| `sites-in-bbox:<minLng>,<minLat>,<maxLng>,<maxLat>` | the sites inside that box, to read |
 
-| Doc name | Kind | Purpose |
-|---|---|---|
-| `world:earth` | standard | Read/write every site. |
-| `sites-in-bbox:<minLng>,<minLat>,<maxLng>,<maxLat>` | custom | Read-only live view of sites inside a bounding box. |
+Open a box and you hold it: when anyone writes a site through the world, the box is told what
+changed for it, in its own shape. A site that moves into the box is added, one that moves within
+it is replaced, one that moves out or is deleted is removed, and a site outside every open box
+is sent to no one.
 
-When a client writes to `world:earth` (adds, moves, or removes a site), the
-server evaluates every open bbox doc's `matches(collection, row, criteria)`
-predicate and fans out the right op on that doc's own shape:
+The box is a custom document (`defineCustomDoc`): `query` reads what is in it when it is opened,
+`matches` says whether a site belongs. `schema.ts` holds what both servers share; only where the
+rows are kept differs.
 
-- row moves **into** the bbox → `add /sites/{id}`
-- row moves **within** the bbox → `replace /sites/{id}`
-- row moves **out of** the bbox → `remove /sites/{id}`
-- row deleted while in the bbox → `remove /sites/{id}`
-- row added or changed outside every open bbox → nothing sent
-
-## Run (SQLite)
+## Run on SQLite
 
 ```sh
 PORT=3100 bun examples/sites-bbox/server.ts
 ```
 
-In-memory SQLite. Single process. The server prints the URL it's listening on.
+In memory, in one process.
 
-## Run (Postgres)
-
-Same two doc types, same client code — only the server-side wiring changes,
-and the names: on Postgres a document and a row are named by number, so open
-`world:<id>` (the id the server seeds) and add sites with `add /sites/-`.
+## Run on Postgres
 
 ```sh
-docker compose up -d --wait
-psql postgres://delta:delta@localhost:5433/delta_test \
-  -f tests/fixtures/sites.sql                 # one-time: create worlds/sites
+bun run db:up
 PORT=3100 bun examples/sites-bbox/server-pg.ts
 ```
 
-Writes via any Bun process that shares the DB will fan out to every open
-bbox view on every process running `createDocListener` with the same
-`sitesInBbox` registered — that's what the LISTEN/NOTIFY path buys you.
+It makes its tables and a world, and prints the world's name (`world:1` in a fresh database).
+Run it twice on the same database, on two ports, and a box open on one is told of sites written
+through the other.
 
-## Try it from the Bun repl
+## Try it
 
 ```ts
-import { connectWs, openDoc, WS } from "@blueshed/delta/client";
+import { connectWs, openDoc } from "@blueshed/delta/client";
 
 const ws = connectWs("ws://localhost:3100/ws");
+const box = openDoc("sites-in-bbox:0,0,50,50", ws);
+box.onOps((ops) => console.log("box:", ops));
+const world = openDoc("world:1", ws);
+await world.ready;
 
-// Viewer of a bbox.
-const view = openDoc("sites-in-bbox:0,0,50,50", ws);
-view.onOps((ops) => console.log("bbox ops:", ops));
-
-// Writer of the whole world.
-const world = openDoc("world:earth", ws);
 await world.send([
-  { op: "add", path: "/sites/s1", value: { name: "Inside",  lat: 10, lng: 20 } },
-  { op: "add", path: "/sites/s2", value: { name: "Outside", lat: 80, lng: 80 } },
+  { op: "add", path: "/sites/-", value: { name: "Inside", lat: 10, lng: 20 } },
+  { op: "add", path: "/sites/-", value: { name: "Outside", lat: 80, lng: 80 } },
 ]);
-// viewer prints: bbox ops: [ { op: "add", path: "/sites/s1", value: {...} } ]
-// s2 is silently dropped — the bbox predicate rejected it.
+// box: [ { op: "add", path: "/sites/1", ... } ]   Outside is not sent
 
-// Move s2 into the bbox.
+const outside = Object.values(world.data.get().sites).find((s) => s.name === "Outside");
 await world.send([
-  { op: "replace", path: "/sites/s2/lat", value: 5 },
-  { op: "replace", path: "/sites/s2/lng", value: 5 },
+  { op: "replace", path: `/sites/${outside.id}/lat`, value: 5 },
+  { op: "replace", path: `/sites/${outside.id}/lng`, value: 5 },
 ]);
-// viewer prints: bbox ops: [ { op: "add", path: "/sites/s2", value: {...} } ]
+// box: [ { op: "add", path: "/sites/2", ... } ]   it moved in
 ```
 
-## What to read
-
-Both backends run one module for custom documents, `src/server/custom.ts`:
-
-- SQLite: `defineCustomDoc` and `registerDocs(..., customDocs)` from `src/server/sqlite.ts`.
-- Postgres: `defineCustomDoc` and `createDocListener(ws, pool, { custom })` from `src/server/postgres/listener.ts`.
-
-Both share the same membership def shape: `{ prefix, watch, parse, query, matches }`.
-The signatures match what `server.ts` / `server-pg.ts` use:
-
-- `parse(docId)` → criteria object.
-- `query(handle, criteria)` is **2-arg** — `handle` is a `bun:sqlite` `Database`
-  (synchronous) on SQLite, a pg `Pool` (awaited) on Postgres. Returns the
-  initial rows per watched collection.
-- `matches(collection, row, criteria)` is **3-arg** — the live per-row
-  membership predicate, identical on both backends.
-
-The Postgres version piggybacks on the existing `NOTIFY delta_changes` path:
-the writer's entry in `_delta_ops_log` carries the write as applied, and the
-listener runs the custom fan-out loop on it, once per write, against every
-open predicate doc on this process.
-
-(Both backends also take a whole-doc `recompute` mode in place of
-`query`+`matches`; this example uses the membership mode on both.)
-
-Tests: `tests/sqlite-custom.test.ts` and `tests/postgres-custom.test.ts`.
+`tests/examples.test.ts` and `tests/postgres-examples.test.ts` run these steps against both
+servers.

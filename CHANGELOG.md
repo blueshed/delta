@@ -328,6 +328,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same person); another person waiting on the id keeps its own address. Signed in, the cursor includes the person, so a second
   tab of the same person has it at once, and anyone else never.
 
+### Docs
+
+- **The examples run as their READMEs say, and tests prove what each promises.** kanban: two
+  browsers (happy-dom) on `serve.ts`, a card clicked in one moves in both, and `run.ts` runs
+  through. sites-bbox: one box story (into, within, out of, deleted, never-sent) against the
+  SQLite server, the Postgres one, and two Postgres processes on one database. todos-vs-rls: raw
+  RLS and delta give the same answers for each person and lens as the `NOSUPERUSER` role, delta
+  stamps the owner and is heard, `owns` answers 404. `tests/examples.test.ts` is in the quick
+  suite, `tests/postgres-examples.test.ts` in the Postgres set; `bun check` covers the examples
+  (and CI, `bun check -p examples/kanban` its JSX). sites-bbox now names rows by serial on both
+  backends (`world:1`, `add /sites/-`, where SQLite used `world:earth` and `/sites/s1`), shares
+  its schema between the two servers, and `server-pg.ts` makes its own tables (no `psql -f
+  tests/fixtures/sites.sql`) and reads a box's first rows with numeric ids, as its live ones.
+  Each README opens with what someone needs in front of them, in plain words.
+
 ## [0.12.0] - 2026-10-11
 
 ### Changed
