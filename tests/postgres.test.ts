@@ -249,10 +249,9 @@ describe("snapshots + pruneOpsLog", () => {
     await type.apply({}, "items:", [
       { op: "add", path: "/items/-", value: { name: "t1" } },
     ]);
-    // `items` is non-temporal, so delta_open_at returns null by contract —
-    // we assert the wrapper runs without throwing and returns null cleanly.
+    // a list, and `items` keeps no history: read as it is, as on SQLite (#74)
     const doc = await loadDocAt(pool, "items:", new Date());
-    expect(doc).toBeNull();
+    expect(Object.values(doc.items).map((r: any) => r.name)).toEqual(["t1"]);
   });
 
   test("delta_snapshot + delta_resolve_snapshot round-trip; an unknown name is null", async () => {

@@ -304,6 +304,7 @@ export function pathCases(backend: () => PathBackend): void {
   documentCases(backend);
   fanOutCases(backend);
   serialCases(backend);
+  listAtCases(backend);
 }
 
 /** A row added under an id it names moves the collection's serial past it, as importTables does (#63, #72). */
@@ -325,20 +326,43 @@ export function serialCases(backend: () => PathBackend): void {
 }
 
 /**
- * A list document read as it stood. SQLite and the JSON file read it; Postgres's
- * delta_open_at answers a list with null (404), so the Postgres backends do not
- * ask these cases.
+ * A list document read as it stood (#74): its root rows as its scope admits
+ * them, and each included collection in full -- a temporal table's rows as they
+ * stood, the others as they are (they keep no history).
  */
 export function listAtCases(backend: () => PathBackend): void {
   describe("a list document read as it stood", () => {
+    const at = (b: PathBackend, doc: string, when: string) => b.process.call("open_at", { doc, at: when }).then((r) => content(r.result));
+    const note = (id: number, text: string) => ({ id, weddings_id: 1, text });
+
     test("a list read as it stood reads its included collections as they stood too", async () => {
       const b = backend();
       await openAll(b.process, ["fo-board:1"]);
       await write(b.process, "fo-board:1", [{ op: "replace", path: "/notes/1/text", value: "bring tables" }, { op: "add", path: "/notes/-", value: { text: "new" } }]);
-      const then = await b.process.call("open_at", { doc: "fo-courses-noted:", at: "2021-01-01T00:00:00.000Z" });
-      expect(content(then.result).notes).toEqual({ "1": { id: 1, weddings_id: 1, text: "bring chairs" } });
-      const before = await b.process.call("open_at", { doc: "fo-courses-noted:", at: "2019-01-01T00:00:00.000Z" });
-      expect(content(before.result).notes).toEqual({});
+      expect((await at(b, "fo-courses-noted:", "2021-01-01T00:00:00.000Z")).notes).toEqual({ "1": note(1, "bring chairs") });
+      expect((await at(b, "fo-courses-noted:", "2019-01-01T00:00:00.000Z")).notes).toEqual({});
+    });
+
+    test("a temporal root: a row made since is not there, one removed since is", async () => {
+      const b = backend();
+      await openAll(b.process, ["fo-board:1"]);
+      await write(b.process, "fo-board:1", [{ op: "remove", path: "/notes/1" }, { op: "add", path: "/notes/-", value: { text: "new" } }]);
+      expect(await at(b, "fo-all-notes:", "2021-01-01T00:00:00.000Z")).toEqual({ notes: { "1": note(1, "bring chairs") } });
+      expect(await at(b, "fo-all-notes:", "2019-01-01T00:00:00.000Z")).toEqual({ notes: {} });
+      expect(await at(b, "fo-all-notes:", "2999-01-01T00:00:00.000Z")).toEqual({ notes: { "2": note(2, "new") } });
+    });
+
+    test("a table that keeps no history reads as it is, through the list's scope", async () => {
+      const b = backend();
+      await openAll(b.process, ["fo-board:1"]);
+      await write(b.process, "fo-board:1", [{ op: "add", path: "/courses/-", value: { name: "Sorbet" } }, { op: "add", path: "/drinks/-", value: { courses_id: 1, name: "Port" } }]);
+      const then = "2019-01-01T00:00:00.000Z";
+      expect(await at(b, "fo-catalog:", then)).toEqual({
+        courses: { "1": course(1, "Soup"), "2": course(2, "Salad", 2), "3": course(3, "Sorbet") },
+        drinks: { "1": drink(1, 1, "Sherry"), "2": drink(2, 2, "Water"), "3": drink(3, 1, "Port") },
+      });
+      expect(await at(b, "fo-courses-like:So", then)).toEqual({ courses: { "1": course(1, "Soup"), "3": course(3, "Sorbet") } });
+      expect(await at(b, "fo-tags-labelled:blue", then)).toEqual({ tags: {} });
     });
   });
 }

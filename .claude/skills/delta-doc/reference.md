@@ -997,7 +997,7 @@ Apply `src/sql/001a-001g-*.sql` alphabetically to every database — idempotent.
 | Function | Purpose |
 |---|---|
 | `delta_open(doc_name)` | returns `{ ...collections, _version }`; an implied document with no root row, its empty root and empty collections |
-| `delta_open_at(doc_name, timestamptz)` | same, at a historical instant (temporal docs only) |
+| `delta_open_at(doc_name, timestamptz)` | same, at a historical instant, single or list: a temporal table's rows as they stood, the others as they are |
 | `delta_apply(doc_name, ops jsonb)` | applies ops, writes `_delta_ops_log`, NOTIFYs `delta_changes`; `delta_apply(doc_name, ops, walk)` with `walk` for an undo or redo, which may write through a single document whose root is gone (001d) |
 | `delta_fetch_ops(doc_name, since_version)` | returns (version, ops) rows after a base version |
 | `_delta_fetch_log(doc_name, since_version)` | the listener's: the same rows with `applied`, the write as applied on the writer's entry where it differs from what the writer was told (null where they agree; `[]` on the others), for custom docs. On SQL without it the listener reads `delta_fetch_ops`, each entry heard as told, and warns once |

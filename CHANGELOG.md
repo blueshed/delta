@@ -60,6 +60,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the JSON file read `notadate` as text, Postgres answered 500). In `scope.ts` (`isDay`,
   shared with `keep.ts`), `sqlite.ts`, `001b` (`_delta_resolve_scope`, `_delta_doc_holds`) and
   `001d` (`delta_apply`), replaced in place: apply them again.
+- **Postgres reads a list document as it stood (todo #74).** `open_at` on a list document
+  (`courses:`, `items-like:So`) answered null, a 404, on PGlite and a Postgres server, where
+  SQLite and the JSON file answer it. `delta_open_at` (`001e`, `CREATE OR REPLACE`: re-apply the
+  framework, or `bunx @blueshed/delta init --upgrade`) now reads the root rows its scope admitted
+  then and each included collection in full, a temporal table's rows as they stood and the others
+  as they are. `tests/helpers/path.ts`' list cases run on every backend.
 
 ## [0.12.0] - 2026-10-11
 

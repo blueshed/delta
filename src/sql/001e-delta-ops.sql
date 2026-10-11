@@ -39,6 +39,7 @@ DECLARE
   v_doc_id    BIGINT;
   v_root_coll RECORD;
   v_root_row  JSONB;
+  v_root_map  JSONB;
   v_result    JSONB;
   v_coll_key  TEXT;
 BEGIN
@@ -51,13 +52,6 @@ BEGIN
   v_resolved := _delta_resolve_scope(v_def, p_doc_name);
   v_mode     := v_resolved->>'mode';
 
-  -- open_at only supports single-mode docs. List-mode docs return NULL so
-  -- callers can probe "can I time-travel this?" without an exception —
-  -- typo'd doc names are caught upstream by _delta_find_doc's raise.
-  IF v_mode != 'single' THEN RETURN NULL; END IF;
-
-  v_doc_id := (v_resolved->'values'->>'id')::BIGINT;
-
   SELECT * INTO v_root_coll FROM _delta_collections
    WHERE collection_key = v_def.root_collection;
   IF NOT FOUND THEN
@@ -65,6 +59,32 @@ BEGIN
       p_doc_name, v_def.root_collection
       USING ERRCODE = 'P0001';
   END IF;
+
+  -- List mode (todo #74): every root row the scope admitted then, and each
+  -- included collection in full as it stood, as delta_open reads a list now
+  -- and SQLite reads one at a time. A table that keeps no history reads as it is.
+  IF v_mode = 'list' THEN
+    IF v_root_coll.temporal THEN
+      EXECUTE format(
+        'SELECT COALESCE(jsonb_object_agg(t.id, _delta_strip_temporal(to_jsonb(t.*))), ''{}''::jsonb) FROM %I t WHERE %s AND %s',
+        v_root_coll.table_name, _delta_temporal_where(p_at), v_resolved->>'where'
+      ) INTO v_root_map;
+    ELSE
+      EXECUTE format(
+        'SELECT COALESCE(jsonb_object_agg(t.id, to_jsonb(t.*)), ''{}''::jsonb) FROM %I t WHERE %s',
+        v_root_coll.table_name, v_resolved->>'where'
+      ) INTO v_root_map;
+    END IF;
+
+    v_result := jsonb_build_object(v_def.root_collection, v_root_map);
+    FOREACH v_coll_key IN ARRAY v_def.include
+    LOOP
+      v_result := v_result || jsonb_build_object(v_coll_key, _delta_load_collection_all(v_coll_key, p_at));
+    END LOOP;
+    RETURN v_result;
+  END IF;
+
+  v_doc_id := (v_resolved->'values'->>'id')::BIGINT;
 
   -- the root as it stood, where it met the whole of its name's scope then
   -- (a column beside its id), as delta_open reads it now
