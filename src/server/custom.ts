@@ -284,7 +284,20 @@ export function createCustomDocs<I, H>(opts: {
     return last;
   }
 
-  /** Each membership view, per row of `ops`: a row that arrives is an add, one that stays a replace of each field that changed, one that leaves a remove. */
+  /**
+   * A row the view holds, brought up to the row a write told (`now`, whole) in
+   * the shape its query gave it: the fields it has, each as the query read it
+   * -- one it read as text (`id::text`) stays text. Like with like, so a view
+   * is told what changed of what it holds, never a field it has not.
+   */
+  const asHeld = (held: Record<string, unknown>, now: Record<string, unknown>) =>
+    Object.fromEntries(Object.entries(held).map(([f, h]) => {
+      if (!Object.hasOwn(now, f)) return [f, h];
+      const v = now[f];
+      return [f, typeof h === "string" && v !== null && typeof v !== "object" && typeof v !== "string" ? String(v) : v];
+    }));
+
+  /** Each membership view, per row of `ops`: a row that arrives is an add, one that stays a replace of each field it holds that changed, one that leaves a remove. */
   function tellRows(ops: DeltaOp[]): void {
     const viewsOf = new Map<string, number>();
     for (const view of views.values()) if (view.subs.size) viewsOf.set(view.docName, (viewsOf.get(view.docName) ?? 0) + 1);
@@ -301,8 +314,9 @@ export function createCustomDocs<I, H>(opts: {
         const was = doc[coll]![id];
         let told: DeltaOp[];
         if (row != null && def.matches(coll, row, view.criteria, view.identity)) {
-          doc[coll]![id] = row;
-          told = was != null ? changedFields(joinPath(coll, id), was, row) : [{ op: "add", path: joinPath(coll, id), value: row }];
+          const now = was != null ? asHeld(was, row) : row;
+          doc[coll]![id] = now;
+          told = was != null ? changedFields(joinPath(coll, id), was, now) : [{ op: "add", path: joinPath(coll, id), value: row }];
           if (!told.length) continue;
         } else if (was != null) {
           delete doc[coll]![id];

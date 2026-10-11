@@ -135,6 +135,30 @@ export const sqliteInbox = inboxDoc((db: any, email: string) => ({ households: d
 export const postgresInbox = inboxDoc(async (pool: any, email: string) => ({ households: (await pool.query(`SELECT to_jsonb(h) AS row FROM ${householdsTable} h WHERE email = $1`, [email])).rows.map((r: any) => r.row) }));
 
 /**
+ * Membership documents whose query reads some columns of a row, as a view
+ * often does: a wedding's guests' emails (`fo-emails:`), and the same with
+ * its keys read as text (`fo-guests:`, `id::text`, as the skill's bbox does).
+ * A view is told what changed of what it holds, in the shape its query gave.
+ */
+const guestsDoc = <Q>(prefix: string, query: Q) => ({
+  prefix,
+  watch: ["households"],
+  parse: (wedding: string) => wedding,
+  query,
+  matches: (_coll: string, row: any, wedding: string) => String(row.weddings_id) === wedding,
+});
+export const sqliteEmails = guestsDoc("fo-emails:", (db: any, w: string) => ({ households: db.query(`SELECT id, email FROM ${householdsTable} WHERE weddings_id = ?`).all(Number(w)) }));
+export const sqliteGuests = guestsDoc("fo-guests:", (db: any, w: string) => ({
+  households: db.query(`SELECT CAST(id AS TEXT) AS id, CAST(weddings_id AS TEXT) AS weddings_id, email FROM ${householdsTable} WHERE weddings_id = ?`).all(Number(w)),
+}));
+export const postgresEmails = guestsDoc("fo-emails:", async (pool: any, w: string) => ({
+  households: (await pool.query(`SELECT jsonb_build_object('id', id, 'email', email) AS row FROM ${householdsTable} WHERE weddings_id = $1`, [Number(w)])).rows.map((r: any) => r.row),
+}));
+export const postgresGuests = guestsDoc("fo-guests:", async (pool: any, w: string) => ({
+  households: (await pool.query(`SELECT id::text AS id, weddings_id::text AS weddings_id, email FROM ${householdsTable} WHERE weddings_id = $1`, [Number(w)])).rows,
+}));
+
+/**
  * A custom document whose prefix starts with a list's: the seats not kept,
  * named fo-seats-at:open:<anything>. Its name is its own, never the list
  * fo-seats-at: read with "open" for a table number.
@@ -465,6 +489,18 @@ export function columnCases(backend: () => PathBackend): void {
       hidden("history", (await b.process.call("history", { doc: "fo-slim:1", cursor: "s1" })).result);
       expect(content((await b.process.call("open", { doc: "fo-board:1" })).result).households["1"]).toEqual(household(1, "w@x", 1, "secret"));
       expect(await favours()).toEqual([jam]);
+      await assertCopiesHold(b, copies);
+    });
+
+    test("a walk that sets back a field it does not hold is answered without it: a dry undo of a row removed and added back through it sets back the email it holds and the t it does not, and answers the email alone", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-slim:1", "fo-board:1"]);
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/t", value: "secret" }]);
+      await write(b.process, "fo-slim:1", [{ op: "remove", path: "/households/1" }, { op: "add", path: "/households/1", value: { email: "n@x" } }], { cursor: "s1" });
+      const dry = (await b.process.call("undo", { cursor: "s1", dry: true })).result;
+      expect({ ops: dry.ops, conflict: dry.conflict }).toEqual({ ops: [field("/households/1/email", "a@x")], conflict: undefined });
+      await b.process.call("undo", { cursor: "s1" });
+      expect(content((await b.process.call("open", { doc: "fo-board:1" })).result).households["1"]).toEqual(household(1, "a@x", 1, "secret"));
       await assertCopiesHold(b, copies);
     });
   });
@@ -2247,6 +2283,20 @@ export function fanOutCases(backend: () => PathBackend): void {
         [{ op: "replace", path: "", value: { wedding: "ours", courses: ["Soup"] } }],
       ]);   // closed: not read again, not told
       copies.delete("fo-menu-card:1");
+      await assertCopiesHold(b, copies);
+    });
+  });
+
+  describe("a custom document whose query reads some columns, or reads them as text", () => {
+    test("is told what changed of what it holds, in the shape its query gave: a field it does not read, nothing; one it reads, that field; a key read as text, no change (todo #69's review)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-emails:1", "fo-guests:1", "fo-board:1", "fo-all-households:"]);
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/t", value: "notes" }]);
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/email", value: "z@x" }]);
+      await write(b.process, "fo-all-households:", [{ op: "replace", path: "/households/2/weddings_id", value: 2 }]);
+      for (const doc of ["fo-emails:1", "fo-guests:1"]) {
+        await expectTold(b, doc, [[field("/households/1/email", "z@x")], [{ op: "remove", path: "/households/2" }]]);
+      }
       await assertCopiesHold(b, copies);
     });
   });

@@ -352,7 +352,7 @@ BEGIN
         -- the document's root at /root/<field>, however the entry spelled it
         v_ops := v_ops || (SELECT jsonb_agg(jsonb_build_object('op', 'replace',
           'path', CASE WHEN v_here = v_doc->v_parts[1] THEN _delta_build_path(v_parts[1]) ELSE v_path END || _delta_build_path(f),
-          'value', COALESCE(v_was->f, 'null'::jsonb)) ORDER BY f) FROM unnest(v_fields) f);
+          'value', COALESCE(v_was->f, 'null'::jsonb)) ORDER BY f COLLATE "C") FROM unnest(v_fields) f);
       END IF;
     END IF;
   END LOOP;

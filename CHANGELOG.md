@@ -36,10 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   written as it was is told nothing. Arrived and left stay a whole-row `add` / `remove`; a root
   that arrives or leaves, `replace /<root>` with the row or null. On the JSON file, SQLite,
   PGlite and Postgres (`_delta_tell`, `001d`, replaced in place: apply it with `bunx
-  @blueshed/delta init`), a membership custom document, and the free-form document (`registerDoc`
+  @blueshed/delta init`), a membership custom document (each field it holds that changed, in
+  the shape its `query` gave: a column it does not read is never told, one read as text stays
+  text), and the free-form document (`registerDoc`
   tells its ops as applied: `normalizeForBroadcast` is no longer called, and stays exported). A
   write's answer and ledger entry keep whole rows: they are its record, not a telling. The
-  client gives what an op changes inside a fresh reference (the row, the map), so a keyed
+  client gives the row a field op lands in a fresh reference (a collection's map is kept), so a keyed
   `list()` still sees the row change under its default equality; `applyOpsToCollection`
   patches the row's node for a field op (its `update` is given the whole row, the field
   changed), where it skipped field ops. The café's "the kitchen starts cooking" write told its
