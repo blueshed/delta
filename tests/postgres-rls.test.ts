@@ -309,15 +309,6 @@ describe("RLS and the broadcast channel (NOSUPERUSER role)", () => {
     }
   });
 
-  test("every framework function that runs as its owner looks names up with pg_temp last", async () => {
-    const { rows } = await admin.query(`SELECT proname, proconfig FROM pg_proc WHERE prosecdef AND proname ~ '^_?delta_' ORDER BY proname`);
-    expect(rows.map((r: any) => r.proname)).toEqual(expect.arrayContaining(["_delta_serial_new", "_delta_serial_past"]));
-    for (const r of rows) {
-      const path = (r.proconfig ?? []).find((c: string) => c.startsWith("search_path="));
-      expect({ fn: r.proname, endsWithTemp: /, pg_temp$/.test(path ?? "") }).toEqual({ fn: r.proname, endsWithTemp: true });
-    }
-  });
-
   test("an undo is a write: once the identity no longer owns the document, its undo is a 404 too", async () => {
     await admin.query("TRUNCATE _delta_ledger RESTART IDENTITY");
     const members = new Set([1]);
@@ -579,7 +570,7 @@ describe("the framework's SECURITY DEFINER functions cannot be led astray", () =
     const made = frameworkSqlFiles().flatMap((f) => [...readFileSync(f, "utf8").matchAll(/CREATE (?:OR REPLACE )?FUNCTION (\w+)/g)].map((m) => m[1]!));
     const { rows } = await admin.query(`SELECT DISTINCT proname, proconfig FROM pg_proc
       WHERE prosecdef AND pronamespace = current_schema()::regnamespace AND proname = ANY($1) ORDER BY proname`, [made]);
-    expect(rows.map((r: any) => r.proname)).toEqual(["_delta_holders", "_delta_serial_past"]);
+    expect(rows.map((r: any) => r.proname)).toEqual(["_delta_holders", "_delta_serial_new", "_delta_serial_past"]);
     for (const { proname, proconfig } of rows) {
       const path = (proconfig ?? []).find((c: string) => c.startsWith("search_path="));
       expect({ proname, last: path?.split(",").at(-1)?.trim() }).toEqual({ proname, last: "pg_temp" });
