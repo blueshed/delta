@@ -507,6 +507,22 @@ export function drivenCases(backend: () => PathBackend): void {
  */
 export function registrationCases(backend: () => PathBackend): void {
   describe("two registrations over the same rows (todo #64)", () => {
+    test("a document is told a write through the other registration with its next version, and opens at the version it was last told (review)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1", "fo-pub-courses:"]);
+      await write(b.process, "fo-pub-courses:", [{ op: "replace", path: "/courses/1/name", value: "Bisque" }]);
+      await write(b.process, "fo-board:1", [{ op: "replace", path: "/courses/1/name", value: "Broth" }]);
+      await write(b.process, "fo-pub-courses:", [{ op: "add", path: "/courses/-", value: { weddings_id: 1, name: "Fish" } }]);
+      await b.quiet();
+      for (const doc of ["fo-board:1", "fo-menu:1"]) {
+        const from = copies.get(doc)._v as number;
+        expect({ doc, v: b.process.heard.filter((h) => h.channel === doc).map((h) => h.data.v) }).toEqual({ doc, v: [from + 1, from + 2, from + 3] });
+        expect({ doc, open: (await b.process.call("open", { doc })).result._v }).toEqual({ doc, open: from + 3 });
+      }
+      await assertCopiesHold(b, copies);
+    });
+
+
     test("Ada's undo through the board meets Bob's rename since, through the public courses, as a conflict and leaves it; her next write is undone to his name, not hers before it", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1", "fo-pub-courses:", "fo-inbox:a@x"]);

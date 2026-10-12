@@ -93,7 +93,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Internal: the law over generated writes** (`tests/law-driver.test.ts`, todo #27): seeded
   random steps through every kind of document as three people, on SQLite, the JSON file and
   PGlite at once, the law and the answers asked after every one (`DELTA_LAW_SEEDS`,
-  `DELTA_LAW_STEPS`, `DELTA_LAW_SEED` for a longer run or one seed).
+  `DELTA_LAW_STEPS`, `DELTA_LAW_SEED` for a longer run or one seed). Copies stay open across
+  steps, two watchers to each document, held against a reader of their own and reopened now and
+  then from the writing server, so a stale copy it keeps is found; each change's version is
+  asked; what each watcher is told is compared across backends; seats, slots and tags, auth on
+  one registration and redo straight after undo are in the steps.
 - **The docs promise only what is so, and tests prove it.** Serial ids are the four table
   backends' (the JSON file via `./json`, SQLite, PGlite, Postgres); `registerDoc` is called "a
   free-form document" everywhere (uuid ids, no schema, not on the moving-on path), never "the
