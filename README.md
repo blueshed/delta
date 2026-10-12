@@ -1,30 +1,22 @@
 # @blueshed/delta
 
-**delta keeps data live between everyone who has it open: change it in one browser and every
-other browser showing it updates at once. It starts on a JSON file and grows to a Postgres
-server without changing your app.**
+A document is what you need in front of you to take an action. To place an order you need the
+catalogue and your order: two documents on one page. The kitchen needs every open order, another
+document over the same rows.
 
-Your data lives in ordinary tables. A *document* is the part of them one screen shows (a
-shopping list and its items, a venue and its rooms), named by a string such as `list:1`. A
-browser opens a document and changes it with three verbs (`add`, `replace`, `remove`) on paths
-like `/items/3/done`. The server applies the change and passes it to every open document that
-holds the row, so each one sees the row arrive, change or leave. Turn on the *ledger*, a record
-of every write, and each person can undo their own writes while others keep writing. A table
-also keeps every version of its rows (unless you turn that off), so a document can be read as it
-stood last March.
+A document is never a poster on the wall. It's a conversation. Open it and you're subscribed:
+every change anyone makes reaches you as it happens, with nothing to poll, fetch or refresh.
+Change it yourself with add, replace or remove on a path, and everyone holding it sees it at once.
 
-Start on a JSON file, move to SQLite, then to Postgres in the same process, and deliver on a
-Postgres server. Each step changes the few lines that say where the data is kept, and nothing
-else: the tables, the documents and the writes stay the same, and the rows move with their
-ids. The undo history (the ledger) does not move: it starts fresh on the next backend. No
-rewrite, no second data layer, no reload logic.
+**Think in documents, not entities.** Ask "what does someone need in front of them to do this?"
+rather than "what are the tables?" The tables follow from the documents.
 
-It exists because shared, live state should be one small idea rather than a stack of fetch
-calls, caches and sockets, and there is one way to do each thing.
+**What grows is where they're kept.** A shared JSON document does a lot on its own. SQLite earns
+its place when documents share the same rows, as the catalogue and every order do, or when you
+want undo and history. Postgres comes in when servers share the data, or people should see only
+their own. The page and its documents stay the same as the storage grows.
 
-Delta runs on [Bun](https://bun.sh). It ships TypeScript source (the exports are `.ts` files),
-the SQLite backend uses `bun:sqlite` and the server uses `Bun.serve`. The browser code needs a
-bundler; Bun's HTML imports do it with no configuration.
+Delta runs on [Bun](https://bun.sh) and ships TypeScript source.
 
 ## Try it
 
@@ -84,108 +76,36 @@ list:1 v3 [{"op":"replace","path":"/items/1/done","value":false}]
 }
 ```
 
-Three writes, each heard as a change with its version, saying what changed: a row that arrives
-whole, a field that changes by itself. The server named the new row `1`: ids are
-serial numbers on every table backend (the JSON file, SQLite, PGlite and Postgres); a free-form
-document and a memory document name a new row with a uuid. The last change is the undo, which the ledger worked out for
-itself. The document did not exist until its first write made it (`implied: true`).
+Three writes, each heard as a change with its version: a row that arrives whole, a field that
+changes by itself, and the undo, which the ledger worked out for itself. The server named the new
+row `1`. The document did not exist until its first write made it (`implied: true`).
 
-## Where the truth lives
+In a browser, `openDoc("list:1", connectWs("/ws"))` holds the same document as a live value
+(`bun add @blueshed/railroad`: the client is drawn with it). The skill's
+[recipe](.claude/skills/delta-doc/SKILL.md#the-recipe) is a chat room in a browser, kept in a JSON
+file, in four short files.
 
-Each kind of document registers on the same server, and the browser opens every one of them the
-same way.
+## When you grow
 
-| The truth is | Register it with | From |
-|---|---|---|
-| a JSON file | `registerDocs(ws, file, schema, docs)` | `@blueshed/delta/json` |
-| a SQLite database | `registerDocs(ws, db, schema, docs)` | `@blueshed/delta/sqlite` |
-| Postgres in this process | `openPglite(dir?)`, then as a Postgres database | `@blueshed/delta/pglite` |
-| a Postgres database, shared by processes | `createDocListener(ws, pool, { types: docs.map((def) => docTypeFromDef(def, pool)) })` | `@blueshed/delta/postgres` |
-| a free-form document (no schema, one JSON value in a file) | `await registerDoc(ws, name, { file, empty })` | `@blueshed/delta/server` |
-| this process (who is online) | `registerMemory(ws, { prefix, empty })` | `@blueshed/delta/kinds` |
-| outside (a sensor, an API) | `registerSource(ws, { prefix, read, every })` | `@blueshed/delta/kinds` |
-| the release (countries, units) | `registerStatic(ws, { prefix, value })` | `@blueshed/delta/kinds` |
+Each of these is a section of the skill's [reference](.claude/skills/delta-doc/reference.md):
 
-Start with a JSON file; move to SQLite, then Postgres in this process, then a Postgres server,
-without changing the app: the same schema, the same documents, the same writes, and the same
-answers from each -- serial ids, a write told to every open document that holds the rows it
-changed, one scope rule. Carry the data with `exportTables` from where it is and
-`importTables` into where it goes; ids and sequences carry, so the next row named follows on.
-The ledger does not carry: undo history starts fresh on the next backend. A free-form document
-is not on this path: it has no schema and no `exportTables`.
+- **SQLite, then Postgres** -- carry the rows with `exportTables` / `importTables`; the app stays
+  as it is: [*Backends side by side*](.claude/skills/delta-doc/reference.md#backends-side-by-side).
+- **Postgres** in this process (`openPglite`) or a server (`createDocListener`, `bun add pg`):
+  [*Quick start (Postgres backend)*](.claude/skills/delta-doc/reference.md#quick-start-postgres-backend).
+- **People see only their own** -- row-level security, `owns` for who may open a document, and
+  `jwtAuth` to sign in (`bun add jose pg`): [*RLS*](.claude/skills/delta-doc/reference.md#rls-with-appuser_id).
+- **Custom documents** -- a view joined or worked out per person (`defineCustomDoc`):
+  [*Custom read docs*](.claude/skills/delta-doc/reference.md#custom-read-docs--definecustomdoc).
+- **The kinds** -- who is online (memory), a sensor or an API (source), static data:
+  [*Document kinds*](.claude/skills/delta-doc/reference.md#document-kinds--memory-source-static).
+- **The CLI** -- `bunx @blueshed/delta` opens, watches and writes documents from a terminal:
+  [*CLI*](.claude/skills/delta-doc/reference.md#cli).
+- **Your own tests** -- `@blueshed/delta/testing` (`mockClient`, `sendAndAwait`, `waitFor`):
+  [*Testing*](.claude/skills/delta-doc/reference.md#testing).
 
-## Undo comes with the ledger
-
-Pass `{ ledger: true }` to the JSON file, SQLite or Postgres and every write is recorded in the
-write's own transaction: what it did, its inverse, the document's version, who made it and the cursor undo
-walks. `undo`, `redo` and `history` then work with no more code. Over a socket the cursor is
-the connection, so a browser undoes only what it wrote:
-
-```ts
-const ws = connectWs("/ws");
-await ws.send({ action: "undo" });   // or "redo"; answers null when there is nothing to walk
-await ws.send({ action: "undo", change: 7 });   // one change of this cursor's, by its entry, not its last
-```
-
-On Postgres the ledger is in the database, so a write made in one process can be undone from
-another.
-
-## In the browser, or in the same process
-
-Served over a socket with `createWs()`, a browser opens a document as a reactive value (the
-client needs `@blueshed/railroad`: `bun add @blueshed/railroad`):
-
-```ts
-import { connectWs, openDoc } from "@blueshed/delta/client";
-
-const doc = openDoc("list:1", connectWs("/ws"));
-await doc.ready;
-doc.onOps((ops) => render(ops));   // every change, including your own
-await doc.send([{ op: "replace", path: "/items/1/done", value: true }]);
-```
-
-In a clone of this repository (`examples/` is not in the npm package),
-`bun examples/shared-state/server.ts` runs a chat in two browser tabs on a free-form document,
-with no database and no schema.
-
-Run in the same process with `createLocal()`, as in the example above, a server that renders
-its own pages, a job or a test speaks to delta by function call. `as(identity)` says who is
-writing, and `onPublish` is the one stream of changes to redraw from.
-
-## Pairs with
-
-- [`@blueshed/railroad`](https://www.npmjs.com/package/@blueshed/railroad) draws in the browser.
-  `doc.data` is a railroad signal, so its `list()` renders a collection row by row.
-- delta keeps the documents.
-
-Starting a new app? `bun create blueshed my-app` makes a Bun site from
-[paintbrush](https://github.com/blueshed/paintbrush), with railroad for the page; its `evolve`
-skill turns a resource into a delta document when several people edit it at once.
-
-## Optional peers
-
-`bun add @blueshed/delta` installs none of these; add the ones the parts you use need.
-
-| You use | Also add |
-|---|---|
-| `@blueshed/delta/client` (the browser) | `@blueshed/railroad` |
-| `@blueshed/delta/postgres` | `pg` (and `@types/pg` to type-check: delta ships TypeScript source) |
-| `@blueshed/delta/pglite` | `@electric-sql/pglite` (and `@types/pg` to type-check) |
-| `@blueshed/delta/auth-jwt` | `jose` and `pg` |
-
-The core, `server` (with the free-form document), `json`, `sqlite`, `local`, `kinds`,
-`dom-ops` and `logger` need nothing else.
-
-## Where to go next
-
-- The `delta-doc` skill is the manual: [`SKILL.md`](.claude/skills/delta-doc/SKILL.md) routes,
-  [`reference.md`](.claude/skills/delta-doc/reference.md) has the API, patterns, auth, row-level
-  security, the ledger, the kinds and the wire protocol. `bunx @blueshed/delta install-skills` copies it
-  into your project for Claude Code.
-- `@blueshed/delta/testing` for your own tests: `mockClient`, `sendAndAwait`, `waitFor`, and the
-  pointer and walk vectors as data (reference.md, *Testing*).
-- [`examples/`](examples/): `shared-state` (a free-form document), `sites-bbox` (custom views on SQLite
-  and Postgres), `kanban` (Postgres with railroad), `todos-vs-rls` (row-level security).
-- [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
+`bunx @blueshed/delta install-skills` copies the skill into your project for Claude Code. In a
+clone of this repository, [`examples/`](examples/) has a chat, a kanban board on Postgres and
+row-level security side by side. [CHANGELOG.md](CHANGELOG.md) says what changed in each release.
 
 MIT licence.

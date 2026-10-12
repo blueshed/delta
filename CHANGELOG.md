@@ -403,6 +403,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Docs
 
+- **README is a front door.** It opens with the concept, keeps the one-file Try it, and then a
+  line for each thing you grow into (SQLite and Postgres, RLS, custom documents, the kinds, the
+  CLI, `./testing`), each pointing into the skill's reference. The backends table, undo, the
+  browser client and the optional peers live in the skill. CLAUDE.md says how the front door is
+  kept: the concept first, small, more on request.
 - **The skill opens with the concept, and its recipe is on tables.** SKILL.md starts with what a
   document is (what you need in front of you to act; open it and you're subscribed; documents,
   not entities; what grows is where they're kept), then a chat room in `types.ts` (`defineSchema`,
