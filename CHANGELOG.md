@@ -403,6 +403,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Docs
 
+- **The skill opens with the concept, and its recipe is on tables.** SKILL.md starts with what a
+  document is (what you need in front of you to act; open it and you're subscribed; documents,
+  not entities; what grows is where they're kept), then a chat room in `types.ts` (`defineSchema`,
+  `defineDoc`), `server.ts` (`registerDocs` on a JSON file), `client.ts` and the page, with
+  `id: number`: the same files move to SQLite by changing the server's wiring alone, and the
+  one line that carries the rows. It keeps the nine rules a first app needs (the id rule now says
+  how to read the id: `doc.send(ops, { inverse: true })`); the rest moved unchanged to
+  reference.md's new *Rules in depth*, beside *Backends side by side* and *Paths*. No more
+  "canonical recipe". reference.md's SQLite quick start opens `list:1` (a text id only as a
+  session token), and its `delta` row says a write needs the document open on the JSON file and
+  SQLite (404 `Doc not loaded` otherwise). `tests/recipe.test.ts` runs the new recipe.
 - **The examples run as their READMEs say, and tests prove what each promises.** kanban: two
   browsers (happy-dom) on `serve.ts`, a card clicked in one moves in both, and `run.ts` runs
   through. sites-bbox: one box story (into, within, out of, deleted, never-sent) against the

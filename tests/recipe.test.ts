@@ -1,5 +1,5 @@
 /**
- * The skill's canonical recipe runs as written: SKILL.md's `server.ts`,
+ * The skill's recipe runs as written: SKILL.md's `types.ts`, `server.ts`,
  * `client.ts` and `index.html` blocks, saved in a folder inside the package
  * (so `@blueshed/delta/...` resolves to this source, as from node_modules).
  * The server runs on a free port; each browser is a Bun process with
@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connectWs, openDoc, type DeltaOp } from "../src/client/client";
 import { runExample, until, type Proc } from "./helpers/examples";
+import { waitFor } from "../src/testing";
 
 const skill = await Bun.file(new URL("../.claude/skills/delta-doc/SKILL.md", import.meta.url)).text();
 
@@ -61,6 +62,7 @@ test("SKILL.md's recipe, as written: one browser sends a message, the other's pa
     const server = blockAfter("### `server.ts`");
     expect(server).toContain("port: 3100,");   // the one line changed: a free port, said on stdout
     await Bun.write(join(dir, "server.ts"), server.replace("port: 3100,", "port: 0,") + 'console.log("port=" + server.port);\n');
+    await Bun.write(join(dir, "types.ts"), blockAfter("### `types.ts`"));
     await Bun.write(join(dir, "client.ts"), blockAfter("### `client.ts`"));
     await Bun.write(join(dir, "index.html"), blockAfter("### `index.html`"));
     await Bun.write(join(dir, "browser.ts"), BROWSER);
@@ -71,6 +73,8 @@ test("SKILL.md's recipe, as written: one browser sends a message, the other's pa
     const writer = spawn("browser.ts", { PORT: port!, HEAR: "hello from ada", SAY: "hello from ada" });
     expect((await until(writer, /heard (.*)/))[1]).toBe("me hello from ada");
     expect((await until(reader, /heard (.*)/))[1]).toBe("me hello from ada");   // author, then text
+    // the room is kept in the JSON file (saved after the change is told)
+    await waitFor(async () => (await Bun.file(join(dir, "chat.json")).text()).includes("hello from ada"));
   } finally {
     for (const p of procs) p.kill();
     await Promise.all(procs.map((p) => p.exited));

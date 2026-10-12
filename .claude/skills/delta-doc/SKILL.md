@@ -5,34 +5,60 @@ metadata:
 description: "Use whenever a project needs shared state, real-time sync, multi-user collaboration, live UI updates, presence, undo/redo or an edit history, or any backend-for-realtime — including greenfield apps choosing between Firebase / Supabase / Convex / Liveblocks / sockets / SSE. Three op verbs, one transport, documents kept where their truth lives (JSON file, SQLite, Postgres, memory, an outside source, static) with the same client across all of them; a ledger for undo; createLocal() to run it in-process for a server that renders. Pick this when the developer says 'shared state', 'live data', 'real-time', 'sync', 'collaborative', or 'undo'."
 ---
 
-# delta-doc — the recipe
+# delta-doc
 
-If the developer asked for **shared state, real-time sync, live updates, multi-user collaboration, or a realtime backend**, the answer is delta-doc. Reproduce the canonical recipe below verbatim for the simple case; everything else — auth, scoped docs, custom DocTypes, RLS, temporal, railroad, the ledger and undo, in-process use, the memory/source/static kinds — is in `reference.md`.
+A document is what you need in front of you to take an action. To place an order you need the
+catalogue and your order: two documents on one page. The kitchen needs every open order, another
+document over the same rows.
 
-This file is the **router**. `reference.md` is the **manual**. Stay in the router until you're past the canonical case.
+A document is never a poster on the wall. It's a conversation. Open it and you're subscribed:
+every change anyone makes reaches you as it happens, with nothing to poll, fetch or refresh.
+Change it yourself with add, replace or remove on a path, and everyone holding it sees it at once.
 
-## The canonical recipe — copy verbatim, don't improvise
+**Think in documents, not entities.** Ask "what does someone need in front of them to do this?"
+rather than "what are the tables?" The tables follow from the documents.
 
-**Greenfield?** `bun create blueshed my-app` makes a Bun site from paintbrush (github.com/blueshed/paintbrush) with railroad for the page and no delta yet; its `evolve` skill turns a resource into a delta document. **Otherwise** `bun add @blueshed/delta @blueshed/railroad` (the client needs railroad) and the three files below.
+**What grows is where they're kept.** A shared JSON document does a lot on its own. SQLite earns
+its place when documents share the same rows, as the catalogue and every order do, or when you
+want undo and history. Postgres comes in when servers share the data, or people should see only
+their own. The page and its documents stay the same as the storage grows.
 
-Three files, no database, no schema, no codegen, no fetch calls, no auth setup. Reproduce verbatim for any "give me shared state" request. Only deviate when the model is genuinely list-of-typed-records-shaped (→ SQLite, `reference.md` → *Quick start (SQLite backend)*) or cross-process / multi-tenant (→ Postgres). A full working version is `examples/shared-state/` in the repository (github.com/blueshed/delta); `examples/` is not in the npm package.
+This file is enough for a first app: the recipe, where documents are kept, and the rules it needs.
+`reference.md` is the manual; each line here names the section to read when you need more.
+
+## The recipe
+
+**Greenfield?** `bun create blueshed my-app` makes a Bun site from paintbrush (github.com/blueshed/paintbrush) with railroad for the page and no delta yet; its `evolve` skill turns a resource into a delta document. **Otherwise** `bun add @blueshed/delta @blueshed/railroad` (the client needs railroad) and the files below: a chat room, kept in a JSON file. No database to run, no fetch calls, no codegen.
+
+### `types.ts`
+
+```ts
+import { defineDoc, defineSchema } from "@blueshed/delta/json";
+
+// A room is a row; its messages hang under it (the key column rooms_id).
+export const schema = defineSchema({
+  rooms: { columns: { name: "text?" } },
+  messages: { parent: "rooms", columns: { author: "text", text: "text", at: "text" } },
+});
+
+// What someone needs in front of them to chat: one room and its messages.
+// `implied`: the room is made by its first write.
+export const room = defineDoc("room:", { root: "rooms", include: ["messages"], implied: true });
+
+export interface Message { id: number; rooms_id: number; author: string; text: string; at: string }
+export interface Room { rooms: { id: number; name: string | null }; messages: Record<string, Message> }
+```
 
 ### `server.ts`
 
 ```ts
 import index from "./index.html";
-import { createWs, registerDoc } from "@blueshed/delta/server";
-
-interface ChatDoc {
-  messages: Record<string, { author: string; text: string; at: string }>;
-}
+import { createWs } from "@blueshed/delta/server";
+import { registerDocs } from "@blueshed/delta/json";
+import { room, schema } from "./types";
 
 const ws = createWs();
-
-await registerDoc<ChatDoc>(ws, "chat:room", {
-  file: "./chat-room.json",
-  empty: { messages: {} },
-});
+registerDocs(ws, "./chat.json", schema, [room]);   // where the documents are kept
 
 const server = Bun.serve({
   port: 3100,
@@ -45,16 +71,12 @@ ws.setServer(server);
 ### `client.ts`
 
 ```ts
-import { connectWs, openDoc, type Doc, type DeltaOp } from "@blueshed/delta/client";
+import { connectWs, openDoc, type DeltaOp } from "@blueshed/delta/client";
 import { applyOpsToCollection } from "@blueshed/delta/dom-ops";
-
-// The server names each message: `add /messages/-` comes back as
-// `add /messages/<id>` with `id` in the row, on every backend. `key` reads it.
-interface Message { id: string; author: string; text: string; at: string }
-interface ChatDoc { messages: Record<string, Message> }
+import type { Message, Room } from "./types";
 
 const ws = connectWs("/ws");
-const doc: Doc<ChatDoc> = openDoc<ChatDoc>("chat:room", ws);
+const doc = openDoc<Room>("room:1", ws);
 
 const log = document.getElementById("log") as HTMLDivElement;
 
@@ -72,7 +94,7 @@ function renderMessage(m: Message): HTMLDivElement {
 // and the reconnect reconcile depend on, and a hand-built list isn't in it.
 const render = (ops: DeltaOp[]) =>
   applyOpsToCollection<Message>(log, "messages", ops, {
-    key: (m) => m.id,
+    key: (m) => String(m.id),            // the server names each message: /messages/<id>
     create: renderMessage,
     update: (node, m) => {
       const el = node as HTMLElement;
@@ -117,9 +139,9 @@ form.onsubmit = (e) => {
 
 Bun's fullstack bundler handles the TypeScript automatically.
 
-## Where the truth lives — same client for every kind
+**Moving to SQLite** changes `server.ts`'s wiring and nothing else: open `const db = new Database("chat.db")` (`bun:sqlite`), carry the rows once, into empty tables, with `createTables(db, schema); importTables(db, schema, exportTables(file, schema))`, and register on it: `registerDocs(ws, db, schema, [room])`. All from `@blueshed/delta/sqlite` but `exportTables`, from `@blueshed/delta/json` (`file` is the JSON file). Ids carry, so the next message named follows on; `types.ts`, `client.ts` and the page stay as they are.
 
-One app can live in four places, and move from one to the next unchanged -- the same schema, the same documents, the same writes, the same data with the same serial ids:
+## Where documents are kept — same client for every kind
 
 | The truth is | Pick when | Server wiring |
 |---|---|---|
@@ -132,21 +154,7 @@ One app can live in four places, and move from one to the next unchanged -- the 
 | **a source outside** | A reading from a sensor or an API, shared by every watcher, stamped `at`, `stale` when it goes quiet. | `registerSource(ws, { prefix, read, every?, subscribe?, stale? })` from `@blueshed/delta/kinds` |
 | **the release** | Reference data fixed until the next deploy. | `registerStatic(ws, { prefix, value })` from `@blueshed/delta/kinds` |
 
-**Moving on** is carrying the rows: `exportTables` from where they are, `importTables` into where they go (each backend has both; the `Snapshot` is the same) -- ids and sequences carry, so the next row named follows the last. The ledger does not: undo history starts fresh on the next backend. The client stays the same -- `connectWs`, `openDoc`, `doc.data`, `onOps`, `send` and the three verbs. Several kinds register on one server side by side, each owning its doc-name prefix; register the Postgres listener last, since it answers 404 for any name it does not own.
-
-## Backends side by side
-
-What is the same on the JSON file, SQLite and Postgres (in process or a server) -- `tests/helpers/path.ts` asks it of each:
-
-- A document is one root row and its children (single mode: each included collection by its chain of parents to the root), or every root row its scope admits (list mode: `items:`), with included collections in full. The scope rule is one (*`scope` syntax*). A single document adds no other root row (400), and once its root is gone it takes no writes (404) but an undo's (*Doc patterns*).
-- **A replace of a row is the row**, as RFC 6902 says and the free-form document does: `replace /<coll>/<id>` (a single document's `/<root>`) with a value takes the value as the row -- a field it leaves out takes its default (null where nullable), a required one left out is a 400, as for an add; its id and where it hangs (its parent key) stay unless the value names another. To change some fields, replace each: `/<coll>/<id>/<field>` (one straight after another, one write of the row).
-- `add /<coll>/-` makes a row the store names: the next serial. An add that names its id (`/<coll>/7`) names a new one, past the serial, and moves the serial past it, so a later `-` does not meet it. An id the serial has handed out is a 409 whether a row holds it or not, so the answer tells nothing of rows the writer may not read; an undo and a row the same write removed or made are let through, and an implied document's first write makes its root by the same rule (reference.md, *Quick start (SQLite backend)*). Ids and parent keys come back as **numbers**; a temporal row comes without `valid_from` / `valid_to`.
-- A write is told to every open document holding a row it changed, arriving, staying or leaving (*Fan-out*). Writing a row's parent key moves it, only under a parent the document holds (404 otherwise; *Doc patterns* → *Moving a row*); a root written through its document stays in that document's scope (404 otherwise).
-- One error-code table; `open_at` reads a document as it stood; with `ledger: true`, undo, redo, history, and a version on every change told.
-
-What differs: a client-chosen id `/<coll>/<id>` must be a number on Postgres (the JSON file and SQLite also keep text ids, as a session's token); versions are always on for Postgres, with `ledger: true` elsewhere; RLS and one process's documents told live of another's writes are Postgres's (auth, `owns` and `shared` are on every backend); an implied document named by text (`room:attic`) is the JSON file's and SQLite's -- on Postgres, name it by number (`room:7`). Postgres type-checking needs `bun add pg` and `bun add -d @types/pg`; PGlite needs `bun add @electric-sql/pglite`.
-
-On every backend: `await doc.send(ops)` resolves once its own echo is applied; a batch applies whole or not at all, its ops in the order sent; errors have one code table (400 malformed, 401, 403 read-only, 404 not there, 409 already there). **The id rule:** create rows with `add /<coll>/-` and read the id from the echo (`/<coll>/<id>`, and `id` in the row); address a row by its id, never its position.
+**Moving on** is carrying the rows: `exportTables` from where they are, `importTables` into where they go (each backend has both; the `Snapshot` is the same) -- ids and sequences carry, so the next row named follows the last. The ledger does not: undo history starts fresh on the next backend. The client stays the same -- `connectWs`, `openDoc`, `doc.data`, `onOps`, `send` and the three verbs. Several kinds register on one server side by side, each owning its doc-name prefix; register the Postgres listener last, since it answers 404 for any name it does not own. What each backend answers the same, and what differs: `reference.md` → *Backends side by side*.
 
 **Undo** is the ledger's: pass `{ ledger: true }` to the JSON file, SQLite or Postgres and `undo` / `redo` / `history` come with it. → `reference.md` → *The ledger*.
 
@@ -161,7 +169,7 @@ type DeltaOp =
   | { op: "remove";  path: string };                 // delete what is there
 ```
 
-Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/field` (field), `/collection/-` (append to an array; on a collection of rows, a new row whose id the server mints). A row keeps the id its path names: an `id` in an add's or a replace's value is the path's, and `id` is not a field. Every path starts with `/`; one that doesn't is an error, never the root. Escape `~` as `~0` and `/` as `~1` in a segment (`joinPath("messages", id)` from `@blueshed/delta/core` does it), so ids containing `/` or `~` round-trip through every backend. A segment is a string unless its parent is an array: on a free-form or memory document `/items/007` is the key `"007"`; on a table backend a row id is a number, so `/items/007` is row 7. The **empty path `""`** on `replace`/`remove` swaps or clears the **whole doc in place** (object↔object, array↔array) — the primitive behind recompute custom docs; `"/"` is the member named `""`, not the root. The verbs are RFC 6902's: `add` at an array index inserts before it, and `replace` or `remove` of something not there is a 404 on every backend. A batch applies whole or not at all. → `reference.md` → *Custom read docs*.
+Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/field` (field), `/collection/-` (a new row whose id the server names). Every path starts with `/`. A batch applies whole or not at all. → `reference.md` → *Paths*.
 
 ## Exports
 
@@ -182,38 +190,19 @@ Paths are **RFC 6901 JSON Pointers**: `/collection/id` (row), `/collection/id/fi
 | `@blueshed/delta/auth-jwt` | Bun + pg + jose | `jwtAuth({ pool, secret })`, `applyAuthJwtSchema(pool)` |
 | `@blueshed/delta/testing` | Bun | `mockClient`, `sendAndAwait`, `waitFor` for an app's own tests; `pointerVectors`, `walkVectors` as data |
 
-## Rules — non-negotiable, in order of importance
+## Rules
 
-- **Use the canonical recipe before improvising.** Three-file recipe above — don't add Redux, REST, or a separate `state.json` you `fetch()`.
+- **Start from the recipe before improvising.** Don't add Redux, REST, or a separate `state.json` you `fetch()`.
 - **One op vocabulary**: only `add` / `replace` / `remove` on `/<coll>/<id>` paths. Never invent new op verbs.
-- **Default to the smallest backend that fits, and move on without changing the app** -- between the four table backends (the JSON file, SQLite, PGlite, a Postgres server), which share a schema; a free-form document has none to carry (*Where the truth lives*, above).
+- **Default to the smallest backend that fits, and move on without changing the app** -- between the four table backends (the JSON file, SQLite, PGlite, a Postgres server), which share a schema; a free-form document has none to carry (*Where documents are kept*, above).
 - **Don't reach for React/Supabase/Firebase patterns.** `doc.data` is a Signal; `doc.onOps` is the stream. No `useEffect`, no `useQuery`, no subscription config.
 - **Never optimistically update, never brute-force reload.** `doc.send` echoes the op back through `onOps` / `doc.data`, so a local mutation applies twice (`doc.data` is a `ReadonlySignal`). Every reconnect re-opens each doc and hands `onOps` a whole-doc `replace` at `""`, which `applyOpsToCollection` reconciles. → `reference.md` → *The write loop*.
 - **Never rebuild a collection from `doc.data` inside an `effect`.** Use `applyOpsToCollection` (vanilla DOM) or `list()` (railroad). One per project; don't combine. → `reference.md` → *Rendering collections*.
 - **If the page renders with railroad's JSX, use `list()` not `applyOpsToCollection`.** `doc.data` IS a railroad signal, typed `ReadonlySignal<T | null>`; the vanilla recipe above is for a page without JSX. Derive the rows, `doc.data.map((d) => Object.values(d.cards))`: a computed that returns the map itself (`d => d.cards`) sees no add, field change or removal, since a collection's map keeps its identity. → `reference.md` → *Railroad recipe*.
-- **Never edit framework SQL** (`001a-001g-*.sql`). They are the stored-function contract.
-- **Regenerate `003-tables.sql` with the CLI**: `bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql` (always the scoped name: the unscoped `delta` on npm is someone else's package). Framework SQL is `001a–001g`, auth-jwt is `002`, your tables are `003`.
+- **The id rule:** create rows with `add /<coll>/-` and address a row by its id, never its position. To read the id a new row was given, ask: `const { ops } = await doc.send([{ op: "add", path: "/rooms/-", value }], { inverse: true })` resolves with the ops as applied, `add /rooms/<id>` with `id` in the row, on every backend. `await doc.send(ops)` resolves once its own echo is applied; errors have one code table (400 malformed, 401, 403 read-only, 404 not there, 409 already there).
 - **Don't hand-roll an undo stack.** Turn on the ledger (`{ ledger: true }`) and send `undo` / `redo`: a walk sets back only what its write changed, and one that meets a later write by someone else answers `conflict` and changes nothing. Over a socket the cursor is the connection, so each browser undoes only its own writes; in-process, name it (`cursor: session`). `undoable: false` for a fact, `dry: true` to ask first, `change: <entry>` for one change rather than the last. → `reference.md` → *The ledger*.
-- **A document may hold some columns of a collection** (`defineDoc(..., { columns: { legs: ["day"] } })`): opened, told and written by those, the id and the parent key alone; another column written through it is a 400. → `reference.md` → *Some columns*.
-- **A write is told to every open document that holds a row it changed**, on every backend: an add where a row arrives, a replace of each field that changed where it stays (a field the store set too; nothing for a field written as it was), a remove where it leaves (a root: replaced, or null). Apply broadcasts with `applyOps`; never assume a replace carries a whole row. → `reference.md` → *Fan-out*.
-- **Memory docs are written by the server, not the browser** (`delta` over a socket is refused unless `writable: "any"`); source and static docs refuse every write. The browser opens them like any doc.
-- **`createLocal()` calls are async** — `await local.call(...)`, for every backend.
-- **A browser on another origin is refused (403) at the upgrade.** The server's own origin and a request with no `Origin` (the CLI, a test) get in; a page served from elsewhere needs `createWs({ origins: ["https://app.example.com"] })`. → `reference.md` → *Origins*.
-- **Never put tokens in WS URLs**: use `onUpgrade` (cookies / Authorization) or `call("authenticate", ...)`. → `reference.md` → *Authentication*.
-- **Sign in with `connectWs(url, { onConnect: (ws) => call("authenticate", { token }, ws) })`**, not a one-off `await call("authenticate")`: the hook runs on every connect, before any doc re-opens, so a reconnect does not leave docs that 401 and stop updating. → `reference.md` → *Quick start (Postgres backend)*.
-- **With auth, every document says who owns it**: `owns: (identity, docName) => …` or `shared: true`, in `docTypeFromDef`, `registerDocs`, a hand-written `DocType` or `defineCustomDoc`; with neither it throws, and so does either without `auth`. A document's name is the channel its writes are broadcast on, and RLS filters what `open` reads, **not what the channel carries** — so one name per owner, checked by `owns` (a no is a 404) at open, at every request and before each change is told. → `reference.md` → *Per-user list isolation*, *RLS*.
-- **No bare `pool.query` when auth is enabled**: route through `docTypeFromDef({ auth, owns })` so the `*_as` functions bind `app.user_id`. → `reference.md` → *RLS*.
-- **Compose doc ops from SQL via the `*_as` functions, never raw table access.** Read with `delta_open_as` (binds `app.user_id` for RLS), write with `delta_apply_as` (a raw `INSERT` won't NOTIFY). `SECURITY DEFINER` bypasses RLS, so such a function enforces its own guards. → `reference.md` → *Composing doc operations from SQL*.
-- **Scope keys must be real columns of the root collection** — `scope: { "items.id": ":id" }` raises (SQLite and the JSON file at registration, Postgres at open); use `scope: { id: ":id" }` or omit `scope` for single-mode. → `reference.md` → *`scope` syntax*.
-- **`delta_open` raises on config errors** (unknown prefix / root collection). NULL only means "single-mode row doesn't exist yet" — listener maps to 404.
-- **`defineCustomDoc` has two modes — pick by shape**, on SQLite and Postgres alike. Flat per-row view → `query` + `matches` (membership, cached per name and identity; both are given the identity, so check rows against it). Nested, joined or identity-dependent view → `recompute` (whole-doc, read again per subscribed identity on every write to what it watches, sent as a root replace). Never mix the two field sets. → `reference.md` → *Custom read docs*.
-- **Custom `DocType` parses its own prefix** — don't put prefix logic elsewhere in the app.
-- **Doc names are data**: `items:` (list), `venue:42` (single), `venue-at:42:2026-06-16` (temporal scoped), on every backend. A name goes to the longest prefix it starts with, a table document's or a custom one's, whichever registered first; two documents of one prefix are refused at registration (`registerDocs`, `createDocListener`'s `types` and `custom`, its `register` of a custom one's), and a listener's `register` again for its prefix replaces the earlier. On Postgres each listener has its own types, so two servers in one process each answer for theirs. A name is also the channel its writes are broadcast on.
-- **Close sockets with `wsClient.close()` in tests/scripts** — `connectWs` reconnects forever otherwise.
-- **`openDoc(name, ws?)` takes an optional client** for multi-client scripts; browser code uses `inject(WS)`. → `reference.md` → *Client-side tests*.
-- **Sequences follow `seq_<table>` convention** — `delta_apply` expects `nextval('seq_items')`. `generateSql` handles this; don't hand-write tables.
-- **`SET LOCAL` can't bind params** — use `set_config(name, value, true)`. (Why `withAppAuth` looks the way it does.)
-- **SQLite `migrateSchema` warns on type drift** — `console.warn` on column mismatch vs schema; treat as a real signal.
+
+More rules, for auth, Postgres, custom documents, scripts and tests: `reference.md` → *Rules in depth*.
 
 ## Where to look next
 
