@@ -419,6 +419,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "canonical recipe". reference.md's SQLite quick start opens `list:1` (a text id only as a
   session token), and its `delta` row says a write needs the document open on the JSON file and
   SQLite (404 `Doc not loaded` otherwise). `tests/recipe.test.ts` runs the new recipe.
+  `examples/shared-state` is that recipe with more page: `types.ts`, `registerDocs` on the JSON
+  file, `room:1`, messages named by number; its README in the concept's words.
 - **The examples run as their READMEs say, and tests prove what each promises.** kanban: two
   browsers (happy-dom) on `serve.ts`, a card clicked in one moves in both, and `run.ts` runs
   through. sites-bbox: one box story (into, within, out of, deleted, never-sent) against the

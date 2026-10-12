@@ -1,25 +1,19 @@
 /**
- * A chat room: one document, `chat:room`, kept in a JSON file. Everyone who
+ * A chat room: one document, `room:1`, kept in a JSON file. Everyone who
  * opens it holds it, and is told each message anyone sends as it is sent.
- * No database, no schema.
+ * No database to run.
  *
  * Run:
  *   bun examples/shared-state/server.ts
  *   open http://localhost:3100 in two tabs
  */
 import index from "./index.html";
-import { createWs, registerDoc } from "../../src/server/server";
-
-interface ChatDoc {
-  messages: Record<string, { author: string; text: string; at: string }>;
-}
+import { createWs } from "../../src/server/server";
+import { registerDocs } from "../../src/server/json";
+import { room, schema } from "./types";
 
 const ws = createWs();
-
-await registerDoc<ChatDoc>(ws, "chat:room", {
-  file: "./examples/shared-state/chat-room.json",
-  empty: { messages: {} },
-});
+registerDocs(ws, "./examples/shared-state/chat-room.json", schema, [room]);   // where the documents are kept
 
 const server = Bun.serve({
   port: Number(process.env.PORT ?? 3100),

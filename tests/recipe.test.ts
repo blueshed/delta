@@ -97,16 +97,14 @@ test("bun examples/shared-state/server.ts serves its page, and passes a message 
 
     const url = `ws://localhost:${port}/ws`;
     [a, b] = [connectWs(url), connectWs(url)];
-    const [mine, theirs] = [openDoc<any>("chat:room", a), openDoc<any>("chat:room", b)];
+    const [mine, theirs] = [openDoc<any>("room:1", a), openDoc<any>("room:1", b)];
     await Promise.all([mine.ready, theirs.ready]);
     const heard: DeltaOp[][] = [];
     theirs.onOps((ops) => heard.push(ops));
     await mine.send([{ op: "add", path: "/messages/-", value: { author: "ada", text: "hi", at: "now" } }]);
     for (let i = 0; i < 100 && heard.length === 0; i++) await Bun.sleep(10);
-    const op: any = heard[0]?.[0];
-    const id = op?.path.split("/")[2];
-    expect(op).toEqual({ op: "add", path: `/messages/${id}`, value: { author: "ada", text: "hi", at: "now", id } });
-    expect(id).not.toBe("-");
+    // the server names the message by number, in the path and the row
+    expect(heard[0]).toEqual([{ op: "add", path: "/messages/1", value: { id: 1, rooms_id: 1, author: "ada", text: "hi", at: "now" } }]);
   } finally {
     a?.close();
     b?.close();

@@ -2,22 +2,20 @@
  * Three concepts: connect, open, send.
  *
  *   const ws  = connectWs("/ws");      // reconnecting WebSocket client
- *   const doc = openDoc("chat:room");   // reactive doc — auto-updates on every op
+ *   const doc = openDoc("room:1");      // reactive doc — auto-updates on every op
  *   doc.send([{ op: "add", path: "/messages/-", value: {...} }]);   // the server names the row
  *
  * No fetch, no polling. The shape lives in `doc.data.get()`; ops mutate it
  * in place; every subscriber receives the same op stream via `onOps`.
  */
-import { connectWs, openDoc, type Doc } from "../../src/client/client";
+import { connectWs, openDoc } from "../../src/client/client";
 import { applyOpsToCollection } from "../../src/client/dom-ops";
+import type { Message, Room } from "./types";
 
 // The server names each message: `add /messages/-` comes back as
 // `add /messages/<id>` with `id` in the row. The DOM renderer keys rows by it.
-interface Message { id: string; author: string; text: string; at: string }
-interface ChatDoc { messages: Record<string, Message> }
-
 const ws = connectWs("/ws");
-const doc: Doc<ChatDoc> = openDoc<ChatDoc>("chat:room", ws);
+const doc = openDoc<Room>("room:1", ws);
 
 const log     = document.getElementById("log") as HTMLDivElement;
 const form    = document.getElementById("composer") as HTMLFormElement;
@@ -40,7 +38,7 @@ function renderMessage(m: Message): HTMLDivElement {
 // its node and stops a reconnect re-appending the whole list.
 const render = (ops: Parameters<Parameters<typeof doc.onOps>[0]>[0]) =>
   applyOpsToCollection<Message>(log, "messages", ops, {
-    key: (m) => m.id,
+    key: (m) => String(m.id),
     create: renderMessage,
     update: (node, m) => {
       const el = node as HTMLElement;
