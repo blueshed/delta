@@ -47,6 +47,14 @@ async function resetSites(pool: Pool): Promise<void> {
       IF to_regclass('worlds') IS NOT NULL THEN
         EXECUTE 'TRUNCATE worlds RESTART IDENTITY CASCADE';
       END IF;
+      -- the serials delta mints from and checks a named id against (#71): not the tables' own, so
+      -- RESTART IDENTITY leaves them; each test names /sites/1 afresh
+      IF to_regclass('seq_sites') IS NOT NULL THEN
+        EXECUTE 'ALTER SEQUENCE seq_sites RESTART';
+      END IF;
+      IF to_regclass('seq_worlds') IS NOT NULL THEN
+        EXECUTE 'ALTER SEQUENCE seq_worlds RESTART';
+      END IF;
       IF to_regclass('_delta_versions') IS NOT NULL THEN
         EXECUTE 'TRUNCATE _delta_versions';
       END IF;
