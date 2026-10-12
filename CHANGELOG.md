@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-10-12
+
 ### Fixed
 
 - **SQLite and the JSON file quote table and column names (todo #74)**, as Postgres does: a table, parent key or column named as an SQL keyword (`order`, `group`, `in`, `from`, `to`) failed with a syntax error, and now works on every backend.
