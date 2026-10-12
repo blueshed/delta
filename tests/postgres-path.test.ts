@@ -48,13 +48,49 @@ afterAll(async () => {
   await pool.end();
 });
 
+/** The version each document open on a process was opened at (`_v`), while it is open. */
+const openedAt = new WeakMap<PathProcess, Map<string, number>>();
+
 /** A process on the database: delta in-process over its own listener, and everything it published. */
 async function processOn(): Promise<PathProcess> {
   const local = createLocal();
   const heard: { channel: string; data: any }[] = [];
   local.onPublish((channel, data) => heard.push({ channel, data }));
   listeners.push(await createDocListener(local.server, pool, { types: [...pathDocs, ...pathPublicDocs].map((def) => docTypeFromDef(def, pool)), ledger: true, custom: [postgresInbox, postgresOpenSeats, postgresMenuCard, postgresEmails, postgresGuests] }));
-  return { call: (action, msg) => local.call(action, msg), heard };
+  const opened = new Map<string, number>();
+  const made: PathProcess = {
+    call: async (action, msg) => {
+      const r = await local.call(action, msg);
+      if (action === "open" && typeof r.result?._v === "number") opened.set(String(msg.doc), r.result._v);
+      if (action === "close") opened.delete(String(msg.doc));
+      return r;
+    },
+    heard,
+  };
+  openedAt.set(made, opened);
+  return made;
+}
+
+/**
+ * Quiet once every document open on `p` has been told up to the version the
+ * database is at for it (`_delta_versions`): the listener fetches what a
+ * NOTIFY announced after the write answered, so a fixed wait alone could
+ * read a copy before its telling under load. Custom documents keep no
+ * version: the wait before covers them, as it did.
+ */
+async function quiet(p: PathProcess): Promise<void> {
+  await new Promise((r) => setTimeout(r, 300));
+  const opened = openedAt.get(p) ?? new Map<string, number>();
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const { rows } = await pool.query("SELECT doc_name, version FROM _delta_versions WHERE doc_name = ANY($1)", [[...opened.keys()]]);
+    const behind = rows.filter((r: any) => {
+      const told = p.heard.filter((h) => h.channel === r.doc_name).map((h) => Number(h.data.v ?? 0));
+      return Math.max(opened.get(r.doc_name)!, ...told) < Number(r.version);
+    });
+    if (!behind.length) return;
+    await new Promise((r) => setTimeout(r, 25));
+  }
 }
 
 beforeEach(async () => {
@@ -63,7 +99,7 @@ beforeEach(async () => {
   backend = {
     process: await processOn(),
     // LISTEN/NOTIFY over the wire: the write answers at its commit; what it notified is fetched and published after.
-    quiet: () => new Promise((r) => setTimeout(r, 300)),
+    quiet: () => quiet(backend.process),
     exportTables: () => exportTables(pool, pathSchema),
     storeSetsT: async () => {
       await pool.query("CREATE FUNCTION fo_t() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.t := upper(NEW.email); RETURN NEW; END $$");
