@@ -450,7 +450,7 @@ export function drivenCases(backend: () => PathBackend): void {
       const code = async (doc: string, ops: unknown[]) => (await b.process.call("delta", { doc, ops })).error?.code;
       expect(await code("fo-all-courses:", [{ op: "add", path: "/courses/-", value: { weddings_id: 7, name: "Fish" } }])).toBe(404);
       expect(await code("fo-all-courses:", [{ op: "replace", path: "/courses/1/weddings_id", value: 9 }])).toBe(404);
-      expect(await code("fo-all-households:", [{ op: "replace", path: "/households/1", value: { weddings_id: 9 } }])).toBe(404);
+      expect(await code("fo-all-households:", [{ op: "replace", path: "/households/1", value: household(1, "a@x", 9) }])).toBe(404);
       expect(await code("fo-catalog:", [{ op: "add", path: "/drinks/-", value: { courses_id: 9, name: "Port" } }])).toBe(404);
       expect(await code("fo-catalog:", [{ op: "replace", path: "/drinks/1/courses_id", value: 9 }])).toBe(404);
       await expectSilent(b, ...copies.keys());
@@ -543,7 +543,7 @@ export function registrationCases(backend: () => PathBackend): void {
       await rename("fo-pub-courses:", "Gazpacho", "bob");
       expect(await walked("redo")).toEqual({ error: undefined, ops: [], conflict: ["/courses/1"] });
       expect(await name()).toBe("Gazpacho");
-      await expectTold(b, "fo-menu:1", ["Broth", "Bisque", "Consomme", "Bisque", "Gazpacho"].map((n) => [{ op: "replace", path: "/courses/1", value: course(1, n) }]));
+      await expectTold(b, "fo-menu:1", ["Broth", "Bisque", "Consomme", "Bisque", "Gazpacho"].map((n) => [field("/courses/1/name", n)]));
       // a row added and removed through the public courses reaches the board, and a household through the board the inbox
       const added = await write(b.process, "fo-pub-courses:", [{ op: "add", path: "/courses/-", value: { weddings_id: 1, name: "Fish" } }], { inverse: true });   // it keeps no ledger: asked for what it applied
       await write(b.process, "fo-pub-courses:", [{ op: "remove", path: added.ops[0].path }]);
@@ -2537,7 +2537,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       await write(b.process, "fo-all-courses:", [{ op: "replace", path: "/courses/10/weddings_id", value: 8 }], { cursor: "s1" });
       for (const way of ["undo", "redo", "undo"]) expect((await b.process.call(way, { cursor: "s1" })).result.conflict).toBeUndefined();
       await expectTold(b, "fo-plan:8", [
-        [{ op: "replace", path: "/weddings", value: { id: 8, name: "the other" } }],
+        [field("/weddings/name", "the other")],
         [{ op: "add", path: "/courses/10", value: course(10, "Soup", 8) }, { op: "add", path: "/drinks/10", value: drink(10, 10, "Sherry") }],
         [{ op: "remove", path: "/courses/10" }, { op: "remove", path: "/drinks/10" }],
         [{ op: "add", path: "/courses/10", value: course(10, "Soup", 8) }, { op: "add", path: "/drinks/10", value: drink(10, 10, "Sherry") }],
