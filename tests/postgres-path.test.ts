@@ -255,6 +255,7 @@ describe("postgres: the documents open now", () => {
   test("delta_prune_ops keeps the version of a name held open, though nothing of it is left in the log: the next change follows on", async () => {
     await openAll(backend.process, ["fo-board:1", "fo-menu:1"]);
     await write(backend.process, "fo-board:1", [{ op: "replace", path: "/courses/1/name", value: "Broth" }]);
+    await waitFor(() => told(backend.process, "fo-menu:1").length === 1);   // told, and fetched from the log, before the log is pruned
     await pool.query("SELECT delta_prune_ops('0 seconds')");
     await write(backend.process, "fo-board:1", [{ op: "replace", path: "/courses/1/name", value: "Soup" }]);
     await waitFor(() => told(backend.process, "fo-menu:1").length === 2);
