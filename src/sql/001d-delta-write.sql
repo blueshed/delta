@@ -351,12 +351,6 @@ RETURNS BIGINT LANGUAGE sql AS $$ SELECT _delta_tell(p_writer, p_touched, NULL);
 -- list holds every row of its root, but names their parents only by key, and
 -- a row under a parent that is not there is no document's (an implied one
 -- not yet written opens empty). `there` in sqlite.ts.
---
--- SECURITY DEFINER, as _delta_holders (todo #33): whether the parent is there
--- is asked as the functions' owner, not the writer, so a parent the writer's
--- RLS hides (another's list, under a board they may write to) is there; a
--- caller that may not read the table is told no row is. It answers a boolean
--- of a row by id, never the row. Its search_path is pinned below, pg_temp last.
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION _delta_row_there(p_collection_key TEXT, p_id BIGINT)
@@ -367,16 +361,11 @@ DECLARE
 BEGIN
   SELECT * INTO v_coll FROM _delta_collections WHERE collection_key = p_collection_key;
   IF NOT FOUND OR p_id IS NULL THEN RETURN FALSE; END IF;
-  IF NOT has_table_privilege(COALESCE(NULLIF(current_setting('role'), 'none'), session_user), v_coll.table_name, 'SELECT') THEN RETURN FALSE; END IF;
   EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I WHERE id = $1)', _delta_source_view(v_coll.table_name, v_coll.temporal))
     INTO v_exists USING p_id;
   RETURN v_exists;
 END;
-$$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
--- the search path it was applied with, and pg_temp last (as _delta_holders, 001b)
-DO $$ BEGIN
-  EXECUTE format('ALTER FUNCTION _delta_row_there(TEXT, BIGINT) SET search_path = %s, pg_temp', COALESCE(NULLIF(current_setting('search_path'), ''), 'public'));
-END $$;
+$$ LANGUAGE plpgsql STABLE;
 
 -- ---------------------------------------------------------------------------
 -- _delta_assert_parent_held: a parent key written (in `p_value`, over the row

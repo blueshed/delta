@@ -214,7 +214,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     list holds every course but names its wedding only by key: `add /courses/- { weddings_id: 7 }`
     through `all-courses:` made an orphan under a wedding that was not there (an implied plan
     not yet written), which the plan was told of but did not hold. `_delta_row_there` (`001d`,
-    new; SECURITY DEFINER, as `_delta_holders`, so a parent the writer's RLS hides is there) and `_delta_assert_parent_held` and `delta_apply` (`001d`, replaced in place) ask it, as
+    new; read as the writer, so a parent RLS hides is not there: a 404, as one that does not exist) and `_delta_assert_parent_held` and `delta_apply` (`001d`, replaced in place) ask it, as
     SQLite and the JSON file now do. An undo that would put a row back under a parent gone since is
     a conflict.
   - **A cascade is told in one order on every backend**: each child collection by key, each row by

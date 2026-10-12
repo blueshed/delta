@@ -571,7 +571,7 @@ describe("the framework's SECURITY DEFINER functions cannot be led astray", () =
     const made = frameworkSqlFiles().flatMap((f) => [...readFileSync(f, "utf8").matchAll(/CREATE (?:OR REPLACE )?FUNCTION (\w+)/g)].map((m) => m[1]!));
     const { rows } = await admin.query(`SELECT DISTINCT proname, proconfig FROM pg_proc
       WHERE prosecdef AND pronamespace = current_schema()::regnamespace AND proname = ANY($1) ORDER BY proname`, [made]);
-    expect(rows.map((r: any) => r.proname)).toEqual(["_delta_holders", "_delta_row_there", "_delta_serial_new", "_delta_serial_past"]);
+    expect(rows.map((r: any) => r.proname)).toEqual(["_delta_holders", "_delta_serial_new", "_delta_serial_past"]);
     for (const { proname, proconfig } of rows) {
       const path = (proconfig ?? []).find((c: string) => c.startsWith("search_path="));
       expect({ proname, last: path?.split(",").at(-1)?.trim() }).toEqual({ proname, last: "pg_temp" });
