@@ -548,9 +548,11 @@ export interface Doc<T> {
   /**
    * Send ops; resolves with the ack once this doc has applied the write's own
    * echo, on every backend (on Postgres the echo follows the ack). Rejects
-   * with a `DeltaError`.
+   * with a `DeltaError`. With `{ inverse: true }` the ack carries `ops`, the
+   * ops as applied, on every backend: `add /rooms/-` comes back as
+   * `add /rooms/<id>` (and `inverse` where the backend gives one).
    */
-  send(ops: DeltaOp[]): Promise<any>;
+  send(ops: DeltaOp[], options?: { inverse?: boolean }): Promise<any>;
   /**
    * Subscribe to the raw JSON-Patch ops as they arrive — BEFORE they are
    * applied to `doc.data`. Use this to route `add` / `replace` / `remove`
@@ -752,9 +754,10 @@ export function openDoc<T>(name: string, client?: WsClient): Doc<T> {
     get data() { return cur().data; },
     get dataVersion() { return cur().dataVersion; },
     ready,
-    send(ops: DeltaOp[]) {
+    send(ops: DeltaOp[], options?: { inverse?: boolean }) {
       // Resolves once this doc has applied the write's echo (see afterEcho).
-      return ensureClient().send({ action: "delta", doc: name, ops }).then((result) => afterEcho(cur(), result));
+      const msg = options?.inverse ? { action: "delta", doc: name, ops, inverse: true } : { action: "delta", doc: name, ops };
+      return ensureClient().send(msg).then((result) => afterEcho(cur(), result));
     },
     onOps(handler) {
       cur().opsHandlers.add(handler);

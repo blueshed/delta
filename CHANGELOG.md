@@ -47,6 +47,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (Postgres with its `version`), as SQLite and the JSON file already answered `ops` and `inverse`;
   neither has an inverse to give. Unasked, their answers are as they were. `registerDoc`'s
   `applyAndBroadcast` returns the ops it applied and broadcast.
+- **`doc.send(ops, { inverse: true })`** asks for that answer from the browser client: it
+  resolves with the ops as applied, so `add /rooms/-` gives back `add /rooms/<id>`, the id the
+  new row was given, on every backend. `doc.send(ops)` sends and answers as it did.
 
 ### Changed
 

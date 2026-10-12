@@ -7,6 +7,11 @@ import { describe, test, expect, afterEach } from "bun:test";
 import { connectWs, openDoc, call, WS, type Doc, type WsClient } from "../src/client/client";
 import { provide, clearProviders, signal } from "@blueshed/railroad";
 import type { DeltaOp } from "../src/core";
+import { Database } from "bun:sqlite";
+import { createWs } from "../src/server/server";
+import { createTables, defineDoc, defineSchema, registerDocs } from "../src/server/sqlite";
+import { applyFramework, applySql, createDocListener, docTypeFromDef, generateSql } from "../src/server/postgres";
+import { openPglite } from "../src/server/pglite";
 
 // `connectWs` resolves URLs against `location` — shim it for Bun.
 (globalThis as any).location = { href: "http://localhost/", protocol: "http:" };
@@ -757,6 +762,53 @@ describe("send resolves after its own echo", () => {
     expect(doc.data.peek()).toEqual({ n: 1 });   // the echo has landed
     client.close();
   });
+});
+
+describe("send(ops, { inverse: true }) resolves with the ops as applied: the id a new row was given", () => {
+  const schema = defineSchema({
+    venues: { columns: { name: "text?" }, temporal: false },
+    rooms: { parent: "venues", columns: { name: "text" }, temporal: false },
+  });
+  const venue = defineDoc("venue:", { root: "venues", include: ["rooms"], implied: true });
+
+  async function serve(register: (ws: ReturnType<typeof createWs>) => unknown): Promise<string> {
+    const ws = createWs();
+    await register(ws);
+    server = Bun.serve({ port: 0, routes: { [ws.path]: ws.upgrade }, websocket: ws.websocket });
+    ws.setServer(server);
+    return `ws://localhost:${server.port}${ws.path}`;
+  }
+
+  async function asksForTheId(url: string) {
+    const client = connectWs(url);
+    const doc = openDoc<any>("venue:1", client);
+    await doc.ready;
+    const ack = await doc.send([{ op: "add", path: "/rooms/-", value: { name: "attic" } }], { inverse: true });
+    expect(ack.ops).toEqual([{ op: "add", path: "/rooms/1", value: expect.objectContaining({ id: 1, venues_id: 1, name: "attic" }) }]);
+    const plain = await doc.send([{ op: "add", path: "/rooms/-", value: { name: "cellar" } }]);
+    expect(plain.ops).toBeUndefined();   // not asked: the ack as it was
+    expect(doc.data.peek().rooms[2].name).toBe("cellar");
+    client.close();
+  }
+
+  test("SQLite", async () => {
+    const db = new Database(":memory:");
+    createTables(db, schema);
+    await asksForTheId(await serve((ws) => registerDocs(ws, db, schema, [venue])));
+  });
+
+  test("Postgres in this process (PGlite), with no ledger", async () => {
+    const pool = await openPglite();
+    let listener: { destroy(): Promise<void> } | undefined;
+    try {
+      await applyFramework(pool);
+      await applySql(pool, generateSql(schema, [venue]));
+      await asksForTheId(await serve(async (ws) => { listener = await createDocListener(ws, pool, { types: [docTypeFromDef(venue, pool)] }); }));
+    } finally {
+      await listener?.destroy();
+      await pool.end();
+    }
+  }, 30_000);
 });
 
 // ---------------------------------------------------------------------------
