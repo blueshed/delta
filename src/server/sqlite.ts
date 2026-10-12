@@ -537,16 +537,25 @@ export function registerDocs<I = unknown>(
 
   /**
    * An id a write named moves its collection's sequence past it, never back, so a later `add /<coll>/-` does not
-   * meet it (#72) -- Postgres's `_delta_serial_past`. A collection with no sequence yet starts one, from the
-   * largest id it holds, as `nextId` would, so the id stays passed once its row is gone, as setval's does.
-   * Rolled back with a refused write, as Postgres passes it only once the write is done (#71): a write refused
-   * part way names none.
+   * meet it (#72) -- Postgres's `_delta_serial_past`. As there, once the write is done (`passNamed`), so a
+   * write refused part way names none, and a `-` in the write after a named add takes the serial as it stood
+   * (#71). A collection with no sequence yet starts one, from the largest id it holds, as `nextId` would, so
+   * the id stays passed once its row is gone, as setval's does.
    */
   function passId(table: ResolvedTable, id: string | number): void {
-    if (typeof id !== "number") return;
-    db.run(
-      `INSERT INTO _delta_sequences (collection, last) VALUES (?1, MAX(?2, COALESCE((SELECT MAX(id) FROM ${table.name} WHERE typeof(id) = 'integer'), 0)))
-       ON CONFLICT (collection) DO UPDATE SET last = MAX(last, ?2)`, [table.docKey, id]);
+    if (typeof id === "number" && !(id <= (passing.get(table) ?? -Infinity))) passing.set(table, id);
+  }
+
+  /** Each collection's highest id the write under way named, its serial passed once the write is done. */
+  const passing = new Map<ResolvedTable, number>();
+
+  function passNamed(): void {
+    for (const [table, id] of passing) {
+      db.run(
+        `INSERT INTO _delta_sequences (collection, last) VALUES (?1, MAX(?2, COALESCE((SELECT MAX(id) FROM ${table.name} WHERE typeof(id) = 'integer'), 0)))
+         ON CONFLICT (collection) DO UPDATE SET last = MAX(last, ?2)`, [table.docKey, id]);
+    }
+    passing.clear();
   }
 
   /**
@@ -1005,6 +1014,7 @@ export function registerDocs<I = unknown>(
 
     let snapshot = structuredClone(doc); // for rollback, and for the inverse
     spent.length = 0;
+    passing.clear();
     let written: Written;
     let touched: Touched[] = [];
     try {
@@ -1026,6 +1036,7 @@ export function registerDocs<I = unknown>(
         }
         const made = implied.has(docName) && !addsRoot && ops.length > 0 ? ensureImpliedRoot(def, doc, docName) : undefined;   // an empty write makes nothing
         const done = applyOps(docName, def, doc, ops, by.undoes !== undefined);
+        passNamed();
         touched = made ? [made, ...done.touched] : done.touched;
         const inverse = inverseOf(besides(snapshot, done.beyond), done.applied, ops);
         const recorded = ledger?.record({ doc: docName, ops: done.applied, inverse, ...by });
