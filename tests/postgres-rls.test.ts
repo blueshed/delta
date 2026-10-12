@@ -41,7 +41,7 @@ const auth: DeltaAuth<Id> = {
 const schema = defineSchema({
   rls_items: { columns: { owner_id: "integer", name: "text" }, temporal: false },
   rls_notes: { columns: { owner_id: "integer", text: "text" }, temporal: true },
-  // a board, its lists, and the cards on them: anyone may put a card on a list, which its board's owner then reads
+  // a board, its lists, and the cards on them: a list is read by its owner and its board's; a card on a list one reads, by them
   rls_boards: { columns: { owner_id: "integer" }, temporal: false },
   rls_lists: { parent: "rls_boards", columns: { owner_id: "integer" }, temporal: false },
   rls_cards: { parent: "rls_lists", columns: { author_id: "integer", text: "text" }, temporal: false },
@@ -92,7 +92,8 @@ beforeAll(async () => {
     ALTER TABLE rls_lists FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS rls_lists_owner ON rls_lists;
     CREATE POLICY rls_lists_owner ON rls_lists FOR ALL
-      USING (owner_id = NULLIF(current_setting('app.user_id', true), '')::bigint);
+      USING (owner_id = NULLIF(current_setting('app.user_id', true), '')::bigint
+             OR EXISTS (SELECT 1 FROM rls_boards b WHERE b.id = rls_boards_id));
     ALTER TABLE rls_cards ENABLE ROW LEVEL SECURITY;
     ALTER TABLE rls_cards FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS rls_cards_seen ON rls_cards;
@@ -536,10 +537,11 @@ describe("a socket hears a document while it may open it (todo #17)", () => {
 });
 
 describe("who is told is worked out whatever the writer may read (todo #33)", () => {
-  test("bob's card on alice's list is told to alice's board, though bob cannot see the list; his card on his own list is not", async () => {
+  test("bob's card on his list on alice's board is told to her board, though bob cannot read the board; his card on his own board's list is not; under her own list, which he cannot read, a 404 as under none, told to no one", async () => {
+    // list 3 is bob's, on alice's board 1: both read it. List 1 is alice's alone; board 1 bob cannot read.
     await admin.query(`TRUNCATE rls_boards, rls_lists, rls_cards RESTART IDENTITY;
       INSERT INTO rls_boards (id, owner_id) VALUES (1, 1), (2, 2);
-      INSERT INTO rls_lists (id, rls_boards_id, owner_id) VALUES (1, 1, 1), (2, 2, 2);`);
+      INSERT INTO rls_lists (id, rls_boards_id, owner_id) VALUES (1, 1, 1), (2, 2, 2), (3, 1, 2);`);
     listener = await createDocListener(ws, app, { auth, types: [
       docTypeFromDef(board, app, { auth, owns: (who, name) => name === `rls-board:${who.id}` }),
       docTypeFromDef(cardsBy, app, { auth, owns: (who, name) => name === `rls-cards-by:${who.id}` }),
@@ -551,11 +553,15 @@ describe("who is told is worked out whatever the writer may read (todo #33)", ()
       return doc;
     };
     const copy = await open();
-    for (const [list, text] of [[1, "for alice"], [2, "bob's own"]] as const) {
-      const w = await sendAndAwait(ws, bob, { action: "delta", doc: "rls-cards-by:2", ops: [{ op: "add", path: "/rls_cards/-", value: { rls_lists_id: list, text } }] });
-      expect(w.error).toBeUndefined();
-    }
+    const card = (list: number, text: string) => sendAndAwait(ws, bob, { action: "delta", doc: "rls-cards-by:2", ops: [{ op: "add", path: "/rls_cards/-", value: { rls_lists_id: list, text } }] });
+    // you may write what you may read: a list he cannot read answers as one that is not there
+    const [hidden, none] = [await card(1, "hidden"), await card(99, "none")];
+    expect(hidden.error?.code).toBe(404);
+    expect(hidden.error.message.replace("/1", "/<id>")).toBe(none.error.message.replace("/99", "/<id>"));
+    for (const [list, text] of [[3, "for alice"], [2, "bob's own"]] as const) expect((await card(list, text)).error).toBeUndefined();
     await settle();
+    expect(heard(alice, "rls-board:1")).toHaveLength(1);   // the refused writes told no one
+    expect((await admin.query("SELECT text FROM rls_cards ORDER BY id")).rows.map((r: any) => r.text)).toEqual(["for alice", "bob's own"]);
     // her copy, with what she was told, is what she reads afresh: bob's card on her list, and nothing she cannot read
     for (const m of heard(alice, "rls-board:1")) applyOps(copy, m.ops);
     const fresh = await open();
