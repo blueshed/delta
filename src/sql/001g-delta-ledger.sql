@@ -230,6 +230,19 @@ RETURNS BOOLEAN LANGUAGE sql IMMUTABLE AS $$
   SELECT COALESCE(a, 'null'::jsonb) = COALESCE(b, 'null'::jsonb);
 $$;
 
+-- A field of a collection's row the same in two values: a timestamptz by the
+-- instant it names, whatever zone its text was written in (a ledger's entry
+-- keeps the session's TimeZone of its write), anything else as _delta_same.
+CREATE OR REPLACE FUNCTION _delta_same(p_coll TEXT, p_field TEXT, a JSONB, b JSONB)
+RETURNS BOOLEAN LANGUAGE sql STABLE AS $$
+  SELECT CASE
+    WHEN jsonb_typeof(a) = 'string' AND jsonb_typeof(b) = 'string'
+         AND (SELECT columns_def->p_field->>'type' FROM _delta_collections WHERE collection_key = p_coll) = 'timestamptz'
+      THEN (a #>> '{}')::timestamptz = (b #>> '{}')::timestamptz
+    ELSE _delta_same(a, b)
+  END;
+$$;
+
 -- _delta_walk_key: a row's key in a walk -- the keyOf of planWalk in
 -- src/server/ledger.ts. A single document's root is one row at two paths,
 -- /root (a replace of it) and /root/id (its add, its remove): both are keyed
@@ -333,7 +346,7 @@ BEGIN
            AND COALESCE(v_left->_delta_build_path(r->>'coll', r->>'id'), 'null'::jsonb) <> 'null'::jsonb));
       IF v_here IS NULL OR v_others OR EXISTS (
         SELECT 1 FROM jsonb_each(v_wrote) w
-         WHERE w.key NOT IN ('valid_from', 'valid_to') AND NOT _delta_same(v_here->w.key, w.value)
+         WHERE w.key NOT IN ('valid_from', 'valid_to') AND NOT _delta_same(v_parts[1], w.key, v_here->w.key, w.value)
       ) THEN v_conflict := v_conflict || to_jsonb(v_at);
       ELSE v_ops := v_ops || jsonb_build_array(jsonb_build_object('op', 'remove', 'path', v_path)); END IF;
     ELSIF v_wrote IS NULL THEN                          -- it removed the row
@@ -346,7 +359,7 @@ BEGIN
       ) keys
       WHERE k NOT IN ('valid_from', 'valid_to') AND NOT _delta_same(v_was->k, v_wrote->k);
       CONTINUE WHEN v_fields IS NULL;
-      IF v_here IS NULL OR EXISTS (SELECT 1 FROM unnest(v_fields) f WHERE NOT _delta_same(v_here->f, v_wrote->f)) THEN
+      IF v_here IS NULL OR EXISTS (SELECT 1 FROM unnest(v_fields) f WHERE NOT _delta_same(v_parts[1], f, v_here->f, v_wrote->f)) THEN
         v_conflict := v_conflict || to_jsonb(v_at);
       ELSE
         -- each field set back, one replace each (a replace of the row is the row whole, todo #3);

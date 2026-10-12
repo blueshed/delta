@@ -90,6 +90,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers `replace /<coll>/<id>/<field>` ops. **Migration:** to change some fields, replace
   each (`/<coll>/<id>/<field>`; one straight after another is one write of the row), or send
   the row whole.
+- **SQLite and the JSON file now store and show times in UTC**, as Postgres gives them back:
+  `2021-06-01T07:30:00+00:00` where they showed the `2021-06-01T09:30:00+02:00` they were given. A
+  row an earlier release wrote reads in UTC too. An app that displays the stored text should
+  format it for the reader's zone.
 - **Internal: the law over generated writes** (`tests/law-driver.test.ts`, todo #27): seeded
   random steps through every kind of document as three people, on SQLite, the JSON file and
   PGlite at once, the law and the answers asked after every one (`DELTA_LAW_SEEDS`,
@@ -237,6 +241,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     as Postgres does (it answered 404 when the parent was not there either).
   - **A recompute custom document whose read comes back null is let go (404)**, every backend: its
     subscribers were told nothing, and kept the menu card of a wedding that was gone.
+  - **An undo of a time kept in another form walks** (every backend). A SQLite store an earlier
+    release wrote keeps a time as the text it was given (`10:00:00+02:00`), in its rows and its
+    ledger; read now in UTC, every undo of such a write conflicted -- and, recorded as walked, its
+    history was lost. On Postgres the ledger keeps the session's `TimeZone` of its write, so an
+    undo in another conflicted the same way. A walk now compares a time by the instant it names
+    (SQLite: the entry's times read in UTC; Postgres: `_delta_same(coll, field, a, b)`, `001g`,
+    new) and puts it back in UTC.
   - **Serials and values alike on every backend (review)**: an id a refused write named stays
     passed on SQLite too where no sequence was kept yet (a fresh database minted 1 where Postgres
     minted 51), and the JSON file saves the serials a refused write spent (a restart lost them).

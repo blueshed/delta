@@ -105,6 +105,20 @@ describe("pglite: a date in a name, whatever the session's TimeZone", () => {
     }
   });
 
+  test("an undo of a time written in another TimeZone compares it by the instant it names: it walks, never a conflict", async () => {
+    await openAll(backend.process, ["fo-slots-of:1"]);
+    await pool.query("SET TimeZone = 'Europe/Berlin'");   // the ledger keeps the text the session gave: +01:00, +02:00
+    try {
+      await write(backend.process, "fo-slots-of:1", [{ op: "add", path: "/slots/-", value: { starts: "2021-01-01T10:00:00+02:00" } }], { cursor: "c" });
+      await write(backend.process, "fo-slots-of:1", [{ op: "replace", path: "/slots/1/starts", value: "2021-06-01T09:30:00+02:00" }], { cursor: "c" });
+    } finally {
+      await pool.query("RESET TimeZone");
+    }
+    const undone = await backend.process.call("undo", { cursor: "c" });
+    expect({ ops: undone.result.ops, conflict: undone.result.conflict }).toEqual({ ops: [{ op: "replace", path: "/slots/1", value: { id: 1, weddings_id: 1, price: null, starts: "2021-01-01T08:00:00+00:00" } }], conflict: undefined });
+    expect((await backend.process.call("undo", { cursor: "c" })).result.ops).toEqual([{ op: "remove", path: "/slots/1" }]);
+  });
+
   test("a time in the name (at:) too: the seed's note, begun at 2020-01-01T00:00:00Z, is there at 2020-01-01 in Tokyo", async () => {
     await pool.query("SET TimeZone = 'Asia/Tokyo'");   // its midnight is 15:00 UTC the day before
     try {

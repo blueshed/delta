@@ -24,7 +24,7 @@ import { type DeltaOp, splitPath, joinPath, changedFields } from "../core";
 import { createLogger } from "./logger";
 import { createLedger, isEntryId, ledgerWho, planWalk, rowAt, socketCursor } from "./ledger";
 import { assertScopeKeys, meets, resolveScope, rowId, sameId, whereOf, type Scope } from "./scope";
-import { defaultForType, holdsField, showDoc, showOps, showRow, type DocDef, type ResolvedTable, type Schema } from "../schema";
+import { defaultForType, holdsField, showDoc, showOps, showRow, utcTime, type DocDef, type ResolvedTable, type Schema } from "../schema";
 import { waitForLocks } from "./sqlite/ddl";
 import { keeping, scopeValue } from "./sqlite/keep";
 import { loadDocAt, readDoc } from "./sqlite/read";
@@ -1183,6 +1183,22 @@ export function registerDocs<I = unknown>(
      * document refuses, walks nothing and records nothing: no cursor has to
      * move past it, and the change stays to be walked once it can be.
      */
+    /**
+     * An entry's ops with each time as a row now reads it, in UTC (decodeRow): an entry an earlier
+     * release kept holds the text it was given ("10:00:00+02:00"), and a walk compares it to the row
+     * by the instant it names, and puts it back in the form the row is now read in.
+     */
+    const inUtc = (ops: DeltaOp[]): DeltaOp[] => ops.map((op) => {
+      if (!("value" in op)) return op;
+      const [coll, , field] = splitPath(op.path);
+      const columns = schema.tables[coll!]?.columns ?? {};
+      const time = (col: string) => columns[col]?.type === "timestamptz";
+      const value: any = op.value;
+      if (field !== undefined) return time(field) ? { ...op, value: utcTime(value) } : op;
+      if (value === null || typeof value !== "object") return op;
+      return { ...op, value: Object.fromEntries(Object.entries(value).map(([k, v]) => [k, time(k) && v != null ? utcTime(v) : v])) };
+    });
+
     const walk = (way: "undo" | "redo") => (msg: any, client: any, respond: (r: any) => void) => {
       const next = nextWalk(way, msg, client);
       if ("error" in next) return respond(next);
@@ -1213,7 +1229,7 @@ export function registerDocs<I = unknown>(
           const row = table && id !== undefined && coll !== match.def.root && !match.def.include.includes(coll!) ? readRow(table, rowId(id)) : null;
           return row ? [{ coll: coll!, row }] : [];
         });
-        const plan = planWalk(entry, besides(implied.has(entry.doc) ? { ...doc, [match.def.root]: null } : doc, outside), under);
+        const plan = planWalk({ ops: inUtc(entry.ops), inverse: inUtc(entry.inverse) }, besides(implied.has(entry.doc) ? { ...doc, [match.def.root]: null } : doc, outside), under);
         const show = (ops: DeltaOp[]) => showOps(match.def, schema, ops);   // as the document shows them (todo #70)
         if (msg.dry) return respond({ result: { doc: entry.doc, entry: entry.id, ops: show(plan.ops), ...(plan.conflict.length ? { conflict: plan.conflict } : {}) } });
         const by = { who: whoOf(client), cursor };
