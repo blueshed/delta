@@ -46,6 +46,8 @@ export const pathSpec: Record<string, TableDef> = {
   // a favour for a household: a child of the wedding that goes with its household too (cascadeOn), so a
   // wedding's removal reaches it twice -- as the wedding's child, and through the household
   favours: { table: "fo_favours", parent: "weddings", columns: { households_id: "integer", gift: "text" }, cascadeOn: ["households_id"], temporal: false },
+  // a wedding's asks, named in SQL's own words (todo #74): the table, its parent key and its columns are keywords
+  asks: { table: "order", parent: { collection: "weddings", fk: "group" }, columns: { in: "integer?", from: "text?", to: "text?" }, temporal: true },
 };
 export const pathSchema = defineSchema(pathSpec);
 
@@ -117,6 +119,9 @@ export const pathDocs = [
   defineDoc("fo-notes-on:", { root: "notes", include: [], scope: { at: "at:when" } }),
   defineDoc("fo-courses-noted-on:", { root: "courses", include: ["notes"], scope: { at: "at:when" } }),
   defineDoc("fo-board-on:", { root: "weddings", include: ["notes"], scope: { id: ":id", at: "at:when" } }),
+  // the asks under a wedding, and those from one person (list mode by a keyword): names SQL keeps for itself (todo #74)
+  defineDoc("fo-asks:", { root: "weddings", include: ["asks"] }),
+  defineDoc("fo-asks-from:", { root: "asks", include: [], scope: { from: ":from" } }),
 ];
 
 /**
@@ -789,6 +794,21 @@ export function documentCases(backend: () => PathBackend): void {
       const undone = await b.process.call("undo", { cursor: "p1" });
       expect({ error: undone.error, conflict: undone.result?.conflict }).toEqual({ error: undefined, conflict: undefined });
       expect(content((await b.process.call("open", { doc: "fo-party:1" })).result).favours).toEqual({ "1": { id: 1, weddings_id: 1, households_id: 1, gift: "jam" } });
+    });
+
+    test("a table, a parent key and columns named as SQL's keywords are created, written, opened, told and carried (todo #74)", async () => {
+      const b = backend();
+      const copies = await openAll(b.process, ["fo-asks:1", "fo-asks-from:ann"]);
+      const ask = { id: 1, group: 1, in: 2, from: "ann", to: "cy" };
+      expect((await write(b.process, "fo-asks:1", [{ op: "add", path: "/asks/-", value: { in: 2, from: "ann", to: "bob" } }])).ops[0].path).toBe("/asks/1");
+      await write(b.process, "fo-asks-from:ann", [{ op: "replace", path: "/asks/1/to", value: "cy" }]);
+      const open = (doc: string) => b.process.call("open", { doc }).then((r) => content(r.result));
+      expect((await open("fo-asks:1")).asks).toEqual({ "1": ask });
+      expect(await open("fo-asks-from:ann")).toEqual({ asks: { "1": ask } });
+      expect(content((await b.process.call("open_at", { doc: "fo-asks:1", at: "2999-01-01T00:00:00.000Z" })).result).asks).toEqual({ "1": ask });
+      await write(b.process, "fo-asks:1", [{ op: "remove", path: "/asks/1" }]);
+      await assertCopiesHold(b, copies);
+      expect((await b.exportTables()).tables.asks!.map(({ valid_from, valid_to, ...row }) => row)).toEqual([{ ...ask, to: "bob" }, ask]);
     });
 
     test("opening the board reads the rows as Postgres gives them: ids as numbers, no validity columns", async () => {

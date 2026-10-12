@@ -1,5 +1,5 @@
 /** A document read from the tables: as they stand (open) or as they stood (open_at), and the times a snapshot names. */
-import type { DocDef, ResolvedTable, Schema } from "../../schema";
+import { q, type DocDef, type ResolvedTable, type Schema } from "../../schema";
 import { toMap } from "../custom";
 import { resolveScope, whereOf, type Scope } from "../scope";
 import { keeping } from "./keep";
@@ -42,7 +42,7 @@ export function readDoc(db: any, schema: Schema, def: DocDef, scope: Scope, at =
 /** A table's rows `where` says, as a document holds them: as they stand, or the versions live at `at`. */
 function readRows(db: any, table: ResolvedTable, where: string, params: any[], at?: string): any[] {
   const rows = table.temporal && at !== undefined
-    ? db.query(`SELECT * FROM ${table.name} WHERE ${where} AND valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)`).all(...params, at, at)
+    ? db.query(`SELECT * FROM ${q(table.name)} WHERE ${where} AND valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)`).all(...params, at, at)
     : db.query(`SELECT * FROM ${current(table)} WHERE ${where}`).all(...params);
   for (const row of rows) decodeRow(table, row);
   return rows;
@@ -54,7 +54,7 @@ function readCollection(db: any, schema: Schema, table: ResolvedTable, def: DocD
   // loaded in full, as the Postgres backend loads it: every document of the
   // prefix holds every row, and the fan-out (holds) says the same.
   if (!table.parent) return readRows(db, table, "1 = 1", [], at);
-  const fk = table.parent.fkColumn;
+  const fk = q(table.parent.fkColumn);
   if (table.parent.collection === def.root) return readRows(db, table, `${fk} = ?`, [rootId], at);
   // Grandchild: its parent rows first, then the rows under them. A parent the
   // document need not include: its rows are walked all the same. One with no

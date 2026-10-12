@@ -273,7 +273,7 @@ describe("a scope on a time compares instants, and an index on the column serves
     db.run("CREATE INDEX idx_shows_starts ON shows (starts)");
     const query = db.query.bind(db);
     const seen: string[] = [];
-    (db as any).query = (sql: string) => { if (sql.includes("FROM shows WHERE")) seen.push(sql); return query(sql); };
+    (db as any).query = (sql: string) => { if (sql.includes('FROM "shows" WHERE')) seen.push(sql); return query(sql); };
     const local = createLocal();
     registerDocs(local.server, db, s, [
       defineDoc("from:", { root: "shows", include: [], scope: { starts: ">=:start" } }),

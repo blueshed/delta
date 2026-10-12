@@ -1,5 +1,5 @@
 /** How a table's columns keep a scope's values, so a condition reads by one rule what an add stamps (./scope `Keep`). */
-import type { ResolvedTable } from "../../schema";
+import { q, type ResolvedTable } from "../../schema";
 import { isDay, type Keep } from "../scope";
 import { encodeValue, refuse } from "./rows";
 
@@ -86,7 +86,7 @@ export function keeping(db: any, table: ResolvedTable): Keep {
   keep = {
     text: (col, text) => once(texts, `${col}:${text}`, () => (time(col) ? instant(db, scopeValue(table, col, text)) : encodeValue(table, col, scopeValue(table, col, text)))),
     value: (col, value) => (time(col) ? instant(db, value) : encodeValue(table, col, value)),
-    column: (col) => (time(col) ? `strftime('%Y-%m-%d %H:%M:%f', ${col})` : col),
+    column: (col) => (time(col) ? `strftime('%Y-%m-%d %H:%M:%f', ${q(col)})` : q(col)),
     within: (col, op, text) => {
       if (!time(col) || op === "!=") return undefined;
       return once(bounds, `${col}:${op}:${text}`, () => {

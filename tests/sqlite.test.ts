@@ -1486,6 +1486,14 @@ describe("migrateSchema", () => {
     const applied = migrateSchema(db, withParent);
     expect(applied.some((s) => s.includes("project_id"))).toBe(true);
   });
+
+  test("a table, parent key and columns named as SQL's keywords migrate, temporal too (todo #74)", () => {
+    const db = new Database(":memory:");
+    createTables(db, defineSchema({ order: { columns: { in: "integer?" }, temporal: false } }));
+    migrateSchema(db, defineSchema({ group: { columns: {} }, order: { parent: { collection: "group", fk: "group" }, columns: { in: "integer?", from: "text?" } } }));
+    expect((db.query('PRAGMA table_info("order")').all() as any[]).map((c) => c.name)).toEqual(["id", "in", "group", "from", "valid_from", "valid_to"]);
+    expect(db.query('SELECT * FROM "current_order"').all()).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------

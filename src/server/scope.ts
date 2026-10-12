@@ -20,7 +20,7 @@
  * casts the text: a boolean's "yes" is true, a time the instant it names; one
  * the column cannot take is a 400.
  */
-import type { DocDef, Schema } from "../schema";
+import { q, type DocDef, type Schema } from "../schema";
 
 export type Op = "=" | "!=" | "<" | ">" | "<=" | ">=" | "like";
 export type Cond = { col: string; op: Op; value: string };
@@ -142,9 +142,9 @@ export function whereOf(scope: Scope, keep: Keep): { sql: string; params: unknow
   const params: unknown[] = [];
   for (const { col, op, value } of scope.conds) {
     const bounds = op === "like" ? undefined : keep.within?.(col, op, value);
-    if (bounds?.from !== undefined) { sql.push(`${col} >= ?`); params.push(bounds.from); }
-    if (bounds?.below !== undefined) { sql.push(`${col} < ?`); params.push(bounds.below); }
-    sql.push(`${keep.column?.(col) ?? col} ${op === "like" ? "LIKE" : op} ?`);
+    if (bounds?.from !== undefined) { sql.push(`${q(col)} >= ?`); params.push(bounds.from); }
+    if (bounds?.below !== undefined) { sql.push(`${q(col)} < ?`); params.push(bounds.below); }
+    sql.push(`${keep.column?.(col) ?? q(col)} ${op === "like" ? "LIKE" : op} ?`);
     params.push(op === "like" ? `${value}%` : keep.text(col, value));
   }
   return { sql: sql.join(" AND "), params };

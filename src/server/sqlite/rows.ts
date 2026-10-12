@@ -1,9 +1,9 @@
 /** A row as SQLite keeps it: written, closed, read back, and each value as its column stores it. */
-import { defaultForType, isoTime, utcTime, type ColumnDef, type DocDef, type ResolvedTable, type Schema } from "../../schema";
+import { defaultForType, isoTime, q, utcTime, type ColumnDef, type DocDef, type ResolvedTable, type Schema } from "../../schema";
 import { rowId } from "../scope";
 
 /** The view a collection's current rows are read from. */
-export const current = (table: ResolvedTable) => (table.temporal ? `current_${table.name}` : table.name);
+export const current = (table: ResolvedTable) => q(table.temporal ? `current_${table.name}` : table.name);
 
 /** A time in SQLite's own sortable form, "YYYY-MM-DD HH:MM:SS.mmm" in UTC, from ISO-8601 or that form. */
 export function sqliteTime(value: unknown): string {
@@ -36,7 +36,7 @@ export function now(): string {
 // lands a tick later than the reinsert, leaving a temporal overlap that makes
 // half-open time-travel reads (valid_to > at) match two versions at once.
 export function closeRow(db: any, table: ResolvedTable, id: string | number, ts: string): void {
-  db.run(`UPDATE ${table.name} SET valid_to = ? WHERE id = ? AND valid_to IS NULL`, [ts, id]);
+  db.run(`UPDATE ${q(table.name)} SET valid_to = ? WHERE id = ? AND valid_to IS NULL`, [ts, id]);
 }
 
 /**
@@ -51,7 +51,7 @@ export function insertRow(db: any, table: ResolvedTable, row: any, ts: string) {
   cols.push(...Object.keys(table.columns));
   if (table.temporal) cols.push("valid_from");
   const vals = cols.map((c) => (c === "valid_from" ? ts : encodeValue(table, c, row[c])));
-  db.run(`INSERT INTO ${table.name} (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`, vals);
+  db.run(`INSERT INTO ${q(table.name)} (${cols.map(q).join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`, vals);
 }
 
 /** An error the writer is answered with: `code` is its wire code. */
@@ -100,7 +100,7 @@ export function insertCollectionRow(
 
   // A version this write made and took back (added, then removed) never was
   // outside it: an add of the same id again takes its place.
-  if (table.temporal) db.run(`DELETE FROM ${table.name} WHERE id = ? AND valid_from = ? AND valid_to = ?`, [id, ts, ts]);
+  if (table.temporal) db.run(`DELETE FROM ${q(table.name)} WHERE id = ? AND valid_from = ? AND valid_to = ?`, [id, ts, ts]);
   insertRow(db, table, fullRow, ts);
 
   // The row read back, as Postgres's RETURNING gives it: as it is kept (a
@@ -130,10 +130,10 @@ export function updateRow(db: any, table: ResolvedTable, id: string | number, ro
   cols.push(...Object.keys(table.columns));
   if (cols.length === 0) return;
 
-  const sets = cols.map((c) => `${c} = ?`).join(", ");
+  const sets = cols.map((c) => `${q(c)} = ?`).join(", ");
   const vals = cols.map((c) => encodeValue(table, c, row[c]));
   // a temporal table's live version alone: the one a write made, rewritten as the write goes on
-  db.run(`UPDATE ${table.name} SET ${sets} WHERE id = ?${table.temporal ? " AND valid_to IS NULL" : ""}`, [...vals, id]);
+  db.run(`UPDATE ${q(table.name)} SET ${sets} WHERE id = ?${table.temporal ? " AND valid_to IS NULL" : ""}`, [...vals, id]);
 }
 
 // ---------------------------------------------------------------------------

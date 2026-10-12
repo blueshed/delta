@@ -26,10 +26,11 @@ import {
   assertCopiesHold, course, expectTold, field, household, openAll, pathCases, pathDocs, pathPublicDocs, pathSchema, pathSeed, postgresEmails, postgresGuests, postgresInbox, postgresMenuCard, postgresOpenSeats, readAll, told, write,
   type PathBackend, type PathProcess,
 } from "./helpers/path";
+import { q } from "../src/schema";
 
 setLogLevel("silent");
 
-const tables = Object.values(pathSchema.tables).map((t) => t.name);
+const tables = Object.values(pathSchema.tables).map((t) => q(t.name));
 let pool: Pool;
 const listeners: { destroy(): Promise<void> }[] = [];
 let backend: PathBackend;

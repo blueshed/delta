@@ -23,7 +23,8 @@
  *   bunx delta sql ./types.ts --out init_db/003-tables.sql
  */
 import type { Schema, DocDef } from "./schema";
-import { q, lit, columnSqlType, sqlDefault, findCascadeOn } from "./sql";
+import { lit, columnSqlType, sqlDefault, findCascadeOn } from "./sql";
+import { q } from "../../schema";
 import { assertScopeKeys } from "../scope";
 
 export interface GenerateSqlOptions {

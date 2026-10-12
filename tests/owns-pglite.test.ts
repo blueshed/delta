@@ -10,7 +10,7 @@ import {
 import { openPglite } from "../src/server/pglite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
-import { defineDoc } from "../src/schema";
+import { defineDoc, q } from "../src/schema";
 import { pathDocs, pathSchema, pathSeed, postgresInbox, postgresMenuCard } from "./helpers/path";
 import { auth, customOwns, everyDoc, mineDoc, ownsCases, whoamiDoc, type Me } from "./helpers/owns";
 
@@ -18,7 +18,7 @@ setLogLevel("silent");
 
 let pool: Pool;
 const listeners: { destroy(): Promise<void> }[] = [];
-const tables = Object.values(pathSchema.tables).map((t) => t.name);
+const tables = Object.values(pathSchema.tables).map((t) => q(t.name));
 
 beforeAll(async () => {
   pool = await openPglite();

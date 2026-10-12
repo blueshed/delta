@@ -1,5 +1,5 @@
 /** Every row and sequence out (`exportTables`) and in (`importTables`): the `Snapshot` every backend gives and takes. */
-import { isoTime, lastId, type Schema, type Snapshot } from "../../schema";
+import { isoTime, lastId, q, type Schema, type Snapshot } from "../../schema";
 import { createSequences } from "./ddl";
 import { decodeRow, encodeValue, sqliteTime } from "./rows";
 
@@ -13,7 +13,7 @@ export function exportTables(db: any, schema: Schema): Snapshot {
   const tables: Snapshot["tables"] = {};
   const sequences: Record<string, number> = {};
   for (const [key, table] of Object.entries(schema.tables)) {
-    const rows = db.query(`SELECT * FROM ${table.name} ORDER BY id${table.temporal ? ", valid_from" : ""}`).all() as any[];
+    const rows = db.query(`SELECT * FROM ${q(table.name)} ORDER BY id${table.temporal ? ", valid_from" : ""}`).all() as any[];
     tables[key] = rows.map((row) => {
       const validity = table.temporal ? { valid_from: isoTime(row.valid_from), valid_to: isoTime(row.valid_to) } : {};
       decodeRow(table, row);
@@ -35,7 +35,7 @@ export function importTables(db: any, schema: Schema, snapshot: Snapshot): void 
   db.transaction(() => {
     for (const [key, table] of Object.entries(schema.tables)) {
       const cols = ["id", ...(table.parent ? [table.parent.fkColumn] : []), ...Object.keys(table.columns), ...(table.temporal ? ["valid_from", "valid_to"] : [])];
-      const insert = db.query(`INSERT INTO ${table.name} (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`);
+      const insert = db.query(`INSERT INTO ${q(table.name)} (${cols.map(q).join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`);
       for (const row of snapshot.tables[key] ?? []) {
         insert.run(...cols.map((c) =>
           c === "valid_from" ? sqliteTime(row.valid_from ?? new Date().toISOString())

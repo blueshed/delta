@@ -24,7 +24,7 @@ import { type DeltaOp, splitPath, joinPath, changedFields } from "../core";
 import { createLogger } from "./logger";
 import { createLedger, isEntryId, ledgerWho, planWalk, rowAt, socketCursor } from "./ledger";
 import { assertScopeKeys, meets, resolveScope, rowId, sameId, whereOf, type Scope } from "./scope";
-import { defaultForType, holdsField, showDoc, showOps, showRow, utcTime, type DocDef, type ResolvedTable, type Schema } from "../schema";
+import { defaultForType, holdsField, q, showDoc, showOps, showRow, utcTime, type DocDef, type ResolvedTable, type Schema } from "../schema";
 import { waitForLocks } from "./sqlite/ddl";
 import { keeping, scopeValue } from "./sqlite/keep";
 import { loadDocAt, readDoc } from "./sqlite/read";
@@ -413,7 +413,7 @@ export function registerDocs<I = unknown>(
       if (cur === root) return id;
       table = schema.tables[cur];
       if (!table?.parent) return null;
-      id = (db.query(`SELECT ${table.parent.fkColumn} AS fk FROM ${current(table)} WHERE id = ?`).get(id as any) as { fk: unknown } | null)?.fk ?? null;
+      id = (db.query(`SELECT ${q(table.parent.fkColumn)} AS fk FROM ${current(table)} WHERE id = ?`).get(id as any) as { fk: unknown } | null)?.fk ?? null;
       cur = table.parent.collection;
     }
     return null;
@@ -464,7 +464,7 @@ export function registerDocs<I = unknown>(
   function hanging(table: ResolvedTable, id: string | number, out: { table: ResolvedTable; row: any }[] = []): { table: ResolvedTable; row: any }[] {
     for (const childKey of table.children.toSorted()) {
       const child = schema.tables[childKey]!;
-      for (const row of db.query(`SELECT * FROM ${current(child)} WHERE ${child.parent!.fkColumn} = ? ORDER BY id`).all(id as any) as any[]) {
+      for (const row of db.query(`SELECT * FROM ${current(child)} WHERE ${q(child.parent!.fkColumn)} = ? ORDER BY id`).all(id as any) as any[]) {
         decodeRow(child, row);
         out.push({ table: child, row });
         hanging(child, row.id, out);
@@ -491,14 +491,14 @@ export function registerDocs<I = unknown>(
     out.push({ table, row });
     for (const childKey of table.children.toSorted()) {
       const child = schema.tables[childKey]!;
-      for (const r of db.query(`SELECT id FROM ${current(child)} WHERE ${child.parent!.fkColumn} = ? ORDER BY id`).all(id as any) as any[]) {
+      for (const r of db.query(`SELECT id FROM ${current(child)} WHERE ${q(child.parent!.fkColumn)} = ? ORDER BY id`).all(id as any) as any[]) {
         cascadeRows(child, r.id, out, seen);
       }
     }
     const byKey = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
     for (const ref of table.referencedBy.toSorted((a, b) => byKey(a.collection, b.collection) || byKey(a.fkColumn, b.fkColumn))) {
       const refTable = schema.tables[ref.collection]!;
-      for (const r of db.query(`SELECT id FROM ${current(refTable)} WHERE ${ref.fkColumn} = ? ORDER BY id`).all(id as any) as any[]) {
+      for (const r of db.query(`SELECT id FROM ${current(refTable)} WHERE ${q(ref.fkColumn)} = ? ORDER BY id`).all(id as any) as any[]) {
         cascadeRows(refTable, r.id, out, seen);
       }
     }
@@ -522,7 +522,7 @@ export function registerDocs<I = unknown>(
   /** The last id a collection's serial handed out: its sequence, or before it has one, the largest id the table holds. */
   function serial(table: ResolvedTable): number {
     const seq = db.query("SELECT last FROM _delta_sequences WHERE collection = ?").get(table.docKey) as { last: number } | null;
-    return seq?.last ?? ((db.query(`SELECT MAX(id) AS m FROM ${table.name} WHERE typeof(id) = 'integer'`).get() as { m: number | null } | null)?.m ?? 0);
+    return seq?.last ?? ((db.query(`SELECT MAX(id) AS m FROM ${q(table.name)} WHERE typeof(id) = 'integer'`).get() as { m: number | null } | null)?.m ?? 0);
   }
 
   /** Whether a collection's serial has handed `id` out: an add may not name it (#71). A text id is the client's own key, which no serial hands out. */
@@ -552,7 +552,7 @@ export function registerDocs<I = unknown>(
   function passNamed(): void {
     for (const [table, id] of passing) {
       db.run(
-        `INSERT INTO _delta_sequences (collection, last) VALUES (?1, MAX(?2, COALESCE((SELECT MAX(id) FROM ${table.name} WHERE typeof(id) = 'integer'), 0)))
+        `INSERT INTO _delta_sequences (collection, last) VALUES (?1, MAX(?2, COALESCE((SELECT MAX(id) FROM ${q(table.name)} WHERE typeof(id) = 'integer'), 0)))
          ON CONFLICT (collection) DO UPDATE SET last = MAX(last, ?2)`, [table.docKey, id]);
     }
     passing.clear();
@@ -853,7 +853,7 @@ export function registerDocs<I = unknown>(
           const cascade = cascadeRows(table, id).map(({ table: t, row }) => ({ t, row, before: heldBy(t.docKey, row, docName) }));
           for (const { t, row, before } of cascade) {
             if (t.temporal) closeRow(db, t, row.id, ts);
-            else db.run(`DELETE FROM ${t.name} WHERE id = ?`, [row.id]);
+            else db.run(`DELETE FROM ${q(t.name)} WHERE id = ?`, [row.id]);
             delete doc[t.docKey]?.[row.id];
             if (t.docKey !== def.root && !def.include.includes(t.docKey)) beyond.push({ coll: t.docKey, row });
             broadcastOps.push({ op: "remove", path: joinPath(t.docKey, String(row.id)) });

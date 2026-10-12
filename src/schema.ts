@@ -84,13 +84,22 @@ export interface DocDef {
 // quote/backslash/space can never reach the generated SQL.
 // ---------------------------------------------------------------------------
 
+/**
+ * A table or column name as SQL names it: quoted, so a name that is a keyword
+ * (`order`, `from`, `in`) or holds a `/` is a name. Every backend's SQL names
+ * a schema's tables and columns through it (todo #74).
+ */
+export function q(id: string): string {
+  return `"${id.replace(/"/g, '""')}"`;
+}
+
 /** Plain SQL identifier: starts with a letter/underscore, then word chars. */
 const SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 /** Doc prefix: identifier-ish, also allowing the `:` and `-` used in doc names. */
 const DOC_PREFIX = /^[A-Za-z_][A-Za-z0-9_:-]*$/;
 /**
- * Column names are also quoted into DDL via `q()`, which escapes embedded
- * double quotes — but to fail fast we still forbid the chars that could break
+ * Column names are quoted into the SQL of every backend via `q()`, which
+ * escapes embedded double quotes — but to fail fast we still forbid the chars that could break
  * out of a quoted identifier or an array/JSON literal. We deliberately allow
  * `/` and `~` here (JSON Pointer reference tokens unescape to these), so a
  * column named `c/d` or `e~f` is legal; we only reject quotes, backslash,

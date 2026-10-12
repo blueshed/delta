@@ -14,6 +14,7 @@ import { setLogLevel } from "../src/server/logger";
 import {
   assertCopiesHold, expectTold, field, household, openAll, pathCases, pathDocs, pathPublicDocs, pathSchema, pathSeed, postgresEmails, postgresGuests, postgresInbox, postgresMenuCard, postgresOpenSeats, told, write, type PathBackend,
 } from "./helpers/path";
+import { q } from "../src/schema";
 import { waitFor } from "../src/testing";
 
 setLogLevel("silent");
@@ -21,7 +22,7 @@ setLogLevel("silent");
 let pool: Pool;
 const listeners: { destroy(): Promise<void> }[] = [];
 let backend: PathBackend;
-const tables = Object.values(pathSchema.tables).map((t) => t.name);
+const tables = Object.values(pathSchema.tables).map((t) => q(t.name));
 
 beforeAll(async () => {
   pool = await openPglite();

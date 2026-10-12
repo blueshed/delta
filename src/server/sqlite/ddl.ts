@@ -3,7 +3,7 @@
  * the schema grows (`migrateSchema`) -- columns, their types and defaults, the
  * temporal scaffolding, the sequences ids are minted from.
  */
-import { defaultForType, type ColumnDef, type Schema } from "../../schema";
+import { defaultForType, q, type ColumnDef, type Schema } from "../../schema";
 
 /** Generate CREATE TABLE statements from the schema and execute them. */
 export function createTables(db: any, schema: Schema) {
@@ -12,6 +12,7 @@ export function createTables(db: any, schema: Schema) {
   createSequences(db);
 
   for (const [, table] of Object.entries(schema.tables)) {
+    const name = q(table.name);
     // Ids and parent keys have integer affinity: a serial is kept, and read, as
     // a number -- as Postgres keeps it -- and an id that is not one (a session's
     // token) as the text it is. `INT`, not `INTEGER`: an INTEGER key would be
@@ -20,7 +21,7 @@ export function createTables(db: any, schema: Schema) {
 
     // FK columns from parent
     if (table.parent) {
-      cols.push(`${table.parent.fkColumn} INT NOT NULL`);
+      cols.push(`${q(table.parent.fkColumn)} INT NOT NULL`);
     }
 
     // User-defined columns
@@ -28,7 +29,7 @@ export function createTables(db: any, schema: Schema) {
       const sqlType = columnSqlType(def);
       const notNull = def.nullable ? "" : " NOT NULL";
       const defaultVal = def.default !== undefined ? ` DEFAULT ${sqlDefault(def.default)}` : "";
-      cols.push(`${col} ${sqlType}${notNull}${defaultVal}`);
+      cols.push(`${q(col)} ${sqlType}${notNull}${defaultVal}`);
     }
 
     if (table.temporal) {
@@ -39,25 +40,23 @@ export function createTables(db: any, schema: Schema) {
       cols.push("PRIMARY KEY (id)");
     }
 
-    db.run(`CREATE TABLE IF NOT EXISTS ${table.name} (${cols.join(", ")})`);
+    db.run(`CREATE TABLE IF NOT EXISTS ${name} (${cols.join(", ")})`);
 
     // Current-state view and indexes for temporal tables
-    if (table.temporal) {
-      db.run(
-        `CREATE VIEW IF NOT EXISTS current_${table.name} AS SELECT * FROM ${table.name} WHERE valid_to IS NULL`,
-      );
-      db.run(
-        `CREATE INDEX IF NOT EXISTS idx_${table.name}_id_valid ON ${table.name} (id, valid_to)`,
-      );
-    }
+    if (table.temporal) createCurrent(db, table.name);
 
     // FK index for child tables
     if (table.parent) {
-      db.run(
-        `CREATE INDEX IF NOT EXISTS idx_${table.name}_${table.parent.fkColumn} ON ${table.name} (${table.parent.fkColumn})`,
-      );
+      const fk = table.parent.fkColumn;
+      db.run(`CREATE INDEX IF NOT EXISTS ${q(`idx_${table.name}_${fk}`)} ON ${name} (${q(fk)})`);
     }
   }
+}
+
+/** A temporal table's current-state view (`current_<table>`, read by `current()`) and its index. */
+function createCurrent(db: any, table: string): void {
+  db.run(`CREATE VIEW IF NOT EXISTS ${q(`current_${table}`)} AS SELECT * FROM ${q(table)} WHERE valid_to IS NULL`);
+  db.run(`CREATE INDEX IF NOT EXISTS ${q(`idx_${table}_id_valid`)} ON ${q(table)} (id, valid_to)`);
 }
 
 function columnSqlType(def: ColumnDef): string {
@@ -86,7 +85,8 @@ export function migrateSchema(db: any, schema: Schema): string[] {
   const applied: string[] = [];
 
   for (const [, table] of Object.entries(schema.tables)) {
-    const info = db.query(`PRAGMA table_info(${table.name})`).all() as any[];
+    const name = q(table.name);
+    const info = db.query(`PRAGMA table_info(${name})`).all() as any[];
     if (info.length === 0) {
       // Table doesn't exist yet — createTables will handle it
       continue;
@@ -110,7 +110,7 @@ export function migrateSchema(db: any, schema: Schema): string[] {
 
     // Check for FK column from parent
     if (table.parent && !existingCols.has(table.parent.fkColumn)) {
-      const sql = `ALTER TABLE ${table.name} ADD COLUMN ${table.parent.fkColumn} TEXT`;
+      const sql = `ALTER TABLE ${name} ADD COLUMN ${q(table.parent.fkColumn)} TEXT`;
       db.run(sql);
       applied.push(sql);
     }
@@ -122,7 +122,7 @@ export function migrateSchema(db: any, schema: Schema): string[] {
       const defaultVal = def.default !== undefined
         ? ` DEFAULT ${sqlDefault(def.default)}`
         : (def.nullable ? "" : ` DEFAULT ${sqlDefault(defaultForType(def.type))}`);
-      const sql = `ALTER TABLE ${table.name} ADD COLUMN ${col} ${sqlType}${defaultVal}`;
+      const sql = `ALTER TABLE ${name} ADD COLUMN ${q(col)} ${sqlType}${defaultVal}`;
       db.run(sql);
       applied.push(sql);
     }
@@ -132,17 +132,16 @@ export function migrateSchema(db: any, schema: Schema): string[] {
     // ("no such table") after a non-temporal→temporal flag flip.
     if (table.temporal) {
       if (!existingCols.has("valid_from")) {
-        const sql = `ALTER TABLE ${table.name} ADD COLUMN valid_from TEXT NOT NULL DEFAULT (datetime('now'))`;
+        const sql = `ALTER TABLE ${name} ADD COLUMN valid_from TEXT NOT NULL DEFAULT (datetime('now'))`;
         db.run(sql);
         applied.push(sql);
       }
       if (!existingCols.has("valid_to")) {
-        const sql = `ALTER TABLE ${table.name} ADD COLUMN valid_to TEXT`;
+        const sql = `ALTER TABLE ${name} ADD COLUMN valid_to TEXT`;
         db.run(sql);
         applied.push(sql);
       }
-      db.run(`CREATE VIEW IF NOT EXISTS current_${table.name} AS SELECT * FROM ${table.name} WHERE valid_to IS NULL`);
-      db.run(`CREATE INDEX IF NOT EXISTS idx_${table.name}_id_valid ON ${table.name} (id, valid_to)`);
+      createCurrent(db, table.name);
       if (!existingCols.has("valid_from")) {
         // NOTE: SQLite can't alter the PRIMARY KEY in place. A real
         // non-temporal→temporal migration of EXISTING data needs the composite

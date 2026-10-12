@@ -5,8 +5,7 @@
  * sequences unchanged.
  */
 import type { Pool } from "pg";
-import { isoTime, lastId, type Schema, type Snapshot } from "../../schema";
-import { q } from "./sql";
+import { isoTime, lastId, q, type Schema, type Snapshot } from "../../schema";
 
 /** Every row of the schema's tables (every version of a temporal row), and each sequence's last id. */
 export async function exportTables(pool: Pool, schema: Schema): Promise<Snapshot> {

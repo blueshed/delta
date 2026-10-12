@@ -1,10 +1,6 @@
 /** SQL helpers for codegen.ts (the schema's DDL) and carry.ts (export and import). */
 import type { ColumnDef, Schema } from "./schema";
 
-export function q(id: string): string {
-  return `"${id.replace(/"/g, '""')}"`;
-}
-
 /**
  * Emit a single-quoted SQL string literal with embedded quotes escaped.
  * Use for ANY value interpolated into a `'…'` literal position so an
