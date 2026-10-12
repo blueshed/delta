@@ -208,17 +208,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   place).
 - **On Postgres without a ledger, a write's answered `version` is a number**, as it is with one:
   a hand-written `DocType` that read it as pg gives a `BIGINT` (a string) passed the string on.
-- **Two registrations over the same rows: an undo through one is guarded by a write through the
-  other (todo #64)**, on SQLite and the JSON file. Ada renamed course 1 through `fo-board:1`, Bob
-  through a public `fo-pub-courses:` registered in a second `registerDocs` on the same database,
-  and Ada's undo planned from her registration's copy, still holding her name: it put the old
-  name back over Bob's with no conflict, and a write of hers after his recorded an inverse that
-  undid to her name, not his. A registration now notices a write by another on the same
-  database handle (as it notices another process's, by `PRAGMA data_version`) and reads its
-  copies again before it serves, writes or walks: the undo answers `conflict`. The JSON file's
-  registrations of one file on one server now share its database, where each had its own and
-  their saves overwrote each other. Postgres guarded it already. Each registration still tells
-  only its own open documents.
 - **What the law over generated writes found (todo #27)**, each pinned as a shared case on every
   backend (`tests/helpers/path.ts`, "found by the law over generated writes"):
   - **A row is never added or moved under a parent that is not there** (404, every backend). A
@@ -235,8 +224,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **A walk leaves a row to a removal before it that takes it.** A redo of a wedding's removal
     removed the household and then its favour, which the household's cascade had taken: refused,
     so the redo was a conflict. `planWalk` and `_delta_walk_plan` (`001g`, replaced in place).
-  - **A refused write spends the serials it took on SQLite and the JSON file, as on Postgres**,
-    where a sequence is never rolled back: the next row is named the same on every backend.
+  - **A refused write spends the serials it minted (`-`) on SQLite and the JSON file, as on
+    Postgres**, where nextval is never rolled back: the next row is named the same on every
+    backend. An id it named it does not pass (#71); a named id passes once the write is done, so a
+    `-` after a named add in one write takes the serial as it stood, as on Postgres.
   - **SQLite and the JSON file answer an add of a row already there 409 before asking its parent**,
     as Postgres does (it answered 404 when the parent was not there either).
   - **A recompute custom document whose read comes back null is let go (404)**, every backend: its
@@ -248,9 +239,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     undo in another conflicted the same way. A walk now compares a time by the instant it names
     (SQLite: the entry's times read in UTC; Postgres: `_delta_same(coll, field, a, b)`, `001g`,
     new) and puts it back in UTC.
-  - **Serials and values alike on every backend (review)**: an id a refused write named stays
-    passed on SQLite too where no sequence was kept yet (a fresh database minted 1 where Postgres
-    minted 51), and the JSON file saves the serials a refused write spent (a restart lost them).
+  - **Serials and values alike on every backend (review)**: an id a write named stays passed
+    once its row is gone on SQLite too where no sequence was kept yet (a fresh database minted 1
+    where Postgres minted 51), and the JSON file saves the serials a refused write spent (a restart lost them).
     A `timestamptz` value is ISO-8601 on every backend (`nope` was a 500 on Postgres and stored on
     SQLite; `_delta_assert_fields`, `001a`; 22007 and 22008 answer 400), and SQLite keeps and reads
     it in UTC as Postgres gives it (`2021-01-01T08:00:00+00:00`, not the text it was given). A parent
