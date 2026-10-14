@@ -326,7 +326,7 @@ describe("applyOpsToCollection", () => {
 // The default `nodes` map must PERSIST across calls.
 //
 // It used to default to a fresh `new Map()` per call, which silently broke
-// every 4-argument caller — including the canonical recipe in SKILL.md,
+// every 4-argument caller — including the skill's recipe (reference/recipe.md),
 // README.md and examples/shared-state. With an empty map each time, `remove`
 // found no node to detach, and the reconnect root-replace missed every row and
 // re-created + re-appended the whole collection. A chat log duplicated itself
@@ -403,7 +403,7 @@ describe("default node map persistence", () => {
     expect(a.children.length).toBe(2);
   });
 
-  test("an explicitly passed map is used and returned (reference.md form)", () => {
+  test("an explicitly passed map is used and returned (the 5th-argument form)", () => {
     const parent = new MockNode();
     const col = makeCollection();
     const mine = new Map<string, Node>();

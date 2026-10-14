@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The `delta-doc` skill is cut to a compass and a manual of pages.** `SKILL.md` is the model,
+  the order of work, the invariants and which page for which job (about 530 words, was 2,200);
+  `reference.md` (20,600 words) is split into 24 pages under `reference/`, each leading with one
+  example from the repo's code, examples or tests, and pointing to the types in `src/` rather
+  than re-typing them (about 11,000 words in all). Its description now fires in a project that
+  uses delta, and sends choosing a stack to `blueshed:live-app` (eta and railroad are the
+  others). The recipe is `reference/recipe.md`, still run as written by `tests/recipe.test.ts`;
+  the README's links point at the pages, and *Why delta* moved to the README. Re-run
+  `bunx @blueshed/delta install-skills` to take it.
+- **`install-skills` mirrors each skill folder it installs.** A file the source no longer has is
+  removed (listed with `-`), so a project that had the monolithic `reference.md` does not keep it
+  beside `reference/`. Only inside the folders it installs (`@blueshed/*` and `claudeSkills`),
+  never a `.bak`, and `--dry-run` removes nothing.
+
 ## [0.13.1] - 2026-10-12
 
 ### Fixed

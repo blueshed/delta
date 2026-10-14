@@ -1,5 +1,5 @@
 /**
- * The skill's recipe runs as written: SKILL.md's `types.ts`, `server.ts`,
+ * The skill's recipe runs as written: reference/recipe.md's `types.ts`, `server.ts`,
  * `client.ts` and `index.html` blocks, saved in a folder inside the package
  * (so `@blueshed/delta/...` resolves to this source, as from node_modules).
  * The server runs on a free port; each browser is a Bun process with
@@ -16,12 +16,12 @@ import { connectWs, openDoc, type DeltaOp } from "../src/client/client";
 import { runExample, until, type Proc } from "./helpers/examples";
 import { waitFor } from "../src/testing";
 
-const skill = await Bun.file(new URL("../.claude/skills/delta-doc/SKILL.md", import.meta.url)).text();
+const skill = await Bun.file(new URL("../.claude/skills/delta-doc/reference/recipe.md", import.meta.url)).text();
 
 /** The fenced block under the heading `marker`. */
 function blockAfter(marker: string): string {
   const at = skill.indexOf(marker);
-  if (at < 0) throw new Error(`SKILL.md has no ${JSON.stringify(marker)}`);
+  if (at < 0) throw new Error(`reference/recipe.md has no ${JSON.stringify(marker)}`);
   const open = skill.indexOf("```", at);
   const start = skill.indexOf("\n", open) + 1;
   return skill.slice(start, skill.indexOf("\n```", start) + 1);
@@ -49,7 +49,7 @@ console.log("heard " + log.textContent);
 process.exit(0);
 `;
 
-test("SKILL.md's recipe, as written: one browser sends a message, the other's page shows it", async () => {
+test("the recipe (reference/recipe.md), as written: one browser sends a message, the other's page shows it", async () => {
   const dir = new URL(`./.recipe-${process.pid}/`, import.meta.url).pathname;
   mkdirSync(dir, { recursive: true });
   const procs: Proc[] = [];

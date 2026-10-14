@@ -8,14 +8,18 @@ in-process.
 ## Load first
 
 - **`delta-doc`** (`.claude/skills/delta-doc/`) is this package's published skill: `SKILL.md`
-  is the start, `reference.md` the manual. It must describe `main` as it is; update it with
-  any change to the API, the wire protocol or the SQL.
+  is the compass (under ~600 words), `reference/<topic>.md` the manual, a page per job, each
+  leading with one true example from the repo. It must describe `main` as it is; update the
+  page a change to the API, the wire protocol or the SQL touches. Point to the types rather
+  than re-typing them; history, rationale and measured numbers go in CHANGELOG.md or README.md,
+  not the skill.
 - **Docs: the front door is small.** README.md and SKILL.md open with the concept, in the
   owner's words (a document is what you need in front of you to act; open it and you're
   subscribed; documents, not entities; what grows is where they're kept). Then small: README's
   Try it (run byte for byte by `tests/readme.test.ts`) and a line for each thing you grow into;
-  SKILL.md's recipe (run as written by `tests/recipe.test.ts`) and the rules a first app needs.
-  Everything else goes in `reference.md`, read on request. Don't swamp the reader.
+  SKILL.md's order of work and invariants. The recipe is `reference/recipe.md` (run as written
+  by `tests/recipe.test.ts`); everything else is a `reference/` page, read on request. Don't
+  swamp the reader.
 - **`railroad`** (`.claude/skills/`) is vendored from @blueshed/railroad, for the examples, and
   synced at its release. Do not edit it here. Its `bun-route` is not: nothing here scaffolds pages,
   and `install-skills` gives a consumer both from railroad's own package.

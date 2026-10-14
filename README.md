@@ -82,30 +82,40 @@ row `1`. The document did not exist until its first write made it (`implied: tru
 
 In a browser, `openDoc("list:1", connectWs("/ws"))` holds the same document as a live value
 (`bun add @blueshed/railroad`: the client is drawn with it). The skill's
-[recipe](.claude/skills/delta-doc/SKILL.md#the-recipe) is a chat room in a browser, kept in a JSON
+[recipe](.claude/skills/delta-doc/reference/recipe.md) is a chat room in a browser, kept in a JSON
 file, in four short files.
 
 ## When you grow
 
-Each of these is a section of the skill's [reference](.claude/skills/delta-doc/reference.md):
+Each of these is a page of the skill's [reference](.claude/skills/delta-doc/reference/):
 
 - **SQLite, then Postgres** -- carry the rows with `exportTables` / `importTables`; the app stays
-  as it is: [*Backends side by side*](.claude/skills/delta-doc/reference.md#backends-side-by-side).
+  as it is: [*Backends*](.claude/skills/delta-doc/reference/backends.md).
 - **Postgres** in this process (`openPglite`) or a server (`createDocListener`, `bun add pg`):
-  [*Quick start (Postgres backend)*](.claude/skills/delta-doc/reference.md#quick-start-postgres-backend).
+  [*Postgres*](.claude/skills/delta-doc/reference/postgres.md).
 - **People see only their own** -- row-level security, `owns` for who may open a document, and
-  `jwtAuth` to sign in (`bun add jose pg`): [*RLS*](.claude/skills/delta-doc/reference.md#rls-with-appuser_id).
+  `jwtAuth` to sign in (`bun add jose pg`): [*Ownership*](.claude/skills/delta-doc/reference/ownership.md), [*RLS*](.claude/skills/delta-doc/reference/rls.md).
 - **Custom documents** -- a view joined or worked out per person (`defineCustomDoc`):
-  [*Custom read docs*](.claude/skills/delta-doc/reference.md#custom-read-docs--definecustomdoc).
+  [*Custom documents*](.claude/skills/delta-doc/reference/custom-docs.md).
 - **The kinds** -- who is online (memory), a sensor or an API (source), static data:
-  [*Document kinds*](.claude/skills/delta-doc/reference.md#document-kinds--memory-source-static).
+  [*Kinds*](.claude/skills/delta-doc/reference/kinds.md).
 - **The CLI** -- `bunx @blueshed/delta` opens, watches and writes documents from a terminal:
-  [*CLI*](.claude/skills/delta-doc/reference.md#cli).
+  [*CLI*](.claude/skills/delta-doc/reference/cli.md).
 - **Your own tests** -- `@blueshed/delta/testing` (`mockClient`, `sendAndAwait`, `waitFor`):
-  [*Testing*](.claude/skills/delta-doc/reference.md#testing).
+  [*Testing*](.claude/skills/delta-doc/reference/testing.md).
 
 `bunx @blueshed/delta install-skills` copies the skill into your project for Claude Code. In a
 clone of this repository, [`examples/`](examples/) has a chat, a kanban board on Postgres and
 row-level security side by side. [CHANGELOG.md](CHANGELOG.md) says what changed in each release.
+
+## Why delta
+
+Sync libraries are built for human developers: big API surfaces, many idioms, ecosystem
+dependencies. Delta is shaped for AI-driven development: the whole system fits in one context
+window, there is one way to do each thing, and the schema comes from one TypeScript source. If an
+assistant reaches for Supabase or Firebase, that is a default trained from millions of projects;
+delta is not harder than those, it is smaller, and it can be read in full before a line is
+written. It grew from dzql, seiro, paintbrush's delta-sync and the clean venue manager
+([CHANGELOG.md](CHANGELOG.md), 0.1.0).
 
 MIT licence.

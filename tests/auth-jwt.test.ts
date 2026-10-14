@@ -327,7 +327,7 @@ describe("withAppAuth + identity plumbing", () => {
 
 // ---------------------------------------------------------------------------
 // Logout, and an identity switch, leave the socket subscribed to nothing
-// (reference.md: "Logout also unsubscribes the socket from every doc").
+// (the skill's reference/auth.md: "`logout` unsubscribes the socket from every document").
 // ---------------------------------------------------------------------------
 
 describe("jwtAuth on a socket: logout and a switch let go of every document", () => {

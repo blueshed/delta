@@ -53,9 +53,10 @@ describe("install-skills", () => {
   test("installs delta-doc into ./.claude/skills/ on a fresh cwd", async () => {
     const res = await runInstall(dir);
     expect(res.code).toBe(0);
-    // The bundled delta-doc skill ships SKILL.md + reference.md.
+    // The bundled delta-doc skill ships SKILL.md and its reference/ topic files.
     expect(existsSync(join(dir, ".claude/skills/delta-doc/SKILL.md"))).toBe(true);
-    expect(existsSync(join(dir, ".claude/skills/delta-doc/reference.md"))).toBe(true);
+    expect(existsSync(join(dir, ".claude/skills/delta-doc/reference/recipe.md"))).toBe(true);
+    expect(existsSync(join(dir, ".claude/skills/delta-doc/reference.md"))).toBe(false);
     // Stderr names the origin so the user sees where each skill came from.
     expect(res.stderr).toContain("delta-doc");
     expect(res.stderr).toContain("@blueshed/delta");
@@ -165,6 +166,40 @@ describe("install-skills", () => {
     expect(res.code).toBe(0);
     // Only the bundled delta-doc appears; boring-lib is silently skipped.
     expect(res.stderr).not.toContain("boring-lib");
+  });
+
+  test("mirrors each skill it installs: a file the source dropped goes, backups and other folders stay", async () => {
+    // The old layout: one monolithic reference.md.
+    makeSkill(dir, "@blueshed/widgets", "widgets", { "SKILL.md": "# widgets\n", "reference.md": "all of it\n" });
+    expect((await runInstall(dir)).code).toBe(0);
+    const installed = join(dir, ".claude/skills/widgets");
+    expect(existsSync(join(installed, "reference.md"))).toBe(true);
+    writeFileSync(join(installed, "SKILL.md.bak"), "an edit kept by an earlier upgrade\n");
+    mkdirSync(join(dir, ".claude/skills/mine"), { recursive: true });
+    writeFileSync(join(dir, ".claude/skills/mine/SKILL.md"), "# the consumer's own\n");
+
+    // The new layout: reference.md split into reference/*.md.
+    rmSync(join(dir, "node_modules/@blueshed/widgets"), { recursive: true });
+    makeSkill(dir, "@blueshed/widgets", "widgets", { "SKILL.md": "# widgets\n" });
+    makeSkill(dir, "@blueshed/widgets", "widgets/reference", { "paths.md": "paths\n", "wire.md": "wire\n" });
+
+    const dry = await runInstall(dir, "--dry-run");
+    expect(dry.stderr).toMatch(/-reference\.md/);
+    expect(existsSync(join(installed, "reference.md"))).toBe(true);   // a dry run removes nothing
+
+    const res = await runInstall(dir);
+    expect(res.code).toBe(0);
+    expect(res.stderr).toMatch(/widgets.*-reference\.md/);
+    expect(existsSync(join(installed, "reference.md"))).toBe(false);
+    expect(readFileSync(join(installed, "reference/paths.md"), "utf8")).toBe("paths\n");
+    expect(readFileSync(join(installed, "reference/wire.md"), "utf8")).toBe("wire\n");
+    expect(existsSync(join(installed, "SKILL.md.bak"))).toBe(true);               // a backup is the consumer's
+    expect(existsSync(join(dir, ".claude/skills/mine/SKILL.md"))).toBe(true);     // not a folder it installs
+
+    // A folder the source drops goes too.
+    rmSync(join(dir, "node_modules/@blueshed/widgets/.claude/skills/widgets/reference"), { recursive: true });
+    expect((await runInstall(dir)).code).toBe(0);
+    expect(existsSync(join(installed, "reference"))).toBe(false);
   });
 
   test("does not clobber a pre-existing .bak when re-upgrading", async () => {

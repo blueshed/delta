@@ -3,7 +3,7 @@
 import { parseArgs } from "node:util";
 import { resolve, basename, join, dirname } from "node:path";
 import { homedir } from "node:os";
-import { mkdirSync, copyFileSync, existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { mkdirSync, copyFileSync, existsSync, readFileSync, writeFileSync, readdirSync, rmSync, rmdirSync } from "node:fs";
 import { generateSql } from "./src/server/postgres/codegen";
 import { frameworkSqlFiles } from "./src/server/postgres/bootstrap";
 import { authJwtSqlFile } from "./src/server/auth-jwt-sql";
@@ -472,7 +472,10 @@ function cmdInit(dir: string | undefined, values: Record<string, unknown>) {
 //
 // Skills aren't versioned like SQL — we always overwrite, but back up the
 // existing file as `.bak` so a consumer who edited their copy doesn't lose
-// it. Bytewise-identical destinations are skipped.
+// it. Bytewise-identical destinations are skipped. Each skill folder installed
+// mirrors its source: a file the source no longer has is removed (a skill
+// that split reference.md into reference/ leaves no stale reference.md
+// beside it), but never a `.bak`, and never outside the folders installed.
 // ---------------------------------------------------------------------------
 
 interface SkillSource {
@@ -608,6 +611,37 @@ function copyDirWithBackup(
   }
 }
 
+/** A backup install-skills left (`x.bak`, `x.bak.1`): the consumer's, never pruned. */
+const isBackup = (name: string) => /\.bak(\.\d+)?$/.test(name);
+
+/**
+ * Remove from `dest` what `src` no longer has (`src` null: a folder the source
+ * dropped), keeping backups; a folder left empty goes too.
+ */
+function pruneDir(
+  src: string | null,
+  dest: string,
+  dryRun: boolean,
+  onRemove: (relPath: string) => void,
+  prefix = "",
+): void {
+  if (!existsSync(dest)) return;
+  for (const entry of readdirSync(dest, { withFileTypes: true })) {
+    const srcPath = src && join(src, entry.name);
+    const destPath = join(dest, entry.name);
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) {
+      const kept = srcPath && existsSync(srcPath) ? srcPath : null;
+      pruneDir(kept, destPath, dryRun, onRemove, rel);
+      if (!kept && !dryRun && readdirSync(destPath).length === 0) rmdirSync(destPath);
+      continue;
+    }
+    if (isBackup(entry.name) || (srcPath && existsSync(srcPath))) continue;
+    if (!dryRun) rmSync(destPath);
+    onRemove(rel);
+  }
+}
+
 function cmdInstallSkills(values: Record<string, unknown>): void {
   const user = !!values.user;
   const dryRun = !!values["dry-run"];
@@ -637,8 +671,11 @@ function cmdInstallSkills(values: Record<string, unknown>): void {
       else if (action === "upgraded") upgraded.push(rel);
       else unchanged.push(rel);
     });
+    const removed: string[] = [];
+    pruneDir(srcDir, destDir, dryRun, (rel) => removed.push(rel));
     const parts: string[] = [];
     if (created.length) parts.push(`+${created.join(", ")}`);
+    if (removed.length) parts.push(`-${removed.join(", ")}`);
     if (upgraded.length) parts.push(`~${upgraded.join(", ")} (.bak)`);
     if (unchanged.length) parts.push(`=${unchanged.join(", ")}`);
     process.stderr.write(`  ${name}  [${origin}]  ${parts.join("  ") || "nothing to do"}\n`);
