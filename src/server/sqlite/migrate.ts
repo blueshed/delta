@@ -7,7 +7,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { q } from "../../schema";
-import { appOf, isDeltasOwn, runMigrations, statusOf, type MigrateOptions, type MigrateResult, type Migration, type MigrationStatus, type Store } from "../migrate";
+import { appOf, fenced, isDeltasOwn, runMigrations, statusOf, type MigrateOptions, type MigrateResult, type Migration, type MigrationStatus, type Store } from "../migrate";
 import { waitForLocks } from "./ddl";
 
 export { fromFolder, type Migration, type MigrateOptions, type MigrateResult, type MigrationStatus } from "../migrate";
@@ -15,7 +15,7 @@ export { fromFolder, type Migration, type MigrateOptions, type MigrateResult, ty
 const has = (db: Database, type: "table" | "view", name: string): boolean =>
   !!db.query("SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?").get(type, name);
 
-function store(db: Database, app: string): Store<Database> {
+function store(db: Database, app: string, collections?: string): Store<Database> {
   return {
     async lock() {
       if (db.inTransaction) throw new Error("[delta-migrate] migrate runs outside a transaction: each migration is its own");
@@ -23,8 +23,16 @@ function store(db: Database, app: string): Store<Database> {
     },
     async unlock() {},
     async exists() { return has(db, "table", "delta_migrations"); },
-    async hasTables(names) {
-      if (names) return names.some((name) => has(db, "table", name));
+    async tables(names) {
+      const out = new Map<string, { columns: string[]; rows: boolean }>();
+      for (const name of names) {
+        if (!has(db, "table", name)) continue;
+        const columns = (db.query(`PRAGMA table_info(${q(name)})`).all() as { name: string }[]).map((c) => c.name);
+        out.set(name, { columns, rows: !!db.query(`SELECT 1 FROM ${q(name)} LIMIT 1`).get() });
+      }
+      return out;
+    },
+    async hasAppTables() {
       const tables = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'").all() as { name: string }[];
       return tables.some((t) => !isDeltasOwn(t.name));
     },
@@ -44,7 +52,15 @@ function store(db: Database, app: string): Store<Database> {
     },
     async has(tx, id) { return !!tx.query("SELECT 1 FROM delta_migrations WHERE app = ? AND id = ?").get(app, id); },
     async record(tx, id, at) { tx.run("INSERT INTO delta_migrations (app, id, ran_at) VALUES (?, ?, ?)", [app, id, at]); },
-    async fence(tx) { if (has(tx, "table", "delta_ledger")) tx.run("UPDATE delta_ledger SET undoable = 0 WHERE undoable = 1"); },
+    async fence(tx) {
+      if (!has(tx, "table", "delta_ledger")) return;
+      if (collections === undefined) return void tx.run("UPDATE delta_ledger SET undoable = 0 WHERE undoable = 1");
+      // an entry is the app's when an op of it, or of its inverse, names one of the app's collections: /<coll>/...
+      tx.run(`UPDATE delta_ledger SET undoable = 0 WHERE undoable = 1 AND EXISTS (
+        SELECT 1 FROM (SELECT substr(json_extract(value, '$.path'), 2) AS rest FROM json_each(delta_ledger.ops)
+                       UNION ALL SELECT substr(json_extract(value, '$.path'), 2) FROM json_each(delta_ledger.inverse)) AS p
+         WHERE (CASE WHEN instr(p.rest, '/') > 0 THEN substr(p.rest, 1, instr(p.rest, '/') - 1) ELSE p.rest END) IN (SELECT value FROM json_each(?)))`, [collections]);
+    },
   };
 }
 
@@ -55,7 +71,7 @@ function store(db: Database, app: string): Store<Database> {
  * and give its schema when apps share the database.
  */
 export function migrate(db: Database, migrations: Migration<Database>[], options: MigrateOptions = {}): Promise<MigrateResult> {
-  return runMigrations(store(db, appOf(options)), migrations, options);
+  return runMigrations(store(db, appOf(options), fenced(options)), migrations, options);
 }
 
 /** What of the app's has run here, what would run, and whether the app is new here; changes nothing. */

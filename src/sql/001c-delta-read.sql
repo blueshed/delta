@@ -71,13 +71,13 @@ BEGIN
   IF v_coll.parent_collection IS NULL THEN
     IF v_strip THEN
       EXECUTE format(
-        'SELECT COALESCE(jsonb_object_agg(t.id, _delta_strip_temporal((to_jsonb(t.*) - (SELECT _delta_undeclared(%L))))), ''{}''::jsonb) FROM %I t WHERE %s',
-        p_collection_key, v_source, v_where
+        'SELECT COALESCE(jsonb_object_agg(t.id, _delta_strip_temporal(to_jsonb(t.*))), ''{}''::jsonb) FROM %I t WHERE %s',
+        v_source, v_where
       ) INTO v_result;
     ELSE
       EXECUTE format(
-        'SELECT COALESCE(jsonb_object_agg(t.id, (to_jsonb(t.*) - (SELECT _delta_undeclared(%L)))), ''{}''::jsonb) FROM %I t',
-        p_collection_key, v_source
+        'SELECT COALESCE(jsonb_object_agg(t.id, to_jsonb(t.*)), ''{}''::jsonb) FROM %I t',
+        v_source
       ) INTO v_result;
     END IF;
     RETURN v_result;
@@ -87,13 +87,13 @@ BEGIN
   IF v_coll.parent_collection = p_root_collection THEN
     IF v_strip THEN
       EXECUTE format(
-        'SELECT COALESCE(jsonb_object_agg(t.id, _delta_strip_temporal((to_jsonb(t.*) - (SELECT _delta_undeclared(%L))))), ''{}''::jsonb) FROM %I t WHERE t.%I = $1 AND %s',
-        p_collection_key, v_source, v_coll.parent_fk, v_where
+        'SELECT COALESCE(jsonb_object_agg(t.id, _delta_strip_temporal(to_jsonb(t.*))), ''{}''::jsonb) FROM %I t WHERE t.%I = $1 AND %s',
+        v_source, v_coll.parent_fk, v_where
       ) INTO v_result USING p_root_id;
     ELSE
       EXECUTE format(
-        'SELECT COALESCE(jsonb_object_agg(t.id, (to_jsonb(t.*) - (SELECT _delta_undeclared(%L)))), ''{}''::jsonb) FROM %I t WHERE t.%I = $1',
-        p_collection_key, v_source, v_coll.parent_fk
+        'SELECT COALESCE(jsonb_object_agg(t.id, to_jsonb(t.*)), ''{}''::jsonb) FROM %I t WHERE t.%I = $1',
+        v_source, v_coll.parent_fk
       ) INTO v_result USING p_root_id;
     END IF;
     RETURN v_result;
@@ -119,13 +119,13 @@ BEGIN
 
   IF v_strip THEN
     EXECUTE format(
-      'SELECT COALESCE(jsonb_object_agg(t.id, _delta_strip_temporal((to_jsonb(t.*) - (SELECT _delta_undeclared(%L))))), ''{}''::jsonb) FROM %I t WHERE t.%I = ANY($1) AND %s',
-      p_collection_key, v_source, v_coll.parent_fk, v_where
+      'SELECT COALESCE(jsonb_object_agg(t.id, _delta_strip_temporal(to_jsonb(t.*))), ''{}''::jsonb) FROM %I t WHERE t.%I = ANY($1) AND %s',
+      v_source, v_coll.parent_fk, v_where
     ) INTO v_result USING v_parent_ids;
   ELSE
     EXECUTE format(
-      'SELECT COALESCE(jsonb_object_agg(t.id, (to_jsonb(t.*) - (SELECT _delta_undeclared(%L)))), ''{}''::jsonb) FROM %I t WHERE t.%I = ANY($1)',
-      p_collection_key, v_source, v_coll.parent_fk
+      'SELECT COALESCE(jsonb_object_agg(t.id, to_jsonb(t.*)), ''{}''::jsonb) FROM %I t WHERE t.%I = ANY($1)',
+      v_source, v_coll.parent_fk
     ) INTO v_result USING v_parent_ids;
   END IF;
 
@@ -156,14 +156,14 @@ BEGIN
 
   IF v_coll.temporal THEN
     EXECUTE format(
-      'SELECT COALESCE(jsonb_object_agg(t.id, _delta_strip_temporal((to_jsonb(t.*) - (SELECT _delta_undeclared(%L))))), ''{}''::jsonb) FROM %I t WHERE %s',
-      p_collection_key, v_source,
+      'SELECT COALESCE(jsonb_object_agg(t.id, _delta_strip_temporal(to_jsonb(t.*))), ''{}''::jsonb) FROM %I t WHERE %s',
+      v_source,
       CASE WHEN p_at IS NOT NULL THEN _delta_temporal_where(p_at) ELSE 'TRUE' END
     ) INTO v_result;
   ELSE
     EXECUTE format(
-      'SELECT COALESCE(jsonb_object_agg(t.id, (to_jsonb(t.*) - (SELECT _delta_undeclared(%L)))), ''{}''::jsonb) FROM %I t',
-      p_collection_key, v_source
+      'SELECT COALESCE(jsonb_object_agg(t.id, to_jsonb(t.*)), ''{}''::jsonb) FROM %I t',
+      v_source
     ) INTO v_result;
   END IF;
 
@@ -193,7 +193,7 @@ RETURNS JSONB LANGUAGE sql STABLE AS $$
              WHEN d->>'type' IN ('integer', 'real') THEN '0'::jsonb
              WHEN d->>'type' = 'boolean' THEN 'false'::jsonb
              ELSE 'null'::jsonb END)
-      FROM _delta_collections c, jsonb_each(c.columns_def) AS x(k, d)
+      FROM _delta_collections c, jsonb_each(_delta_cols(c.collection_key, c.columns_def)) AS x(k, d)
      WHERE c.collection_key = p_def.root_collection), '{}'::jsonb);
 $$;
 
@@ -268,7 +268,7 @@ BEGIN
   SELECT * INTO v_root FROM _delta_collections WHERE collection_key = p_def.root_collection;
   EXECUTE format(
     'SELECT COALESCE(jsonb_object_agg(t.id, %s), ''{}''::jsonb) FROM %I t WHERE %s AND %s',
-    format(CASE WHEN v_root.temporal THEN '_delta_strip_temporal(to_jsonb(t.*) - (SELECT _delta_undeclared(%L)))' ELSE '(to_jsonb(t.*) - (SELECT _delta_undeclared(%L)))' END, p_def.root_collection),
+    CASE WHEN v_root.temporal THEN '_delta_strip_temporal(to_jsonb(t.*))' ELSE 'to_jsonb(t.*)' END,
     _delta_source_view(v_root.table_name, v_root.temporal, p_at),
     CASE WHEN v_root.temporal AND p_at IS NOT NULL THEN _delta_temporal_where(p_at) ELSE 'TRUE' END,
     p_where
@@ -333,7 +333,7 @@ BEGIN
     v_parts := _delta_split_path(v_op->>'path');
     SELECT * INTO v_coll FROM _delta_collections WHERE collection_key = v_parts[1];
     v_field := CASE WHEN array_length(v_parts, 1) >= 3 THEN v_parts[3]
-                    WHEN array_length(v_parts, 1) = 2 AND (v_coll.columns_def ? v_parts[2] OR v_parts[2] = v_coll.parent_fk) THEN v_parts[2] END;
+                    WHEN array_length(v_parts, 1) = 2 AND (_delta_cols(v_coll.collection_key, v_coll.columns_def) ? v_parts[2] OR v_parts[2] = v_coll.parent_fk) THEN v_parts[2] END;
     IF v_field IS NOT NULL THEN
       CONTINUE WHEN (v_def.held ? v_parts[1]) AND NOT ((v_def.held->v_parts[1]) ? v_field OR v_field = 'id' OR v_field = v_coll.parent_fk);
     ELSIF v_op ? 'value' THEN
@@ -407,7 +407,6 @@ BEGIN
     -- (fo-guest:<id>:<email>: that id with that email), as SQLite reads it
     EXECUTE format('SELECT to_jsonb(t.*) FROM %I t WHERE t.id = $1 AND %s', v_view, v_where)
       INTO v_root_row USING v_doc_id;
-    v_root_row := _delta_declared(v_def.root_collection, v_root_row);
 
     IF v_root_row IS NULL AND NOT COALESCE(v_def.implied, FALSE) THEN RETURN NULL; END IF;
 

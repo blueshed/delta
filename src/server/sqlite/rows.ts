@@ -60,8 +60,35 @@ export function insertRow(db: any, table: ResolvedTable, row: any, ts: string) {
   if (table.parent) cols.push(table.parent.fkColumn);
   cols.push(...Object.keys(table.columns));
   if (table.temporal) cols.push("valid_from");
+  // a row put back as it was stored (an undo of its removal) has the columns this version does not declare too
+  const declared = declaredColumns(table);
+  if (Object.keys(row).some((k) => !declared.has(k))) {
+    const stored = new Set(undeclaredColumns(db, table));
+    cols.push(...Object.keys(row).filter((k) => stored.has(k)));
+  }
   const vals = cols.map((c) => (c === "valid_from" ? ts : encodeValue(table, c, row[c])));
   db.run(`INSERT INTO ${q(table.name)} (${cols.map(q).join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`, vals);
+}
+
+/** The columns a row of `table` is read and written by (`columnsOf`), by name. */
+export const declaredColumns = (table: ResolvedTable): Set<string> =>
+  new Set(["id", ...(table.parent ? [table.parent.fkColumn] : []), ...Object.keys(table.columns), "valid_from", "valid_to"]);
+
+/** The table's columns the schema does not declare: a later version's, there under this one. */
+export function undeclaredColumns(db: any, table: ResolvedTable): string[] {
+  const declared = declaredColumns(table);
+  return (db.query(`PRAGMA table_info(${q(table.name)})`).all() as { name: string }[]).map((c) => c.name).filter((c) => !declared.has(c));
+}
+
+/**
+ * What a row holds in the columns the schema does not declare, as stored: a
+ * removal's inverse keeps it, so an undo puts the row back whole (the ledger
+ * keeps rows as stored; only what delta sends is the declared columns).
+ */
+export function undeclaredOf(db: any, table: ResolvedTable, id: string | number): Record<string, unknown> | undefined {
+  const others = undeclaredColumns(db, table);
+  if (others.length === 0) return undefined;
+  return db.query(`SELECT ${others.map(q).join(", ")} FROM ${current(table)} WHERE id = ?`).get(id) ?? undefined;
 }
 
 /**
@@ -72,8 +99,7 @@ export function insertRow(db: any, table: ResolvedTable, row: any, ts: string) {
  * blank it (expand/contract: reference/migrations.md).
  */
 export function carryUndeclared(db: any, table: ResolvedTable, id: string | number, ts: string): void {
-  const declared = new Set(["id", table.parent?.fkColumn, ...Object.keys(table.columns), "valid_from", "valid_to"]);
-  const others = (db.query(`PRAGMA table_info(${q(table.name)})`).all() as { name: string }[]).map((c) => c.name).filter((c) => !declared.has(c));
+  const others = undeclaredColumns(db, table);
   if (others.length === 0) return;
   const cols = others.map(q).join(", ");
   db.run(`UPDATE ${q(table.name)} SET (${cols}) = (SELECT ${cols} FROM ${q(table.name)} WHERE id = ?1 AND valid_to = ?2) WHERE id = ?1 AND valid_from = ?2`, [id, ts]);

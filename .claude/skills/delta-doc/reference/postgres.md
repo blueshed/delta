@@ -35,7 +35,9 @@ Options: `createDocListener` and `docTypeFromDef` in `src/server/postgres/listen
   is yours, in git; only the SQL is vendored, the TypeScript is imported.
 - **Upgrading the app**: `migrate(pool, migrations, { app, schema })` first, then
   `applyFramework` and `applySql(pool, generateSql(…))`. `generateSql` adds a column a later
-  schema declares; a migration does the rest (`migrations.md`).
+  schema declares; a migration does the rest (`migrations.md`). Give the listener your
+  `schema` (`createDocListener(ws, pool, { types, schema })`): it sends and writes the columns
+  it declares, so two versions on one database each see their own.
 - **After upgrading delta**, run `init <dir> --upgrade` (it keeps `.bak`s and says what changed)
   or `applyFramework` again. Never edit `001*` by hand: it is the stored-function contract.
 - Mount `init_db/` at `/docker-entrypoint-initdb.d`: Postgres applies it alphabetically on the

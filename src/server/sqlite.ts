@@ -28,7 +28,7 @@ import { defaultForType, holdsField, q, showDoc, showOps, showRow, utcTime, type
 import { waitForLocks } from "./sqlite/ddl";
 import { keeping, scopeValue } from "./sqlite/keep";
 import { loadDocAt, readDoc } from "./sqlite/read";
-import { carryUndeclared, closeRow, columnsOf, current, decodeRow, insertCollectionRow, insertRow, leftOut, named, now, refuse, sqliteTime, updateRow } from "./sqlite/rows";
+import { carryUndeclared, closeRow, columnsOf, undeclaredColumns, undeclaredOf, current, decodeRow, insertCollectionRow, insertRow, leftOut, named, now, refuse, sqliteTime, updateRow } from "./sqlite/rows";
 import { namesRootRow, validateOps } from "./sqlite/validate";
 
 export type {
@@ -578,7 +578,7 @@ export function registerDocs<I = unknown>(
   // does not include, through the tables: `reaches`). The error message
   // deliberately matches the "not there" case: a distinct "forbidden" would
   // confirm the row exists to someone probing ids.
-  function applyOps(docName: string, def: DocDef, doc: any, ops: DeltaOp[], walk: boolean): { applied: DeltaOp[]; touched: Touched[]; beyond: Beyond[] } {
+  function applyOps(docName: string, def: DocDef, doc: any, ops: DeltaOp[], walk: boolean): { applied: DeltaOp[]; touched: Touched[]; beyond: Beyond[]; stored: Map<string, Record<string, unknown>> } {
     const scope = resolveScope(def, docName.slice(def.prefix.length));
     const list = scope.mode === "list";
     const rootId = list ? undefined : rowId(scope.id ?? doc[def.root]?.id);
@@ -588,6 +588,7 @@ export function registerDocs<I = unknown>(
     const broadcastOps: DeltaOp[] = [];
     const touched: Touched[] = [];
     const beyond: Beyond[] = [];   // rows the cascade took that the document does not hold, as they were
+    const stored = new Map<string, Record<string, unknown>>();   // what each row removed held in columns this version does not declare
     // A write is one moment, as a Postgres transaction's NOW() is: every version
     // it makes or closes is stamped with it, and a temporal row it writes twice
     // is one new version -- rewritten in place (`made`), not closed a tick later.
@@ -741,7 +742,7 @@ export function registerDocs<I = unknown>(
 
       // What the op may say (`validateOps`), asked as it comes, as delta_apply asks it: one refused
       // leaves the ops before it to roll back, and the serials they took spent -- the same on every backend
-      const invalid = validateOps(schema, def, [op], { list, values: scope.values, walk });
+      const invalid = validateOps(schema, def, [op], { list, values: scope.values, walk, stored: walk ? (t) => undeclaredColumns(db, t) : undefined });
       if (invalid.length) refuse(400, invalid.map((e) => `${e.path}: ${e.message}`).join("; "));
 
       const parts = splitPath(op.path);
@@ -855,6 +856,8 @@ export function registerDocs<I = unknown>(
           // the row and every row its removal takes, and who holds each, asked before any is gone
           const cascade = cascadeRows(table, id).map(({ table: t, row }) => ({ t, row, before: heldBy(t.docKey, row, docName) }));
           for (const { t, row, before } of cascade) {
+            const others = undeclaredOf(db, t, row.id);
+            if (others) stored.set(joinPath(t.docKey, String(row.id)), others);
             if (t.temporal) closeRow(db, t, row.id, ts);
             else db.run(`DELETE FROM ${q(t.name)} WHERE id = ?`, [row.id]);
             delete doc[t.docKey]?.[row.id];
@@ -876,7 +879,7 @@ export function registerDocs<I = unknown>(
     }
     endRun();
 
-    return { applied: broadcastOps, touched, beyond };
+    return { applied: broadcastOps, touched, beyond, stored };
   }
 
   /**
@@ -1041,7 +1044,9 @@ export function registerDocs<I = unknown>(
         const done = applyOps(docName, def, doc, ops, by.undoes !== undefined);
         passNamed();
         touched = made ? [made, ...done.touched] : done.touched;
-        const inverse = inverseOf(besides(snapshot, done.beyond), done.applied, ops);
+        // a removed row comes back as it was stored: with what it held in columns this version does not declare
+        const inverse = inverseOf(besides(snapshot, done.beyond), done.applied, ops).map((op) =>
+          op.op === "add" && done.stored.has(op.path) ? { ...op, value: { ...(op.value as object), ...done.stored.get(op.path) } } : op);
         const recorded = ledger?.record({ doc: docName, ops: done.applied, inverse, ...by });
         return { ops: done.applied, inverse, version: recorded?.version, entry: recorded?.entry };
       }).immediate();

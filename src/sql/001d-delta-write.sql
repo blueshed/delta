@@ -180,7 +180,7 @@ BEGIN
   v_view := _delta_source_view(v_coll.table_name, v_coll.temporal);
   EXECUTE format('SELECT to_jsonb(t.*) FROM %I t WHERE t.id = $1', v_view) INTO v_row USING p_id;
   IF v_row IS NULL THEN RETURN v_rows; END IF;
-  v_rows := jsonb_build_array(jsonb_build_object('coll', p_collection_key, 'id', p_id, 'row', _delta_strip_temporal(_delta_declared(p_collection_key, v_row))));
+  v_rows := jsonb_build_array(jsonb_build_object('coll', p_collection_key, 'id', p_id, 'row', _delta_strip_temporal(v_row)));
 
   FOR v_child IN
     SELECT * FROM _delta_collections
@@ -227,10 +227,10 @@ BEGIN
   FOR v_child IN SELECT * FROM _delta_collections WHERE parent_collection = p_collection_key ORDER BY collection_key COLLATE "C" LOOP
     EXECUTE format(
       'SELECT COALESCE(jsonb_agg(e ORDER BY t.id, n), ''[]''::jsonb) FROM %I t,
-         jsonb_array_elements(jsonb_build_array(jsonb_build_object(''coll'', %L, ''id'', t.id, ''row'', _delta_strip_temporal(_delta_declared(%L, to_jsonb(t.*)))))
+         jsonb_array_elements(jsonb_build_array(jsonb_build_object(''coll'', %L, ''id'', t.id, ''row'', _delta_strip_temporal(to_jsonb(t.*))))
                               || _delta_hanging_rows(%L, t.id)) WITH ORDINALITY AS x(e, n)
         WHERE t.%I = $1',
-      _delta_source_view(v_child.table_name, v_child.temporal), v_child.collection_key, v_child.collection_key, v_child.collection_key, v_child.parent_fk
+      _delta_source_view(v_child.table_name, v_child.temporal), v_child.collection_key, v_child.collection_key, v_child.parent_fk
     ) INTO v_part USING p_id;
     v_rows := v_rows || v_part;
   END LOOP;
@@ -529,7 +529,6 @@ BEGIN
     IF NOT v_exists THEN
       v_passed := jsonb_build_object(v_root_coll.table_name, v_doc_id);
       EXECUTE format('SELECT _delta_strip_temporal(to_jsonb(t.*)) FROM %I t WHERE t.id = $1', v_root_view) INTO v_row USING v_doc_id;
-      v_row := _delta_declared(v_def.root_collection, v_row);
       IF v_row IS NOT NULL THEN
         v_touched := jsonb_build_array(jsonb_build_object('coll', v_def.root_collection, 'id', v_doc_id, 'after', v_row, 'carried', TRUE,
           'before', COALESCE((SELECT jsonb_agg(n) FROM unnest(_delta_holders(v_def.root_collection, v_row, p_doc_name)) AS n
@@ -590,7 +589,12 @@ BEGIN
       RAISE EXCEPTION 'unknown collection: %', v_coll_key USING ERRCODE = '22023';
     END IF;
     -- a walk puts back what the ledger recorded, whole
-    v_cols := CASE WHEN COALESCE(p_walk, FALSE) THEN v_coll.columns_def ELSE _delta_held_columns(v_def, v_coll_key, v_coll.columns_def) END;
+    -- (the columns this process declares, _delta_cols; a walk's, every column the row was stored with too)
+    v_cols := CASE WHEN COALESCE(p_walk, FALSE)
+      THEN COALESCE((SELECT jsonb_object_agg(c, '{"nullable": true}'::jsonb) FROM unnest(_delta_stored_columns(v_coll.table_name)) AS c
+                      WHERE c NOT IN ('id', 'valid_from', 'valid_to') AND c IS DISTINCT FROM v_coll.parent_fk), '{}'::jsonb)
+           || _delta_cols(v_coll_key, v_coll.columns_def)
+      ELSE _delta_held_columns(v_def, v_coll_key, _delta_cols(v_coll_key, v_coll.columns_def)) END;
 
     -- Scope guard: an op may only target the doc's root or an included
     -- collection. Defence-in-depth — a client that opened doc A must not write
@@ -685,8 +689,6 @@ BEGIN
         ) INTO v_new_row USING v_new_row;
       END IF;
 
-      v_new_row := _delta_declared(v_coll_key, v_new_row);   -- told and kept as this version declares it
-
       -- The root written through its document stays in its scope, as a list's
       -- rows do (below): one written out of the rest of its name's scope -- a
       -- seat of fo-seat-of:1:3 to table 7 -- is refused, and the write undone
@@ -709,7 +711,7 @@ BEGIN
           jsonb_build_object('op', 'replace', 'path', v_told_path, 'value', v_new_row)
         );
         v_touched := v_touched || jsonb_build_array(jsonb_build_object(
-          'coll', v_coll_key, 'id', v_doc_id, 'before', to_jsonb(v_before), 'after', v_new_row, 'was', _delta_declared(v_coll_key, CASE WHEN v_coll.temporal THEN _delta_strip_temporal(v_row) ELSE v_row END)));
+          'coll', v_coll_key, 'id', v_doc_id, 'before', to_jsonb(v_before), 'after', v_new_row, 'was', CASE WHEN v_coll.temporal THEN _delta_strip_temporal(v_row) ELSE v_row END));
         v_run_at := jsonb_array_length(v_touched) - 1;
         v_run_carried := FALSE;
       END IF;
@@ -781,7 +783,7 @@ BEGIN
       -- child adds (e.g. a product-catalog doc adding a `parts` row) there is
       -- no doc-id to inject, so we trust the parent_fk supplied in the op value.
       IF v_is_list AND v_coll_key = v_def.root_collection THEN
-        v_new_row := v_new_row || _delta_scope_row(v_coll.columns_def, v_scope->'values');
+        v_new_row := v_new_row || _delta_scope_row(_delta_cols(v_coll_key, v_coll.columns_def), v_scope->'values');
       ELSIF v_coll.parent_collection = v_def.root_collection AND v_coll.parent_fk IS NOT NULL
             AND v_doc_id IS NOT NULL THEN
         v_new_row := v_new_row || jsonb_build_object(v_coll.parent_fk, v_doc_id);
@@ -825,7 +827,7 @@ BEGIN
       -- out is the writer's mistake: refuse it (SQLSTATE 23502, 400 on the
       -- wire) rather than store '' / 0 / false for it.
       SELECT string_agg(col_key, ', ' ORDER BY col_key) INTO v_missing
-        FROM jsonb_each(v_coll.columns_def) AS x(col_key, col_def)
+        FROM jsonb_each(_delta_cols(v_coll_key, v_coll.columns_def)) AS x(col_key, col_def)
        WHERE NOT v_new_row ? col_key
          AND NOT COALESCE((col_def->>'nullable')::boolean, false)
          AND NOT col_def ? 'default';
@@ -837,7 +839,7 @@ BEGIN
       -- Declared column defaults, for what the value leaves out
       SELECT v_new_row || COALESCE(jsonb_object_agg(col_key, col_def->'default'), '{}'::jsonb)
         INTO v_new_row
-        FROM jsonb_each(v_coll.columns_def) AS x(col_key, col_def)
+        FROM jsonb_each(_delta_cols(v_coll_key, v_coll.columns_def)) AS x(col_key, col_def)
        WHERE NOT v_new_row ? col_key AND col_def ? 'default';
 
       IF v_coll.temporal THEN
@@ -876,8 +878,7 @@ BEGIN
           USING ERRCODE = 'P0002';
       END IF;
 
-      -- Strip temporal columns, and any this version does not declare, from broadcast
-      v_new_row := _delta_declared(v_coll_key, v_new_row);
+      -- Strip temporal columns from broadcast
       IF v_coll.temporal THEN
         v_new_row := _delta_strip_temporal(v_new_row);
       END IF;
@@ -1042,8 +1043,7 @@ BEGIN
           USING ERRCODE = 'P0002';
       END IF;
 
-      -- Strip temporal from broadcast, and any column this version does not declare
-      v_new_row := _delta_declared(v_coll_key, v_new_row);
+      -- Strip temporal from broadcast
       IF v_coll.temporal THEN
         v_new_row := _delta_strip_temporal(v_new_row);
       END IF;
@@ -1057,7 +1057,7 @@ BEGIN
           jsonb_build_object('op', 'replace', 'path', v_told_path, 'value', v_new_row)
         );
         v_touched := v_touched || jsonb_build_array(jsonb_build_object(
-          'coll', v_coll_key, 'id', v_id, 'before', to_jsonb(v_before), 'after', v_new_row, 'was', _delta_declared(v_coll_key, CASE WHEN v_coll.temporal THEN _delta_strip_temporal(v_row) ELSE v_row END)));
+          'coll', v_coll_key, 'id', v_id, 'before', to_jsonb(v_before), 'after', v_new_row, 'was', CASE WHEN v_coll.temporal THEN _delta_strip_temporal(v_row) ELSE v_row END));
         v_run_at := jsonb_array_length(v_touched) - 1;
       END IF;
       v_run_carried := v_run_carried OR jsonb_array_length(v_hung) > 0;

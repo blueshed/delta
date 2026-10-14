@@ -9,7 +9,7 @@
  */
 import type { Pool, PoolClient } from "pg";
 import { q } from "../../schema";
-import { appOf, runMigrations, statusOf, type MigrateOptions, type MigrateResult, type Migration, type MigrationStatus, type Store } from "../migrate";
+import { appOf, fenced, runMigrations, statusOf, type MigrateOptions, type MigrateResult, type Migration, type MigrationStatus, type Store } from "../migrate";
 
 export { fromFolder, type Migration, type MigrateOptions, type MigrateResult, type MigrationStatus } from "../migrate";
 
@@ -22,13 +22,23 @@ const LOCK = "hashtext('delta_migrations')";
 const regclass = async (tx: Tx, name: string): Promise<boolean> =>
   (await tx.query("SELECT to_regclass($1) IS NOT NULL AS there", [q(name)])).rows[0]?.there === true;
 
-function store(client: PoolClient, app: string): Store<PoolClient> {
+function store(client: PoolClient, app: string, collections?: string): Store<PoolClient> {
   return {
     async lock() { await client.query(`SELECT pg_advisory_lock(${LOCK})`); },
     async unlock() { await client.query(`SELECT pg_advisory_unlock(${LOCK})`); },
     async exists() { return regclass(client, "delta_migrations"); },
-    async hasTables(names) {
-      if (names) return (await client.query("SELECT 1 FROM pg_tables WHERE schemaname = current_schema() AND tablename IN (SELECT jsonb_array_elements_text($1::jsonb))", [JSON.stringify(names)])).rows.length > 0;
+    async tables(names) {
+      const out = new Map<string, { columns: string[]; rows: boolean }>();
+      const { rows: found } = await client.query(
+        `SELECT table_name AS name, array_agg(column_name::text) AS columns FROM information_schema.columns
+          WHERE table_schema = current_schema() AND table_name IN (SELECT jsonb_array_elements_text($1::jsonb)) GROUP BY 1`, [JSON.stringify(names)]);
+      for (const t of found) {
+        const rows = (await client.query(`SELECT EXISTS (SELECT 1 FROM ${q(t.name)}) AS any`)).rows[0]?.any === true;
+        out.set(t.name, { columns: Array.isArray(t.columns) ? t.columns : String(t.columns).replace(/^\{|\}$/g, "").split(","), rows });
+      }
+      return out;
+    },
+    async hasAppTables() {
       const { rows } = await client.query(
         "SELECT count(*)::int AS n FROM pg_tables WHERE schemaname = current_schema() AND tablename !~ '^_?delta_'",
       );
@@ -49,7 +59,14 @@ function store(client: PoolClient, app: string): Store<PoolClient> {
     },
     async has(tx, id) { return (await tx.query("SELECT 1 FROM delta_migrations WHERE app = $1 AND id = $2", [app, id])).rows.length > 0; },
     async record(tx, id, at) { await tx.query("INSERT INTO delta_migrations (app, id, ran_at) VALUES ($1, $2, $3)", [app, id, at]); },
-    async fence(tx) { if (await regclass(tx, "_delta_ledger")) await tx.query("UPDATE _delta_ledger SET undoable = FALSE WHERE undoable"); },
+    async fence(tx) {
+      if (!(await regclass(tx, "_delta_ledger"))) return;
+      if (collections === undefined) return void (await tx.query("UPDATE _delta_ledger SET undoable = FALSE WHERE undoable"));
+      // an entry is the app's when an op of it, or of its inverse, names one of the app's collections: /<coll>/...
+      await tx.query(`UPDATE _delta_ledger SET undoable = FALSE WHERE undoable AND EXISTS (
+        SELECT 1 FROM jsonb_array_elements(ops || inverse) AS o
+         WHERE split_part(o->>'path', '/', 2) IN (SELECT jsonb_array_elements_text($1::jsonb)))`, [collections]);
+    },
   };
 }
 
@@ -67,7 +84,7 @@ async function withClient<T>(pool: Pool, fn: (client: PoolClient) => Promise<T>)
  * schema when apps share the database.
  */
 export function migrate(pool: Pool, migrations: Migration<PoolClient>[], options: MigrateOptions = {}): Promise<MigrateResult> {
-  return withClient(pool, (client) => runMigrations(store(client, appOf(options)), migrations, options));
+  return withClient(pool, (client) => runMigrations(store(client, appOf(options), fenced(options)), migrations, options));
 }
 
 /** What of the app's has run here, what would run, and whether the app is new here; changes nothing. */

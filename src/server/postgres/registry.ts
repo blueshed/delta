@@ -63,6 +63,8 @@ export interface DocType<C = any, I = unknown> {
     ops: DeltaOp[],
     identity?: I,
     by?: Writer,
+    /** The columns the listener's schema declares, by collection (JSON), for `callAs`: a write by them (`_delta_cols`). */
+    declared?: string,
   ): Promise<{ version: number; ops?: any[]; inverse?: any[]; entry?: number | null }>;
 
   /** Optional: snapshot read at a historical timestamp. Not every doc type
@@ -159,10 +161,13 @@ export function docTypes(initial: DocType[], taken: string[], auth: boolean) {
  * says how to name it (`asSqlArg`): `fn_as(user, args)`, which sets
  * `app.user_id` and calls `fn` in one round-trip (001f).
  */
-export async function callAs<I>(db: { query(sql: string, params: unknown[]): Promise<{ rows: any[] }> }, fn: string, args: unknown[], auth?: DeltaAuth<I>, identity?: I): Promise<any> {
+export async function callAs<I>(db: { query(sql: string, params: unknown[]): Promise<{ rows: any[] }> }, fn: string, args: unknown[], auth?: DeltaAuth<I>, identity?: I, declared?: string): Promise<any> {
   const as = auth?.asSqlArg && identity !== undefined ? [String(auth.asSqlArg(identity))] : [];
   const all = [...as, ...args];
-  const { rows } = await db.query(`SELECT ${as.length ? `${fn}_as` : fn}(${all.map((_, i) => `$${i + 1}`).join(", ")}) AS result`, all);
+  const call = `${as.length ? `${fn}_as` : fn}(${all.map((_, i) => `$${i + 1}`).join(", ")})`;
+  if (declared === undefined) return (await db.query(`SELECT ${call} AS result`, all)).rows[0]?.result;
+  // the columns this process declares, for the call's transaction (`_delta_cols`, 001b): set first, then the call
+  const { rows } = await db.query(`WITH d AS MATERIALIZED (SELECT set_config('delta.declared', $${all.length + 1}, true)) SELECT ${call} AS result FROM d`, [...all, declared]);
   return rows[0]?.result;
 }
 
@@ -232,11 +237,11 @@ export function docTypeFromDef<I = unknown>(
       return { result: doc, version };
     },
 
-    async apply(_ctx, docName, ops, identity, by) {
+    async apply(_ctx, docName, ops, identity, by, declared) {
       // on the ledger: delta_apply with its entry, in one transaction (001g)
       const result = by
-        ? await callAs(pool, "delta_apply_logged", [docName, JSON.stringify(ops), by.who, by.cursor, by.undoable !== false, by.undoes ?? null], auth, identity)
-        : await callAs(pool, "delta_apply", [docName, JSON.stringify(ops)], auth, identity);
+        ? await callAs(pool, "delta_apply_logged", [docName, JSON.stringify(ops), by.who, by.cursor, by.undoable !== false, by.undoes ?? null], auth, identity, declared)
+        : await callAs(pool, "delta_apply", [docName, JSON.stringify(ops)], auth, identity, declared);
       if (!result) throw new Error(`delta_apply returned no result for ${docName}`);
       return showAnswer(pool, docName, result, def);   // its writer is answered only what it holds
     },

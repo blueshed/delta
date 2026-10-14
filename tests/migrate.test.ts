@@ -274,6 +274,60 @@ for (const [name, b] of [["sqlite", sqliteBackend], ["pglite", pgBackend]] as [s
       expect(ran).toEqual(["chat 001-x", "leave 002-y"]);
     }, SLOW);
 
+    test("tables made from the schema before the first start (init_db at first boot) are new: every migration recorded, none run; with rows, or another shape, they are lived in", async () => {
+      const made = async (h: any) => {
+        if (name === "sqlite") sqlite.createTables(new Database(h), after);
+        else { await pg.applyFramework(h); await pg.applySql(h, pg.generateSql(after, [team])); }
+      };
+      const ran: string[] = [];
+      const fresh = await b.open();
+      await made(fresh);
+      expect((await b.status(fresh, b.story(ran), { app: "team", schema: after })).fresh).toBe(true);
+      expect(await b.migrate(fresh, b.story(ran), { app: "team", schema: after })).toEqual({ ran: [], fresh: true, unknown: [] });
+      expect(ran).toEqual([]);
+
+      // a row in them is data to keep: not new, so the list runs (and here, against tables already at its end, fails)
+      const seeded = await b.open();
+      await made(seeded);
+      await b.rows(seeded, "INSERT INTO teams (id) VALUES (1)");
+      expect((await b.status(seeded, b.story([]), { app: "team", schema: after })).fresh).toBe(false);
+      await expect(b.migrate(seeded, b.story([]), { app: "team", schema: after })).rejects.toThrow(/001-name-is-full-name failed/);
+
+      // an earlier version's tables, empty, are another shape: not new, and the list brings them to this one
+      const older = await b.open();
+      await b.start(older, before, []);
+      await b.rows(older, "DELETE FROM delta_migrations");
+      expect(await b.migrate(older, b.story(ran), { app: "team", schema: after })).toEqual({ ran: ["001-name-is-full-name", "002-fax-into-phone", "003-no-fax"], fresh: false, unknown: [] });
+    }, SLOW);
+
+    test("the fence is the migrating app's: another app on the database undoes on across it", async () => {
+      const h = await b.open();
+      await lived(b, h);   // the team app, on the ledger
+      const notes = sqlite.defineSchema({ notes: { table: "other_notes", columns: { text: "text" }, temporal: false } });
+      const note = sqlite.defineDoc("notes:", { root: "notes", include: [] });
+      const other = createLocal();
+      if (name === "sqlite") {
+        const db = new Database(h);
+        sqlite.createTables(db, notes);
+        sqlite.registerDocs(other.server, db, notes, [note], [], { ledger: true });
+      } else {
+        await pg.applySql(h, pg.generateSql(notes, [note]));
+        listeners.push(await pg.createDocListener(other.server, h, { types: [pg.docTypeFromDef(note, h)], ledger: true, schema: notes }));
+      }
+      await other.call("open", { doc: "notes:" });
+      expect((await other.call("delta", { doc: "notes:", ops: [{ op: "add", path: "/notes/-", value: { text: "kept" } }], cursor: "cy" })).error).toBeUndefined();
+
+      await b.migrate(h, b.story([]), { app: "team", schema: after });
+      if (name === "sqlite") sqlite.migrateSchema(new Database(h), after);
+      else await pg.applySql(h, pg.generateSql(after, [team]));
+      const v2 = await b.serve(h, after);
+      await v2.call("open", { doc: "team:1" });
+      expect((await v2.call("undo", { cursor: "ada" })).result).toBeNull();   // the team's own: fenced
+      const undone = await other.call("undo", { cursor: "cy" });             // the notes app's: not
+      expect(undone.error).toBeUndefined();
+      expect(undone.result.ops).toEqual([{ op: "remove", path: "/notes/1" }]);
+    }, SLOW);
+
     test("migrations from a folder: each file's up, named by the file, in the files' order", async () => {
       const dir = tempDir();
       writeFileSync(join(dir, "002-second.ts"), `export const up = (tx) => { globalThis.__order.push("002"); };\n`);

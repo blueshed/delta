@@ -84,9 +84,9 @@ const onPglite: Backend<Pool> = {
     await pg.applySql(pool, pg.generateSql(schema, [team]));
   },
   async migrate(pool, list) { await pg.migrate(pool, list); },
-  async serve(pool) {
+  async serve(pool, schema) {
     const local = createLocal();
-    listeners.push(await pg.createDocListener(local.server, pool, { types: [pg.docTypeFromDef(team, pool)], ledger: true }));
+    listeners.push(await pg.createDocListener(local.server, pool, { types: [pg.docTypeFromDef(team, pool)], ledger: true, schema }));
     return local;
   },
   async sql(pool, sql) { return (await pool.query(sql)).rows; },
@@ -97,6 +97,11 @@ const onPglite: Backend<Pool> = {
   contract: { id: "002-no-phone", up: (tx: PoolClient) => pg.dropColumn(tx, "people", "phone") },
 };
 
+/** The path of the newest row. */
+const last3 = async (local: Local) => {
+  const { result } = await local.call("open", { doc: "team:1" });
+  return `/people/${Math.max(...Object.values(result.people as Record<string, any>).map((r) => r.id))}`;
+};
 const rows = async (local: Local) => {
   const { result } = await local.call("open", { doc: "team:1" });
   return Object.values(result.people as Record<string, any>).toSorted((a, b) => a.id - b.id).map(({ id: _i, teams_id: _t, ...row }) => row);
@@ -156,7 +161,7 @@ for (const [name, b] of [["sqlite", onSqlite], ["pglite", onPglite]] as [string,
       await b.migrate(h, [b.expand]);
       const bob = (await write(old, "bob", [{ op: "add", path: "/people/-", value: { name: "Bob" } }])).ops[0].path;   // NOT NULL: its default
       await write(old, "ada", [{ op: "replace", path: `${ada}/name`, value: "Ada L" }]);
-      if (name === "sqlite") expect(await rows(old)).toEqual([{ name: "Ada L", phone: "555" }, { name: "Bob", phone: null }]);
+      expect(await rows(old)).toEqual([{ name: "Ada L", phone: "555" }, { name: "Bob", phone: null }]);
       expect((await b.sql(h, "SELECT email FROM people WHERE valid_to IS NULL ORDER BY id")).map((r) => r.email)).toEqual(["555@sms", ""]);
 
       // 2. v2 starts beside v1 and uses the email; v1 writes on, and keeps what v2 wrote
@@ -168,17 +173,34 @@ for (const [name, b] of [["sqlite", onSqlite], ["pglite", onPglite]] as [string,
       expect(await rows(next)).toEqual([{ name: "Ada L", phone: "555", email: "555@sms" }, { name: "Robert", phone: null, email: "bob@x" }]);
       expect((await old.call("undo", { cursor: "bob" })).error).toBeUndefined();   // v1 undoes its own write; v2's email stays
       expect((await rows(next))[1]).toEqual({ name: "Bob", phone: null, email: "bob@x" });
+      // v1 removes Bob and undoes it: the row comes back as it was stored, v2's email and all
+      await write(old, "bob", [{ op: "remove", path: bob }]);
+      const back = await old.call("undo", { cursor: "bob" });
+      expect(back.error).toBeUndefined();
+      expect(back.result.ops[0].value).not.toHaveProperty("email");   // what v1 is told is what v1 declares
+      expect((await rows(next))[1]).toEqual({ name: "Bob", phone: null, email: "bob@x" });
+      // v1 replaces Ada whole: the row is what v1 declares, and v2's email is not v1's to blank
+      await write(old, "ada", [{ op: "replace", path: ada, value: { name: "Ada L", phone: "556" } }]);
+      expect((await rows(next))[0]).toEqual({ name: "Ada L", phone: "556", email: "555@sms" });
+      expect(await rows(old)).toEqual([{ name: "Ada L", phone: "556" }, { name: "Bob", phone: null }]);   // v1 never sees the email
+      // v1 starts again beside v2 (a rollback begun): it makes what it declares, and v2 writes on, email and all
+      await b.start(h, v1, [b.expand]);
+      await write(next, "ada", [{ op: "replace", path: `${ada}/email`, value: "ada@x" }]);
+      await write(next, "ada", [{ op: "add", path: "/people/-", value: { name: "Cy", email: "cy@x" } }]);
+      expect((await rows(next)).slice(-1)).toEqual([{ name: "Cy", phone: null, email: "cy@x" }]);
+      expect((await rows(old)).slice(-1)).toEqual([{ name: "Cy", phone: null }]);
+      await write(next, "ada", [{ op: "remove", path: (await last3(next)) }]);
 
       // 3. contract: v1 is stopped, and with no running version declaring the phone, a migration drops it; v3 starts
       await b.start(h, v3, [b.expand, b.contract]);
       expect(await b.columns(h, "people")).not.toContain("phone");
       const last = await b.serve(h, v3);
-      expect(await rows(last)).toEqual([{ name: "Ada L", email: "555@sms" }, { name: "Bob", email: "bob@x" }]);
+      expect(await rows(last)).toEqual([{ name: "Ada L", email: "ada@x" }, { name: "Bob", email: "bob@x" }]);
       await last.call("open", { doc: "team:1" });
       expect((await last.call("undo", { cursor: "bob" })).result).toBeNull();   // nothing walks back across the contract
-      await write(last, "ada", [{ op: "replace", path: `${ada}/email`, value: "ada@x" }]);
+      await write(last, "ada", [{ op: "replace", path: `${ada}/email`, value: "ada@lovelace" }]);
       expect((await last.call("undo", { cursor: "ada" })).error).toBeUndefined();
-      expect((await rows(last))[0]).toEqual({ name: "Ada L", email: "555@sms" });
+      expect((await rows(last))[0]).toEqual({ name: "Ada L", email: "ada@x" });
     }, SLOW);
   });
 }

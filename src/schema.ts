@@ -246,14 +246,20 @@ export function defineDoc(
 
 /** Does a document hold `field` of a row of `coll`? Its id and parent key always; else, where it names that collection's columns, those. */
 export function holdsField(def: DocDef, schema: Schema, coll: string, field: string): boolean {
+  const table = schema.tables[coll];
+  if (field === "id" || field === table?.parent?.fkColumn) return true;
+  // the schema is the contract: a column it does not declare (a later version's) is no document's
+  if (table && !Object.hasOwn(table.columns, field)) return false;
   const cols = def.columns?.[coll];
-  return !cols || field === "id" || field === schema.tables[coll]?.parent?.fkColumn || cols.includes(field);
+  return !cols || cols.includes(field);
 }
 
-/** A row of `coll` as a document shows it: the fields it holds (`holdsField`). */
+/** A row of `coll` as a document shows it: the fields it holds (`holdsField`) -- never a column the schema does not declare. */
 export function showRow(def: DocDef, schema: Schema, coll: string, row: any): any {
-  if (!def.columns?.[coll] || row === null || typeof row !== "object") return row;
-  return Object.fromEntries(Object.entries(row).filter(([f]) => holdsField(def, schema, coll, f)));
+  if (row === null || typeof row !== "object" || Array.isArray(row)) return row;
+  const keys = Object.keys(row);
+  if (keys.every((f) => holdsField(def, schema, coll, f))) return row;
+  return Object.fromEntries(keys.filter((f) => holdsField(def, schema, coll, f)).map((f) => [f, row[f]]));
 }
 
 /**
@@ -267,7 +273,6 @@ export function showOps<O extends { path: string; value?: unknown }>(def: DocDef
   return ops.flatMap((op) => {
     const [coll, at, field] = splitPath(op.path);
     if (coll !== def.root && !def.include.includes(coll!)) return [];
-    if (!def.columns) return [op];
     const table = schema.tables[coll!];
     // a field: /<coll>/<id>/<field>, or a single document's root's, /<root>/<field>
     const named = field ?? (at !== undefined && table && (Object.hasOwn(table.columns, at) || at === table.parent?.fkColumn) ? at : undefined);
@@ -276,15 +281,17 @@ export function showOps<O extends { path: string; value?: unknown }>(def: DocDef
   });
 }
 
-/** A document as it shows: each row of a collection whose columns it names, those alone. `single`: its root is one row, not a map. */
+/** A document as it shows: each row the columns it holds, of those the schema declares (`showRow`). `single`: its root is one row, not a map. */
 export function showDoc(def: DocDef, schema: Schema, doc: any, single: boolean): any {
-  if (!def.columns || doc == null) return doc;
+  if (doc == null) return doc;
   const out = { ...doc };
-  for (const coll of Object.keys(def.columns)) {
+  for (const coll of [def.root, ...def.include]) {
     const held = out[coll];
     if (held == null) continue;
-    out[coll] = single && coll === def.root ? showRow(def, schema, coll, held)
-      : Object.fromEntries(Object.entries(held).map(([id, row]) => [id, showRow(def, schema, coll, row)]));
+    if (single && coll === def.root) { out[coll] = showRow(def, schema, coll, held); continue; }
+    const rows = Object.entries(held);
+    if (rows.every(([, row]) => showRow(def, schema, coll, row) === row)) continue;   // nothing to leave out: the map as it is
+    out[coll] = Object.fromEntries(rows.map(([id, row]) => [id, showRow(def, schema, coll, row)]));
   }
   return out;
 }

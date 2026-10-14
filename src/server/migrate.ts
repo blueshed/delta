@@ -18,12 +18,14 @@
  *   runs none: the schema it is about to be made from is already where they
  *   lead, so each is recorded as run.
  * - The ledger is fenced: a migration changes rows under the ledger's paths,
- *   so every entry before it is made not undoable (undo answers null, nothing
- *   to walk), and history still shows them.
+ *   so the app's entries before it -- those over its schema's collections; with
+ *   no schema, every entry -- are made not undoable (undo answers null,
+ *   nothing to walk), and history still shows them. Another app's undo goes on.
  */
 import { readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createLogger } from "./logger";
+import type { Schema } from "../schema";
 
 /** One change to a database: `up` gets the transaction it runs in (SQLite: the `Database`; Postgres: the pool's client). */
 export type Migration<Tx = any> = {
@@ -42,8 +44,13 @@ export type MigrationStatus = { fresh: boolean; ran: { id: string; ran_at: strin
 export type MigrateOptions = {
   /** The app the list belongs to, recorded with each id (default ""): give one when apps share a database. */
   app?: string;
-  /** The app's schema: it is new to the database when none of its tables are there. Without one, any table but delta's own says it is not. */
-  schema?: { tables: Record<string, { name: string }> };
+  /**
+   * The app's schema: the app is new to the database when none of its tables are there, or
+   * all are, made from it (every declared column) and holding no row -- `init_db/` made them
+   * at first boot. Its collections are what a migration fences. Without one, any table but
+   * delta's own says the app has lived here, and a migration fences the whole ledger.
+   */
+  schema?: Schema;
 };
 
 /** A backend's side of the runner, for one app. */
@@ -53,8 +60,10 @@ export interface Store<Tx> {
   unlock(): Promise<void>;
   /** Whether `delta_migrations` is there. */
   exists(): Promise<boolean>;
-  /** Whether one of `tables` is there; with none named, whether a table is that is not delta's own (`isDeltasOwn`). */
-  hasTables(tables: string[] | undefined): Promise<boolean>;
+  /** Whether a table is there that is not delta's own (`isDeltasOwn`). */
+  hasAppTables(): Promise<boolean>;
+  /** Of the tables named, those that are there: each its columns, and whether it holds a row. */
+  tables(names: string[]): Promise<Map<string, { columns: string[]; rows: boolean }>>;
   /** Makes `delta_migrations` (if it is not there). */
   create(): Promise<void>;
   /** What has run of the app's, oldest first. */
@@ -65,7 +74,7 @@ export interface Store<Tx> {
   has(tx: Tx, id: string): Promise<boolean>;
   /** In a transaction: records `id` as run at `at`. */
   record(tx: Tx, id: string, at: string): Promise<void>;
-  /** In a transaction: makes every ledger entry so far not undoable (the fence). */
+  /** In a transaction: makes the app's ledger entries so far not undoable (the fence): those over its schema's collections (`fenced`), or with no schema, every entry. */
   fence(tx: Tx): Promise<void>;
 }
 
@@ -86,11 +95,25 @@ function checked<Tx>(migrations: Migration<Tx>[]): Migration<Tx>[] {
   return migrations;
 }
 
-/** The app is new to the database: nothing recorded for it, and none of its tables there. */
+/**
+ * The app is new to the database: nothing recorded for it, and its tables not
+ * there -- or there as its schema makes them, every declared column, holding
+ * no row (made from the schema before its first start: `init_db/` at a
+ * Postgres's first boot). A row is data a migration is for: then, or in
+ * another shape (an earlier version's), the app has lived here, and its list runs.
+ */
 async function isNew<Tx>(store: Store<Tx>, options: MigrateOptions): Promise<boolean> {
   if ((await store.exists()) && (await store.recorded()).length > 0) return false;
-  return !(await store.hasTables(options.schema && Object.values(options.schema.tables).map((t) => t.name)));
+  if (!options.schema) return !(await store.hasAppTables());
+  const wanted = Object.values(options.schema.tables).map((t) => ({ name: t.name, columns: ["id", ...(t.parent ? [t.parent.fkColumn] : []), ...Object.keys(t.columns)] }));
+  const there = await store.tables(wanted.map((t) => t.name));
+  if (there.size === 0) return true;
+  return wanted.every((t) => t.columns.every((c) => there.get(t.name)?.columns.includes(c))) && [...there.values()].every((t) => !t.rows);
 }
+
+/** The collections whose ledger entries a migration of the app fences: its schema's, as JSON; none named, every entry (undefined). */
+export const fenced = (options: MigrateOptions): string | undefined =>
+  options.schema ? JSON.stringify(Object.keys(options.schema.tables)) : undefined;
 
 /** The app a list belongs to: a name, or "" for a database's one app. */
 export function appOf(options: MigrateOptions): string {

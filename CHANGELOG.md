@@ -14,37 +14,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{ id, up(tx) }`, each run once, in order, in its own transaction with its record in
   `delta_migrations (app, id, ran_at)`. A failure rolls that one back and throws naming it; an id
   recorded the list no longer has is a warning. Postgres takes an advisory lock, so two processes
-  starting at once run each once. An app new to the database (nothing recorded, none of its
-  tables there) records every id and runs none: it is made from the schema. Apps sharing a
-  database each have their own list (`app`). Helpers on both backends: `renameColumn`,
-  `dropColumn`, `renameTable` (each keeps the `current_` view, the indexes and the serial in
-  step); `fromFolder(dir)` loads `migrations/NNN-name.ts`; `migrationStatus` says what ran and
-  what is pending; `bunx @blueshed/delta migrate <database> [--app] [--status]` runs it from a
-  shell. Order at start-up: `migrate`, then `createTables` / `migrateSchema` (Postgres:
+  starting at once run each once. Apps sharing a database each have their own list (`app`). An
+  app new to the database records every id and runs none: its tables are not there, or are there
+  as its schema makes them with no row (`init_db/` at a Postgres's first boot); a row, or tables
+  of another shape, and its list runs. Helpers on both backends: `renameColumn`, `dropColumn`,
+  `renameTable` (each keeps the `current_` view, the indexes and the serial in step);
+  `fromFolder(dir)` loads `migrations/NNN-name.ts`; `migrationStatus` says what ran and what is
+  pending; `bunx @blueshed/delta migrate <database> [--app] [--status]` runs it from a shell.
+  Order at start-up: `migrate`, then `createTables` / `migrateSchema` (Postgres:
   `applyFramework`, `applySql(generateSql(…))`): a fresh database and an upgraded one end the
-  same. `reference/migrations.md`.
+  same. `reference/migrations.md`. The JSON file has none: it is for documents you can reset.
 - **The ledger is fenced at a migration.** A migration moves rows under the ledger's paths (a
-  rename, a drop), so each makes every entry before it not undoable: undo and redo answer `null`,
-  and `history` shows them with `undoable: false`. Rewriting recorded paths was not chosen: an
-  inverse keeps whole rows, and a drop or a change of type has no rewrite.
+  rename, a drop), so it makes the app's entries before it (those over its schema's collections;
+  with no schema, every entry) not undoable: undo and redo answer `null`, and `history` shows
+  them with `undoable: false`. Another app on the database undoes on. Rewriting recorded paths
+  was not chosen: a drop or a change of type has no rewrite.
 - **`generateSql` adds a column a later schema declares** to a table made before it
-  (`ADD COLUMN IF NOT EXISTS`, nullable, with its default: SQLite's `migrateSchema`), so an
-  upgraded Postgres and a fresh one have the same columns.
+  (`ADD COLUMN IF NOT EXISTS`, nullable, with its default: SQLite's `migrateSchema`).
+- **`createDocListener`'s `schema`**: the process's own schema, which its writes are validated,
+  defaulted and replaced by (`_delta_cols`, set for each write's transaction) and its documents,
+  answers, broadcasts and history are shown by. Without it, what the database declares as the
+  listener starts.
 
 ### Fixed
 
-- **The schema is the contract: delta sees only the columns it declares.** A column the schema
-  does not declare (a later version's, added under this one: a rollback, or two versions running
-  through a deploy) was read with `SELECT *` into the document, the answer and the ledger, so a
-  remove's inverse carried it and its undo was refused (`Unknown field`). Now reads, answers,
-  inverses and undo hold the declared columns (and the id, the parent key, a temporal row's
-  validity), on SQLite and Postgres; a new row leaves an undeclared column to its database
-  default (Postgres had given it NULL, refused by a `NOT NULL` one), and a temporal row's next
-  version keeps what it held (SQLite had given it the default). So an upgrade can expand and
-  contract with two versions on one database (`tests/schema-contract.test.ts`).
+- **The schema is the contract: delta sees only the columns it declares**, and keeps the rest.
+  A column the schema does not declare (a later version's, added under this one: a rollback, or
+  two versions through a deploy) was read with `SELECT *` into the document and the ledger, so a
+  remove's inverse carried it and its undo was refused (`Unknown field`). Now what delta sends
+  is the declared columns, on SQLite and Postgres; the ledger keeps a removed row as stored, and
+  its undo puts it back whole (a walk may name a column the table has); a write leaves an
+  undeclared column as it is (a temporal row's next version keeps it on SQLite, as Postgres
+  did); a new row leaves it to its database default (Postgres had given NULL, refused by a
+  `NOT NULL` one). On Postgres, two versions on one database each write and see by their own
+  schema, whichever applied `generateSql` last. So an upgrade can expand and contract
+  (`tests/schema-contract.test.ts`).
   **What to change**: on Postgres, re-apply the framework (`applyFramework(pool)`, or `bunx
-  @blueshed/delta init <dir> --upgrade`); its new functions (`_delta_undeclared`,
-  `_delta_declared`, `_delta_insert_sql`) are `CREATE OR REPLACE`. Nothing else.
+  @blueshed/delta init <dir> --upgrade`): `_delta_cols`, `_delta_stored_columns` and
+  `_delta_insert_sql` are new, the rest `CREATE OR REPLACE`. Give `createDocListener` your
+  `schema` for two versions on one database (a `DocType` written by hand is given its columns
+  as `apply`'s new last argument, `declared`, to use or leave).
 
 ### Changed
 

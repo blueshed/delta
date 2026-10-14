@@ -77,7 +77,6 @@ BEGIN
       INTO v_root_row USING v_doc_id;
   END IF;
 
-  v_root_row := _delta_declared(v_def.root_collection, v_root_row);
   IF v_root_row IS NULL THEN RETURN NULL; END IF;
 
   v_result := jsonb_build_object(v_def.root_collection, v_root_row);

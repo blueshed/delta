@@ -237,7 +237,7 @@ CREATE OR REPLACE FUNCTION _delta_same(p_coll TEXT, p_field TEXT, a JSONB, b JSO
 RETURNS BOOLEAN LANGUAGE sql STABLE AS $$
   SELECT CASE
     WHEN jsonb_typeof(a) = 'string' AND jsonb_typeof(b) = 'string'
-         AND (SELECT columns_def->p_field->>'type' FROM _delta_collections WHERE collection_key = p_coll) = 'timestamptz'
+         AND (SELECT _delta_cols(collection_key, columns_def)->p_field->>'type' FROM _delta_collections WHERE collection_key = p_coll) = 'timestamptz'
       THEN (a #>> '{}')::timestamptz = (b #>> '{}')::timestamptz
     ELSE _delta_same(a, b)
   END;
