@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **railroad's skill is no longer kept in this repo.** `bun install` copies it from
+  `node_modules/@blueshed/railroad` into `.claude/skills/railroad` (git-ignored, package.json `prepare`),
+  so it is always the railroad installed and never synced by hand. Nothing changes for a consumer:
+  the package ships only `delta-doc`, and `install-skills` still installs railroad's from railroad.
 - **The `delta-doc` skill is cut to a compass and a manual of pages.** `SKILL.md` is the model,
   the order of work, the invariants and which page for which job (about 530 words, was 2,200);
   `reference.md` (20,600 words) is split into 24 pages under `reference/`, each leading with one

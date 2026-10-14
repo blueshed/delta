@@ -20,8 +20,9 @@ in-process.
   SKILL.md's order of work and invariants. The recipe is `reference/recipe.md` (run as written
   by `tests/recipe.test.ts`); everything else is a `reference/` page, read on request. Don't
   swamp the reader.
-- **`railroad`** (`.claude/skills/`) is vendored from @blueshed/railroad, for the examples, and
-  synced at its release. Do not edit it here. Its `bun-route` is not: nothing here scaffolds pages,
+- **`railroad`** (`.claude/skills/`, git-ignored) is railroad's own skill, for the examples: `bun install`
+  copies it from `node_modules/@blueshed/railroad` (package.json `prepare`), so it is always the
+  version installed. Never edit it here. Its `bun-route` is not copied: nothing here scaffolds pages,
   and `install-skills` gives a consumer both from railroad's own package.
 
 ## Commands and the gate
