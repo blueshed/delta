@@ -33,6 +33,9 @@ Options: `createDocListener` and `docTypeFromDef` in `src/server/postgres/listen
   `bunx @blueshed/delta init init_db --with-auth` copies `001a–001g` (and `002-users.sql`);
   `bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql` writes your tables. The SQL
   is yours, in git; only the SQL is vendored, the TypeScript is imported.
+- **Upgrading the app**: `migrate(pool, migrations, { app, schema })` first, then
+  `applyFramework` and `applySql(pool, generateSql(…))`. `generateSql` adds a column a later
+  schema declares; a migration does the rest (`migrations.md`).
 - **After upgrading delta**, run `init <dir> --upgrade` (it keeps `.bak`s and says what changed)
   or `applyFramework` again. Never edit `001*` by hand: it is the stored-function contract.
 - Mount `init_db/` at `/docker-entrypoint-initdb.d`: Postgres applies it alphabetically on the

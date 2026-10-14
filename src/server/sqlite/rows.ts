@@ -5,6 +5,16 @@ import { rowId } from "../scope";
 /** The view a collection's current rows are read from. */
 export const current = (table: ResolvedTable) => q(table.temporal ? `current_${table.name}` : table.name);
 
+/**
+ * What a row is read by: its id, its parent key, the columns the schema
+ * declares and a temporal row's validity -- never a column it does not declare
+ * (a later version's, added under this one), which would ride into the
+ * document, the answer and the ledger, and an undo would put back a field this
+ * version refuses.
+ */
+export const columnsOf = (table: ResolvedTable): string =>
+  ["id", ...(table.parent ? [table.parent.fkColumn] : []), ...Object.keys(table.columns), ...(table.temporal ? ["valid_from", "valid_to"] : [])].map(q).join(", ");
+
 /** A time in SQLite's own sortable form, "YYYY-MM-DD HH:MM:SS.mmm" in UTC, from ISO-8601 or that form. */
 export function sqliteTime(value: unknown): string {
   const iso = isoTime(value);
@@ -52,6 +62,21 @@ export function insertRow(db: any, table: ResolvedTable, row: any, ts: string) {
   if (table.temporal) cols.push("valid_from");
   const vals = cols.map((c) => (c === "valid_from" ? ts : encodeValue(table, c, row[c])));
   db.run(`INSERT INTO ${q(table.name)} (${cols.map(q).join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`, vals);
+}
+
+/**
+ * The next version of a temporal row keeps what the version it closes held in
+ * a column the schema does not declare (a later version's): this one writes
+ * only what it declares, and another column keeps what it held, as an UPDATE of
+ * a plain row leaves it -- so a version running blind to a column does not
+ * blank it (expand/contract: reference/migrations.md).
+ */
+export function carryUndeclared(db: any, table: ResolvedTable, id: string | number, ts: string): void {
+  const declared = new Set(["id", table.parent?.fkColumn, ...Object.keys(table.columns), "valid_from", "valid_to"]);
+  const others = (db.query(`PRAGMA table_info(${q(table.name)})`).all() as { name: string }[]).map((c) => c.name).filter((c) => !declared.has(c));
+  if (others.length === 0) return;
+  const cols = others.map(q).join(", ");
+  db.run(`UPDATE ${q(table.name)} SET (${cols}) = (SELECT ${cols} FROM ${q(table.name)} WHERE id = ?1 AND valid_to = ?2) WHERE id = ?1 AND valid_from = ?2`, [id, ts]);
 }
 
 /** An error the writer is answered with: `code` is its wire code. */
@@ -108,7 +133,7 @@ export function insertCollectionRow(
   // so a row told of an add, the ledger's entry, and the same row read again
   // (by an undo's guard and inverse, a redo, a reopen) are the same row, keys,
   // values and all.
-  const read = db.query(`SELECT * FROM ${current(table)} WHERE id = ?`).get(id);
+  const read = db.query(`SELECT ${columnsOf(table)} FROM ${current(table)} WHERE id = ?`).get(id);
   decodeRow(table, read);
   return read;
 }

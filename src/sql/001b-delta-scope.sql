@@ -582,3 +582,39 @@ END $$;
 
 CREATE OR REPLACE FUNCTION _delta_strip_temporal(p_row JSONB)
 RETURNS JSONB AS $$ SELECT p_row - 'valid_from' - 'valid_to' - 'override'; $$ LANGUAGE sql IMMUTABLE;
+
+-- ---------------------------------------------------------------------------
+-- _delta_undeclared: the columns of a collection's table its schema does not
+-- declare -- a later version's, added under this one -- which a row is never
+-- read with: in a document, an answer or the ledger it would ride along, and
+-- an undo would put back a field this version refuses. _delta_declared: a row
+-- without them. Its id, its parent key and a temporal row's validity stay.
+-- A read of many rows asks `(SELECT _delta_undeclared(key))` once, not per row.
+-- columnsOf in sqlite/rows.ts.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION _delta_undeclared(p_collection_key TEXT)
+RETURNS TEXT[] AS $$
+  SELECT COALESCE(array_agg(a.attname::text ORDER BY a.attnum), '{}')
+    FROM _delta_collections c
+    JOIN pg_attribute a ON a.attrelid = to_regclass(quote_ident(c.table_name))
+   WHERE c.collection_key = p_collection_key
+     AND a.attnum > 0 AND NOT a.attisdropped
+     AND a.attname NOT IN ('id', 'valid_from', 'valid_to')
+     AND a.attname IS DISTINCT FROM c.parent_fk
+     AND NOT c.columns_def ? a.attname;
+$$ LANGUAGE sql STABLE;
+
+CREATE OR REPLACE FUNCTION _delta_declared(p_collection_key TEXT, p_row JSONB)
+RETURNS JSONB AS $$ SELECT p_row - _delta_undeclared(p_collection_key); $$ LANGUAGE sql STABLE;
+
+-- _delta_insert_sql: the INSERT of a new row that names only the columns the
+-- row gives (its id, parent key, declared columns and validity), so a column
+-- the schema does not declare takes its database default -- one a migration
+-- added NOT NULL with a default takes it, as SQLite's insertRow gives it. Run
+-- with the row as $1; RETURNING may follow.
+CREATE OR REPLACE FUNCTION _delta_insert_sql(p_table TEXT, p_row JSONB)
+RETURNS TEXT AS $$
+  SELECT format('INSERT INTO %1$I AS t (%2$s) SELECT %2$s FROM jsonb_populate_record(null::%1$I, $1)', p_table,
+    (SELECT string_agg(format('%I', k), ', ') FROM jsonb_object_keys(p_row) AS k));
+$$ LANGUAGE sql STABLE;

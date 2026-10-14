@@ -44,6 +44,9 @@ export {
   frameworkSqlFiles,
 } from "./bootstrap";
 
+export { migrate, migrationStatus, renameColumn, dropColumn, renameTable, fromFolder } from "./migrate";
+export type { Migration, MigrateOptions, MigrateResult, MigrationStatus } from "./migrate";
+
 export { createDocListener, defineCustomDoc } from "./listener";
 export type { CustomDocDef } from "./listener";
 

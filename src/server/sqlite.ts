@@ -28,7 +28,7 @@ import { defaultForType, holdsField, q, showDoc, showOps, showRow, utcTime, type
 import { waitForLocks } from "./sqlite/ddl";
 import { keeping, scopeValue } from "./sqlite/keep";
 import { loadDocAt, readDoc } from "./sqlite/read";
-import { closeRow, current, decodeRow, insertCollectionRow, insertRow, leftOut, named, now, refuse, sqliteTime, updateRow } from "./sqlite/rows";
+import { carryUndeclared, closeRow, columnsOf, current, decodeRow, insertCollectionRow, insertRow, leftOut, named, now, refuse, sqliteTime, updateRow } from "./sqlite/rows";
 import { namesRootRow, validateOps } from "./sqlite/validate";
 
 export type {
@@ -44,6 +44,8 @@ export type {
 } from "../schema";
 export { defineSchema, defineDoc } from "../schema";
 export { createTables, migrateSchema } from "./sqlite/ddl";
+export { migrate, migrationStatus, renameColumn, dropColumn, renameTable, fromFolder } from "./sqlite/migrate";
+export type { Migration, MigrateOptions, MigrateResult, MigrationStatus } from "./sqlite/migrate";
 export { validateOps } from "./sqlite/validate";
 export { loadDocAt, createSnapshot, resolveSnapshot } from "./sqlite/read";
 export { exportTables, importTables } from "./sqlite/carry";
@@ -454,7 +456,7 @@ export function registerDocs<I = unknown>(
 
   /** A row as the tables hold it now, as a document reads it; null when not there. */
   function readRow(table: ResolvedTable, id: string | number): any | null {
-    const row = db.query(`SELECT * FROM ${current(table)} WHERE id = ?`).get(id as any);
+    const row = db.query(`SELECT ${columnsOf(table)} FROM ${current(table)} WHERE id = ?`).get(id as any);
     if (!row) return null;
     decodeRow(table, row);
     return row;
@@ -464,7 +466,7 @@ export function registerDocs<I = unknown>(
   function hanging(table: ResolvedTable, id: string | number, out: { table: ResolvedTable; row: any }[] = []): { table: ResolvedTable; row: any }[] {
     for (const childKey of table.children.toSorted()) {
       const child = schema.tables[childKey]!;
-      for (const row of db.query(`SELECT * FROM ${current(child)} WHERE ${q(child.parent!.fkColumn)} = ? ORDER BY id`).all(id as any) as any[]) {
+      for (const row of db.query(`SELECT ${columnsOf(child)} FROM ${current(child)} WHERE ${q(child.parent!.fkColumn)} = ? ORDER BY id`).all(id as any) as any[]) {
         decodeRow(child, row);
         out.push({ table: child, row });
         hanging(child, row.id, out);
@@ -633,6 +635,7 @@ export function registerDocs<I = unknown>(
       if (table.temporal && !made.has(key)) {
         closeRow(db, table, id, ts);
         insertRow(db, table, row, ts);
+        carryUndeclared(db, table, id, ts);
         made.add(key);
       } else updateRow(db, table, id, row);
       const collKey = table.docKey;

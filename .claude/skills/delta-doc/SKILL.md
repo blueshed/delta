@@ -39,6 +39,8 @@ Start from `reference/recipe.md`, a chat room in four files that `tests/recipe.t
   never both, never a rebuild from `doc.data` in an `effect`.
 - A told replace may be one field: apply broadcasts with `applyOps`, never assume a whole row.
 - Undo is the ledger's (`{ ledger: true }`), never a hand-rolled stack.
+- The schema is the contract: delta reads and writes only declared columns. A database may hold
+  more, never less: at start-up `migrate`, then `createTables` / `migrateSchema`.
 - With `auth`, every document says who may have it: `owns` or `shared: true`. A name is its
   broadcast channel; RLS filters reads, not the channel.
 - Tokens never in the socket URL. Sign in with `connectWs(url, { onConnect })`.
@@ -66,4 +68,5 @@ exports map is `package.json`'s `exports`.
 - Sign-in: `reference/auth.md`; who may open what: `reference/ownership.md`; Postgres RLS:
   `reference/rls.md`; SQL functions: `reference/sql.md`.
 - Undo and history: `reference/ledger.md`. In-process: `reference/local.md`.
+- Upgrading a database that holds data (rename, drop, move): `reference/migrations.md`.
 - The wire: `reference/wire.md`. CLI: `reference/cli.md`. Tests and scripts: `reference/testing.md`.

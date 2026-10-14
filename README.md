@@ -93,6 +93,8 @@ Each of these is a page of the skill's [reference](.claude/skills/delta-doc/refe
   as it is: [*Backends*](.claude/skills/delta-doc/reference/backends.md).
 - **Postgres** in this process (`openPglite`) or a server (`createDocListener`, `bun add pg`):
   [*Postgres*](.claude/skills/delta-doc/reference/postgres.md).
+- **Upgrades that keep the data** -- rename, drop, move: `migrate` runs each once, in order, before
+  the schema adds what it declares: [*Migrations*](.claude/skills/delta-doc/reference/migrations.md).
 - **People see only their own** -- row-level security, `owns` for who may open a document, and
   `jwtAuth` to sign in (`bun add jose pg`): [*Ownership*](.claude/skills/delta-doc/reference/ownership.md), [*RLS*](.claude/skills/delta-doc/reference/rls.md).
 - **Custom documents** -- a view joined or worked out per person (`defineCustomDoc`):

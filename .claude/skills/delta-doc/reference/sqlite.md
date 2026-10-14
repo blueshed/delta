@@ -27,8 +27,9 @@ also `persisted()`, resolving once every change so far is in the file).
 ## Gotchas
 
 - `createTables(db, schema)` before the first open; a missing table's error says so.
-  `migrateSchema(db, schema)` adds columns a later schema declares, and `console.warn`s on type
-  drift: treat that as a real signal.
+  `migrateSchema(db, schema)` only adds what a later schema declares (columns, and
+  `console.warn`s on type drift: treat that as a real signal). A rename, a drop, a change of
+  type or data moved is a migration, run first: `migrations.md`.
 - A single document's root row must exist before it opens: seed it, or declare it `implied: true`.
 - A `delta` for a name this process has not opened is 404 `Doc not loaded`. `doc.send` never
   meets it; a script sending `delta` itself opens the document first.
