@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Docker (`tests/writes.test.ts`) and on a server (`tests/postgres-writes.test.ts`).
   `reference/testing.md` says how to run them.
 
+### Fixed
+
+- **SQLite and the JSON file: a write in the millisecond a seeded row was imported no longer fails.**
+  `importTables` stamped a temporal row given no `valid_from` with the wall clock, beside the clock
+  writes keep (`now()`, never the same millisecond twice); a replace landing in that millisecond
+  started the next version at the seed's, and `(id, valid_from)` refused it (`UNIQUE constraint
+  failed`). It now stamps by the writes' clock. Found by the write cases on CI's quicker runner.
+
 ## [0.14.0] - 2026-10-15
 
 ### Added

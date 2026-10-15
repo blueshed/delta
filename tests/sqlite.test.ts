@@ -3,9 +3,11 @@ import { Database } from "bun:sqlite";
 import {
   defineSchema, defineDoc, createTables, registerDocs,
   loadDocAt, createSnapshot, resolveSnapshot,
-  migrateSchema, validateOps,
+  migrateSchema, validateOps, importTables,
   type Schema, type DocDef,
 } from "../src/server/sqlite";
+import { createLocal } from "../src/server/local";
+import { now } from "../src/server/sqlite/rows";
 import { createWs, dropClientSubscriptions } from "../src/server/server";
 import { applyOps } from "../src/core";
 import { setLogLevel } from "../src/server/logger";
@@ -2184,4 +2186,31 @@ describe("a doc evicted while someone has it open", () => {
     expect(a.sent.at(-1).result.ops).toEqual([{ op: "remove", path: "/tasks/t1" }]);
     expect(published.filter((m) => m.ch === "tasks-of:p1").at(-1)?.ops).toEqual([{ op: "remove", path: "/tasks/t1" }]);
   });
+});
+
+/**
+ * A seeded temporal row given no start began by `new Date()`, beside the clock writes keep
+ * (`now()`, never twice the same millisecond): a write in the millisecond the seed was stamped
+ * started its next version at the seed's, and (id, valid_from) refused it. Found by the write
+ * cases on CI's quicker runner; pinned here by holding the clock at the seed's millisecond.
+ */
+test("importTables stamps a version by the writes' clock: a write in the same millisecond starts the next after it", async () => {
+  const schema = defineSchema({ notes: { columns: { body: "text" } } });
+  const db = new Database(":memory:");
+  createTables(db, schema);
+  const local = createLocal();
+  registerDocs(local.server, db, schema, [defineDoc("notes:", { root: "notes", include: [] })]);
+  const clock = Date.parse(now().replace(" ", "T") + "Z");   // the writes' clock, ahead of real time after a burst
+  while (Date.now() <= clock + 1) await Bun.sleep(1);
+  importTables(db, schema, { tables: { notes: [{ id: 1, body: "a" }] } });
+  await local.call("open", { doc: "notes:" });
+  const stamped = Date.parse((db.query("SELECT valid_from FROM notes").get() as any).valid_from.replace(" ", "T") + "Z");
+  const real = Date.now;
+  Date.now = () => stamped;
+  try {
+    const r = await local.call("delta", { doc: "notes:", ops: [{ op: "replace", path: "/notes/1/body", value: "b" }] });
+    expect(r.error).toBeUndefined();
+  } finally {
+    Date.now = real;
+  }
 });
