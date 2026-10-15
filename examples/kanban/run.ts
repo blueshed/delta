@@ -2,18 +2,17 @@
  * Driver: start a delta server and open board:1 over two sockets; what one
  * client changes, the other is told, and its `openDoc` signal shows it.
  *
- *   bun run db:up
  *   bun run examples/kanban/run.ts
  *
  * Two clients, "alice" and "bob", each with their own `connectWs()` and
  * their own reactive `openDoc("board:1")` signal. Alice mutates; the
- * framework commits + NOTIFYs; `createDocListener` fans the ops out;
+ * server applies it to the tables and tells every holder of board:1;
  * bob's `data` signal updates automatically via the client's internal
  * `applyOps` dispatch. Nothing hand-rolled — every piece is the library.
  */
 
 
-import { newPool, applyAll, PG_URL } from "./setup";
+import { openBoard, DB_PATH } from "./setup";
 import { startServer } from "./server";
 import { connectWs, openDoc } from "../../src/client/client";
 import type { DeltaOp } from "../../src/core";
@@ -33,10 +32,9 @@ function show(label: string, value: unknown) {
 }
 
 async function main() {
-  const pool = newPool();
-  await applyAll(pool);
-  const srv = await startServer(pool);
-  console.log(`delta server up on ${srv.wsUrl}  (target DB: ${PG_URL})`);
+  const db = openBoard();
+  const srv = await startServer(db);
+  console.log(`delta server up on ${srv.wsUrl}  (DB: ${DB_PATH})`);
 
   // Two independent WS clients — each gets its own reconnecting socket and
   // its own `openDoc` state. Per-client is a 0.4.0 feature; see
@@ -67,8 +65,8 @@ async function main() {
   hr("2. alice.send(ops) — server commits, broadcasts, bob's signal updates");
   console.log(
     "    aliceBoard.send(ops) hits createWs, which dispatches to the 'delta'\n" +
-    "    action, which calls delta_apply; that fires pg_notify; the listener\n" +
-    "    publishes to bob's subscription; bob's openDoc message handler runs\n" +
+    "    action, which applies the ops to the tables; the server publishes to\n" +
+    "    bob's subscription; bob's openDoc message handler runs\n" +
     "    applyOps against bob.data's current value and re-emits the signal.\n",
   );
 
@@ -106,7 +104,7 @@ async function main() {
   bob.close();
   charlie.close();
   await srv.stop();
-  await pool.end();
+  db.close();
 }
 
 main().catch((err) => {

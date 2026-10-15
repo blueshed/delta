@@ -1891,7 +1891,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-notes:1"]);
       const code = async (ops: unknown[]) => (await b.process.call("delta", { doc: "fo-board:1", ops })).error?.code;
-      // a mint that meets a row: tests/path-pglite.test.ts, "a row put in by hand"
+      // a mint that meets a row: dzql's tests/delta-pg/path-pglite.test.ts, "a row put in by hand"
       await write(b.process, "fo-board:1", [{ op: "add", path: "/notes/2", value: { text: "named" } }]);
       expect(await code([{ op: "add", path: "/notes/2", value: { text: "again" } }])).toBe(409);
       await write(b.process, "fo-board:1", [{ op: "add", path: "/courses/3", value: { name: "named" } }]);

@@ -4,12 +4,10 @@ Server and client: the four places auth is wired, and the sign-in `ConnectOption
 (`src/client/client.ts`) exists for (`tests/client.test.ts`, "onConnect").
 
 ```ts
-// server
-const auth = jwtAuth({ pool, secret: process.env.JWT_SECRET! });   // @blueshed/delta/auth-jwt
+// server: auth is a DeltaAuth (@blueshed/delta/auth)
 wireAuth(ws, auth);                                  // auth.actions → "call" handlers
 ws.upgrade = upgradeWithAuth(ws, auth);              // onUpgrade: cookie / Authorization
-await createDocListener(ws, pool, { types: [docTypeFromDef(def, pool, { auth, owns })], auth });
-// SQLite or the JSON file: registerDocs(ws, db, schema, docs, customDocs, { auth, owns })
+registerDocs(ws, db, schema, docs, customDocs, { auth, owns });   // SQLite or the JSON file
 
 // client: sign in on EVERY connect, before any document opens or re-opens
 provide(WS, connectWs("/ws", {
@@ -23,9 +21,10 @@ provide(WS, connectWs("/ws", {
 ```
 
 `DeltaAuth` in `src/server/auth.ts` is the contract: `onUpgrade?`, `actions?`, `gate`,
-`asSqlArg?` (for RLS). Delta reads no credentials itself; `jwtAuth` (`bun add jose pg`; needs `auth-jwt.sql`:
-`applyAuthJwtSchema(pool)` or `init --with-auth`) is the reference, with `login`, `register`,
-`authenticate` and `logout` actions. Who may open which document: `ownership.md`.
+`asSqlArg?`. Delta reads no credentials itself and ships no sign-in scheme: write the `DeltaAuth`
+your app needs (`login`, `authenticate`, `logout` as its `actions`). On Postgres, dzql's `jwtAuth`
+is one, and `asSqlArg` names who row-level security sees (`postgres.md`). Who may open which
+document: `ownership.md`.
 
 ## Gotchas
 
@@ -47,4 +46,3 @@ provide(WS, connectWs("/ws", {
   a request or before a change is told. The socket is told `{ doc, error: { code: 401 } }` and the
   client reconnects, so `onConnect` signs in again. A request's own 401 leaves the socket as is.
 - `gate` is asked before every open, delta, open_at, history, undo, redo and close.
-- `jwtAuth` writes `users`: give it an admin pool, and documents the app pool (`rls.md`).

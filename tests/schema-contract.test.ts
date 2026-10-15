@@ -3,19 +3,16 @@
  * the schema declares: reads, writes, inverses and undo use the declared
  * columns (and the id, the parent key, a temporal row's validity). A database
  * may hold more -- a migration ahead of this version -- never less: at start-up
- * `migrate`, then `createTables` / `migrateSchema` (Postgres: `generateSql`),
+ * `migrate`, then `createTables` / `migrateSchema`,
  * make what is declared. So an upgrade can expand and contract with two
- * versions of the app on one database. On SQLite and Postgres in process.
+ * versions of the app on one database. On SQLite (dzql asks the same of Postgres).
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import type { Pool, PoolClient } from "pg";
 import * as sqlite from "../src/server/sqlite";
-import * as pg from "../src/server/postgres";
-import { openPglite } from "../src/server/pglite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
 import type { Schema } from "../src/schema";
@@ -48,11 +45,7 @@ interface Backend<H> {
 }
 
 const dirs: string[] = [];
-const pools: Pool[] = [];
-const listeners: { destroy(): Promise<void> }[] = [];
 afterAll(async () => {
-  for (const l of listeners) await l.destroy();
-  for (const p of pools) await p.end();
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
 });
 
@@ -76,27 +69,6 @@ const onSqlite: Backend<string> = {
   contract: { id: "002-no-phone", up: (db: Database) => sqlite.dropColumn(db, "people", "phone") },
 };
 
-const onPglite: Backend<Pool> = {
-  async open() { const pool = await openPglite(); pools.push(pool); return pool; },
-  async start(pool, schema, list = []) {
-    await pg.migrate(pool, list);
-    await pg.applyFramework(pool);
-    await pg.applySql(pool, pg.generateSql(schema, [team]));
-  },
-  async migrate(pool, list) { await pg.migrate(pool, list); },
-  async serve(pool, schema) {
-    const local = createLocal();
-    listeners.push(await pg.createDocListener(local.server, pool, { types: [pg.docTypeFromDef(team, pool)], ledger: true, schema }));
-    return local;
-  },
-  async sql(pool, sql) { return (await pool.query(sql)).rows; },
-  async columns(pool, table) {
-    return (await pool.query("SELECT column_name AS c FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1", [table])).rows.map((r) => r.c).toSorted();
-  },
-  expand: { id: "001-email", up: async (tx: PoolClient) => { await tx.query("ALTER TABLE people ADD COLUMN email TEXT NOT NULL DEFAULT ''"); await tx.query("UPDATE people SET email = phone || '@sms' WHERE phone IS NOT NULL"); } },
-  contract: { id: "002-no-phone", up: (tx: PoolClient) => pg.dropColumn(tx, "people", "phone") },
-};
-
 /** The path of the newest row. */
 const last3 = async (local: Local) => {
   const { result } = await local.call("open", { doc: "team:1" });
@@ -112,7 +84,7 @@ const write = async (local: Local, cursor: string, ops: any[]) => {
   return answer.result;
 };
 
-for (const [name, b] of [["sqlite", onSqlite], ["pglite", onPglite]] as [string, Backend<any>][]) {
+for (const [name, b] of [["sqlite", onSqlite]] as [string, Backend<any>][]) {
   describe(name, () => {
     test("a column the schema does not declare is not seen: not read, not written, and a row removed and undone comes back", async () => {
       const h = await b.open();

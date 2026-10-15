@@ -3,7 +3,7 @@
 `examples/kanban/schema.ts`: three tables in a parent chain, and the one document over them.
 
 ```ts
-import { defineSchema, defineDoc } from "@blueshed/delta/postgres";   // or ./sqlite, ./json
+import { defineSchema, defineDoc } from "@blueshed/delta/sqlite";   // or ./json
 
 export const schema = defineSchema({
   kanban_boards:  { columns: { owner_id: "integer", title: "text" }, temporal: false },
@@ -44,13 +44,5 @@ const errors = validateOps(schema, itemsDoc, [{ op: "add", path: "/items/-", val
 Give it the name (`{ doc }`) or `{ list, values }`, so it knows single or list mode; given
 neither, a root field's replace is taken as single and a root row's add as list. It refuses
 what the backend refuses as a mistake (400); a 404, a 409 or a value the column cannot cast is
-the database's. The backend runs its own: `sqlite/validate.ts`; Postgres's is exported but the
-listener relies on `delta_apply`.
+the database's. The backend runs it on every write: `sqlite/validate.ts`.
 
-## Postgres tables
-
-Never hand-write them: `generateSql(schema, docs)`, or
-`bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql`. It makes the tables, the
-`seq_<table>` sequences `delta_apply` expects, and the `_delta_collections` / `_delta_docs`
-rows (never hand-edit those). Framework SQL is `001a–001g`, auth-jwt `002`, yours `003`
-(`postgres.md`).

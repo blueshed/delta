@@ -22,15 +22,9 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Start Postgres
-        run: docker compose up -d --wait
-
       - name: Type check
         run: bun check && bun check -p examples/kanban
 
       - name: Run tests
         run: bun test tests/
 
-      - name: Stop Postgres
-        if: always()
-        run: docker compose down -v

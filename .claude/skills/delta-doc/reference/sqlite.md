@@ -36,10 +36,10 @@ also `persisted()`, resolving once every change so far is in the file).
 - **Processes may share the file.** A write takes the lock (`BEGIN IMMEDIATE`, 5 s
   `busy_timeout` unless the app set its own) and re-reads any copy another process changed. But a
   document open in one process is **not told** of a write in another until it is next opened or
-  written through: live fan-out across processes is Postgres's.
+  written through: live fan-out across processes is Postgres's, the next step (`postgres.md`).
 - `bun:sqlite` is synchronous: waiting for another process's lock blocks the event loop. Keep
   writes short on a shared file; a write from another process drops every cached copy here.
-- **Auth without RLS.** `{ auth, owns }` (or `shared: true`) covers every document of the call:
+- **Auth by the name.** `{ auth, owns }` (or `shared: true`) covers every document of the call:
   one `owns`, switch on the name's prefix. Nothing filters what a document reads: the name is the
   whole check, so scope per-user documents by owner (`scope: { owner_id: ":id" }`) and have
   `owns` match the id. A custom doc's `query`, `matches`, `recompute` must check rows themselves.

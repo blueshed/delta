@@ -18,8 +18,8 @@ const room = defineDoc("room:", { root: "rooms", include: ["messages"], implied:
 - **List**: `defineDoc("items:", { root: "items", include: [] })`; `items:` opens every row,
   `{ items: { "1": {…}, "2": {…} } }`.
 - **Catalog**: a list root with includes, each loaded **in full** (list mode has no root id to
-  filter by): `defineDoc("catalog:", { root: "products", include: ["parts", "faces"] })`. Use it
-  in place of a hand-written `DocType` that only reads collections side by side.
+  filter by): `defineDoc("catalog:", { root: "products", include: ["parts", "faces"] })`, for
+  collections read side by side.
 - **Single**: `board:1` is one root row; each include travels its `parent` chain to that root.
 
 ## The parent chain
@@ -39,8 +39,8 @@ collections, and makes no row. The first write makes the root in the same transa
 one makes none. A list over the roots is told the row arrived before what was written under it.
 
 - An implied document cannot declare a `scope` (`defineDoc` throws).
-- Postgres names it by number (`room:7`); `room:attic` is 400 there. Name by number for an app
-  that will move; keep text names (`session:<token>`) for documents that never move.
+- Name it by number (`room:7`) for an app that will move on to Postgres, where `room:attic` is
+  400; keep text names (`session:<token>`) for documents that never move.
 - Its root removed, it opens empty again; an open copy is told that empty root, not null.
 - A document that is not implied answers 404 for a missing root.
 
@@ -59,4 +59,4 @@ Holds, of each collection named, those columns plus the id and the parent key; o
   required column it does not hold cannot be added through it (400).
 - The ledger keeps rows whole: undo through it puts every column back, but its answers and
   `history` show its columns alone.
-- A column its collection lacks is thrown at registration and by `generateSql`.
+- A column its collection lacks is thrown at registration.

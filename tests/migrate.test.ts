@@ -1,17 +1,14 @@
 /**
  * Migrations (reference/migrations.md): the changes a schema cannot say, run
  * once each, in order, at start-up, before the schema adds what it declares.
- * The same story on SQLite and on Postgres in process (PGlite).
+ * On SQLite (dzql tells the same story on Postgres).
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import type { Pool, PoolClient } from "pg";
 import * as sqlite from "../src/server/sqlite";
-import * as pg from "../src/server/postgres";
-import { openPglite } from "../src/server/pglite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
 import type { DocDef, Schema } from "../src/schema";
@@ -19,7 +16,6 @@ import type { MigrateOptions, MigrateResult, Migration } from "../src/server/mig
 
 setLogLevel("silent");
 
-/** PGlite starts a Postgres per database: a few of them in a test, under a loaded suite. */
 const SLOW = 30_000;
 
 const team = sqlite.defineDoc("team:", { root: "teams", include: ["people"], implied: true });
@@ -33,11 +29,7 @@ const after = sqlite.defineSchema({
 });
 
 const dirs: string[] = [];
-const pools: Pool[] = [];
-const listeners: { destroy(): Promise<void> }[] = [];
 afterAll(async () => {
-  for (const l of listeners) await l.destroy();
-  for (const p of pools) await p.end();
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
 });
 const tempDir = () => { const d = mkdtempSync(join(tmpdir(), "delta-migrate-")); dirs.push(d); return d; };
@@ -88,36 +80,6 @@ const sqliteBackend: Backend<string> = {
   failing: () => ({ id: "004-breaks", up: (db: Database) => { db.run("UPDATE people SET phone = 'lost'"); db.run("SELECT * FROM no_such_table"); } }),
 };
 
-const pgBackend: Backend<Pool> = {
-  async open() { const pool = await openPglite(); pools.push(pool); return pool; },
-  async start(pool, schema, list) {
-    const result = await pg.migrate(pool, list);
-    await pg.applyFramework(pool);
-    await pg.applySql(pool, pg.generateSql(schema, [team]));
-    return result;
-  },
-  async serve(pool) {
-    const local = createLocal();
-    listeners.push(await pg.createDocListener(local.server, pool, { types: [pg.docTypeFromDef(team, pool)], ledger: true }));
-    return local;
-  },
-  status: (pool, list, options) => pg.migrationStatus(pool, list, options),
-  migrate: (pool, list, options) => pg.migrate(pool, list, options),
-  async columns(pool, table) {
-    return (await pool.query("SELECT column_name || ':' || data_type AS c FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1", [table])).rows.map((r) => r.c).toSorted();
-  },
-  async views(pool) {
-    return (await pool.query("SELECT table_name AS v FROM information_schema.views WHERE table_schema = current_schema() ORDER BY 1")).rows.map((r) => r.v);
-  },
-  async rows(pool, sql) { return (await pool.query(sql)).rows; },
-  story: (ran) => [
-    { id: "001-name-is-full-name", up: async (tx: PoolClient) => { ran.push("001"); await pg.renameColumn(tx, "people", "name", "full_name"); } },
-    { id: "002-fax-into-phone", up: async (tx: PoolClient) => { ran.push("002"); await tx.query("UPDATE people SET phone = fax WHERE phone IS NULL"); } },
-    { id: "003-no-fax", up: async (tx: PoolClient) => { ran.push("003"); await pg.dropColumn(tx, "people", "fax"); } },
-  ],
-  failing: () => ({ id: "004-breaks", up: async (tx: PoolClient) => { await tx.query("UPDATE people SET phone = 'lost'"); await tx.query("SELECT * FROM no_such_table"); } }),
-};
-
 const people = async (local: ReturnType<typeof createLocal>) =>
   Object.values((await local.call("open", { doc: "team:1" })).result.people as Record<string, any>)
     .map(({ id: _id, teams_id: _t, ...row }) => row)
@@ -134,7 +96,7 @@ async function lived<H>(b: Backend<H>, h: H) {
   return { adaPath: ada.result.ops[0].path as string };
 }
 
-for (const [name, b] of [["sqlite", sqliteBackend], ["pglite", pgBackend]] as [string, Backend<any>][]) {
+for (const [name, b] of [["sqlite", sqliteBackend]] as [string, Backend<any>][]) {
   describe(name, () => {
     test("an app's data survives an upgrade that adds a field, renames one, drops one and moves data from one to another; it runs once, in order, and a second start does nothing", async () => {
       const h = await b.open();
@@ -172,7 +134,7 @@ for (const [name, b] of [["sqlite", sqliteBackend], ["pglite", pgBackend]] as [s
       expect((await b.status(fresh, b.story(ran))).pending).toEqual([]);
 
       for (const table of ["teams", "people"]) expect(await b.columns(fresh, table)).toEqual(await b.columns(upgraded, table));
-      expect(await b.columns(fresh, "people")).toContain(name === "sqlite" ? "full_name:TEXT" : "full_name:text");
+      expect(await b.columns(fresh, "people")).toContain("full_name:TEXT");
       expect(await b.views(fresh)).toEqual(await b.views(upgraded));
     }, SLOW);
 
@@ -222,22 +184,15 @@ for (const [name, b] of [["sqlite", sqliteBackend], ["pglite", pgBackend]] as [s
         teams: { columns: {}, temporal: false },
         members: { parent: "teams", columns: { name: "text", phone: "text?", fax: "text?" } },
       });
-      const list: Migration[] = name === "sqlite"
-        ? [{ id: "001-people-are-members", up: (db: Database) => sqlite.renameTable(db, "people", "members") }]
-        : [{ id: "001-people-are-members", up: (tx: PoolClient) => pg.renameTable(tx, "people", "members") }];
-      if (name === "sqlite") await b.start(h, renamed, list);
-      else {
-        await pg.migrate(h, list);
-        await pg.applySql(h, pg.generateSql(renamed, [sqlite.defineDoc("team:", { root: "teams", include: ["members"], implied: true })]));
-      }
+      const list: Migration[] = [{ id: "001-people-are-members", up: (db: Database) => sqlite.renameTable(db, "people", "members") }];
+      await b.start(h, renamed, list);
       expect((await b.rows(h, "SELECT name FROM current_members ORDER BY id")).map((r) => r.name)).toEqual(["Ada L", "Bob"]);
       expect((await b.rows(h, "SELECT count(*) AS n FROM members")).map((r) => Number(r.n))).toEqual([3]);
       expect(await b.views(h)).toEqual(["current_members"]);
       // the next row follows on from the last, not from one
       const local = createLocal();
       const members = sqlite.defineDoc("team:", { root: "teams", include: ["members"], implied: true });
-      if (name === "sqlite") sqlite.registerDocs(local.server, new Database(h), renamed, [members], []);
-      else listeners.push(await pg.createDocListener(local.server, h, { types: [pg.docTypeFromDef(members, h)] }));
+      sqlite.registerDocs(local.server, new Database(h), renamed, [members], []);
       await local.call("open", { doc: "team:1" });
       const added = await local.call("delta", { doc: "team:1", ops: [{ op: "add", path: "/members/-", value: { name: "Cy" } }] });
       expect(added.result.ack).toBe(true);
@@ -252,7 +207,7 @@ for (const [name, b] of [["sqlite", sqliteBackend], ["pglite", pgBackend]] as [s
       const ran: string[] = [];
       const step = (app: string, id: string, sql: string): Migration => ({
         id,
-        up: async (tx: any) => { ran.push(`${app} ${id}`); await (name === "sqlite" ? tx.run(sql) : tx.query(sql)); },
+        up: (db: Database) => { ran.push(`${app} ${id}`); db.run(sql); },
       });
       const chats = [step("chat", "001-x", "ALTER TABLE chat_rooms RENAME COLUMN name TO title")];
       const leaves = [step("leave", "001-x", "ALTER TABLE leave_requests RENAME COLUMN length TO days")];
@@ -275,10 +230,7 @@ for (const [name, b] of [["sqlite", sqliteBackend], ["pglite", pgBackend]] as [s
     }, SLOW);
 
     test("tables made from the schema before the first start (init_db at first boot) are new: every migration recorded, none run; with rows, or another shape, they are lived in", async () => {
-      const made = async (h: any) => {
-        if (name === "sqlite") sqlite.createTables(new Database(h), after);
-        else { await pg.applyFramework(h); await pg.applySql(h, pg.generateSql(after, [team])); }
-      };
+      const made = async (h: any) => sqlite.createTables(new Database(h), after);
       const ran: string[] = [];
       const fresh = await b.open();
       await made(fresh);
@@ -306,20 +258,14 @@ for (const [name, b] of [["sqlite", sqliteBackend], ["pglite", pgBackend]] as [s
       const notes = sqlite.defineSchema({ notes: { table: "other_notes", columns: { text: "text" }, temporal: false } });
       const note = sqlite.defineDoc("notes:", { root: "notes", include: [] });
       const other = createLocal();
-      if (name === "sqlite") {
-        const db = new Database(h);
-        sqlite.createTables(db, notes);
-        sqlite.registerDocs(other.server, db, notes, [note], [], { ledger: true });
-      } else {
-        await pg.applySql(h, pg.generateSql(notes, [note]));
-        listeners.push(await pg.createDocListener(other.server, h, { types: [pg.docTypeFromDef(note, h)], ledger: true, schema: notes }));
-      }
+      const db = new Database(h);
+      sqlite.createTables(db, notes);
+      sqlite.registerDocs(other.server, db, notes, [note], [], { ledger: true });
       await other.call("open", { doc: "notes:" });
       expect((await other.call("delta", { doc: "notes:", ops: [{ op: "add", path: "/notes/-", value: { text: "kept" } }], cursor: "cy" })).error).toBeUndefined();
 
       await b.migrate(h, b.story([]), { app: "team", schema: after });
-      if (name === "sqlite") sqlite.migrateSchema(new Database(h), after);
-      else await pg.applySql(h, pg.generateSql(after, [team]));
+      sqlite.migrateSchema(new Database(h), after);
       const v2 = await b.serve(h, after);
       await v2.call("open", { doc: "team:1" });
       expect((await v2.call("undo", { cursor: "ada" })).result).toBeNull();   // the team's own: fenced
@@ -333,7 +279,7 @@ for (const [name, b] of [["sqlite", sqliteBackend], ["pglite", pgBackend]] as [s
       writeFileSync(join(dir, "002-second.ts"), `export const up = (tx) => { globalThis.__order.push("002"); };\n`);
       writeFileSync(join(dir, "001-first.ts"), `export async function up(tx) { globalThis.__order.push("001"); }\n`);
       writeFileSync(join(dir, "README.md"), "not a migration\n");
-      const list = await (name === "sqlite" ? sqlite.fromFolder(dir) : pg.fromFolder(dir));
+      const list = await sqlite.fromFolder(dir);
       expect(list.map((m) => m.id)).toEqual(["001-first", "002-second"]);
       (globalThis as any).__order = [];
       const h = await b.open();
@@ -376,24 +322,14 @@ describe("the CLI: delta migrate", () => {
     return { code, out, err };
   };
 
-  for (const kind of ["sqlite", "pglite"]) {
-    test(`--status says what ran and what is pending; without it, runs what is pending (${kind})`, async () => {
+  {
+    test("--status says what ran and what is pending; without it, runs what is pending", async () => {
       const dir = tempDir();
       const migrations = join(dir, "migrations");
       mkdirSync(migrations);
-      writeFileSync(join(migrations, "001-add-notes.ts"), kind === "sqlite"
-        ? `export const up = (db) => db.run("ALTER TABLE things ADD COLUMN notes TEXT");\n`
-        : `export const up = async (tx) => { await tx.query("ALTER TABLE things ADD COLUMN notes TEXT"); };\n`);
-      let target: string;
-      if (kind === "sqlite") {
-        target = join(dir, "app.db");
-        new Database(target).run("CREATE TABLE things (id INT PRIMARY KEY)");
-      } else {
-        target = join(dir, "pgdata");
-        const pool = await openPglite(target);
-        await pool.query("CREATE TABLE things (id INT PRIMARY KEY)");
-        await pool.end();
-      }
+      writeFileSync(join(migrations, "001-add-notes.ts"), `export const up = (db) => db.run("ALTER TABLE things ADD COLUMN notes TEXT");\n`);
+      const target = join(dir, "app.db");
+      new Database(target).run("CREATE TABLE things (id INT PRIMARY KEY)");
       const status = await run(target, "--dir", migrations, "--status", "--json");
       expect([status.code, status.err]).toEqual([0, ""]);
       expect(JSON.parse(status.out)).toEqual({ fresh: false, ran: [], pending: ["001-add-notes"], unknown: [] });
@@ -415,5 +351,7 @@ describe("the CLI: delta migrate", () => {
   test("a database that is not there, or no database named, is a bad argument", async () => {
     expect((await run(join(tempDir(), "nope.db"))).code).toBe(2);
     expect((await run()).code).toBe(2);
+    const pg = await run("postgres://localhost/app");   // Postgres is dzql's
+    expect([pg.code, pg.err]).toEqual([2, "delta: postgres://localhost/app is Postgres: dzql migrate runs its migrations\n"]);
   });
 });

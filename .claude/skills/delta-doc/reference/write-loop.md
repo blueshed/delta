@@ -19,8 +19,8 @@ every holder, the sender included. `Doc` in `src/client/client.ts` is the contra
 1. Calls every `doc.onOps` handler (DOM patchers run here).
 2. Applies the ops to `doc.data` in place and bumps `dataVersion`, in one railroad `batch()`.
 
-`await doc.send(ops)` resolves once its own echo is applied, on every backend (Postgres
-answers first; the client waits for the version the ack names). It rejects with a
+`await doc.send(ops)` resolves once its own echo is applied, on every backend (an answer that
+comes first waits for the version it names). It rejects with a
 `DeltaError` (`DeltaError.isDeltaError(err)`, `err.code`: `paths.md`).
 
 ## Never reload
@@ -43,7 +43,7 @@ rebuild from `doc.data` is a category error.
   with `_v`, the snapshot's version (the client strips it from `doc.data`).
 - The client applies the next `v`, ignores one it has, and **re-opens on a gap** or on a
   broadcast that does not apply to its copy (a remove of a row it lacks).
-- Versioned: Postgres always; SQLite and the JSON file with a ledger; memory and source kinds.
+- Versioned: SQLite and the JSON file with a ledger; memory and source kinds.
   Without `v` (the free-form document, no ledger, custom docs) broadcasts apply as they come.
 
 ## Gotchas

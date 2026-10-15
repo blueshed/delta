@@ -1,9 +1,9 @@
 /**
  * A document's scope, read from its name -- the same rule on every backend.
  *
- * The TypeScript twin of the Postgres resolver (`_delta_resolve_scope`,
- * src/sql/001b-delta-scope.sql), for the backends that are not Postgres: the
- * SQLite file and the JSON file. A document with an id in its scope is one
+ * The rule SQLite and the JSON file read a name by; dzql's Postgres reads it the
+ * same (its compiled opens, and `_delta_resolve_scope`), held equal by delta's
+ * published cases. A document with an id in its scope is one
  * root row and its children (single mode); one without is every root row its
  * conditions admit (list mode), with its included collections in full.
  *

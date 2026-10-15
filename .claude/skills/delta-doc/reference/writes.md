@@ -42,8 +42,7 @@ await doc.send([{ op: "replace", path: `/kanban_cards/${card.id}/kanban_columns_
   its root to be `null`.
 - Then the document is 404 (an implied one opens empty again) and takes no writes until undo,
   except the root's own add back in the same write: `[remove /venues/42, add /venues/42 {…}]`.
-- `/venues/<other id>` is 404 to remove. To add another id, 400 on SQLite and JSON; Postgres
-  adds the row, which the document then does not hold.
+- `/venues/<other id>` is 404 to remove, and 400 to add.
 - `replace /venues/<field>`, `/venues/42` and `/venues/42/<field>` all write the root, told as
   `replace /venues…`.
 

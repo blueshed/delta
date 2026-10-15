@@ -1,7 +1,7 @@
 /**
  * What someone needs in front of them to chat: one room and its messages.
  * The schema is the tables; the document is the room. The same file serves
- * the JSON file, SQLite and Postgres.
+ * the JSON file and SQLite (and Postgres, on dzql).
  */
 import { defineDoc, defineSchema } from "../../src/server/json";
 

@@ -1,7 +1,7 @@
 {
   "name": "@blueshed/delta",
   "version": "0.16.0",
-  "description": "Delta-doc — JSON-Patch document sync with SQLite and Postgres backends, WebSocket transport, and reactive client signals",
+  "description": "Delta-doc \u2014 JSON-Patch document sync with SQLite and Postgres backends, WebSocket transport, and reactive client signals",
   "type": "module",
   "main": "src/core.ts",
   "types": "src/core.ts",
@@ -18,18 +18,14 @@
     "./json": "./src/server/json.ts",
     "./local": "./src/server/local.ts",
     "./kinds": "./src/server/kinds.ts",
-    "./postgres": "./src/server/postgres/index.ts",
-    "./pglite": "./src/server/pglite.ts",
     "./logger": "./src/server/logger.ts",
     "./auth": "./src/server/auth.ts",
-    "./auth-jwt": "./src/server/auth-jwt.ts",
     "./testing": "./src/testing.ts",
     "./backend": "./src/backend.ts"
   },
   "files": [
     "cli.ts",
     "src/**/*.ts",
-    "src/sql/**/*.sql",
     "src/pointer-vectors.json",
     "src/walk-vectors.json",
     ".claude/skills/delta-doc/**",
@@ -39,42 +35,21 @@
   ],
   "scripts": {
     "prepare": "bun -e \"import { cpSync, existsSync, rmSync } from 'node:fs'; const from = 'node_modules/@blueshed/railroad/.claude/skills/railroad'; if (existsSync(from)) { rmSync('.claude/skills/railroad', { recursive: true, force: true }); cpSync(from, '.claude/skills/railroad', { recursive: true }); }\"",
-    "test": "bun test tests/core.test.ts tests/cli.test.ts tests/walk-plan.test.ts tests/server.test.ts tests/sqlite.test.ts tests/auth.test.ts tests/railroad-client.test.ts tests/path-json.test.ts tests/path-sqlite.test.ts tests/path-pglite.test.ts tests/client.test.ts tests/codegen.test.ts tests/dom-ops.test.ts tests/install-skills.test.ts tests/kinds.test.ts tests/kinds-pglite.test.ts tests/readme.test.ts tests/recipe.test.ts tests/examples.test.ts tests/file.test.ts tests/ledger.test.ts tests/local.test.ts tests/package-exports.test.ts tests/schema.test.ts tests/sqlite-custom.test.ts tests/sqlite-fanout-scope.test.ts tests/sqlite-isolation.test.ts tests/sqlite-processes.test.ts tests/owns-sqlite.test.ts tests/owns-pglite.test.ts tests/ledger-0.10.0-sql.test.ts tests/law-driver.test.ts tests/migrate.test.ts tests/schema-contract.test.ts tests/writes.test.ts",
-    "test:pg": "bun test tests/postgres.test.ts tests/auth-jwt.test.ts",
-    "test:all": "bun test tests/",
-    "db:up": "docker compose up -d --wait",
-    "db:down": "docker compose down -v",
-    "bench": "bun run bench/run.ts",
-    "ci": "bun run db:up && bun check && bun check -p examples/kanban && bun run test:all; code=$?; bun run db:down; exit $code"
+    "test": "bun test tests/",
+    "ci": "bun check && bun check -p examples/kanban && bun test tests/"
   },
   "peerDependencies": {
-    "@blueshed/railroad": "^0.11.0 || ^0.12.0 || ^0.13.0 || ^0.14.0 || ^0.15.0 || ^0.16.0",
-    "pg": "^8.20.0",
-    "jose": "^6.0.0",
-    "@electric-sql/pglite": "^0.5.4"
+    "@blueshed/railroad": "^0.11.0 || ^0.12.0 || ^0.13.0 || ^0.14.0 || ^0.15.0 || ^0.16.0"
   },
   "peerDependenciesMeta": {
     "@blueshed/railroad": {
-      "optional": true
-    },
-    "pg": {
-      "optional": true
-    },
-    "jose": {
-      "optional": true
-    },
-    "@electric-sql/pglite": {
       "optional": true
     }
   },
   "devDependencies": {
     "@blueshed/railroad": "^0.16.0",
-    "@electric-sql/pglite": "^0.5.4",
     "@happy-dom/global-registrator": "^20.11.1",
-    "@types/bun": "^1.4.2",
-    "@types/pg": "^8.20.0",
-    "jose": "^6.2.4",
-    "pg": "^8.22.0"
+    "@types/bun": "^1.4.2"
   },
   "author": "Peter Bunyan <peter@blueshed.co.uk> (https://blueshed.co.uk)",
   "license": "MIT",

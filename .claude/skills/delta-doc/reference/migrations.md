@@ -3,19 +3,17 @@
 **The schema is the contract.** delta sees only what the schema declares: what it sends
 (documents, answers, broadcasts, history) and what it writes are the declared columns (and the
 id, the parent key, a temporal row's validity). A database may hold **more** (a migration ahead
-of this version), never **less**: at start-up `migrate`, then `createTables` / `migrateSchema`
-(Postgres: `generateSql`), make what is declared. A column a version does not declare keeps what
-it holds: a write leaves it, a new row takes its database default, and the ledger keeps rows as
-stored, so undoing a remove puts the row back whole. So an upgrade can expand and contract with
+of this version), never **less**: at start-up `migrate`, then `createTables` / `migrateSchema`,
+make what is declared. A column a version does not declare keeps what it holds: a write leaves
+it, a new row takes its database default, and the ledger keeps rows as stored, so undoing a
+remove puts the row back whole. So an upgrade can expand and contract with
 two versions on one database:
 
 1. **Expand**: a migration adds a column; the running version is blind to it.
 2. The new version declares it and uses it, beside the old one.
 3. **Contract**: once no running version declares the old column, a later migration drops it.
 
-On Postgres each process declares by its own schema: `createDocListener(ws, pool, { types,
-schema })`. Without `schema` it takes what the database declares as it starts (the last
-`generateSql` applied). `tests/schema-contract.test.ts` runs the steps on SQLite and PGlite.
+`tests/schema-contract.test.ts` runs the steps on SQLite.
 
 ## A migration
 
@@ -37,13 +35,12 @@ createTables(db, schema);                                  // then what the sche
 migrateSchema(db, schema);
 ```
 
-Postgres (and PGlite) is the same shape from `@blueshed/delta/postgres`: `up(client)` is async
-and the helpers are awaited; `await migrate(pool, migrations, { app, schema })`, then
-`applyFramework(pool)` and `applySql(pool, generateSql(schema, docs))`.
+On Postgres, `migrate` and its helpers are dzql's (`dzql/postgres`, `dzql migrate`), the same
+shape with `up` async (`postgres.md`).
 
 - **Once, in order.** Each runs in its own transaction with its record in
   `delta_migrations (app, id, ran_at)`. A failure rolls that one back and throws naming it; the
-  ones before it stay. Postgres takes an advisory lock: two processes starting at once run each once.
+  ones before it stay.
 - **Helpers** (each keeps the `current_<table>` view, the `idx_<table>_…` indexes and the serial
   in step): `renameColumn`, `dropColumn`, `renameTable`. Moving data is SQL on `tx`.
 - **`fromFolder(dir)`**: `migrations/NNN-name.ts`, each exporting `up`, sorted by name.
@@ -55,10 +52,10 @@ and the helpers are awaited; `await migrate(pool, migrations, { app, schema })`,
 ## New, and lived in
 
 An app is **new** to a database when nothing is recorded for it and its schema's tables are not
-there, or are there as its schema makes them (every declared column) with no row: `init_db/`
-made them at a Postgres's first boot. A new app records every migration and runs none. A row is
-data a migration is for: then, or with tables of another shape (an earlier version's), the app
-has lived here and its list runs. Give `app` and `schema` when apps share a database.
+there, or are there as its schema makes them (every declared column) with no row. A new app
+records every migration and runs none. A row is data a migration is for: then, or with tables
+of another shape (an earlier version's), the app has lived here and its list runs. Give `app` and
+`schema` when apps share a database.
 
 ## Gotchas
 
@@ -72,4 +69,4 @@ has lived here and its list runs. Give `app` and `schema` when apps share a data
   then finds it there.
 - Run migrations at start-up, outside a transaction, before any document opens.
 - **The JSON file has no migrations.** The file backend is for documents you can reset; to keep
-  data across upgrades, keep it in SQLite or Postgres.
+  data across upgrades, keep it in SQLite.
