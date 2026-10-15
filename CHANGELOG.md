@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **An undo no longer slows as its cursor's ledger grows** (todo #78). `nextUndo` and `nextRedo`
+  found their entry by walking every chain the cursor had ever begun (a recursive query over its
+  whole history), so finding it took about 1 ms at 3,000 entries of one cursor and 3.3 ms at
+  10,000. The SQLite ledger now looks newest first among the cursor's own entries, a step at a
+  time on the cursor's index (it is `(cursor, id)` already, `id` being the rowid: no new index),
+  as dzql's `_delta_ledger_tip` does since blueshed/dzql#35. It stops at the first tip that goes
+  the way asked: depth along its chain, up to the write that began it, is found by following
+  `undoes`; the chain must be one this cursor's undoable write began. A redo stops at the
+  cursor's last write. Finding the entry now takes about 1 µs at any length. It relies on every
+  entry of a chain carrying its write's cursor, as a walk records it.
+  - `tests/ledger-tip.test.ts` keeps the old query as the reference. Over five seeded runs of
+    300 steps through the API (three cursors writing, removing, adding, writing facts, undoing,
+    redoing, walking a change by name, conflicts as they come), both take the same entry for
+    every cursor, both ways, after every step. Five mutations of the rule each fail it (an entry
+    recorded by hand as another cursor's walk covers the one the API never makes).
+  - On a cursor with 1,500 write-and-undo pairs, the lookup takes 39 of SQLite's virtual-machine
+    steps for an undo and 28 for a redo, with no full scans (the old query: 121,639 and
+    136,608), counted by `sqlite3_stmt_status` on the system's libsqlite3
+    (`tests/helpers/counted-sqlite.ts`; bun:sqlite does not expose it). Against the old query that
+    test fails.
+
 ## [1.0.0] - 2026-10-15
 
 delta is the documents, their wire and their definitions, on a JSON file and SQLite. Postgres, the
