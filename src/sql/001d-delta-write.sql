@@ -589,7 +589,12 @@ BEGIN
       RAISE EXCEPTION 'unknown collection: %', v_coll_key USING ERRCODE = '22023';
     END IF;
     -- a walk puts back what the ledger recorded, whole
-    v_cols := CASE WHEN COALESCE(p_walk, FALSE) THEN v_coll.columns_def ELSE _delta_held_columns(v_def, v_coll_key, v_coll.columns_def) END;
+    -- (the columns this process declares, _delta_cols; a walk's, every column the row was stored with too)
+    v_cols := CASE WHEN COALESCE(p_walk, FALSE)
+      THEN COALESCE((SELECT jsonb_object_agg(c, '{"nullable": true}'::jsonb) FROM unnest(_delta_stored_columns(v_coll.table_name)) AS c
+                      WHERE c NOT IN ('id', 'valid_from', 'valid_to') AND c IS DISTINCT FROM v_coll.parent_fk), '{}'::jsonb)
+           || _delta_cols(v_coll_key, v_coll.columns_def)
+      ELSE _delta_held_columns(v_def, v_coll_key, _delta_cols(v_coll_key, v_coll.columns_def)) END;
 
     -- Scope guard: an op may only target the doc's root or an included
     -- collection. Defence-in-depth — a client that opened doc A must not write
@@ -778,7 +783,7 @@ BEGIN
       -- child adds (e.g. a product-catalog doc adding a `parts` row) there is
       -- no doc-id to inject, so we trust the parent_fk supplied in the op value.
       IF v_is_list AND v_coll_key = v_def.root_collection THEN
-        v_new_row := v_new_row || _delta_scope_row(v_coll.columns_def, v_scope->'values');
+        v_new_row := v_new_row || _delta_scope_row(_delta_cols(v_coll_key, v_coll.columns_def), v_scope->'values');
       ELSIF v_coll.parent_collection = v_def.root_collection AND v_coll.parent_fk IS NOT NULL
             AND v_doc_id IS NOT NULL THEN
         v_new_row := v_new_row || jsonb_build_object(v_coll.parent_fk, v_doc_id);
@@ -822,7 +827,7 @@ BEGIN
       -- out is the writer's mistake: refuse it (SQLSTATE 23502, 400 on the
       -- wire) rather than store '' / 0 / false for it.
       SELECT string_agg(col_key, ', ' ORDER BY col_key) INTO v_missing
-        FROM jsonb_each(v_coll.columns_def) AS x(col_key, col_def)
+        FROM jsonb_each(_delta_cols(v_coll_key, v_coll.columns_def)) AS x(col_key, col_def)
        WHERE NOT v_new_row ? col_key
          AND NOT COALESCE((col_def->>'nullable')::boolean, false)
          AND NOT col_def ? 'default';
@@ -834,7 +839,7 @@ BEGIN
       -- Declared column defaults, for what the value leaves out
       SELECT v_new_row || COALESCE(jsonb_object_agg(col_key, col_def->'default'), '{}'::jsonb)
         INTO v_new_row
-        FROM jsonb_each(v_coll.columns_def) AS x(col_key, col_def)
+        FROM jsonb_each(_delta_cols(v_coll_key, v_coll.columns_def)) AS x(col_key, col_def)
        WHERE NOT v_new_row ? col_key AND col_def ? 'default';
 
       IF v_coll.temporal THEN
@@ -853,10 +858,7 @@ BEGIN
       -- value its column casts (a scope's '1' into an integer, a date into a
       -- timestamptz) is told as a later open reads it, so the broadcast, the
       -- ledger's entry and undo's guard agree with the table.
-      EXECUTE format(
-        'INSERT INTO %I AS t SELECT * FROM jsonb_populate_record(null::%I, $1) RETURNING to_jsonb(t.*)',
-        v_coll.table_name, v_coll.table_name
-      ) INTO v_new_row USING v_new_row;
+      EXECUTE _delta_insert_sql(v_coll.table_name, v_new_row) || ' RETURNING to_jsonb(t.*)' INTO v_new_row USING v_new_row;
 
       -- An id the add named moves the serial past it, so a later /- does not meet it.
       IF v_id_text <> '-' AND v_id > COALESCE((v_passed->>v_coll.table_name)::BIGINT, 0) THEN

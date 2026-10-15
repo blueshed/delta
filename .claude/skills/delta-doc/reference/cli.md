@@ -41,6 +41,18 @@ bunx @blueshed/delta init init_db --upgrade                        # replace, ke
 bunx @blueshed/delta sql ./types.ts --out init_db/003-tables.sql   # your tables, from the schema
 ```
 
+## Migrations
+
+```bash
+bunx @blueshed/delta migrate app.db --app leave --status   # which ran, which are pending
+bunx @blueshed/delta migrate app.db --app leave             # run them
+```
+
+- The database: a SQLite file (one that is there), a PGlite directory, or a `postgres://` URL.
+  `--dir` is the migrations folder (default `./migrations`); `--app` the app whose list it is
+  (default none); `--json` prints the answer as a line. Run it with the app stopped, or let the
+  app run them at start-up (`migrations.md`).
+
 ## Skills for Claude Code
 
 ```bash

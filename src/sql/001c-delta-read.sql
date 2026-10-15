@@ -193,7 +193,7 @@ RETURNS JSONB LANGUAGE sql STABLE AS $$
              WHEN d->>'type' IN ('integer', 'real') THEN '0'::jsonb
              WHEN d->>'type' = 'boolean' THEN 'false'::jsonb
              ELSE 'null'::jsonb END)
-      FROM _delta_collections c, jsonb_each(c.columns_def) AS x(k, d)
+      FROM _delta_collections c, jsonb_each(_delta_cols(c.collection_key, c.columns_def)) AS x(k, d)
      WHERE c.collection_key = p_def.root_collection), '{}'::jsonb);
 $$;
 
@@ -225,8 +225,7 @@ BEGIN
   END IF;
   v_row := _delta_implied_root(p_def, p_id);
   IF v_coll.temporal THEN v_row := v_row || jsonb_build_object('valid_from', p_ts, 'valid_to', NULL); END IF;
-  EXECUTE format('INSERT INTO %I SELECT * FROM jsonb_populate_record(null::%I, $1)', v_coll.table_name, v_coll.table_name)
-    USING v_row;
+  EXECUTE _delta_insert_sql(v_coll.table_name, v_row) USING v_row;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -334,7 +333,7 @@ BEGIN
     v_parts := _delta_split_path(v_op->>'path');
     SELECT * INTO v_coll FROM _delta_collections WHERE collection_key = v_parts[1];
     v_field := CASE WHEN array_length(v_parts, 1) >= 3 THEN v_parts[3]
-                    WHEN array_length(v_parts, 1) = 2 AND (v_coll.columns_def ? v_parts[2] OR v_parts[2] = v_coll.parent_fk) THEN v_parts[2] END;
+                    WHEN array_length(v_parts, 1) = 2 AND (_delta_cols(v_coll.collection_key, v_coll.columns_def) ? v_parts[2] OR v_parts[2] = v_coll.parent_fk) THEN v_parts[2] END;
     IF v_field IS NOT NULL THEN
       CONTINUE WHEN (v_def.held ? v_parts[1]) AND NOT ((v_def.held->v_parts[1]) ? v_field OR v_field = 'id' OR v_field = v_coll.parent_fk);
     ELSIF v_op ? 'value' THEN

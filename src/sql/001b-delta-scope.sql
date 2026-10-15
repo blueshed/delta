@@ -99,7 +99,7 @@ BEGIN
         FROM jsonb_each_text(v_scope) AS x(k, val)
        WHERE k != 'id'
          AND k IS DISTINCT FROM v_root_coll.parent_fk
-         AND NOT (v_root_coll.columns_def ? k)
+         AND NOT (_delta_cols(v_root_coll.collection_key, v_root_coll.columns_def) ? k)
          AND val !~ '^at:'
        LIMIT 1;
 
@@ -110,7 +110,7 @@ BEGIN
                      ELSE '' END
              || COALESCE(
                   (SELECT ', ' || string_agg(kk, ', ')
-                     FROM jsonb_object_keys(v_root_coll.columns_def) kk),
+                     FROM jsonb_object_keys(_delta_cols(v_root_coll.collection_key, v_root_coll.columns_def)) kk),
                   '')
           INTO v_valid_keys_txt;
         RAISE EXCEPTION
@@ -194,7 +194,7 @@ BEGIN
     -- A time in the name (at:) is a date, as a time column's condition is.
     v_cond := NULL;
     IF v_op <> 'like' THEN
-      v_type := CASE WHEN v_op = 'at' THEN 'timestamptz' ELSE v_root_coll.columns_def->v_key->>'type' END;
+      v_type := CASE WHEN v_op = 'at' THEN 'timestamptz' ELSE _delta_cols(v_root_coll.collection_key, v_root_coll.columns_def)->v_key->>'type' END;
       IF v_op <> 'at' AND (v_key = 'id' OR v_key = v_root_coll.parent_fk) THEN
         -- An id, as SQLite reads one: a whole number, signed, up to 2^53 - 1;
         -- one not whole is none (1.5, 1e0); other text is an id SQLite keeps as
@@ -582,3 +582,38 @@ END $$;
 
 CREATE OR REPLACE FUNCTION _delta_strip_temporal(p_row JSONB)
 RETURNS JSONB AS $$ SELECT p_row - 'valid_from' - 'valid_to' - 'override'; $$ LANGUAGE sql IMMUTABLE;
+
+-- ---------------------------------------------------------------------------
+-- The schema is the contract (reference/migrations.md): a process writes by
+-- the columns its own schema declares. _delta_cols: a collection's columns as
+-- the process writing declares them -- `delta.declared`, set for the call by its
+-- listener (`{ <collection>: <columns_def> }`, createDocListener's `schema`) --
+-- else as the database last declared them (_delta_collections, generateSql).
+-- Two versions on one database each validate, default and replace by their
+-- own, whichever started last. _delta_stored_columns: every column the table
+-- has, by name -- a walk puts a row back as the ledger stored it, a column this
+-- process does not declare too.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION _delta_cols(p_collection_key TEXT, p_columns_def JSONB)
+RETURNS JSONB AS $$
+  SELECT COALESCE(NULLIF(current_setting('delta.declared', true), '')::jsonb -> p_collection_key, p_columns_def);
+$$ LANGUAGE sql STABLE;
+
+CREATE OR REPLACE FUNCTION _delta_stored_columns(p_table TEXT)
+RETURNS TEXT[] AS $$
+  SELECT COALESCE(array_agg(attname::text ORDER BY attnum), '{}')
+    FROM pg_attribute
+   WHERE attrelid = to_regclass(quote_ident(p_table)) AND attnum > 0 AND NOT attisdropped;
+$$ LANGUAGE sql STABLE;
+
+-- _delta_insert_sql: the INSERT of a new row that names only the columns the
+-- row gives (its id, parent key, declared columns and validity; a row put back
+-- by a walk, every column it was stored with), so a column it does not give --
+-- one a migration added NOT NULL with a default -- takes its database default,
+-- as SQLite's insertRow gives it. Run with the row as $1; RETURNING may follow.
+CREATE OR REPLACE FUNCTION _delta_insert_sql(p_table TEXT, p_row JSONB)
+RETURNS TEXT AS $$
+  SELECT format('INSERT INTO %1$I AS t (%2$s) SELECT %2$s FROM jsonb_populate_record(null::%1$I, $1)', p_table,
+    (SELECT string_agg(format('%I', k), ', ') FROM jsonb_object_keys(p_row) AS k));
+$$ LANGUAGE sql STABLE;

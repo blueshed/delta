@@ -3,7 +3,7 @@ import { q, type DocDef, type ResolvedTable, type Schema } from "../../schema";
 import { toMap } from "../custom";
 import { resolveScope, whereOf, type Scope } from "../scope";
 import { keeping } from "./keep";
-import { current, decodeRow, now, sqliteTime } from "./rows";
+import { columnsOf, current, decodeRow, now, sqliteTime } from "./rows";
 
 /** Load a doc as it existed at a specific point in time (`at`: ISO-8601, or SQLite's own form). */
 export function loadDocAt(db: any, schema: Schema, def: DocDef, docId: string, at: string): any | null {
@@ -42,8 +42,8 @@ export function readDoc(db: any, schema: Schema, def: DocDef, scope: Scope, at =
 /** A table's rows `where` says, as a document holds them: as they stand, or the versions live at `at`. */
 function readRows(db: any, table: ResolvedTable, where: string, params: any[], at?: string): any[] {
   const rows = table.temporal && at !== undefined
-    ? db.query(`SELECT * FROM ${q(table.name)} WHERE ${where} AND valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)`).all(...params, at, at)
-    : db.query(`SELECT * FROM ${current(table)} WHERE ${where}`).all(...params);
+    ? db.query(`SELECT ${columnsOf(table)} FROM ${q(table.name)} WHERE ${where} AND valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)`).all(...params, at, at)
+    : db.query(`SELECT ${columnsOf(table)} FROM ${current(table)} WHERE ${where}`).all(...params);
   for (const row of rows) decodeRow(table, row);
   return rows;
 }

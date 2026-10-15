@@ -56,6 +56,13 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
 
 ## Invariants
 
+- **The schema is the contract.** delta sends and writes only the columns a schema declares (and the
+  id, the parent key, a temporal row's validity); a database may hold more, never less. The ledger
+  keeps rows as stored, so an undo restores them whole. On Postgres a process writes and shows by its
+  own schema (`createDocListener`'s `schema`, `_delta_cols`). An upgrade that renames, drops or moves
+  is a migration (`migrate`, per app, run once each, fencing that app's undo); add, then use, then
+  drop, so two versions on one database both work. `tests/schema-contract.test.ts`,
+  `tests/migrate.test.ts`.
 - **Three op verbs** (`add`, `replace`, `remove`) on `/<coll>/<id>[/field]` paths. No new verbs.
   They mean what RFC 6902 says on every backend: a replace of a row is the row (a field it
   leaves out takes its default; its id and parent key stay), never a merge.

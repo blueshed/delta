@@ -24,7 +24,7 @@
  */
 import type { Schema, DocDef } from "./schema";
 import { lit, columnSqlType, sqlDefault, findCascadeOn } from "./sql";
-import { q } from "../../schema";
+import { defaultForType, q } from "../../schema";
 import { assertScopeKeys } from "../scope";
 
 export interface GenerateSqlOptions {
@@ -85,6 +85,13 @@ export function generateSql(
     lines.push(`CREATE TABLE IF NOT EXISTS ${q(table.name)} (`);
     lines.push(cols.map((c) => `  ${c}`).join(",\n"));
     lines.push(");");
+    // A column a later schema declares, added to a table made before it (SQLite's migrateSchema): a
+    // no-op on a table just made. Nullable, with its default or its type's, as migrateSchema adds it.
+    if (table.parent) lines.push(`ALTER TABLE ${q(table.name)} ADD COLUMN IF NOT EXISTS ${q(table.parent.fkColumn)} BIGINT;`);
+    for (const [col, def] of Object.entries(table.columns)) {
+      const fill = def.default !== undefined ? def.default : def.nullable ? undefined : defaultForType(def.type);
+      lines.push(`ALTER TABLE ${q(table.name)} ADD COLUMN IF NOT EXISTS ${q(col)} ${columnSqlType(def)}${fill !== undefined ? ` DEFAULT ${sqlDefault(fill)}` : ""};`);
+    }
     // Own the sequence to the table.id so `TRUNCATE RESTART IDENTITY`
     // actually resets the counter — without this, re-seeds in tests and
     // demo scripts drift by the stale sequence value.

@@ -17,6 +17,8 @@ import { trackSubscribe, trackUnsubscribe, onClientDrop } from "../server";
 import { createLogger } from "../logger";
 import type { Pool, PoolClient } from "pg";
 import { callAs, docTypes, showAnswer } from "./registry";
+import { showDoc, showOps, type DocDef, type Schema } from "../../schema";
+import { resolveScope } from "../scope";
 import type { DocType } from "./registry";
 import type { DeltaAuth } from "../auth";
 import { isAuthError } from "../auth";
@@ -52,6 +54,25 @@ export function defineCustomDoc<C, I = any>(
   opts: Omit<CustomDocDef<C, I>, "prefix">,
 ): CustomDocDef<C, I> {
   return { prefix, ...opts };
+}
+
+/**
+ * The schema the database declares (`_delta_collections`, the last
+ * `generateSql` applied), as a listener given none shows it: read once, as
+ * it starts.
+ */
+async function declaredSchema(pool: Pool): Promise<Schema> {
+  try {
+    const { rows } = await pool.query("SELECT collection_key, table_name, columns_def, parent_collection, parent_fk, temporal FROM _delta_collections");
+    return {
+      tables: Object.fromEntries(rows.map((r: any) => [r.collection_key, {
+        name: r.table_name, docKey: r.collection_key, columns: r.columns_def ?? {}, temporal: !!r.temporal, children: [], referencedBy: [],
+        ...(r.parent_fk ? { parent: { collection: r.parent_collection, fkColumn: r.parent_fk } } : {}),
+      }])),
+    };
+  } catch {
+    return { tables: {} };   // no framework yet: nothing declared, nothing left out
+  }
 }
 
 function errMsg(err: unknown): string {
@@ -134,6 +155,13 @@ export async function createDocListener<I = unknown>(
     ledger?: boolean;
     /** How an identity is written in the ledger. Default: a string or number as it is, anything else as JSON. */
     who?: (identity: I) => string;
+    /**
+     * This process's schema: the schema is the contract (reference/migrations.md). It writes
+     * by the columns it declares, and sends only those -- two versions on one database each
+     * see and write their own. Without it, the columns the database declares as the
+     * listener starts (`_delta_collections`, the last `generateSql` applied).
+     */
+    schema?: Schema;
   },
 ) {
   const auth = opts?.auth;
@@ -142,6 +170,16 @@ export async function createDocListener<I = unknown>(
   // before the pool is touched, so a refusal leaves nothing to clean up.
   assertOwned(opts?.custom ?? [], auth);
   const registry = docTypes((opts?.types ?? []) as DocType[], (opts?.custom ?? []).map((d) => d.prefix), !!auth);
+  // what this process declares: it writes by it (`declared`, set for each write's transaction) and sends only it (`shown`)
+  const declared = opts?.schema ? JSON.stringify(Object.fromEntries(Object.entries(opts.schema.tables).map(([key, t]) => [key, t.columns]))) : undefined;
+  const shownBy: Schema = opts?.schema ?? (await declaredSchema(pool));
+  /** A document as this process shows it: each row its declared columns (`showDoc`). */
+  const shownDoc = (type: DocType<any, I>, docName: string, doc: any) =>
+    type.def && doc ? showDoc(type.def, shownBy, doc, resolveScope(type.def, docName.slice(type.def.prefix.length)).mode === "single") : doc;
+  /** Ops, and an answer's ops and inverse, as this process shows them (`showOps`). */
+  const shownOps = (def: DocDef | undefined, ops: any) => (def && Array.isArray(ops) ? showOps(def, shownBy, ops) : ops);
+  const shownAnswer = <R extends { ops?: unknown; inverse?: unknown } | null>(def: DocDef | undefined, r: R): R =>
+    r && def ? { ...r, ...(r.ops ? { ops: shownOps(def, r.ops) } : {}), ...(r.inverse ? { inverse: shownOps(def, r.inverse) } : {}) } : r;
   const resolveDoc = registry.resolve;
   const ledger = !!opts?.ledger;
   const whoOf = (identity: I | undefined): string | null => ledgerWho(identity, opts?.who);
@@ -349,7 +387,7 @@ export async function createDocListener<I = unknown>(
             // Number(): pg returns a top-level BIGINT column as a string, but
             // the open snapshot's `_v` (from JSONB) is a number — the client
             // compares them strictly, so both must be numbers.
-            ws.publish(docName, { doc: docName, ops: row.ops, v: Number(row.version) });
+            ws.publish(docName, { doc: docName, ops: shownOps(resolveDoc(docName)?.type.def, row.ops), v: Number(row.version) });
           }
           state.version = Number(row.version);
           // A custom document hears each write once, as it was applied: the
@@ -551,7 +589,7 @@ export async function createDocListener<I = unknown>(
       state.subscribers.add(client);
       trackSubscribe(client, docName);
       onClientDrop(client, releaseClient);
-      respond({ result: result.result });
+      respond({ result: shownDoc(type, docName, result.result) });
       log.info(`opened ${docName} v${state.version}`);
     } finally {
       const left = opening.get(docName)! - 1;
@@ -563,7 +601,7 @@ export async function createDocListener<I = unknown>(
   ws.on("delta", withDoc("delta", async ({ docName, type, ctx, msg, client, respond, identity }) => {
     const writer = writerOf(identity, client);
     const by = ledger ? { who: whoOf(writer), cursor: cursorOf(msg, client, writer), undoable: msg.undoable !== false } : undefined;
-    const result = await type.apply(ctx, docName, msg.ops, identity, by);
+    const result = shownAnswer(type.def, await type.apply(ctx, docName, msg.ops, identity, by, declared));
     respond({ result: ledger ? { ack: true, version: Number(result.version), ops: result.ops, inverse: result.inverse, entry: result.entry == null ? undefined : Number(result.entry) } : { ack: true, version: Number(result.version), ...(msg.inverse ? { ops: result.ops } : {}) } });
     log.info(`delta ${docName} v${result.version}`);
   }));
@@ -604,8 +642,9 @@ export async function createDocListener<I = unknown>(
         }
         // a change named takes 001g's newer forms; none, the ones a database on 0.10.0's SQL has too
         const args = [cursor, whoOf(writer), way === "undo", msg.dry === true, msg.entry ?? null, ...(change === null ? [] : [change])];
-        const walked = (await callAs(db, "delta_walk", args, auth, identity)) ?? null;
-        const result = walked?.doc ? await showAnswer(db, walked.doc, walked, resolveDoc(walked.doc)?.type.def) : walked;   // as its document shows them
+        const walked = (await callAs(db, "delta_walk", args, auth, identity, declared)) ?? null;
+        const def = walked?.doc ? resolveDoc(walked.doc)?.type.def : undefined;
+        const result = walked?.doc ? shownAnswer(def, await showAnswer(db, walked.doc, walked, def)) : walked;   // as its document shows them
         await db.query("COMMIT");
         respond({ result: result && { ...result, ...(result.version != null ? { version: Number(result.version) } : {}), entry: result.entry == null ? undefined : Number(result.entry) } });
       } catch (err) {
@@ -622,7 +661,7 @@ export async function createDocListener<I = unknown>(
     ws.on("history", withDoc("history", async ({ docName, type, ctx, msg, client, respond, identity }) => {
       if (!(await type.open(ctx, docName, msg, identity))) return respond({ error: NOT_FOUND });
       const { rows } = await pool.query("SELECT delta_history($1, $2, $3) AS entries", [docName, cursorOf(msg, client, writerOf(identity, client)), msg.limit ?? 50]);
-      respond({ result: await Promise.all((rows[0]?.entries ?? []).map((e: any) => showAnswer(pool, docName, e, type.def))) });
+      respond({ result: await Promise.all((rows[0]?.entries ?? []).map(async (e: any) => shownAnswer(type.def, await showAnswer(pool, docName, e, type.def)))) });
     }));
   }
 
@@ -634,7 +673,7 @@ export async function createDocListener<I = unknown>(
     }
     const doc = await type.openAt(ctx, docName, at, identity);
     if (!doc) return respond({ error: NOT_FOUND });
-    respond({ result: doc });
+    respond({ result: shownDoc(type, docName, doc) });
     log.info(`open_at ${docName} @ ${at}`);
   }));
 

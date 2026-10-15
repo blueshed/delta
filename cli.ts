@@ -3,7 +3,7 @@
 import { parseArgs } from "node:util";
 import { resolve, basename, join, dirname } from "node:path";
 import { homedir } from "node:os";
-import { mkdirSync, copyFileSync, existsSync, readFileSync, writeFileSync, readdirSync, rmSync, rmdirSync } from "node:fs";
+import { mkdirSync, copyFileSync, existsSync, readFileSync, writeFileSync, readdirSync, rmSync, rmdirSync, statSync } from "node:fs";
 import { generateSql } from "./src/server/postgres/codegen";
 import { frameworkSqlFiles } from "./src/server/postgres/bootstrap";
 import { authJwtSqlFile } from "./src/server/auth-jwt-sql";
@@ -25,6 +25,8 @@ const USAGE =
     `  delta sql <module> [--out <file>] [--force] [--schema-export <name>] [--docs-export <name>]\n` +
     `  delta init <dir> [--with-auth] [--upgrade]\n` +
     `  delta install-skills [--user] [--dry-run]\n` +
+    `  delta migrate <database> [--app <name>] [--dir <migrations>] [--status]   run (or list) an app's migrations\n` +
+    `        <database>: a SQLite file, a PGlite directory, or a postgres:// URL; --dir defaults to ./migrations\n` +
     `\n` +
     `  delta open  <docName>                  Open a doc, print its state, exit.\n` +
     `  delta watch <docName>                  Open a doc, then print each broadcast to it, a line each.\n` +
@@ -693,6 +695,69 @@ function compareVersion(a: string, b: string): number {
 }
 
 // ---------------------------------------------------------------------------
+// delta migrate
+// ---------------------------------------------------------------------------
+
+/**
+ * Run an app's migrations (`--dir`, default ./migrations, each `NNN-name.ts`
+ * exporting `up`; `--app` names the app when apps share the database) against
+ * its database, or with --status say which ran and which are pending. With no
+ * schema to ask, an app with nothing recorded is new only to a database with
+ * no table but delta's: the app's own start-up, given its schema, knows better. The database: a postgres:// URL, a PGlite directory, or a
+ * SQLite file -- one that is there: a name mistyped makes no new database.
+ */
+async function cmdMigrate(target: string | undefined, values: Record<string, unknown>) {
+  if (!target) usageError("migrate takes a <database>: a SQLite file, a PGlite directory, or a postgres:// URL", true);
+  const { setLogLevel } = await import("./src/server/logger");
+  setLogLevel(json ? "silent" : "warn");
+  const dir = resolve(process.cwd(), (values.dir as string | undefined) ?? "migrations");
+  const status = !!values.status;
+  const options = { app: (values.app as string | undefined) ?? "" };
+  const isUrl = /^postgres(ql)?:\/\//.test(target);
+  const path = resolve(process.cwd(), target);
+  if (!isUrl && !existsSync(path)) usageError(`no database at ${target}`);
+  if (!existsSync(dir)) usageError(`no migrations folder at ${dir} (--dir)`);
+
+  let answer: unknown;
+  if (isUrl || statSync(path).isDirectory()) {
+    const pg = await import("./src/server/postgres/migrate");
+    let pool: any;
+    if (isUrl) {
+      const { Pool } = await import("pg");
+      pool = new Pool({ connectionString: target });
+    } else {
+      const { openPglite } = await import("./src/server/pglite");
+      pool = await openPglite(path);
+    }
+    try {
+      const list = await pg.fromFolder(dir);
+      answer = status ? await pg.migrationStatus(pool, list, options) : await pg.migrate(pool, list, options);
+    } finally { await pool.end(); }
+  } else {
+    const { Database } = await import("bun:sqlite");
+    const sqlite = await import("./src/server/sqlite/migrate");
+    const db = new Database(path);
+    try {
+      const list = await sqlite.fromFolder(dir);
+      answer = status ? await sqlite.migrationStatus(db, list, options) : await sqlite.migrate(db, list, options);
+    } finally { db.close(); }
+  }
+  if (json) return print(answer);
+  if (status) {
+    const s = answer as import("./src/server/migrate").MigrationStatus;
+    if (s.fresh) process.stdout.write("new database: migrate records every migration as run, and runs none\n");
+    for (const r of s.ran) process.stdout.write(`ran      ${r.id}  ${r.ran_at}\n`);
+    for (const id of s.pending) process.stdout.write(`pending  ${id}\n`);
+    for (const id of s.unknown) process.stdout.write(`unknown  ${id}  (ran here, not in ${dir})\n`);
+    return;
+  }
+  const r = answer as import("./src/server/migrate").MigrateResult;
+  if (r.fresh) process.stdout.write("new database: every migration recorded as run, none run\n");
+  for (const id of r.ran) process.stdout.write(`ran      ${id}\n`);
+  if (!r.fresh && r.ran.length === 0) process.stdout.write("nothing to run\n");
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -716,6 +781,9 @@ async function main() {
       for: { type: "string" },
       until: { type: "string" },
       timeout: { type: "string" },
+      dir: { type: "string" },
+      app: { type: "string" },
+      status: { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
     },
     allowPositionals: true,
@@ -738,6 +806,7 @@ async function main() {
     case "watch":           return cmdWatch(arg, values);
     case "delta":           return cmdDelta(arg, arg2, values);
     case "call":            return cmdCall(arg, arg2, values);
+    case "migrate":         return cmdMigrate(arg, values);
     default:                usageError(cmd ? `no command ${cmd}` : "a command, please", true);
   }
 }

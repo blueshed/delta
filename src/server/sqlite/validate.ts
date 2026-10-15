@@ -8,7 +8,7 @@ import { pastSafeId, rowId, sameId } from "../scope";
  * `list`: the document is in list mode; `values`: its scope's equality bindings,
  * which a list-mode add of a root row is given (`applyOps`), so they count as given.
  */
-export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: { list?: boolean; values?: Record<string, string>; walk?: boolean } = {}): ValidationError[] {
+export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: { list?: boolean; values?: Record<string, string>; walk?: boolean; stored?: (table: ResolvedTable) => string[] } = {}): ValidationError[] {
   const errors: ValidationError[] = [];
   // A list-mode document's root is a map of rows, like an included collection.
   const single = (collKey: string) => collKey === def.root && !opts.list;
@@ -41,7 +41,10 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
     // A column the document does not hold (its `columns`) is no field of it: it may not write it,
     // as it never reads it (todo #70). A walk puts back what the store recorded, whole.
     const held = (k: string) => opts.walk || holdsField(def, schema, collKey, k);
-    const isKnownKey = (k: string) => (k === "id" || k === fkCol || columnOf(k) !== undefined) && held(k);
+    // a walk puts a row back as it was stored: a column this version does not declare, but the table has, too
+    let others: Set<string> | undefined;
+    const storedOnly = (k: string) => !!opts.walk && !!opts.stored && (others ??= new Set(opts.stored(table))).has(k);
+    const isKnownKey = (k: string) => ((k === "id" || k === fkCol || columnOf(k) !== undefined) && held(k)) || storedOnly(k);
     // A field's value: a column's by its type; the parent key's as a key (the row moves).
     const fieldErr = (field: string, value: unknown): string | null => {
       if (field === fkCol) return validateParentKey(field, value);
