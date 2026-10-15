@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-15
+
 delta is the documents, their wire and their definitions, on a JSON file and SQLite. Postgres, the
 next step of the path, is [dzql](https://github.com/blueshed/dzql)'s: compiled from the same
 definitions, answering delta's own published cases unchanged.

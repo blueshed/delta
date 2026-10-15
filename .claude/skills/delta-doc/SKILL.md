@@ -1,7 +1,7 @@
 ---
 name: delta-doc
 metadata:
-  version: 0.16.0
+  version: 1.0.0
 description: "Use in a project that uses @blueshed/delta (it is in package.json, or the live-app guide chose it): documents, their three op verbs, storage in a JSON file or SQLite (Postgres: dzql), the ledger and undo, createLocal() for a server that renders, and the wire a client speaks. For choosing a stack for a new live app, use blueshed:live-app first: a whole live app drawn on the server is eta's (eta-app), reactive JSX on real DOM is railroad's."
 ---
 
