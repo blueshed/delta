@@ -99,6 +99,7 @@ describe("package exports", () => {
     "./auth": "wireAuth",
     "./auth-jwt": "jwtAuth",
     "./testing": "mockClient",
+    "./backend": "resolveScope",
   };
 
   test("every declared subpath is covered by this test", () => {
@@ -138,6 +139,16 @@ describe("package exports", () => {
     ]) {
       expect([name, typeof (testing as any)[name]]).not.toEqual([name, "undefined"]);
     }
+  });
+
+  test('"./backend" gives what a backend kept outside the package builds on, and nothing more', async () => {
+    const backend = await import("../src/backend");
+    expect(Object.keys(backend).sort()).toEqual([
+      "NOT_FOUND", "appOf", "assertOnePrefix", "assertOwned", "assertScopeKeys", "authless", "createCustomDocs", "defaultForType",
+      "dropClientSubscriptions", "fenced", "fromFolder", "holdsField", "isAuthError", "isDeltasOwn", "isEntryId", "isIsoTime",
+      "isoTime", "lastId", "ledgerWho", "onClientDrop", "ownerless", "pastSafeId", "q", "resolveScope", "runMigrations", "sendTo",
+      "showDoc", "showOps", "showRow", "socketCursor", "statusOf", "trackSubscribe", "trackUnsubscribe",
+    ]);
   });
 
   for (const [subpath, named] of Object.entries(probes)) {

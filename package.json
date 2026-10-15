@@ -23,7 +23,8 @@
     "./logger": "./src/server/logger.ts",
     "./auth": "./src/server/auth.ts",
     "./auth-jwt": "./src/server/auth-jwt.ts",
-    "./testing": "./src/testing.ts"
+    "./testing": "./src/testing.ts",
+    "./backend": "./src/backend.ts"
   },
   "files": [
     "cli.ts",
