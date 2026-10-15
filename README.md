@@ -14,7 +14,8 @@ rather than "what are the tables?" The tables follow from the documents.
 **What grows is where they're kept.** A shared JSON document does a lot on its own. SQLite earns
 its place when documents share the same rows, as the catalogue and every order do, or when you
 want undo and history. Postgres comes in when servers share the data, or people should see only
-their own. The page and its documents stay the same as the storage grows.
+their own: that step is [dzql](.claude/skills/delta-doc/reference/postgres.md), compiled Postgres.
+The page and its documents stay the same as the storage grows.
 
 Delta runs on [Bun](https://bun.sh) and ships TypeScript source.
 
@@ -89,14 +90,14 @@ file, in four short files.
 
 Each of these is a page of the skill's [reference](.claude/skills/delta-doc/reference/):
 
-- **SQLite, then Postgres** -- carry the rows with `exportTables` / `importTables`; the app stays
-  as it is: [*Backends*](.claude/skills/delta-doc/reference/backends.md).
-- **Postgres** in this process (`openPglite`) or a server (`createDocListener`, `bun add pg`):
-  [*Postgres*](.claude/skills/delta-doc/reference/postgres.md).
+- **The JSON file, then SQLite** -- carry the rows with `exportTables` / `importTables`; the app
+  stays as it is: [*Backends*](.claude/skills/delta-doc/reference/backends.md).
+- **Then Postgres** -- the same definitions on dzql (`dzql/postgres`):
+  [*Moving on to Postgres*](.claude/skills/delta-doc/reference/postgres.md).
 - **Upgrades that keep the data** -- rename, drop, move: `migrate` runs each once, in order, before
   the schema adds what it declares: [*Migrations*](.claude/skills/delta-doc/reference/migrations.md).
-- **People see only their own** -- row-level security, `owns` for who may open a document, and
-  `jwtAuth` to sign in (`bun add jose pg`): [*Ownership*](.claude/skills/delta-doc/reference/ownership.md), [*RLS*](.claude/skills/delta-doc/reference/rls.md).
+- **Who may have a document** -- `owns` for who may open it, and a `DeltaAuth` to sign in:
+  [*Ownership*](.claude/skills/delta-doc/reference/ownership.md), [*Signing in*](.claude/skills/delta-doc/reference/auth.md).
 - **Custom documents** -- a view joined or worked out per person (`defineCustomDoc`):
   [*Custom documents*](.claude/skills/delta-doc/reference/custom-docs.md).
 - **The kinds** -- who is online (memory), a sensor or an API (source), static data:
@@ -107,8 +108,8 @@ Each of these is a page of the skill's [reference](.claude/skills/delta-doc/refe
   [*Testing*](.claude/skills/delta-doc/reference/testing.md).
 
 `bunx @blueshed/delta install-skills` copies the skill into your project for Claude Code. In a
-clone of this repository, [`examples/`](examples/) has a chat, a kanban board on Postgres and
-row-level security side by side. [CHANGELOG.md](CHANGELOG.md) says what changed in each release.
+clone of this repository, [`examples/`](examples/) has a chat, a kanban board, and the sites
+inside a box on a map. [CHANGELOG.md](CHANGELOG.md) says what changed in each release.
 
 ## Why delta
 

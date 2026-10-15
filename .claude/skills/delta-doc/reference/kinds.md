@@ -13,7 +13,7 @@ here.peek("here:general");                            // { people: { p1: "Ada" }
 Options and handles: `MemoryOptions`, `SourceOptions`, `StaticOptions`, `Sourced` in
 `src/server/kinds.ts` (`@blueshed/delta/kinds`); `DocOptions` in `src/server/server.ts` for the
 free-form document. Each registers a prefix on any `WsServer` and the browser opens it like any
-document. Register them **before** `createDocListener` (it answers 404 for names it does not own).
+document.
 
 ## Memory: the truth is this process
 

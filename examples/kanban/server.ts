@@ -1,24 +1,18 @@
 /**
- * Server — a real delta-doc server, 100% library surface.
+ * Server -- a real delta-doc server, 100% library surface.
  *
- *   createWs()                                    — WS action router + pub/sub
- *   createDocListener(ws, pool, { types })        — Postgres LISTEN → WS publish,
- *     types: [docTypeFromDef(docs[0], pool)]      — for the "board:" prefix
- *   Bun.serve({ routes, websocket })              — HTTP + WebSocket
+ *   createWs()                                  -- WS action router + pub/sub
+ *   registerDocs(ws, db, schema, docs)          -- the "board:" document over SQLite
+ *   Bun.serve({ routes, websocket })            -- HTTP + WebSocket
  *
- * No hand-written SQL in the write path. `docTypeFromDef` uses `delta_open`
- * + `delta_apply` under the hood. The listener is the framework's own —
- * it LISTENs on `delta_changes`, fetches the logged ops on bump, and
- * `ws.publish(docName, {doc, ops})` reaches every subscriber of that doc.
+ * No hand-written SQL in the write path: a write is applied to the tables its
+ * paths name, and `ws.publish(docName, {doc, ops})` reaches every subscriber.
  */
-import type { Pool } from "pg";
+import type { Database } from "bun:sqlite";
 import type { Server } from "bun";
 import { createWs } from "../../src/server/server";
-import {
-  createDocListener,
-  docTypeFromDef,
-} from "../../src/server/postgres";
-import { docs } from "./schema";
+import { registerDocs } from "../../src/server/sqlite";
+import { schema, docs } from "./schema";
 
 export interface KanbanServer {
   server: Server<unknown>;
@@ -27,10 +21,9 @@ export interface KanbanServer {
   stop(): Promise<void>;
 }
 
-export async function startServer(pool: Pool): Promise<KanbanServer> {
-  // One DocType per doc def — framework-generic, no custom SQL.
+export async function startServer(db: Database): Promise<KanbanServer> {
   const ws = createWs();
-  const listener = await createDocListener(ws, pool, { types: docs.map((def) => docTypeFromDef(def, pool)) });
+  registerDocs(ws, db, schema, docs);
 
   const server = Bun.serve({
     port: 0,                                        // let the OS pick
@@ -47,7 +40,6 @@ export async function startServer(pool: Pool): Promise<KanbanServer> {
     port,
     wsUrl,
     async stop() {
-      await listener.destroy();   // releases the LISTEN connection back to the pool
       server.stop(true);
     },
   };

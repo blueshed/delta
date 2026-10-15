@@ -36,15 +36,12 @@ judged on who held the row before and after the op:
   `add` of the row as its `query` reads it, a `replace` of each field it holds that changed, or a
   `remove` when the row no longer matches. A recompute doc is read again whole; read as null,
   its subscribers are let go with 404 (`custom-docs.md`).
-- A hand-written Postgres `DocType` is told only its own writes (`custom-docs.md`).
 - With `auth`, `owns` and the gate are asked again before each telling (`ownership.md`).
 
 ## Where it is worked out
 
-- **Postgres**: in the database. `delta_apply` asks `_delta_holders` before and after and
-  `_delta_tell` logs and NOTIFYs each name, over the names open now (`_delta_held`), so every
-  process hears it. A write runs at READ COMMITTED: one inside a `REPEATABLE READ` or
-  `SERIALIZABLE` transaction is refused (SQLSTATE `0A000`).
 - **SQLite and the JSON file**: in the process, over every registration on the database handle.
   Another process is not told (`sqlite.md`).
-- `tests/postgres-isolation.test.ts` and `tests/sqlite-isolation.test.ts` pin that nobody else is told.
+- **Postgres** is dzql's: there it is worked out in the database, so every process hears it
+  (`postgres.md`).
+- `tests/sqlite-isolation.test.ts` pins that nobody else is told.

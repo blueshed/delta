@@ -38,11 +38,9 @@ server names (on an array, append). The parsers are `splitPath` / `joinPath` in 
   moves the serial past it. One already handed out is 409 whether or not a row holds it, so the
   answer leaks nothing. Undo, redo, and a row the same write removed or made are let through.
 - `-` never collides; a client clock (`Date.now() * 1000`) collides once one client is behind.
-- A refused write that took a serial has spent it, as Postgres does.
-- Text ids exist only on SQLite and the JSON file: keep them to session tokens (a uuid), for
-  documents that never move. A taken text id is 409, so make it unguessable.
-- On Postgres a named add through your own `SECURITY DEFINER` function is judged as the
-  session's role: call delta through the listener, or as the user's role.
+- A refused write that took a serial has spent it.
+- Text ids: keep them to session tokens (a uuid), for documents that never move. A taken text id
+  is 409, so make it unguessable.
 
 ## Error codes
 
@@ -53,5 +51,5 @@ backend (`errorCodeCases` in `src/cases/writes.ts`):
 - **401** not signed in (an `auth` gate said no).
 - **403** read-only: custom, static and source documents; memory over a socket; a past (`at:`) name.
 - **404** not there: a document, row or path; a document the identity does not `own`.
-- **409** already there (an id taken); on Postgres also a deadlock given way: nothing written, send again.
+- **409** already there (an id taken).
 - **500** the server's own failure.

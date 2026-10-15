@@ -4,10 +4,6 @@ import { parseArgs } from "node:util";
 import { resolve, basename, join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { mkdirSync, copyFileSync, existsSync, readFileSync, writeFileSync, readdirSync, rmSync, rmdirSync, statSync } from "node:fs";
-import { generateSql } from "./src/server/postgres/codegen";
-import { frameworkSqlFiles } from "./src/server/postgres/bootstrap";
-import { authJwtSqlFile } from "./src/server/auth-jwt-sql";
-import type { Schema, DocDef } from "./src/server/postgres";
 
 const PKG_VERSION = (() => {
   try {
@@ -22,11 +18,9 @@ const PKG_VERSION = (() => {
 
 const USAGE =
     `Usage:\n` +
-    `  delta sql <module> [--out <file>] [--force] [--schema-export <name>] [--docs-export <name>]\n` +
-    `  delta init <dir> [--with-auth] [--upgrade]\n` +
     `  delta install-skills [--user] [--dry-run]\n` +
     `  delta migrate <database> [--app <name>] [--dir <migrations>] [--status]   run (or list) an app's migrations\n` +
-    `        <database>: a SQLite file, a PGlite directory, or a postgres:// URL; --dir defaults to ./migrations\n` +
+    `        <database>: a SQLite file; --dir defaults to ./migrations (Postgres: dzql migrate)\n` +
     `\n` +
     `  delta open  <docName>                  Open a doc, print its state, exit.\n` +
     `  delta watch <docName>                  Open a doc, then print each broadcast to it, a line each.\n` +
@@ -271,28 +265,6 @@ async function cmdCall(
   print(await withWs(values, ({ send }) => send({ action: "call", method, params: params ?? {} })));
 }
 
-// ---------------------------------------------------------------------------
-// Header handling — identifies files written by delta init (stamped with this
-// package's version) so upgrades can read them back and avoid clobbering
-// user-owned SQL, and a `diff -u` against a later `init --upgrade` shows what changed.
-// ---------------------------------------------------------------------------
-
-const HEADER_RE = /^-- @blueshed\/delta ([a-z0-9-]+) v(\d+\.\d+\.\d+)/;
-
-function readHeader(path: string): { kind: string; version: string } | null {
-  if (!existsSync(path)) return null;
-  const first = readFileSync(path, "utf8").split("\n", 1)[0] ?? "";
-  const m = first.match(HEADER_RE);
-  return m ? { kind: m[1]!, version: m[2]! } : null;
-}
-
-function writeWithHeader(src: string, dest: string, kind: "framework" | "auth-jwt"): void {
-  const header =
-    `-- @blueshed/delta ${kind} v${PKG_VERSION}\n` +
-    `-- Vendored by 'delta init'. Safe to read; prefer 'delta init --upgrade' over hand edits.\n\n`;
-  writeFileSync(dest, header + readFileSync(src, "utf8"));
-}
-
 /**
  * Back up `dest` to `dest + ".bak"` without destroying a pre-existing backup.
  * If `dest.bak` already exists, fall back to `.bak.1`, `.bak.2`, … so an
@@ -311,153 +283,6 @@ function backupFile(dest: string): string {
   }
   copyFileSync(dest, bak);
   return bak;
-}
-
-// ---------------------------------------------------------------------------
-// delta sql
-// ---------------------------------------------------------------------------
-
-// Stable substring of the codegen header (see src/server/postgres/codegen.ts:
-// "GENERATED FROM types.ts — DO NOT EDIT"). Matching on the leading words
-// avoids depending on the em-dash byte sequence.
-const GENERATED_MARKER = "GENERATED FROM";
-
-async function cmdSql(modulePath: string | undefined, values: Record<string, unknown>) {
-  if (!modulePath) usageError("sql takes a <module>", true);
-
-  const abs = resolve(process.cwd(), modulePath);
-  let mod: Record<string, unknown>;
-  try {
-    mod = await import(abs);
-  } catch (err) {
-    // Bun surfaces a `ResolveMessage` whose `.message` is a single useful line
-    // (e.g. "Cannot find module '…'") but is fronted by the class-name prefix;
-    // strip it to a clean one-liner instead of dumping the raw object/stack.
-    const raw =
-      err instanceof Error ? err.message.split("\n", 1)[0] : String(err);
-    const reason = raw.replace(/^(ResolveMessage|BuildMessage|Error):\s*/, "");
-    process.stderr.write(`Cannot load module "${modulePath}": ${reason}\n`);
-    process.exit(2);
-  }
-
-  const schemaExport = values["schema-export"] as string;
-  const docsExport = values["docs-export"] as string;
-  const schema = mod[schemaExport] as Schema | undefined;
-  const docs = mod[docsExport] as DocDef[] | undefined;
-
-  if (!schema || typeof schema !== "object" || !("tables" in schema)) {
-    process.stderr.write(
-      `Module at ${modulePath} does not export a Schema as \`${schemaExport}\`.\n` +
-      `Export one with: export const ${schemaExport} = defineSchema({ ... });\n`,
-    );
-    process.exit(2);
-  }
-  if (!Array.isArray(docs)) {
-    process.stderr.write(
-      `Module at ${modulePath} does not export a DocDef[] as \`${docsExport}\`.\n` +
-      `Export one with: export const ${docsExport} = [defineDoc(...), ...];\n`,
-    );
-    process.exit(2);
-  }
-
-  const sql = generateSql(schema, docs);
-  const out = values.out as string | undefined;
-  const force = !!values.force;
-
-  if (out) {
-    const absOut = resolve(out);
-    // Guard: never silently clobber a file we didn't generate. A previously
-    // generated file carries the codegen header marker and is safe to replace;
-    // anything else needs --force.
-    if (existsSync(absOut) && !force) {
-      const existing = readFileSync(absOut, "utf8");
-      if (!existing.includes(GENERATED_MARKER)) {
-        process.stderr.write(
-          `Refusing to overwrite ${out}: it has no generated-file header ` +
-          `(not produced by 'delta sql').\n` +
-          `Pass --force to overwrite it anyway.\n`,
-        );
-        process.exit(3);
-      }
-      // It's a previously generated file — back it up before replacing.
-      backupFile(absOut);
-    }
-    mkdirSync(dirname(absOut), { recursive: true });
-    await Bun.write(out, sql);
-    process.stderr.write(`Wrote ${out} (${sql.length} bytes)\n`);
-  } else {
-    process.stdout.write(sql);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// delta init
-// ---------------------------------------------------------------------------
-
-function cmdInit(dir: string | undefined, values: Record<string, unknown>) {
-  if (!dir) usageError("init takes a <dir>", true);
-
-  const absDir = resolve(process.cwd(), dir);
-  mkdirSync(absDir, { recursive: true });
-
-  const upgrade = !!values.upgrade;
-  const plan: { src: string; dest: string; kind: "framework" | "auth-jwt" }[] =
-    frameworkSqlFiles().map((src) => ({ src, dest: join(absDir, basename(src)), kind: "framework" }));
-  if (values["with-auth"]) plan.push({ src: authJwtSqlFile(), dest: join(absDir, "002-users.sql"), kind: "auth-jwt" });
-
-  // On upgrade we refuse to clobber files that don't have our header or that
-  // point to a newer version than we ship. The user either wrote that file
-  // themselves or has downgraded the package.
-  if (upgrade) {
-    const conflicts: string[] = [];
-    for (const { dest } of plan) {
-      if (!existsSync(dest)) continue;
-      const hdr = readHeader(dest);
-      if (!hdr) conflicts.push(`${basename(dest)}: not stamped by delta init`);
-      else if (compareVersion(hdr.version, PKG_VERSION) > 0) {
-        conflicts.push(`${basename(dest)}: has v${hdr.version}, package is v${PKG_VERSION}`);
-      }
-    }
-    if (conflicts.length) {
-      process.stderr.write(
-        `Refusing to upgrade:\n  ${conflicts.join("\n  ")}\n\n` +
-        `Resolve these manually (move or rename the offending files) and rerun.\n`,
-      );
-      process.exit(3);
-    }
-  }
-
-  const created: string[] = [];
-  const upgraded: string[] = [];
-  const unchanged: string[] = [];
-
-  for (const { src, dest, kind } of plan) {
-    if (existsSync(dest)) {
-      if (!upgrade || readHeader(dest)?.version === PKG_VERSION) {
-        unchanged.push(basename(dest));
-        continue;
-      }
-      const bak = backupFile(dest);
-      writeWithHeader(src, dest, kind);
-      upgraded.push(`${basename(dest)} (backup at ${basename(bak)})`);
-    } else {
-      writeWithHeader(src, dest, kind);
-      created.push(basename(dest));
-    }
-  }
-
-  const lines: string[] = [];
-  if (created.length) lines.push("Created:\n  " + created.join("\n  "));
-  if (upgraded.length) lines.push("Upgraded:\n  " + upgraded.join("\n  "));
-  if (unchanged.length) lines.push("Unchanged:\n  " + unchanged.join("\n  "));
-  process.stderr.write((lines.join("\n\n") || "Nothing to do.") + "\n");
-
-  if (created.length || upgraded.length) {
-    process.stderr.write(
-      `\nNext: regenerate your table SQL from types.ts:\n` +
-      `  bunx delta sql ./types.ts --out ${dir}/003-tables.sql\n`,
-    );
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -703,45 +528,30 @@ function compareVersion(a: string, b: string): number {
  * exporting `up`; `--app` names the app when apps share the database) against
  * its database, or with --status say which ran and which are pending. With no
  * schema to ask, an app with nothing recorded is new only to a database with
- * no table but delta's: the app's own start-up, given its schema, knows better. The database: a postgres:// URL, a PGlite directory, or a
- * SQLite file -- one that is there: a name mistyped makes no new database.
+ * no table but delta's: the app's own start-up, given its schema, knows better.
+ * The database: a SQLite file that is there (a name mistyped makes no new
+ * database); Postgres is dzql's (`dzql migrate`).
  */
 async function cmdMigrate(target: string | undefined, values: Record<string, unknown>) {
-  if (!target) usageError("migrate takes a <database>: a SQLite file, a PGlite directory, or a postgres:// URL", true);
+  if (!target) usageError("migrate takes a <database>: a SQLite file (Postgres: dzql migrate)", true);
   const { setLogLevel } = await import("./src/server/logger");
   setLogLevel(json ? "silent" : "warn");
   const dir = resolve(process.cwd(), (values.dir as string | undefined) ?? "migrations");
   const status = !!values.status;
   const options = { app: (values.app as string | undefined) ?? "" };
-  const isUrl = /^postgres(ql)?:\/\//.test(target);
   const path = resolve(process.cwd(), target);
-  if (!isUrl && !existsSync(path)) usageError(`no database at ${target}`);
+  if (/^postgres(ql)?:\/\//.test(target) || (existsSync(path) && statSync(path).isDirectory())) usageError(`${target} is Postgres: dzql migrate runs its migrations`);
+  if (!existsSync(path)) usageError(`no database at ${target}`);
   if (!existsSync(dir)) usageError(`no migrations folder at ${dir} (--dir)`);
 
   let answer: unknown;
-  if (isUrl || statSync(path).isDirectory()) {
-    const pg = await import("./src/server/postgres/migrate");
-    let pool: any;
-    if (isUrl) {
-      const { Pool } = await import("pg");
-      pool = new Pool({ connectionString: target });
-    } else {
-      const { openPglite } = await import("./src/server/pglite");
-      pool = await openPglite(path);
-    }
-    try {
-      const list = await pg.fromFolder(dir);
-      answer = status ? await pg.migrationStatus(pool, list, options) : await pg.migrate(pool, list, options);
-    } finally { await pool.end(); }
-  } else {
-    const { Database } = await import("bun:sqlite");
-    const sqlite = await import("./src/server/sqlite/migrate");
-    const db = new Database(path);
-    try {
-      const list = await sqlite.fromFolder(dir);
-      answer = status ? await sqlite.migrationStatus(db, list, options) : await sqlite.migrate(db, list, options);
-    } finally { db.close(); }
-  }
+  const { Database } = await import("bun:sqlite");
+  const sqlite = await import("./src/server/sqlite/migrate");
+  const db = new Database(path);
+  try {
+    const list = await sqlite.fromFolder(dir);
+    answer = status ? await sqlite.migrationStatus(db, list, options) : await sqlite.migrate(db, list, options);
+  } finally { db.close(); }
   if (json) return print(answer);
   if (status) {
     const s = answer as import("./src/server/migrate").MigrationStatus;
@@ -766,12 +576,6 @@ async function main() {
   try { parsed = parseArgs({
     args: process.argv.slice(2),
     options: {
-      out: { type: "string", short: "o" },
-      force: { type: "boolean", default: false },
-      "schema-export": { type: "string", default: "schema" },
-      "docs-export": { type: "string", default: "docs" },
-      "with-auth": { type: "boolean", default: false },
-      upgrade: { type: "boolean", default: false },
       user: { type: "boolean", default: false },
       "dry-run": { type: "boolean", default: false },
       url: { type: "string" },
@@ -799,8 +603,6 @@ async function main() {
   const arg2 = positionals[2];
 
   switch (cmd) {
-    case "sql":             return cmdSql(arg, values);
-    case "init":            return cmdInit(arg, values);
     case "install-skills":  return cmdInstallSkills(values);
     case "open":            return cmdOpen(arg, values);
     case "watch":           return cmdWatch(arg, values);

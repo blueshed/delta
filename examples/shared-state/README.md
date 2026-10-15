@@ -43,10 +43,10 @@ doc.onOps((ops) => /* patch the DOM with applyOpsToCollection */);
 **What grows is where they're kept.** A shared JSON document does a lot on its own. SQLite earns
 its place when documents share the same rows, as the catalogue and every order do, or when you
 want undo and history. Postgres comes in when servers share the data, or people should see only
-their own. The page and its documents stay the same as the storage grows: here, moving to SQLite
-changes `server.ts`'s one `registerDocs` line (`@blueshed/delta/sqlite`, on a database after
-`createTables`), and `types.ts`, `client.ts` and the page stay as they are.
+their own: that step is dzql (compiled Postgres). The page and its documents stay the same as
+the storage grows: here, moving to SQLite changes `server.ts`'s one `registerDocs` line
+(`@blueshed/delta/sqlite`, on a database after `createTables`), and `types.ts`, `client.ts` and
+the page stay as they are.
 
-[../sites-bbox/](../sites-bbox/) shows two documents over the same rows, on SQLite and Postgres;
-[../kanban/](../kanban/) a board on Postgres; [../todos-vs-rls/](../todos-vs-rls/) people who
-should see only their own.
+[../sites-bbox/](../sites-bbox/) shows two documents over the same rows, on SQLite;
+[../kanban/](../kanban/) a board on SQLite.

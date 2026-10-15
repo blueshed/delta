@@ -11,14 +11,13 @@
  * or via a dedicated in-band WS message (deferred auth). That structure makes
  * the URL-token flaw impossible to introduce.
  *
- * A reference JWT implementation ships at `@blueshed/delta/auth-jwt`.
+ * A reference JWT implementation, which checks passwords in Postgres, is
+ * dzql's (`dzql/auth-jwt`). With your own:
  *
  *   import { wireAuth, type DeltaAuth } from "@blueshed/delta/auth";
- *   import { jwtAuth } from "@blueshed/delta/auth-jwt";
  *
- *   const auth = jwtAuth({ pool, secret: process.env.JWT_SECRET! });
  *   wireAuth(ws, auth);
- *   await createDocListener(ws, pool, { auth });
+ *   registerDocs(ws, db, schema, docs, [], { auth, owns });
  */
 import { refuseOrigin, type WsServer } from "./server";
 
@@ -70,8 +69,8 @@ export interface DeltaAuth<Identity = unknown> {
 
 /**
  * Default-deny, on every backend: with auth, a document says who owns it --
- * `docTypeFromDef` and `createDocListener` (Postgres), `registerDocs` (the
- * JSON file and SQLite), `defineCustomDoc` on each -- or is refused with this.
+ * `registerDocs` (the JSON file and SQLite), `defineCustomDoc`, and dzql's
+ * `docTypeFromDef` and `createDocListener` (Postgres) -- or is refused with this.
  */
 export function ownerless(prefix: string, what: string): Error {
   return new Error(
@@ -111,7 +110,7 @@ export type AuthAction<Identity> = (
  * behind `authenticate`, without waiting for its answer, is handled signed in,
  * and one sent before `logout` is handled signed in and let go by the logout.
  *
- * Call this once at server startup, before `createDocListener`.
+ * Call this once at server startup, before the documents are registered.
  */
 export function wireAuth<I>(ws: WsServer, auth: DeltaAuth<I>): void {
   if (!auth.actions) return;

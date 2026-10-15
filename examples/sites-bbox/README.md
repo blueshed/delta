@@ -14,8 +14,8 @@ it is told the fields that changed, one that moves out or is deleted is removed,
 outside every open box is sent to no one.
 
 The box is a custom document (`defineCustomDoc`): `query` reads what is in it when it is opened,
-`matches` says whether a site belongs. `schema.ts` holds what both servers share; only where the
-rows are kept differs.
+`matches` says whether a site belongs. `schema.ts` holds the tables, the world document and what
+a box is; `server.ts` keeps the rows.
 
 ## Run on SQLite
 
@@ -23,18 +23,8 @@ rows are kept differs.
 PORT=3100 bun examples/sites-bbox/server.ts
 ```
 
-In memory, in one process.
-
-## Run on Postgres
-
-```sh
-bun run db:up
-PORT=3100 bun examples/sites-bbox/server-pg.ts
-```
-
-It makes its tables and a world, and prints the world's name (`world:1` in a fresh database).
-Run it twice on the same database, on two ports, and a box open on one is told of sites written
-through the other.
+In memory, in one process. On Postgres the same schema and documents run on dzql
+(`dzql/postgres`), where a box open on one server is told of sites written through another.
 
 ## Try it
 
@@ -61,5 +51,4 @@ await world.send([
 // box: [ { op: "add", path: "/sites/2", ... } ]   it moved in
 ```
 
-`tests/examples.test.ts` and `tests/postgres-examples.test.ts` run these steps against both
-servers.
+`tests/examples.test.ts` runs these steps against the server.

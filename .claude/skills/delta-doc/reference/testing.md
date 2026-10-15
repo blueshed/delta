@@ -29,9 +29,6 @@ test("opens, writes and hears the broadcast", async () => {
   `sendAndAwait(ws, client, msg)`, `waitFor(predicate, { timeout, interval })`.
 - `pointerVectors` and `walkVectors` (`src/pointer-vectors.json`, `src/walk-vectors.json`): the
   path grammar and the undo guard as data, for a parser of your own to run the same cases.
-- **Postgres**: the repo's `tests/setup.ts` (`newPool`, `applyFramework`, `resetState`, …) is not
-  shipped; copy what you need. `listener.destroy()` after each test. A test that must prove a
-  policy blocks makes its own `NOSUPERUSER` role (`rls.md`).
 
 ## Running delta's cases on another backend
 

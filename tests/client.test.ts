@@ -10,8 +10,6 @@ import type { DeltaOp } from "../src/core";
 import { Database } from "bun:sqlite";
 import { createWs } from "../src/server/server";
 import { createTables, defineDoc, defineSchema, registerDocs } from "../src/server/sqlite";
-import { applyFramework, applySql, createDocListener, docTypeFromDef, generateSql } from "../src/server/postgres";
-import { openPglite } from "../src/server/pglite";
 
 // `connectWs` resolves URLs against `location` — shim it for Bun.
 (globalThis as any).location = { href: "http://localhost/", protocol: "http:" };
@@ -797,18 +795,6 @@ describe("send(ops, { inverse: true }) resolves with the ops as applied: the id 
     await asksForTheId(await serve((ws) => registerDocs(ws, db, schema, [venue])));
   });
 
-  test("Postgres in this process (PGlite), with no ledger", async () => {
-    const pool = await openPglite();
-    let listener: { destroy(): Promise<void> } | undefined;
-    try {
-      await applyFramework(pool);
-      await applySql(pool, generateSql(schema, [venue]));
-      await asksForTheId(await serve(async (ws) => { listener = await createDocListener(ws, pool, { types: [docTypeFromDef(venue, pool)] }); }));
-    } finally {
-      await listener?.destroy();
-      await pool.end();
-    }
-  }, 30_000);
 });
 
 // ---------------------------------------------------------------------------

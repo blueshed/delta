@@ -1,8 +1,8 @@
 /**
  * What every backend answers alike about a write (`src/cases/writes.ts`,
  * published in `@blueshed/delta/testing`): the error table (D11), a row the
- * server names (D3), and write scope -- on SQLite, the JSON file and PGlite
- * here, on a Postgres server in `postgres-writes.test.ts`. Beside them, what
+ * server names (D3), and write scope -- on SQLite and the JSON file (dzql asks
+ * them of Postgres). Beside them, what
  * the protocol answers itself, and the free-form and memory documents, which
  * are not on the moving-on path.
  */
@@ -13,11 +13,11 @@ import { registerMemory } from "../src/server/kinds";
 import { setLogLevel } from "../src/server/logger";
 import { applyOps } from "../src/core";
 import { createRowCases, errorCodeCases, mistakes, mockClient, sendAndAwait, writeScopeCases } from "@blueshed/delta/testing";
-import { onJson, onPglite, onSqlite } from "./helpers/case-backends";
+import { onJson, onSqlite } from "./helpers/case-backends";
 
 setLogLevel("silent");
 
-for (const [name, backend] of [["SQLite", onSqlite], ["the JSON file", onJson], ["PGlite", onPglite]] as const) {
+for (const [name, backend] of [["SQLite", onSqlite], ["the JSON file", onJson]] as const) {
   describe(name, () => {
     errorCodeCases(backend);
     createRowCases(backend);

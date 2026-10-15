@@ -5,14 +5,12 @@
  *   kanban_columns  parent: kanban_boards  → FK kanban_boards_id
  *   kanban_cards    parent: kanban_columns → FK kanban_columns_id
  *
- * `generateSql(schema, docs)` produces the CREATE TABLE / CREATE SEQUENCE
- * statements AND the `_delta_collections` + `_delta_docs` metadata inserts.
- * Once that SQL is applied, the framework's `delta_open("board:1")` composes
- * the full nested document by walking parent_fk relationships via
- * `_delta_load_collection`, and `delta_apply("board:1", ops)` mutates the
- * right table per op path. No hand-written SQL in this example.
+ * `createTables(db, schema)` makes the tables in SQLite; `registerDocs` then
+ * opens `board:1` by walking the parent keys down from the board, and applies
+ * each op to the table its path names. No hand-written SQL in this example.
+ * (On Postgres the same schema and documents run on dzql: `dzql/postgres`.)
  */
-import { defineSchema, defineDoc } from "../../src/server/postgres";
+import { defineSchema, defineDoc } from "../../src/server/sqlite";
 
 export const schema = defineSchema({
   kanban_boards: {
@@ -44,9 +42,8 @@ export const schema = defineSchema({
 
 /**
  * The doc: `board:<id>`. Scoped-single — one board with its columns and
- * cards included. The framework's `delta_open` reads the root row, then
- * walks the parent chain to pull in the two-hop `kanban_cards` filtered
- * by column ids belonging to this board.
+ * cards included: the root row, then the parent chain down to the two-hop
+ * `kanban_cards` of this board's columns.
  */
 export const docs = [
   defineDoc("board:", {

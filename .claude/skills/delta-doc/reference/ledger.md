@@ -4,7 +4,6 @@ From `tests/ledger.test.ts`'s shape: turn it on, write with a cursor, walk it ba
 
 ```ts
 registerDocs(ws, db, schema, docs, customDocs, { ledger: true, who: (i) => String((i as { id: number }).id) });
-// Postgres (needs 001g): createDocListener(ws, pool, { types, auth, ledger: true, who })
 
 await local.call("delta", { doc: "room:a", ops, cursor: "s1" });   // in-process: name the cursor
 await local.call("undo", { cursor: "s1" });     // → { doc, ops, inverse, version, entry } | conflict | null
@@ -14,8 +13,7 @@ await local.call("history", { doc: "room:a" }); // → newest first, limit 50, e
 
 Message shapes: `wire.md`. Every write is recorded in its own transaction: ops, inverse,
 version, **who** (for the audit) and the **cursor** (what undo walks). SQLite keeps
-`delta_ledger`; Postgres `_delta_ledger`, shared by every process, so one process can undo
-another's write and every process broadcasts it.
+`delta_ledger`.
 
 ## The cursor
 
@@ -38,7 +36,8 @@ another's write and every process broadcasts it.
   A made row someone edited or put rows under is not removed.
 - Removed rows come back under their ids, a cascade parent first. An undo reaches a document
   nobody has open.
-- `walkVectors` (`./testing`) is the guard as data; `planWalk` and `_delta_walk_plan` both answer it.
+- `walkVectors` (`./testing`) is the guard as data; `planWalk` answers it, and dzql's planner on
+  Postgres.
 
 ## Options on a walk
 
@@ -55,8 +54,8 @@ another's write and every process broadcasts it.
   collections); the ledger keeps rows whole, so undo puts everything back.
 - `history` goes to whoever may open the document; `mine` says whether the asker's cursor wrote
   it, never who did.
-- With `auth`, undo and redo pass the gate and `owns` of the entry's document; Postgres uses `_as`.
+- With `auth`, undo and redo pass the gate and `owns` of the entry's document.
 - An empty write records nothing. The ledger does not carry to the next backend.
 - **Without a ledger**, `inverse: true` on a `delta` answers `{ ack, ops, inverse }` on SQLite
-  (`inverseOf` in `./sqlite`); on Postgres and the free-form document, the ops as applied only.
+  (`inverseOf` in `./sqlite`); on the free-form document, the ops as applied only.
   A row made and removed in one write has no inverse.

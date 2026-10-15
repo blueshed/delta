@@ -1,30 +1,25 @@
 /**
  * Kanban: the page and its server.
  *
- * Boots Postgres setup, applies framework + table SQL, starts the WS listener
- * with the "board:" doc type, serves the HTML page that drives `client.tsx`.
+ * Makes the tables in SQLite and seeds a board, registers the "board:"
+ * document, serves the HTML page that drives `client.tsx`.
  *
  * Run:
- *   bun run db:up
  *   bun examples/kanban/serve.ts        # default port 3100
  *   PORT=3199 bun examples/kanban/serve.ts
  *
  * Open http://localhost:3100 in two tabs: a card moved in one moves in the other.
  */
 import index from "./index.html";
-import { newPool, applyAll, PG_URL } from "./setup";
+import { openBoard, DB_PATH } from "./setup";
 import { createWs } from "../../src/server/server";
-import {
-  createDocListener,
-  docTypeFromDef,
-} from "../../src/server/postgres";
-import { docs } from "./schema";
+import { registerDocs } from "../../src/server/sqlite";
+import { schema, docs } from "./schema";
 
-const pool = newPool();
-await applyAll(pool);
+const db = openBoard();
 
 const ws = createWs();
-const listener = await createDocListener(ws, pool, { types: docs.map((def) => docTypeFromDef(def, pool)) });
+registerDocs(ws, db, schema, docs);
 
 const server = Bun.serve({
   port: Number(process.env.PORT ?? 3100),
@@ -37,13 +32,12 @@ const server = Bun.serve({
 });
 ws.setServer(server);
 
-console.log(`kanban (railroad UX) on http://localhost:${server.port}  (DB: ${PG_URL})`);
+console.log(`kanban (railroad UX) on http://localhost:${server.port}  (DB: ${DB_PATH})`);
 console.log(`  open two tabs · click a card to cycle columns · double-click a header to rename`);
 
 const shutdown = async () => {
-  await listener.destroy();
-  await pool.end();
   server.stop(true);
+  db.close();
   process.exit(0);
 };
 process.on("SIGINT", shutdown);

@@ -93,11 +93,8 @@ describe("package exports", () => {
     "./json": "registerDocs",
     "./local": "createLocal",
     "./kinds": "registerSource",
-    "./postgres": "createDocListener",
-    "./pglite": "openPglite",
     "./logger": "createLogger",
     "./auth": "wireAuth",
-    "./auth-jwt": "jwtAuth",
     "./testing": "mockClient",
     "./backend": "resolveScope",
   };
@@ -107,14 +104,7 @@ describe("package exports", () => {
     expect(declared).toEqual(Object.keys(probes).sort());
   });
 
-  test('"./postgres" does not export codegen\'s SQL helpers or frameworkSql', async () => {
-    const postgres = await import("../src/server/postgres");
-    for (const name of ["q", "columnSqlType", "sqlDefault", "findCascadeOn", "defaultForType", "frameworkSql"]) {
-      expect(postgres).not.toHaveProperty(name);
-    }
-  });
-
-  test('"./json" gives an app what it defines its documents with, as "./sqlite" and "./postgres" do: one import moves', async () => {
+  test('"./json" gives an app what it defines its documents with, as "./sqlite" does: one import moves', async () => {
     const json = await import("../src/server/json");
     const sqlite = await import("../src/server/sqlite");
     for (const name of ["defineSchema", "defineDoc", "defineCustomDoc"] as const) expect([name, json[name]]).toEqual([name, sqlite[name]]);

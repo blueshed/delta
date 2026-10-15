@@ -1,6 +1,6 @@
 /**
  * What both servers share: the tables, the world document, and what a
- * bounding box is. Only where the rows are kept differs (server.ts, server-pg.ts).
+ * bounding box is. Where the rows are kept is server.ts's (SQLite; dzql's examples keep them in Postgres).
  */
 import { defineSchema, defineDoc } from "../../src/server/sqlite";
 

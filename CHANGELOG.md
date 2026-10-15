@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+delta is the documents, their wire and their definitions, on a JSON file and SQLite. Postgres, the
+next step of the path, is [dzql](https://github.com/blueshed/dzql)'s: compiled from the same
+definitions, answering delta's own published cases unchanged.
+
+### Breaking
+
+- **Postgres has moved to dzql.** Gone from delta: `@blueshed/delta/postgres`, `/pglite` and
+  `/auth-jwt` (and `pg`, `@electric-sql/pglite` and `jose` among its peers), the framework SQL
+  (`src/sql/`), the CLI's `sql` and `init`, and `migrate` on a postgres:// URL or a PGlite folder
+  (it now answers a bad argument naming `dzql migrate`). **Migration**: an app on Postgres adds
+  `dzql` and changes its imports; the definitions are the same, from delta:
+
+  ```ts
+  // before
+  import { applyFramework, applySql, createDocListener, docTypeFromDef, generateSql } from "@blueshed/delta/postgres";
+  import { openPglite } from "@blueshed/delta/pglite";
+  import { jwtAuth } from "@blueshed/delta/auth-jwt";
+  // after
+  import { applyFramework, applySql, createDocListener, docTypeFromDef, generateSql } from "dzql/postgres";
+  import { openPglite } from "dzql/pglite";
+  import { jwtAuth } from "dzql/auth-jwt";
+  ```
+
+  `defineSchema`, `defineDoc` and `defineCustomDoc` keep coming from delta (`./sqlite` or `./json`;
+  dzql re-exports them). `bunx @blueshed/delta sql | init` become `bunx dzql sql | init`, and
+  `migrate` on Postgres `bunx dzql migrate`. A database `delta init` set up upgrades in place:
+  `dzql init --upgrade` replaces the framework files, and the app's tables, ledger and history stay.
+  The Postgres examples (`todos-vs-rls`, `sites-bbox`'s `server-pg.ts`), the bench and its todo #77
+  went with it, and the `postgres`, `rls` and `sql` pages of the delta-doc skill are dzql's docs.
+
+### Changed
+
+- **The gate needs no database**: `bun run ci` is the type check and every test, `bun run test`
+  every test (about 17 s, where Postgres in Docker took minutes). No `db:up`, `db:down`, `test:pg`
+  or `test:all`, no Docker in CI, no Postgres in the web sandbox's hook.
+- **The rules once kept in two languages are one each**: the pointer grammar, a name's scope and
+  the walk planner are delta's TypeScript, their vectors (`pointerVectors`, `walkVectors`)
+  published in `./testing` for dzql to answer in SQL.
+- **`examples/kanban` runs on SQLite**: the same schema, document and page, the board in memory
+  (or `KANBAN_DB=<file>`); `tests/examples.test.ts` drives it in two browsers and runs `run.ts`.
+
 ## [0.16.0] - 2026-10-15
 
 ### Added

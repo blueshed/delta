@@ -18,7 +18,7 @@ await ada.call("undo", { cursor: "tab-1" });
 ```
 
 `Local` and `Caller` in `src/server/local.ts` are the contract. Any backend registers on
-`local.server` as on `createWs()`: `registerDocs`, `createDocListener`, `registerDoc`, the kinds.
+`local.server` as on `createWs()`: `registerDocs`, `registerDoc`, the kinds.
 
 ## Rules
 

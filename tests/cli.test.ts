@@ -12,8 +12,6 @@ import { tmpdir } from "node:os";
 import { defineSchema, defineDoc, createTables, registerDocs } from "../src/server/sqlite";
 import { createWs, registerDoc, registerMethod } from "../src/server/server";
 import { wireAuth, type DeltaAuth } from "../src/server/auth";
-import { applyFramework, applySql, createDocListener, docTypeFromDef, generateSql } from "../src/server/postgres";
-import { openPglite } from "../src/server/pglite";
 import { setLogLevel } from "../src/server/logger";
 
 setLogLevel("silent");
@@ -283,27 +281,5 @@ describe("an auth-enabled server, the token in band", () => {
     const { code, stderr } = await run(["open", "items:", "--url", guarded.url, "--json", "--token", "nope"]);
     expect(code).toBe(1);
     expect(JSON.parse(stderr.trim())).toEqual({ error: { code: 401, message: "Bad token" } });
-  });
-});
-
-describe("Postgres with no ledger (in process, PGlite)", () => {
-  test("delta answers { ack, version }; the ops as applied come from the write's broadcast", async () => {
-    const pool = await openPglite();
-    await applyFramework(pool);
-    await applySql(pool, generateSql(schema, [items]));
-    const ws = createWs();
-    const listener = await createDocListener(ws, pool, { types: [docTypeFromDef(items, pool)] });
-    const server = Bun.serve({ port: 0, routes: { [ws.path]: ws.upgrade }, websocket: ws.websocket });
-    ws.setServer(server);
-    try {
-      const { code, lines } = await run(["delta", "items:", '[{"op":"add","path":"/items/-","value":{"name":"pg"}}]', "--url", `ws://localhost:${server.port}/ws`, "--json"]);
-      expect(code).toBe(0);
-      expect(lines).toHaveLength(1);
-      expect(lines[0]).toMatchObject({ ack: true, ops: [{ op: "add", path: "/items/1", value: { id: 1, name: "pg" } }] });
-    } finally {
-      server.stop(true);
-      await listener.destroy();
-      await pool.end();
-    }
   });
 });

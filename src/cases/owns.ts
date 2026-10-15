@@ -1,8 +1,8 @@
 /**
  * With auth, every document says who owns it -- the same on every backend
  * (todo #6). The JSON file and SQLite take `registerDocs(..., { auth, owns |
- * shared })`, Postgres `docTypeFromDef(def, pool, { auth, owns | shared })` and
- * `createDocListener(ws, pool, { auth })`; custom documents say it in
+ * shared })`, dzql's Postgres `docTypeFromDef(def, pool, { auth, owns | shared })`
+ * and `createDocListener(ws, pool, { auth })`; custom documents say it in
  * `defineCustomDoc(prefix, { owns | shared })` on each. Each backend's file
  * supplies `start` and asks every case below of it.
  */
