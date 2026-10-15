@@ -17,9 +17,9 @@
  * version (`_v`) is left out of the law; versions have their own cases.
  */
 import { describe, expect, test } from "bun:test";
-import { applyOps } from "../../src/core";
-import { defineDoc, defineSchema, type Snapshot, type TableDef } from "../../src/schema";
-import { waitFor } from "../../src/testing";
+import { applyOps } from "../core";
+import { defineDoc, defineSchema, type Snapshot, type TableDef } from "../schema";
+import { waitFor } from "./support";
 
 // ---------------------------------------------------------------------------
 // The one schema, documents and seed
@@ -136,9 +136,10 @@ export const pathPublicDocs = [defineDoc("fo-pub-courses:", { root: "courses", i
  * A custom document (`defineCustomDoc`, membership) beside them: the
  * households of one email, told of a write to a household row whichever
  * document it came through. Only the first read differs by backend (SQLite and
- * the JSON file read their database, Postgres its pool); the rest is the same.
+ * the JSON file read their database, Postgres its pool): a backend gives its
+ * read to `inboxDoc`, and the rest is the same.
  */
-const inboxDoc = <Q>(query: Q) => ({
+export const inboxDoc = <Q>(query: Q) => ({
   prefix: "fo-inbox:",
   watch: ["households"],
   parse: (email: string) => email,
@@ -147,8 +148,6 @@ const inboxDoc = <Q>(query: Q) => ({
 });
 const householdsTable = pathSchema.tables.households!.name;
 export const sqliteInbox = inboxDoc((db: any, email: string) => ({ households: db.query(`SELECT * FROM ${householdsTable} WHERE email = ?`).all(email) }));
-// each row as JSON, as a document reads it: pg gives a bare BIGINT column as text
-export const postgresInbox = inboxDoc(async (pool: any, email: string) => ({ households: (await pool.query(`SELECT to_jsonb(h) AS row FROM ${householdsTable} h WHERE email = $1`, [email])).rows.map((r: any) => r.row) }));
 
 /**
  * Membership documents whose query reads some columns of a row, as a view
@@ -156,7 +155,7 @@ export const postgresInbox = inboxDoc(async (pool: any, email: string) => ({ hou
  * its keys read as text (`fo-guests:`, `id::text`, as the skill's bbox does).
  * A view is told what changed of what it holds, in the shape its query gave.
  */
-const guestsDoc = <Q>(prefix: string, query: Q) => ({
+const membersOf = <Q>(prefix: string, query: Q) => ({
   prefix,
   watch: ["households"],
   parse: (wedding: string) => wedding,
@@ -171,16 +170,15 @@ const slowed = <R>(read: () => R | Promise<R>): R | Promise<R> => {
   const rows = read();   // read as the query runs, answered late
   return Bun.sleep(emailsQuery.delay).then(() => rows);
 };
+/** fo-emails: over a backend's read, counted and slowed as `emailsQuery` says. */
+export const emailsDoc = <Q extends (...args: any[]) => any>(read: Q) =>
+  membersOf("fo-emails:", ((...args: any[]) => slowed(() => read(...args))) as Q);
+/** fo-guests: over a backend's read, its keys read as text. */
+export const guestsDoc = <Q>(read: Q) => membersOf("fo-guests:", read);
 // slowed, the SQLite query answers a promise, as the backend takes it (its type says a value)
-export const sqliteEmails = guestsDoc("fo-emails:", (db: any, w: string) => slowed(() => ({ households: db.query(`SELECT id, email FROM ${householdsTable} WHERE weddings_id = ?`).all(Number(w)) as any[] })) as { households: any[] });
-export const sqliteGuests = guestsDoc("fo-guests:", (db: any, w: string) => ({
+export const sqliteEmails = emailsDoc((db: any, w: string) => ({ households: db.query(`SELECT id, email FROM ${householdsTable} WHERE weddings_id = ?`).all(Number(w)) as any[] }) as { households: any[] });
+export const sqliteGuests = guestsDoc((db: any, w: string) => ({
   households: db.query(`SELECT CAST(id AS TEXT) AS id, CAST(weddings_id AS TEXT) AS weddings_id, email FROM ${householdsTable} WHERE weddings_id = ?`).all(Number(w)),
-}));
-export const postgresEmails = guestsDoc("fo-emails:", async (pool: any, w: string) => slowed(async () => ({
-  households: (await pool.query(`SELECT jsonb_build_object('id', id, 'email', email) AS row FROM ${householdsTable} WHERE weddings_id = $1`, [Number(w)])).rows.map((r: any) => r.row) as any[],
-})));
-export const postgresGuests = guestsDoc("fo-guests:", async (pool: any, w: string) => ({
-  households: (await pool.query(`SELECT id::text AS id, weddings_id::text AS weddings_id, email FROM ${householdsTable} WHERE weddings_id = $1`, [Number(w)])).rows,
 }));
 
 /**
@@ -188,7 +186,7 @@ export const postgresGuests = guestsDoc("fo-guests:", async (pool: any, w: strin
  * named fo-seats-at:open:<anything>. Its name is its own, never the list
  * fo-seats-at: read with "open" for a table number.
  */
-const openSeatsDoc = <Q>(query: Q) => ({
+export const openSeatsDoc = <Q>(query: Q) => ({
   prefix: "fo-seats-at:open:",
   watch: ["seats"],
   parse: (name: string) => name,
@@ -200,7 +198,6 @@ const seatsTable = pathSchema.tables.seats!.name;
 export const sqliteOpenSeats = openSeatsDoc((db: any) => ({
   seats: db.query(`SELECT * FROM ${seatsTable} WHERE kept = 0`).all().map((r: any) => ({ ...r, kept: r.kept === 1, wishes: r.wishes === null ? null : JSON.parse(r.wishes) })),
 }));
-export const postgresOpenSeats = openSeatsDoc(async (pool: any) => ({ seats: (await pool.query(`SELECT to_jsonb(s) AS row FROM ${seatsTable} s WHERE NOT kept`)).rows.map((r: any) => r.row) }));
 
 /**
  * A recompute custom document beside them (todo #35): the wedding's menu card,
@@ -208,7 +205,7 @@ export const postgresOpenSeats = openSeatsDoc(async (pool: any) => ({ seats: (aw
  * gives -- read whole on open and again on every write to what it watches,
  * told as a root replace. Only the read differs by backend.
  */
-const menuCardDoc = <R>(recompute: R) => ({
+export const menuCardDoc = <R>(recompute: R) => ({
   prefix: "fo-menu-card:",
   watch: ["weddings", "courses"],
   parse: (id: string) => Number(id),
@@ -221,9 +218,6 @@ export const sqliteMenuCard = menuCardDoc((db: any, id: number) => {
   if (!wedding) return null;
   return { wedding: wedding.name, courses: (db.query(`SELECT name FROM ${coursesTable} WHERE weddings_id = ? ORDER BY id`).all(id) as { name: string }[]).map((c) => c.name) };
 });
-export const postgresMenuCard = menuCardDoc(async (pool: any, id: number) => (await pool.query(
-  `SELECT jsonb_build_object('wedding', w.name, 'courses', COALESCE((SELECT jsonb_agg(c.name ORDER BY c.id) FROM ${coursesTable} c WHERE c.weddings_id = w.id), '[]'::jsonb)) AS doc FROM ${weddingsTable} w WHERE w.id = $1`,
-  [id])).rows[0]?.doc ?? null);
 
 /** Rows as every backend is seeded with them, through `importTables`. Wedding 2 is the bystander. The temporal note began long ago. */
 export const pathSeed: Snapshot = {

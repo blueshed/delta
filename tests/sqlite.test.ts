@@ -599,7 +599,7 @@ describe("registerDocs", () => {
       // `include: ["memberships"]` too, but loadCollection only walks parent-FK
       // chains, not cascadeOn refs, so its memberships map opens empty — and a doc
       // may only write rows it can read. That refusal is pinned in
-      // tests/write-scope.test.ts.)
+      // src/cases/writes.ts.)
       const sock = mockSocket();
       await tws.websocket.message(sock, JSON.stringify({ id: 1, action: "open", doc: "team:team1" }));
 

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The case suite is published in `@blueshed/delta/testing`**, for another backend (dzql, for
+  Postgres) to run unchanged: the path's one schema, documents and seed with every `*Cases`
+  function (`src/cases/path.ts`); the law over generated writes, `drive(seed, places)` with
+  SQLite's and the JSON file's places (`src/cases/law.ts`); `ownsCases` and `assertDocIsolation`;
+  and three suites that asked every backend inline before, now given a `CaseBackend` that stands up
+  an app on a fresh store and checked through a fresh open alone: `errorCodeCases`,
+  `createRowCases` and `writeScopeCases` (`src/cases/writes.ts`). A custom document's first read
+  is a backend's own: the suite gives `inboxDoc`, `emailsDoc`, `guestsDoc`, `openSeatsDoc` and
+  `menuCardDoc` to wrap it, with SQLite's reads beside them. delta's own tests import the suite as
+  `@blueshed/delta/testing`; the write suites now run on SQLite, the JSON file and PGlite with no
+  Docker (`tests/writes.test.ts`) and on a server (`tests/postgres-writes.test.ts`).
+  `reference/testing.md` says how to run them.
+
 ## [0.14.0] - 2026-10-15
 
 ### Added

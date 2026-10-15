@@ -12,7 +12,9 @@ import { join } from "node:path";
 import { createTables, importTables, registerDocs } from "../src/server/sqlite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
-import { course, pathDocs, pathSchema, pathSeed, seat } from "./helpers/path";
+import {
+  course, pathDocs, pathSchema, pathSeed, seat,
+} from "@blueshed/delta/testing";
 
 setLogLevel("silent");
 

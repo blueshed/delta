@@ -265,7 +265,7 @@ describe("RLS and the broadcast channel (NOSUPERUSER role)", () => {
       expect(await first(prefix, spent[prefix])).toEqual(refused);
     }
     expect((await admin.query("SELECT owner_id::int FROM rls_notes WHERE valid_to IS NULL")).rows).toEqual([{ owner_id: 2 }]);
-    // (one past the serial is made, and the serial follows it: tests/helpers/path.ts; here the policy's
+    // (one past the serial is made, and the serial follows it: src/cases/path.ts; here the policy's
     // WITH CHECK refuses an empty root, whose owner is 0)
   });
 

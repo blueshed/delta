@@ -34,7 +34,7 @@ Bun only: never `npm`, `npx` or `node`.
 | Install | `bun install` |
 | Typecheck | `bun check` (Bun's type check, TypeScript 7; no `check` script, which would shadow it), and `bun check -p examples/kanban` for its JSX |
 | Fast tests, no database | `bun run test`: every file that needs no Postgres server (PGlite runs in process) |
-| One file | `bun test tests/local.test.ts` (Postgres needed by `postgres*`, `auth-jwt`, `review-findings`, `write-scope`, `create-row` and `error-codes`; a new file that needs no Postgres goes into `test` too) |
+| One file | `bun test tests/local.test.ts` (Postgres needed by `postgres*`, `auth-jwt` and `review-findings`; a new file that needs no Postgres goes into `test` too) |
 | Start / stop Postgres | `bun run db:up` / `bun run db:down` (Docker, `compose.yml`) |
 | Postgres tests | `bun run db:up`, then `bun run test:pg` or `bun test tests/postgres-ledger.test.ts` |
 | Everything | `bun run test:all` (Postgres must be up) |
@@ -73,9 +73,9 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
   path from ids with `joinPath`, never a template.
 - **A batch applies whole or not at all**, on every backend (`applyOps` undoes in place).
 - **`add /<coll>/-` makes a row the server names**, on every backend, and the echo carries
-  `/<coll>/<id>` (`tests/create-row.test.ts`). The path's id wins over one in the value.
+  `/<coll>/<id>` (`createRowCases` in `src/cases/writes.ts`). The path's id wins over one in the value.
 - **One error-code table**: 400 malformed, 401, 403 read-only, 404 not there, 409 already
-  there, 500 the server's; `tests/error-codes.test.ts` asks every backend. Postgres raises
+  there, 500 the server's; `errorCodeCases` in `src/cases/writes.ts` asks every backend. Postgres raises
   SQLSTATEs the listener maps (`CODE_OF_SQLSTATE` in `listener.ts`).
 - **With `auth`, a document says who owns it** (`owns`, or `shared: true`): its name is its
   broadcast channel, and RLS does not filter the channel. `docTypeFromDef` throws without
@@ -104,7 +104,7 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
   and a Postgres server take the same schema, documents and writes, and answer the same:
   serial ids (numbers), no validity columns in rows, list mode and one scope rule
   (`src/server/scope.ts` is `_delta_resolve_scope`'s twin), `open_at`, the error table.
-  `tests/helpers/path.ts` asks every case of each (`tests/path-*.test.ts`,
+  `src/cases/path.ts` asks every case of each (`tests/path-*.test.ts`,
   `tests/postgres-path.test.ts`, which also carries one app's data through all four). A
   backend that answers differently is wrong: change both sides together.
 - **Fan-out is the same on every backend.** A write is told to every document that held or
@@ -128,7 +128,7 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
   named change (`change`: `changeTip` / `_delta_change_tip`), which records nothing. Change them
   together (`tests/walk-plan.test.ts` runs both on one set of vectors, `src/walk-vectors.json`,
   published in `./testing`; `tests/ledger.test.ts`, `tests/postgres-ledger.test.ts`, "undo beside
-  someone else"; `tests/helpers/path.ts`, "a change named by its entry").
+  someone else"; `src/cases/path.ts`, "a change named by its entry").
 - **The cursor**: named by an in-process caller (`client.data.local`); over a socket the
   connection's `clientId`, and signed in, the person with it (`socketCursor` in
   `src/server/ledger.ts`). A socket client never names another's.
@@ -176,8 +176,13 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
 - `cli.ts`: `bunx @blueshed/delta` (open, watch, delta, call, init, sql, install-skills;
   install-skills copies `@blueshed/*` skills and the packages `claudeSkills` names). The runtime
   commands take `--token` / `DELTA_TOKEN` and `--json` for an agent; `tests/cli.test.ts` runs them.
-- `src/testing.ts` (`./testing`): `mockClient`, `sendAndAwait`, `waitFor`, `pointerVectors` and
-  `walkVectors` (the two-language rules' cases, `src/*-vectors.json`), for delta's tests and a consumer's.
+- `src/testing.ts` (`./testing`): `mockClient`, `sendAndAwait`, `waitFor` (`src/cases/support.ts`),
+  `pointerVectors` and `walkVectors` (the two-language rules' cases, `src/*-vectors.json`), and the
+  case suite every backend answers alike, for delta's tests and another backend's: `src/cases/`
+  (`path`, `law`, `owns`, `isolation`, `writes`). delta's own tests import it as
+  `@blueshed/delta/testing`, as a consumer would; what is a backend's own (SQLite's adapters, the
+  Postgres reads in `tests/helpers/postgres-reads.ts`, the stand-ups in
+  `tests/helpers/case-backends.ts`) stays beside the tests.
   `tests/setup.ts`: the Postgres ones (`newPool`, `applyFramework`, `resetState`). `createLocal()` is
   the lighter harness for SQLite and the kinds.
 - `examples/`: `shared-state`, `sites-bbox`, `kanban`, `todos-vs-rls`, each run as its README says by

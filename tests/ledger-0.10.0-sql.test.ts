@@ -9,8 +9,9 @@ import { applyFramework, applySql, createDocListener, docTypeFromDef, generateSq
 import { openPglite } from "../src/server/pglite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
-import { pathDocs, pathSchema, pathSeed } from "./helpers/path";
-import { auth, ownsByName } from "./helpers/owns";
+import {
+  pathDocs, pathSchema, pathSeed, auth, ownsByName,
+} from "@blueshed/delta/testing";
 
 setLogLevel("silent");
 

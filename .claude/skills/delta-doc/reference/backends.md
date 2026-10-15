@@ -35,7 +35,7 @@ next id follows on. The ledger does not: undo history starts fresh.
 
 ## The same on every table backend
 
-`tests/helpers/path.ts` asks each of them:
+`src/cases/path.ts` asks each of them:
 
 - One scope rule, single or list (`scope.md`); one error table (`paths.md`).
 - A replace of a row is the row; `add /<coll>/-` takes the next serial (`paths.md`).

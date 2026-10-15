@@ -18,10 +18,8 @@ import {
 import { createWs, type WsServer } from "../src/server/server";
 import { setLogLevel } from "../src/server/logger";
 import {
-  assertDocIsolation,
-  type IsolationHarness,
-  type OpenedDoc,
-} from "./helpers/isolation";
+  assertDocIsolation, type IsolationHarness, type OpenedDoc,
+} from "@blueshed/delta/testing";
 
 setLogLevel("silent");
 

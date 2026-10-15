@@ -1,5 +1,5 @@
 /**
- * The path's second place: SQLite. The shared cases (tests/helpers/path.ts)
+ * The path's second place: SQLite. The shared cases (src/cases/path.ts)
  * asked of registerDocs over an in-memory database, seeded through the carry
  * tool (`importTables`), with a ledger kept.
  */
@@ -12,7 +12,9 @@ import { Database } from "bun:sqlite";
 import { createTables, exportTables, importTables, registerDocs } from "../src/server/sqlite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
-import { pathCases, pathDocs, pathPublicDocs, pathSchema, pathSeed, sqliteEmails, sqliteGuests, sqliteInbox, sqliteMenuCard, sqliteOpenSeats, type PathBackend } from "./helpers/path";
+import {
+  pathCases, pathDocs, pathPublicDocs, pathSchema, pathSeed, sqliteEmails, sqliteGuests, sqliteInbox, sqliteMenuCard, sqliteOpenSeats, type PathBackend,
+} from "@blueshed/delta/testing";
 
 setLogLevel("silent");
 
