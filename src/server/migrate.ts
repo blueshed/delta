@@ -173,7 +173,6 @@ export async function runMigrations<Tx>(store: Store<Tx>, migrations: Migration<
 /** Where a database stands against the list; changes nothing. */
 export async function statusOf<Tx>(store: Store<Tx>, migrations: Migration<Tx>[], options: MigrateOptions = {}): Promise<MigrationStatus> {
   checked(migrations);
-  appOf(options);
   const fresh = await isNew(store, options);
   const recorded = (await store.exists()) ? await store.recorded() : [];
   const { pending, unknown } = plan(migrations, recorded);

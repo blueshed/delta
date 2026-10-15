@@ -12,8 +12,11 @@ export const current = (table: ResolvedTable) => q(table.temporal ? `current_${t
  * document, the answer and the ledger, and an undo would put back a field this
  * version refuses.
  */
-export const columnsOf = (table: ResolvedTable): string =>
-  ["id", ...(table.parent ? [table.parent.fkColumn] : []), ...Object.keys(table.columns), ...(table.temporal ? ["valid_from", "valid_to"] : [])].map(q).join(", ");
+export const columnsOf = (table: ResolvedTable): string => declaredNames(table).map(q).join(", ");
+
+/** The columns the schema declares for a row of `table`, by name: id, parent key, its columns, a temporal row's validity. */
+const declaredNames = (table: ResolvedTable): string[] =>
+  ["id", ...(table.parent ? [table.parent.fkColumn] : []), ...Object.keys(table.columns), ...(table.temporal ? ["valid_from", "valid_to"] : [])];
 
 /** A time in SQLite's own sortable form, "YYYY-MM-DD HH:MM:SS.mmm" in UTC, from ISO-8601 or that form. */
 export function sqliteTime(value: unknown): string {
@@ -71,8 +74,7 @@ export function insertRow(db: any, table: ResolvedTable, row: any, ts: string) {
 }
 
 /** The columns a row of `table` is read and written by (`columnsOf`), by name. */
-export const declaredColumns = (table: ResolvedTable): Set<string> =>
-  new Set(["id", ...(table.parent ? [table.parent.fkColumn] : []), ...Object.keys(table.columns), "valid_from", "valid_to"]);
+export const declaredColumns = (table: ResolvedTable): Set<string> => new Set(declaredNames(table));
 
 /** The table's columns the schema does not declare: a later version's, there under this one. */
 export function undeclaredColumns(db: any, table: ResolvedTable): string[] {
