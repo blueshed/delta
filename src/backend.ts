@@ -7,7 +7,7 @@
  * it; `tests/package-exports.test.ts` lists what it gives.
  */
 export {
-  defaultForType, holdsField, isIsoTime, isoTime, lastId, q, showDoc, showOps, showRow,
+  defineDoc, defineSchema, defaultForType, holdsField, isIsoTime, isoTime, lastId, q, showDoc, showOps, showRow,
   type ColumnDef, type ColumnShorthand, type ColumnType, type DocDef, type ResolvedTable, type Schema, type Snapshot,
   type TableDef, type ValidationError,
 } from "./schema";

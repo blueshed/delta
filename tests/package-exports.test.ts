@@ -144,7 +144,7 @@ describe("package exports", () => {
   test('"./backend" gives what a backend kept outside the package builds on, and nothing more', async () => {
     const backend = await import("../src/backend");
     expect(Object.keys(backend).sort()).toEqual([
-      "NOT_FOUND", "appOf", "assertOnePrefix", "assertOwned", "assertScopeKeys", "authless", "createCustomDocs", "defaultForType",
+      "NOT_FOUND", "appOf", "assertOnePrefix", "assertOwned", "assertScopeKeys", "authless", "createCustomDocs", "defaultForType", "defineDoc", "defineSchema",
       "dropClientSubscriptions", "fenced", "fromFolder", "holdsField", "isAuthError", "isDeltasOwn", "isEntryId", "isIsoTime",
       "isoTime", "lastId", "ledgerWho", "onClientDrop", "ownerless", "pastSafeId", "q", "resolveScope", "runMigrations", "sendTo",
       "showDoc", "showOps", "showRow", "socketCursor", "statusOf", "trackSubscribe", "trackUnsubscribe",
