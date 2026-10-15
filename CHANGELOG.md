@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`@blueshed/delta/backend`: what a backend kept outside this package builds on** (step 2a of
+  the Postgres split): a document's scope (`resolveScope`, `assertScopeKeys`, `pastSafeId`), what
+  it shows (`showDoc`, `showOps`, `showRow`, `holdsField`), the custom documents
+  (`createCustomDocs` and its kin), the ledger's cursor and writer (`socketCursor`, `ledgerWho`,
+  `isEntryId`), the migration runner (`runMigrations`, `Store`, `fenced`), the socket's
+  subscriptions (`trackSubscribe`, `onClientDrop`, ...) and the schema's helpers (`q`, `isoTime`,
+  `lastId`, `defaultForType`) and its definitions (`defineSchema`, `defineDoc`). dzql's copy of the Postgres listener imports these, so it answers the
+  wire as delta's own backends do. An app never needs it; `tests/package-exports.test.ts` lists
+  exactly what it gives.
+
 ## [0.15.0] - 2026-10-15
 
 ### Added

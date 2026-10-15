@@ -176,6 +176,9 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
 - `cli.ts`: `bunx @blueshed/delta` (open, watch, delta, call, init, sql, install-skills;
   install-skills copies `@blueshed/*` skills and the packages `claudeSkills` names). The runtime
   commands take `--token` / `DELTA_TOKEN` and `--json` for an agent; `tests/cli.test.ts` runs them.
+- `src/backend.ts` (`./backend`): what a backend outside the package (dzql) builds on: scope,
+  showing, custom documents, the ledger's cursor, the migration runner, socket subscriptions. Change
+  what it gives only with `tests/package-exports.test.ts`'s list, and say so in the changelog.
 - `src/testing.ts` (`./testing`): `mockClient`, `sendAndAwait`, `waitFor` (`src/cases/support.ts`),
   `pointerVectors` and `walkVectors` (the two-language rules' cases, `src/*-vectors.json`), and the
   case suite every backend answers alike, for delta's tests and another backend's: `src/cases/`
