@@ -1,6 +1,6 @@
 /**
  * The path's last place: a Postgres server. The shared cases
- * (tests/helpers/path.ts); what only a database shared by processes has --
+ * (src/cases/path.ts); what only a database shared by processes has --
  * another process on it, a told document's catch-up from the log; what the
  * writer's own channel carries; and the whole path: the same data carried
  * from a JSON file to SQLite to Postgres in process to this server, reading
@@ -23,9 +23,9 @@ import { setLogLevel } from "../src/server/logger";
 import { applyFramework, newPool } from "./setup";
 import { waitFor } from "../src/testing";
 import {
-  assertCopiesHold, course, expectTold, field, household, openAll, pathCases, pathDocs, pathPublicDocs, pathSchema, pathSeed, postgresEmails, postgresGuests, postgresInbox, postgresMenuCard, postgresOpenSeats, readAll, told, write,
-  type PathBackend, type PathProcess,
-} from "./helpers/path";
+  assertCopiesHold, course, expectTold, field, household, openAll, pathCases, pathDocs, pathPublicDocs, pathSchema, pathSeed, readAll, told, write, type PathBackend, type PathProcess,
+} from "@blueshed/delta/testing";
+import { postgresEmails, postgresGuests, postgresInbox, postgresMenuCard, postgresOpenSeats } from "./helpers/postgres-reads";
 import { q } from "../src/schema";
 
 setLogLevel("silent");

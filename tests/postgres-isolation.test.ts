@@ -20,10 +20,8 @@ import { setLogLevel } from "../src/server/logger";
 import { newPool, applyFramework } from "./setup";
 import { mockClient, sendAndAwait } from "../src/testing";
 import {
-  assertDocIsolation,
-  type IsolationHarness,
-  type OpenedDoc,
-} from "./helpers/isolation";
+  assertDocIsolation, type IsolationHarness, type OpenedDoc,
+} from "@blueshed/delta/testing";
 
 setLogLevel("silent");
 

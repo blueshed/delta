@@ -33,6 +33,43 @@ test("opens, writes and hears the broadcast", async () => {
   shipped; copy what you need. `listener.destroy()` after each test. A test that must prove a
   policy blocks makes its own `NOSUPERUSER` role (`rls.md`).
 
+## Running delta's cases on another backend
+
+`@blueshed/delta/testing` also ships the cases every delta backend answers alike, for a backend of
+your own (dzql, for Postgres) to run unchanged. From `tests/writes.test.ts`:
+
+```ts
+const onSqlite: CaseBackend = async ({ schema, docs, seed }) => {
+  const db = new Database(":memory:");
+  createTables(db, schema);
+  importTables(db, schema, seed);
+  const ws = createWs();
+  registerDocs(ws, db, schema, docs);
+  return { ws, end: async () => db.close() };
+};
+
+describe("SQLite", () => {
+  errorCodeCases(onSqlite);   // one error table: 400, 404, 409
+  createRowCases(onSqlite);   // add /<coll>/- makes a row the server names
+  writeScopeCases(onSqlite);  // a document writes only what it reads
+});
+```
+
+- **The writes** (`src/cases/writes.ts`): a `CaseBackend` stands up an app (`roomsApp`,
+  `tenantsApp`, `membershipsApp`) on a fresh store; every check reads through a fresh open.
+- **The path** (`src/cases/path.ts`): one schema, its documents cut every way and its seed
+  (`pathSchema`, `pathDocs`, `pathSeed`), each case ending on the law. A backend supplies a
+  `PathBackend` and its own first reads for the custom documents (`inboxDoc`, `emailsDoc`,
+  `guestsDoc`, `openSeatsDoc`, `menuCardDoc`; SQLite's are `sqliteInbox` and its kin), then calls
+  `pathCases`, `drivenCases`, `registrationCases`, `serialCases`, `asItStoodCases`,
+  `columnCases`, `documentCases` and `fanOutCases` (`tests/path-sqlite.test.ts`).
+- **The law over generated writes** (`src/cases/law.ts`): `drive(seed, places)` sends the same
+  random steps to each `Place` and compares them; put SQLite's (`onSqlite()`) first, so a new
+  backend is always measured against it (`tests/law-driver.test.ts`). `lawSeeds` and `lawSteps`
+  read `DELTA_LAW_SEED(S)` and `DELTA_LAW_STEPS`.
+- **`owns`** (`ownsCases`) and **isolation** (`assertDocIsolation`): who may open a document, and
+  nobody told what is not theirs (`tests/owns-sqlite.test.ts`, `tests/sqlite-isolation.test.ts`).
+
 ## Driving the client from Bun
 
 - **Pass an absolute URL**: `connectWs("ws://localhost:3000/ws")`; outside a browser there is no

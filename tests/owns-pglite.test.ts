@@ -1,6 +1,6 @@
 /**
  * With auth, every document says who owns it: the shared cases
- * (tests/helpers/owns.ts) asked of Postgres in process (PGlite).
+ * (src/cases/owns.ts) asked of Postgres in process (PGlite).
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import type { Pool } from "pg";
@@ -11,8 +11,10 @@ import { openPglite } from "../src/server/pglite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
 import { defineDoc, q } from "../src/schema";
-import { pathDocs, pathSchema, pathSeed, postgresInbox, postgresMenuCard } from "./helpers/path";
-import { auth, customOwns, everyDoc, mineDoc, ownsCases, whoamiDoc, type Me } from "./helpers/owns";
+import {
+  pathDocs, pathSchema, pathSeed, auth, customOwns, everyDoc, mineDoc, ownsCases, whoamiDoc, type Me,
+} from "@blueshed/delta/testing";
+import { postgresInbox, postgresMenuCard } from "./helpers/postgres-reads";
 
 setLogLevel("silent");
 

@@ -1,7 +1,7 @@
 /** Every row and sequence out (`exportTables`) and in (`importTables`): the `Snapshot` every backend gives and takes. */
 import { isoTime, lastId, q, type Schema, type Snapshot } from "../../schema";
 import { createSequences } from "./ddl";
-import { decodeRow, encodeValue, sqliteTime } from "./rows";
+import { decodeRow, encodeValue, now, sqliteTime } from "./rows";
 
 /**
  * Every row of the schema's tables -- every version of a temporal row, with
@@ -38,7 +38,9 @@ export function importTables(db: any, schema: Schema, snapshot: Snapshot): void 
       const insert = db.query(`INSERT INTO ${q(table.name)} (${cols.map(q).join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`);
       for (const row of snapshot.tables[key] ?? []) {
         insert.run(...cols.map((c) =>
-          c === "valid_from" ? sqliteTime(row.valid_from ?? new Date().toISOString())
+          // a version given no start begins now, by the clock writes keep, so a write in the same
+          // millisecond starts the next version after it, never at it (one (id, valid_from) each)
+          c === "valid_from" ? (row.valid_from == null ? now() : sqliteTime(row.valid_from))
           : c === "valid_to" ? (row.valid_to == null ? null : sqliteTime(row.valid_to))
           : encodeValue(table, c, row[c])));
       }

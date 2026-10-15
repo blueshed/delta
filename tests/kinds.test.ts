@@ -6,7 +6,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setLogLevel } from "../src/server/logger";
-import { assertCopiesHold, openAll, write, type PathBackend } from "./helpers/path";
+import {
+  assertCopiesHold, openAll, write, type PathBackend,
+} from "@blueshed/delta/testing";
 
 setLogLevel("silent");
 

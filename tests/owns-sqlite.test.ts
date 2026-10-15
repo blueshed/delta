@@ -1,6 +1,6 @@
 /**
  * With auth, every document says who owns it: the shared cases
- * (tests/helpers/owns.ts) asked of SQLite and the JSON file.
+ * (src/cases/owns.ts) asked of SQLite and the JSON file.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
@@ -12,8 +12,9 @@ import * as json from "../src/server/json";
 import { createWs } from "../src/server/server";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
-import { pathDocs, pathSchema, pathSeed, sqliteInbox, sqliteMenuCard } from "./helpers/path";
-import { auth, customOwns, everyDoc, mineDoc, ownsByName, ownsCases, whoamiDoc, type Me, type OwnsBackend } from "./helpers/owns";
+import {
+  pathDocs, pathSchema, pathSeed, sqliteInbox, sqliteMenuCard, auth, customOwns, everyDoc, mineDoc, ownsByName, ownsCases, whoamiDoc, type Me, type OwnsBackend,
+} from "@blueshed/delta/testing";
 import { defineDoc } from "../src/schema";
 
 setLogLevel("silent");

@@ -47,7 +47,7 @@ server names (on an array, append). The parsers are `splitPath` / `joinPath` in 
 ## Error codes
 
 `{ id, error: { code, message } }` on the wire, `DeltaError.code` on the client, the same on every
-backend (`tests/error-codes.test.ts`):
+backend (`errorCodeCases` in `src/cases/writes.ts`):
 
 - **400** malformed: no leading `/`, unknown field, missing required field, bad id.
 - **401** not signed in (an `auth` gate said no).

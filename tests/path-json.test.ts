@@ -1,6 +1,6 @@
 /**
  * The path's first place: a JSON file. The same schema and documents as every
- * other backend (tests/helpers/path.ts), their rows kept in one readable file.
+ * other backend (src/cases/path.ts), their rows kept in one readable file.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -9,7 +9,9 @@ import { join } from "node:path";
 import { defineDoc, defineSchema, exportTables, importTables, registerDocs } from "../src/server/json";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
-import { course, pathCases, pathDocs, pathPublicDocs, pathSchema, pathSeed, pathSpec, readAll, sqliteEmails, sqliteGuests, sqliteInbox, sqliteMenuCard, sqliteOpenSeats, write, type PathBackend } from "./helpers/path";
+import {
+  course, pathCases, pathDocs, pathPublicDocs, pathSchema, pathSeed, pathSpec, readAll, sqliteEmails, sqliteGuests, sqliteInbox, sqliteMenuCard, sqliteOpenSeats, write, type PathBackend,
+} from "@blueshed/delta/testing";
 
 setLogLevel("silent");
 

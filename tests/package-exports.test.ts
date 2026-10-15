@@ -127,6 +127,19 @@ describe("package exports", () => {
     expect(pkg.files).toContain("src/walk-vectors.json");
   });
 
+  test('"./testing" gives the case suite another backend runs: the path, the law, owns, isolation and the writes', async () => {
+    const testing = await import("../src/testing");
+    for (const name of [
+      "pathSchema", "pathDocs", "pathPublicDocs", "pathSeed", "inboxDoc", "emailsDoc", "guestsDoc", "openSeatsDoc", "menuCardDoc",
+      "pathCases", "drivenCases", "registrationCases", "serialCases", "asItStoodCases", "columnCases", "documentCases", "fanOutCases",
+      "drive", "onSqlite", "onJson", "lawSeeds", "lawSteps",
+      "ownsCases", "assertDocIsolation",
+      "errorCodeCases", "createRowCases", "writeScopeCases", "roomsApp", "tenantsApp", "membershipsApp",
+    ]) {
+      expect([name, typeof (testing as any)[name]]).not.toEqual([name, "undefined"]);
+    }
+  });
+
   for (const [subpath, named] of Object.entries(probes)) {
     // Keys carry the exports-map's leading "." — drop it to get the specifier
     // a consumer writes ("./core" -> "@blueshed/delta/core").

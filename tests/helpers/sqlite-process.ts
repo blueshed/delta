@@ -11,7 +11,9 @@ import { Database } from "bun:sqlite";
 import { registerDocs } from "../../src/server/sqlite";
 import { createLocal } from "../../src/server/local";
 import { setLogLevel } from "../../src/server/logger";
-import { pathDocs, pathSchema } from "./path";
+import {
+  pathDocs, pathSchema,
+} from "@blueshed/delta/testing";
 
 setLogLevel("silent");
 const db = new Database(process.argv[2]!);

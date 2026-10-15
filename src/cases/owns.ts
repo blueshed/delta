@@ -7,8 +7,8 @@
  * supplies `start` and asks every case below of it.
  */
 import { describe, expect, test } from "bun:test";
-import { waitFor } from "../../src/testing";
-import type { DeltaAuth } from "../../src/server/auth";
+import { waitFor } from "./support";
+import type { DeltaAuth } from "../server/auth";
 import { expectTold, field, household, openAll, type PathBackend } from "./path";
 
 export type Me = { id: number; email?: string };

@@ -1,7 +1,7 @@
 /**
  * The path's third place: Postgres in this process (PGlite). The same stored
  * functions as a Postgres server, the same listener, the same cases
- * (tests/helpers/path.ts) -- no database to run.
+ * (src/cases/path.ts) -- no database to run.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { Pool } from "pg";
@@ -12,8 +12,9 @@ import { openPglite } from "../src/server/pglite";
 import { createLocal } from "../src/server/local";
 import { setLogLevel } from "../src/server/logger";
 import {
-  assertCopiesHold, expectTold, field, household, openAll, pathCases, pathDocs, pathPublicDocs, pathSchema, pathSeed, postgresEmails, postgresGuests, postgresInbox, postgresMenuCard, postgresOpenSeats, told, write, type PathBackend,
-} from "./helpers/path";
+  assertCopiesHold, expectTold, field, household, openAll, pathCases, pathDocs, pathPublicDocs, pathSchema, pathSeed, told, write, type PathBackend,
+} from "@blueshed/delta/testing";
+import { postgresEmails, postgresGuests, postgresInbox, postgresMenuCard, postgresOpenSeats } from "./helpers/postgres-reads";
 import { q } from "../src/schema";
 import { waitFor } from "../src/testing";
 
@@ -255,7 +256,7 @@ describe("pglite: validateOps answers as delta_apply does", () => {
  * The log keeps a write's applied ops once, and only where the writer was told
  * otherwise: where they agree, the writer's entry carries none (null), and is
  * heard as told; each other told document's entry carries [] (todo #44).
- * tests/helpers/path.ts asks that a custom document hears each write once
+ * src/cases/path.ts asks that a custom document hears each write once
  * either way.
  */
 describe("pglite: the log keeps the write as applied only where the writer was told otherwise", () => {
