@@ -11,45 +11,48 @@ export function createTables(db: any, schema: Schema) {
   db.run("PRAGMA journal_mode = WAL");
   createSequences(db);
 
-  for (const [, table] of Object.entries(schema.tables)) {
-    const name = q(table.name);
-    // Ids and parent keys have integer affinity: a serial is kept, and read, as
-    // a number -- as Postgres keeps it -- and an id that is not one (a session's
-    // token) as the text it is. `INT`, not `INTEGER`: an INTEGER key would be
-    // the rowid, and refuse the text.
-    const cols: string[] = ["id INT NOT NULL"];
+  for (const [, table] of Object.entries(schema.tables)) createTable(db, table);
+}
 
-    // FK columns from parent
-    if (table.parent) {
-      cols.push(`${q(table.parent.fkColumn)} INT NOT NULL`);
-    }
+/** One table, as `createTables` makes each (if it is not there): its columns, a temporal one's view, a parent key's index. */
+export function createTable(db: any, table: Schema["tables"][string]) {
+  const name = q(table.name);
+  // Ids and parent keys have integer affinity: a serial is kept, and read, as
+  // a number -- as Postgres keeps it -- and an id that is not one (a session's
+  // token) as the text it is. `INT`, not `INTEGER`: an INTEGER key would be
+  // the rowid, and refuse the text.
+  const cols: string[] = ["id INT NOT NULL"];
 
-    // User-defined columns
-    for (const [col, def] of Object.entries(table.columns)) {
-      const sqlType = columnSqlType(def);
-      const notNull = def.nullable ? "" : " NOT NULL";
-      const defaultVal = def.default !== undefined ? ` DEFAULT ${sqlDefault(def.default)}` : "";
-      cols.push(`${q(col)} ${sqlType}${notNull}${defaultVal}`);
-    }
+  // FK columns from parent
+  if (table.parent) {
+    cols.push(`${q(table.parent.fkColumn)} INT NOT NULL`);
+  }
 
-    if (table.temporal) {
-      cols.push("valid_from TEXT NOT NULL DEFAULT (datetime('now'))");
-      cols.push("valid_to TEXT");
-      cols.push("PRIMARY KEY (id, valid_from)");
-    } else {
-      cols.push("PRIMARY KEY (id)");
-    }
+  // User-defined columns
+  for (const [col, def] of Object.entries(table.columns)) {
+    const sqlType = columnSqlType(def);
+    const notNull = def.nullable ? "" : " NOT NULL";
+    const defaultVal = def.default !== undefined ? ` DEFAULT ${sqlDefault(def.default)}` : "";
+    cols.push(`${q(col)} ${sqlType}${notNull}${defaultVal}`);
+  }
 
-    db.run(`CREATE TABLE IF NOT EXISTS ${name} (${cols.join(", ")})`);
+  if (table.temporal) {
+    cols.push("valid_from TEXT NOT NULL DEFAULT (datetime('now'))");
+    cols.push("valid_to TEXT");
+    cols.push("PRIMARY KEY (id, valid_from)");
+  } else {
+    cols.push("PRIMARY KEY (id)");
+  }
 
-    // Current-state view and indexes for temporal tables
-    if (table.temporal) createCurrent(db, table.name);
+  db.run(`CREATE TABLE IF NOT EXISTS ${name} (${cols.join(", ")})`);
 
-    // FK index for child tables
-    if (table.parent) {
-      const fk = table.parent.fkColumn;
-      db.run(`CREATE INDEX IF NOT EXISTS ${q(`idx_${table.name}_${fk}`)} ON ${name} (${q(fk)})`);
-    }
+  // Current-state view and indexes for temporal tables
+  if (table.temporal) createCurrent(db, table.name);
+
+  // FK index for child tables
+  if (table.parent) {
+    const fk = table.parent.fkColumn;
+    db.run(`CREATE INDEX IF NOT EXISTS ${q(`idx_${table.name}_${fk}`)} ON ${name} (${q(fk)})`);
   }
 }
 
