@@ -124,6 +124,8 @@ test("delta migrations make: writes the next file from a module's schema, then n
     const made = await run(mod, "--dir", migrations, "--name", "people");
     expect(made.code).toBe(0);
     expect(readdirSync(migrations)).toEqual(["001-people.ts"]);
+    // as a person would write it
+    expect(await Bun.file(join(migrations, "001-people.ts")).text()).toContain(`createTable("people", { columns: { name: { type: "text" } }, temporal: false }),`);
     expect(diff(stateOf(await fromFolder(migrations)), defineSchema({ people: { columns: { name: "text" }, temporal: false } })).changes).toEqual([]);
     const again = await run(mod, "--dir", migrations);
     expect([again.code, again.out.trim()]).toEqual([0, "nothing to make: the migrations say what the definitions say"]);
