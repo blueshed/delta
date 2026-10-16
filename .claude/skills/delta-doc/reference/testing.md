@@ -66,6 +66,10 @@ describe("SQLite", () => {
   read `DELTA_LAW_SEED(S)` and `DELTA_LAW_STEPS`.
 - **`owns`** (`ownsCases`) and **isolation** (`assertDocIsolation`): who may open a document, and
   nobody told what is not theirs (`tests/owns-sqlite.test.ts`, `tests/sqlite-isolation.test.ts`).
+- **`owns` as a path** (`permissionCases`): a path that reaches the person, one that does not, a
+  row never handed away (`tests/permissions-sqlite.test.ts`).
+- **Migrations from empty** (`migrationCases`) and **link sign-in's store** (`linkStoreCases`):
+  what every backend's `migrate` and `LinkStore` answer alike.
 
 ## Driving the client from Bun
 

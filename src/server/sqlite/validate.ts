@@ -39,7 +39,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
     // Own columns only: `table.columns.toString` is Object.prototype's, not a column.
     const columnOf = (k: string): ColumnDef | undefined => (Object.hasOwn(table.columns, k) ? table.columns[k] : undefined);
     // A column the document does not hold (its `columns`) is no field of it: it may not write it,
-    // as it never reads it (todo #70). A walk puts back what the store recorded, whole.
+    // as it never reads it. A walk puts back what the store recorded, whole.
     const held = (k: string) => opts.walk || holdsField(def, schema, collKey, k);
     // a walk puts a row back as it was stored: a column this version does not declare, but the table has, too
     let others: Set<string> | undefined;
@@ -55,8 +55,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
     // A row's value, added or replaced whole (RFC 6902: a replace of the row is
     // the row): a column that is neither nullable nor has a default must be
     // given -- by the value, or, for a list-mode root row's add, by the scope,
-    // as Postgres checks after it stamps them. It used to be stored as "", 0 or
-    // false, acked and broadcast.
+    // never stored as "", 0 or false in its place.
     // A replace leaves the columns the document does not hold as they are; an add makes them.
     const required = (value: Record<string, unknown>, given: Record<string, unknown> = {}, add = false) => {
       for (const [col, colDef] of Object.entries(table.columns)) {
@@ -96,7 +95,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
 
     // A single-mode root: /<root>/<field> is a FIELD replace
     // (not /<root>/<id> row), so validate parts[1] as a column name -- or the
-    // parent key (the root row moves, as the whole-root merge moves it, and as on Postgres).
+    // parent key (the root row moves, as the whole-root merge moves it, and).
     // An add or a remove of /<root>/<id> is the root row itself, checked as a
     // row below, and so is a replace of it named by its id (`namesRootRow`, as
     // Postgres reads the segment); applyOps holds it to the one the document is named for.
@@ -161,7 +160,7 @@ export function validateOps(schema: Schema, def: DocDef, ops: DeltaOp[], opts: {
       }
     }
 
-    // Field-level replace: /<coll>/<id>/field -- a column, or the parent key (the row moves, as on Postgres)
+    // Field-level replace: /<coll>/<id>/field -- a column, or the parent key (the row moves)
     if (op.op === "replace" && parts.length === 3) {
       const field = parts[2]!;
       if ((field !== fkCol && !columnOf(field)) || !held(field)) {
@@ -188,7 +187,7 @@ export function namesRootRow(table: ResolvedTable, segment: string, rootId: unkn
 }
 
 /**
- * A parent key written: never null (its column is NOT NULL, as on Postgres),
+ * A parent key written: never null (its column is NOT NULL),
  * and an id -- an integer, or text, as SQLite keeps a text id (a session's token).
  */
 function validateParentKey(field: string, value: unknown): string | null {
@@ -216,7 +215,7 @@ function validateFieldType(def: ColumnDef, field: string, value: unknown): strin
     case "json":
       break; // any type is valid for json
     case "timestamptz":
-      // ISO-8601 (isIsoTime), as Postgres asks it; kept in UTC as Postgres gives it back
+      // ISO-8601 (isIsoTime) it; kept in UTC as Postgres gives it back
       if (!isIsoTime(value) && !(value instanceof Date && Number.isFinite(value.getTime()))) return `${field} must be an ISO-8601 time`;
       break;
   }

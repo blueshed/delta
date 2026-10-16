@@ -63,7 +63,7 @@ describe("json", () => ownsCases(over((local, opts) => {
 /**
  * Over sockets: a socket taken off a document, or signed out since, hears no
  * more of it though it asks for nothing -- let go at the next change told, and
- * told why, as on Postgres (todo #6's review; #17). The JSON file is SQLite's
+ * told why. The JSON file is SQLite's
  * registration over its file, so both are asked.
  */
 describe("sqlite and json: a socket hears a document while it may open it, over sockets", () => {
@@ -110,7 +110,7 @@ describe("sqlite and json: a socket hears a document while it may open it, over 
 /**
  * Several registrations on one server: a name is answered by the one whose
  * prefix matching it is longest, as within one registration and on Postgres
- * -- not by whichever registered first (todo #6's review). A prefix two
+ * -- not by whichever registered first. A prefix two
  * registrations both claim is refused as the second registers.
  */
 describe("sqlite and json: several registrations on one server, one name", () => {
@@ -193,7 +193,7 @@ describe("sqlite and json: several registrations on one server, one name", () =>
  * One database, two registrations -- a public one (shared) and a private one
  * (owns), as one `owns` per call makes an app with both write -- and one
  * ledger: an undo or redo is walked by the registration whose document the
- * entry was written through; the other lets it by (todo #6's review).
+ * entry was written through; the other lets it by.
  */
 describe("sqlite: two registrations on one database share the ledger", () => {
   const setup = (withAuth: boolean) => {
@@ -225,7 +225,7 @@ describe("sqlite: two registrations on one database share the ledger", () => {
     });
   }
 
-  test("with auth, a write through the public registration is told to the private board its owner opened through the other (todo #64)", async () => {
+  test("with auth, a write through the public registration is told to the private board its owner opened through the other", async () => {
     const local = setup(true);
     const heard: { channel: string }[] = [];
     local.onPublish((channel) => heard.push({ channel }));

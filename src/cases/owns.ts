@@ -1,6 +1,6 @@
 /**
  * With auth, every document says who owns it -- the same on every backend
- * (todo #6). The JSON file and SQLite take `registerDocs(..., { auth, owns |
+ *. The JSON file and SQLite take `registerDocs(..., { auth, owns |
  * shared })`, dzql's Postgres `docTypeFromDef(def, pool, { auth, owns | shared })`
  * and `createDocListener(ws, pool, { auth })`; custom documents say it in
  * `defineCustomDoc(prefix, { owns | shared })` on each. Each backend's file
@@ -87,7 +87,7 @@ const ada: Me = { id: 1, email: "a@x" };
 const bob: Me = { id: 2, email: "c@x" };
 
 export function ownsCases(backend: () => OwnsBackend): void {
-  describe("with auth, every document says who owns it (todo #6)", () => {
+  describe("with auth, every document says who owns it", () => {
     test("a document registered with neither owns nor shared is refused, and so is a custom document; the error says what to add", async () => {
       await expect(backend().start({})).rejects.toThrow(/with auth, say who may open it -- owns: \(identity, docName\) => boolean, or shared: true/);
       await expect(backend().start({ owns: ownsByName, custom: "neither" })).rejects.toThrow(/defineCustomDoc\("fo-inbox:"\): with auth, say who may open it/);
@@ -236,7 +236,7 @@ export function ownsCases(backend: () => OwnsBackend): void {
       expect(await rows(bob)).toEqual({});
     });
 
-    for (const lookup of [false, true]) test(`a socket hears a document while it may open it: taken off it, or signed out since, it is let go at the next change told, and told so (404, 401) -- a membership view too -- and asked no more; put back, it opens again${lookup ? "; owns a lookup (a promise)" : ""} (todo #6's review; #17 on Postgres)`, async () => {
+    for (const lookup of [false, true]) test(`a socket hears a document while it may open it: taken off it, or signed out since, it is let go at the next change told, and told so (404, 401) -- a membership view too -- and asked no more; put back, it opens again${lookup ? "; owns a lookup (a promise)" : ""}`, async () => {
       const granted = new Set(["2:fo-board:1", "3:fo-board:1"]);
       const may = (me: Me, name: string) => ownsByName(me, name) || granted.has(`${me.id}:${name}`);
       const p = await backend().start({ owns: lookup ? async (me, name) => { await new Promise((r) => setTimeout(r, 2)); return may(me, name); } : may, custom: "owned" });

@@ -1,14 +1,8 @@
 name: Publish to npm
 
-# Matches the pattern proven in @blueshed/railroad: fires when a GitHub
-# Release is published, runs the full CI gate inline, then publishes via
-# npm Trusted Publishing (OIDC).
-#
-# Release flow:
-#   /publish <level>                     → commits + tags locally
-#   git push origin main --follow-tags   → pushes main + tag
-#   gh release create v<ver> -t v<ver> --notes-from-tag   (or GH UI)
-#   → this workflow fires → npm publish
+# Fires when a GitHub Release is published (/publish creates it, after pushing
+# main and its tag), runs the gate, then publishes with npm Trusted Publishing
+# (OIDC).
 #
 # npm Trusted Publisher (one-time):
 #   npmjs.com → @blueshed/delta → Publishing access →

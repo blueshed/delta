@@ -1,8 +1,8 @@
 /**
- * Document kinds that are not stored in a database — Workshop/docs/eta-on-delta.md.
+ * Document kinds that are not stored in a database.
  *
  * A document is divided by where its truth lives. Written documents and facts
- * live in a database (the SQLite and Postgres backends). These three do not:
+ * live in a database (SQLite, or dzql's Postgres). These three do not:
  *
  * - **memory** — live: the truth is this process (who is online). Held in
  *   memory, gone on restart, never on a ledger. Written by a caller in this

@@ -52,10 +52,12 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
 
 - **The schema is the contract.** delta sends and writes only the columns a schema declares (and the
   id, the parent key, a temporal row's validity); a database may hold more, never less. The ledger
-  keeps rows as stored, so an undo restores them whole. An upgrade that renames, drops or moves
-  is a migration (`migrate`, per app, run once each, fencing that app's undo); add, then use, then
-  drop, so two versions on one database both work. `tests/schema-contract.test.ts`,
-  `tests/migrate.test.ts`.
+  keeps rows as stored, so an undo restores them whole. The tables are made by a history of
+  migrations from empty (`src/server/changes.ts`: each a list of changes, plus an `up` for data);
+  `delta migrations make` writes the next from what the schema says beyond the history, and
+  `migrate` runs each once per app, fencing that app's undo. Add, then use, then drop, so two
+  versions on one database both work. `tests/schema-contract.test.ts`, `tests/migrate.test.ts`,
+  `tests/migrations-from-empty.test.ts`.
 - **Three op verbs** (`add`, `replace`, `remove`) on `/<coll>/<id>[/field]` paths. No new verbs.
   They mean what RFC 6902 says on every backend: a replace of a row is the row (a field it
   leaves out takes its default; its id and parent key stay), never a merge.
@@ -81,12 +83,12 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
   membership view in `custom.ts`). A memory or free-form document
   tells its ops as applied. The client freshens the row a field op lands in (maps kept), so a keyed `list()`
   sees the row as new. A write's answer and ledger entry keep whole rows: they are its record.
-- **A document may hold some columns** (`defineDoc`'s `columns`, todo #70): it is opened, told
+- **A document may hold some columns** (`defineDoc`'s `columns`): it is opened, told
   and written by those, the id and the parent key alone (`holdsField` / `showRow` in
   `schema.ts`). The store, the copies kept server-side and the ledger keep rows whole: a
   document's columns are what it shows and takes.
 - **Opt-in stays opt-in.** Without `ledger: true` / `inverse: true`, answers and broadcasts
-  keep their 0.5 shapes.
+  carry no inverse, version or entry.
 - **One app, every backend.** The JSON file (`./json`) and SQLite take the same schema,
   documents and writes, and answer the same: serial ids (numbers), no validity columns in rows,
   list mode and one scope rule (`resolveScope` in `src/server/scope.ts`), `open_at`, the error
@@ -136,8 +138,14 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
   through `./backend`, dzql's) -- views, recompute reads, who may still hear a document
   (`letGo`), the per-row telling.
 - `src/server/ledger.ts`: the SQLite ledger (entries, the cursor's chains, `planWalk`).
-- `src/server/migrate.ts`: the migration runner (`runMigrations`); `sqlite/migrate.ts` is
-  SQLite's `migrate` over it.
+- `src/server/changes.ts` (`./migrations`): a migration's changes (`createTable`, `addColumn`, ...),
+  the tables a history leads to (`stateOf`), what the schema says beyond them (`diff`), and the
+  file `make` writes (`writeMigration`). `src/server/migrate.ts`: the runner (`runMigrations`);
+  `sqlite/migrate.ts` is SQLite's `migrate` over it.
+- `src/paths.ts` (`./paths`): a document's `owns` as a path: `parsePath`, `checkPath` (thrown at
+  registration), `pathSql` (the SQL SQLite and dzql both run).
+- `src/server/auth-link.ts` (`./auth-link`) and `src/client/auth-link.ts` (`./auth-link/client`):
+  link sign-in, a `DeltaAuth` with its routes, a `LinkStore` (`sqliteLinkStore`) and the page's side.
 - `src/server/file.ts`: how `registerDoc` and `./json` keep their file (a save whole or not
   at all: temp beside the real file, its mode, synced, renamed; stale temps cleared at start).
 - `src/server/local.ts`: `createLocal()`, delta in-process with no socket.
@@ -150,7 +158,8 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
 - `src/server/logger.ts`: a copy of railroad's `logger.ts`, so a server needs no railroad (an
   optional peer only the client imports); `tests/server.test.ts` fails when the two differ.
 - `src/server/auth.ts`: the `DeltaAuth` contract (`wireAuth`, `upgradeWithAuth`).
-- `cli.ts`: `bunx @blueshed/delta` (open, watch, delta, call, migrate, install-skills;
+- `cli.ts`: `bunx @blueshed/delta` (open, watch, delta, call, migrate, migrations make, link,
+  install-skills;
   install-skills copies `@blueshed/*` skills and the packages `claudeSkills` names; migrate takes
   a SQLite file, and sends a `postgres://` URL or a folder to `dzql migrate`). The runtime
   commands take `--token` / `DELTA_TOKEN` and `--json` for an agent; `tests/cli.test.ts` runs them.
@@ -160,7 +169,8 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
 - `src/testing.ts` (`./testing`): `mockClient`, `sendAndAwait`, `waitFor` (`src/cases/support.ts`),
   `pointerVectors` and `walkVectors` (the pointer grammar and the walk guard as data,
   `src/*-vectors.json`, for dzql to answer), and the case suite every backend answers alike, for
-  delta's tests and dzql's: `src/cases/` (`path`, `law`, `owns`, `isolation`, `writes`). delta's
+  delta's tests and dzql's: `src/cases/` (`path`, `law`, `owns`, `permissions`, `isolation`,
+  `writes`, `migrations`, `link-store`). delta's
   own tests import it as `@blueshed/delta/testing`, as a consumer would; what is a backend's own
   (SQLite's adapters, the stand-ups in `tests/helpers/case-backends.ts`) stays beside the tests.
   `createLocal()` is the lighter harness for SQLite and the kinds.
@@ -169,14 +179,14 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
 
 ## Notes
 
-- `todo.jsonl` holds what is still open, one JSON object per line (`n, status, severity, area,
-  file, summary, detail, note`, as eta's). Add to it; the CHANGELOG records what is fixed.
+- `todo.jsonl` holds what is open, one JSON object per line (`n, status, severity, area, file,
+  summary, detail, note`). An item settled is marked `fixed` with its entry in the CHANGELOG, and
+  leaves at the next release. Code comments cite only open items.
 
 ## In a remote container
 
 Claude Code on the web runs in an ephemeral container. `.claude/hooks/session-start.sh`
-provisions it when `CLAUDE_CODE_REMOTE=true`: the latest Bun, `bun install`, and
-`scripts/setup-webview.sh` if one is added. By hand, the same is
+provisions it when `CLAUDE_CODE_REMOTE=true`: the Bun CI pins, then `bun install`. By hand, the same is
 `CLAUDE_CODE_REMOTE=true .claude/hooks/session-start.sh`; it is idempotent. The gate, `bun run ci`,
 runs there as it does locally: no database server, no Docker. Nothing in the container survives
 reclamation: commit what is worth keeping.

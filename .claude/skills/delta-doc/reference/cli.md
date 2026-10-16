@@ -36,6 +36,7 @@ bunx @blueshed/delta call  <method> ['<paramsJSON>']
 ## Migrations
 
 ```bash
+bunx @blueshed/delta migrations make src/db.ts --name quantity   # the next migration, from the schema
 bunx @blueshed/delta migrate app.db --app leave --status   # which ran, which are pending
 bunx @blueshed/delta migrate app.db --app leave             # run them
 ```
@@ -45,6 +46,15 @@ bunx @blueshed/delta migrate app.db --app leave             # run them
   `--dir` is the migrations folder (default `./migrations`); `--app` the app whose list it is
   (default none); `--json` prints the answer as a line. Run it with the app stopped, or let the
   app run them at start-up (`migrations.md`).
+
+## Sign-in
+
+```bash
+bunx @blueshed/delta link app.db 1   # a link to sign in as person 1: the first person's, on the server
+```
+
+- `--origin` names the site (else `ORIGIN`, else Railway's domain); `--opens` a page the link
+  opens at. Postgres's is `dzql link` (`auth.md`).
 
 ## Skills for Claude Code
 

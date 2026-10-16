@@ -37,8 +37,8 @@ async function main() {
   console.log(`delta server up on ${srv.wsUrl}  (DB: ${DB_PATH})`);
 
   // Two independent WS clients — each gets its own reconnecting socket and
-  // its own `openDoc` state. Per-client is a 0.4.0 feature; see
-  // reference.md → "Client-side tests and one-shot scripts".
+  // its own `openDoc` state (the skill's reference/testing.md, "Driving the
+  // client from Bun").
   const alice = connectWs(srv.wsUrl);
   const bob   = connectWs(srv.wsUrl);
 

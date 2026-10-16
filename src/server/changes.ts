@@ -1,5 +1,5 @@
 /**
- * Migrations as a history from empty (the Django way; Workshop's docs, delta todo #82): each
+ * Migrations as a history from empty (the Django way): each
  * migration a list of changes -- a table made, a column added, renamed or dropped -- that every
  * backend knows how to make (SQLite here, Postgres in dzql). Folded in order, the changes are the
  * tables the history leads to (`stateOf`); what the definitions say beyond them (`diff`) is the

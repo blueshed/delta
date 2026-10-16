@@ -1,5 +1,5 @@
 /**
- * The law over generated writes (todo #27). The shared cases
+ * The law over generated writes. The shared cases
  * (`./path.ts`) ask the law after writes someone thought of; this
  * asks it after writes nobody chose. A seeded driver opens a mix of the path's
  * documents -- single, list, implied, a time in the name, custom, a scope by
@@ -19,7 +19,7 @@
  *   the same store, holding nothing open) reads from the tables, at the same
  *   version; and a few copies opened again from the writing server, while the
  *   other watcher holds them, read the same: a copy the server keeps that has
- *   gone stale is found (todo #64's class);
+ *   gone stale is found;
  * - across backends, the same answers (an error's code; a write's ops; a walk's
  *   ops and conflict), the same told to each watcher, and the same documents.
  *
@@ -91,7 +91,7 @@ export function hearing(): { local: ReturnType<typeof createLocal>; heard: Told[
 /** SQLite's registrations, on a database or a JSON file: the private set, and the public one with auth. The first's handle. */
 function registerOn<H>(register: (ws: any, docs: any[], custom: any[], opts: any) => H, ws: any): H {
   const first = register(ws, pathDocs, [sqliteInbox, sqliteMenuCard], { ledger: true });
-  register(ws, pathPublicDocs, [], { ledger: true, auth, owns: pubOwns });   // undone as on Postgres, where every write is kept
+  register(ws, pathPublicDocs, [], { ledger: true, auth, owns: pubOwns });   // undone, where every write is kept
   return first;
 }
 
@@ -414,7 +414,7 @@ function catchUp(p: Place, me: Me, doc: string, copy: Copy): boolean {
  * null (or, a custom one, was let go), and is opened again once it is. Then a
  * few copies are opened again, as their watcher, while the other keeps the
  * document open: what the writing server answers from what it keeps must be
- * what the tables say (todo #64's class). Answers every document as read (null: not there).
+ * what the tables say. Answers every document as read (null: not there).
  */
 async function law(p: Place, copies: Copies, reopen: [number, number][]): Promise<Record<string, any>> {
   await p.quiet();

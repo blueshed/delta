@@ -1,9 +1,8 @@
 /**
- * Migrations: the changes to a database a schema cannot say -- a column
- * renamed or dropped, a table renamed, data moved -- run once each, in order,
- * at start-up, before the schema's own `createTables` / `migrateSchema` (or
- * `generateSql`) add what it declares. SQLite's `migrate` (`./sqlite`) is
- * this runner over its database; dzql builds Postgres's on it (`./backend`).
+ * The migration runner: an app's history of migrations, each run once, in
+ * order, at start-up -- each one's changes (`./changes.ts`) and then its `up`,
+ * in one transaction. SQLite's `migrate` (`./sqlite`) is this runner over its
+ * database; dzql builds Postgres's on it (`./backend`).
  *
  * - Migrations belong to an app (`app`, default ""): several apps may share a
  *   database, each its own list, and an id is one app's.

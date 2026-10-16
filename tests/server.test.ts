@@ -52,7 +52,7 @@ describe("createWs", () => {
   });
 
   // A WebSocket is not bound by the same-origin policy: without a check, any
-  // page a signed-in person visits could open a socket as them (todo #31).
+  // page a signed-in person visits could open a socket as them.
   describe("the Origin check on upgrade", () => {
     function mockServer() {
       const upgraded: Request[] = [];
@@ -243,7 +243,7 @@ describe("normalizeForBroadcast", () => {
     ]);
   });
 
-  test("registerDoc broadcasts the ops as applied: what changed, a field by itself (todo #69)", async () => {
+  test("registerDoc broadcasts the ops as applied: what changed, a field by itself", async () => {
     const tmpFile = `/tmp/railroad-test-normalize-${Date.now()}.json`;
     const ws = createWs();
     const published: any[] = [];
@@ -1002,7 +1002,7 @@ describe("persist queue", () => {
 });
 
 // ---------------------------------------------------------------------------
-// todo #5: createWs handles a socket's messages side by side, so an `open`
+// createWs handles a socket's messages side by side, so an `open`
 // sent straight after `authenticate`, without waiting for its answer, was
 // handled while the authentication still ran, and 401'd. A call that changes
 // who the socket is (every action wireAuth wires) now holds that socket's

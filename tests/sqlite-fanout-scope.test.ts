@@ -184,7 +184,7 @@ describe("fanOut — parent-FK scope check (issue.md)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// An included collection with no parent (todo #2). It has no key to the root,
+// An included collection with no parent. It has no key to the root,
 // so nothing ties a row of it to one document: it is loaded in full, as the
 // Postgres backend loads it (`_delta_load_collection`, no parent). Open, the
 // fan-out and `loadDocAt` must agree on that.

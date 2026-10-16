@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The documents say what delta is now.** README, the skill (SKILL.md, `postgres.md`, `cli.md`,
+  `migrations.md`, `testing.md`) and CLAUDE.md teach migrations from empty, link sign-in and
+  `owns` as a path; `delta migrations make` and `delta link` are in the CLI page. Comments no
+  longer say delta has a Postgres backend, nor cite another repo's functions or closed ledger
+  items; `package.json` describes delta without Postgres. The session-start hook installs the Bun CI
+  pins, and `todo.jsonl` holds only what is open.
+
 ## [1.2.0] - 2026-10-16
 
 ### Added

@@ -2,7 +2,7 @@
 
 `bun add @blueshed/delta @blueshed/railroad` (the client needs railroad), then these four files.
 No database to run, no fetch, no codegen. `tests/recipe.test.ts` runs them as written, so keep
-the headings and blocks exact (over 400 words because it is four whole files).
+the headings and blocks exact.
 
 ### `types.ts`
 

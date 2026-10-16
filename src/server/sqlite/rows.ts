@@ -140,7 +140,7 @@ export function insertCollectionRow(
   fullRow.id = id;   // the path names the row, whatever the value says
 
   // A single-mode document's direct child hangs from its root; any other row
-  // names its parent (a grandchild, a list-mode document's rows), as on Postgres.
+  // names its parent (a grandchild, a list-mode document's rows).
   if (table.parent) {
     if (!list && table.parent.collection === def.root) {
       fullRow[table.parent.fkColumn] = rootId;
@@ -156,7 +156,7 @@ export function insertCollectionRow(
   if (table.temporal) db.run(`DELETE FROM ${q(table.name)} WHERE id = ? AND valid_from = ? AND valid_to = ?`, [id, ts, ts]);
   insertRow(db, table, fullRow, ts);
 
-  // The row read back, as Postgres's RETURNING gives it: as it is kept (a
+  // The row read back: as it is kept (a
   // scope's "10" in a text column is "10"), its columns in the table's order --
   // so a row told of an add, the ledger's entry, and the same row read again
   // (by an undo's guard and inverse, a redo, a reopen) are the same row, keys,
@@ -172,10 +172,8 @@ export function insertCollectionRow(
  *
  * A temporal row is otherwise updated by closing the old version and inserting a new one
  * — the composite `(id, valid_from)` key keeps both. A non-temporal table has
- * `id` as its whole primary key, so that same insert collides: replaces against
- * one used to fail with `UNIQUE constraint failed`, making non-temporal rows
- * unupdatable. UPDATE rather than DELETE+INSERT (which is what the Postgres
- * backend does) so the row is never briefly absent.
+ * `id` as its whole primary key, so that same insert would collide. UPDATE,
+ * never DELETE+INSERT, so the row is never briefly absent.
  */
 export function updateRow(db: any, table: ResolvedTable, id: string | number, row: any) {
   const cols: string[] = [];

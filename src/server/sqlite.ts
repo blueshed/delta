@@ -60,7 +60,7 @@ export { exportTables, importTables } from "./sqlite/carry";
  * and answer at once, no await. A membership `query` runs once per doc name
  * and identity (the gate's, with `auth`; undefined without), and its result is
  * kept for the subscribers of that name who are that identity -- never
- * another's, as on Postgres. SQLite has no RLS: check the rows against the
+ * another's. SQLite has no RLS: check the rows against the
  * identity here. A `recompute` reads the WHOLE doc, on open and on any write
  * to a watched collection, and sends it to each subscriber as a root-replace
  * op -- for nested, joined or aggregated reads a per-row `matches` can't
@@ -84,7 +84,7 @@ const log = createLogger("[delta-sqlite]");
 /**
  * The prefixes each `registerDocs` on a server answers, by registration. A
  * name is answered by the registration whose prefix matching it is longest --
- * as within one registration, and as on Postgres -- whichever registered
+ * as within one registration, and -- whichever registered
  * first: `fo-board` (a public registration) never answers `fo-board:1` beside
  * a registration of `fo-board:`. A prefix two registrations both claim would
  * leave the name to the order they registered in, so the second is refused.
@@ -93,9 +93,8 @@ const registrations = new WeakMap<object, Map<symbol, string[]>>();
 
 /**
  * One registration's open documents, as a write through any registration on
- * its database handle tells them (todo #64): every document open on the
- * database hears a write, whichever registration it was opened through -- as
- * every Postgres listener does.
+ * its database handle tells them: every document open on the
+ * database hears a write, whichever registration it was opened through.
  */
 type Fanout = {
   /** The documents open here (and `writer`, the one written through) that hold `row` of `coll`. */
@@ -114,7 +113,7 @@ const fanoutsOn = new WeakMap<object, Set<Fanout>>();
  * over the database -- and what it is now (null: gone); a replace's, what it was
  * (`was`), so a document that holds it either way is told only the fields that
  * changed. A `carried` row is one the write did not change but moved, under a
- * parent it moved: it is told only where it arrives or leaves (todo #62).
+ * parent it moved: it is told only where it arrives or leaves.
  */
 type Touched = { coll: string; id: string | number; before: Map<Fanout, string[]>; after: any | null; was?: any; carried?: boolean };
 
@@ -153,7 +152,7 @@ export interface RegisterOptions<I = unknown> {
   /** Called after every change that committed -- a write, an undo or redo, a walk recorded as skipped: the JSON file saves itself from it. */
   committed?: () => void;
   /**
-   * An auth module (`DeltaAuth`), as the Postgres listener takes it: every
+   * An auth module (`DeltaAuth`): every
    * open, delta, open_at, history, undo, redo and close of these documents
    * passes `auth.gate(client)` first (401 without an identity), and the
    * identity it gives is who writes (the ledger's `who`, the cursor) and who a
@@ -203,7 +202,7 @@ export function registerDocs<I = unknown>(
     const g = auth!.gate(client);
     return isAuthError(g) ? { error: { code: 401, message: g.error } } : { identity: g };
   };
-  /** Who is writing: with `auth` the gate's identity, else the one the client carries -- as the Postgres listener's writerOf. */
+  /** Who is writing: with `auth` the gate's identity, else the one the client carries --. */
   const writerOf = (client: any): I | undefined => {
     if (!auth) return client?.data?.identity as I | undefined;
     const g = gated(client);
@@ -229,7 +228,7 @@ export function registerDocs<I = unknown>(
   // In-memory doc cache: docName → loaded doc object
   const cache = new Map<string, any>();
 
-  // Several processes on one file (todo #1): a copy read before another
+  // Several processes on one file: a copy read before another
   // connection committed is stale, and a write merged over one would put back
   // what the other wrote. `PRAGMA data_version` moves when another connection
   // commits (never for this one's own writes), so before a copy is served or
@@ -257,7 +256,7 @@ export function registerDocs<I = unknown>(
   const underLock = (handler: (msg: any, client: any, respond: (r: any) => void) => void) =>
     (msg: any, client: any, respond: (r: any) => void) => db.transaction(() => handler(msg, client, respond)).immediate();
 
-  /** Who a client is, to a custom document: the gate's identity with `auth`, else undefined -- as on Postgres. */
+  /** Who a client is, to a custom document: the gate's identity with `auth`, else undefined --. */
   const identityOf = (client: any): I | undefined => (auth ? writerOf(client) : undefined);
 
   /** An answer that may come later: `go` once `ok` says yes (awaited when it is a promise), else 404 -- not there for this identity. */
@@ -270,7 +269,7 @@ export function registerDocs<I = unknown>(
   /**
    * With `auth`, a handler for one of these documents asks the gate first
    * (401 without an identity) and then the document's `owns` (404 when it says
-   * no; a shared one has none) -- the Postgres listener's withDoc. `owned:
+   * no; a shared one has none). `owned:
    * false` for close: letting go never needs the owner's say. `gatesCustom: false`
    * where a custom document answers without the gate (a write: 403; a close).
    */
@@ -352,7 +351,7 @@ export function registerDocs<I = unknown>(
     const rootTable = schema.tables[def.root]!;
     const root = doc[def.root];
     if (db.query(`SELECT 1 FROM ${current(rootTable)} WHERE id = ?`).get(root.id)) return;
-    if (handedOut(rootTable, root.id)) taken(def.root, root.id);   // made under the add rule (#71), as on Postgres
+    if (handedOut(rootTable, root.id)) taken(def.root, root.id);   // made under the add rule (#71)
     const ts = now();
     if (rootTable.temporal) { root.valid_from = ts; root.valid_to = null; }
     insertRow(db, rootTable, root, ts);
@@ -382,7 +381,7 @@ export function registerDocs<I = unknown>(
   const heldBy = (coll: string, row: any, writer: string): Touched["before"] =>
     new Map([...fanouts].map((f) => [f, f.holders(coll, row, f === me ? writer : undefined)]));
 
-  /** The definition a name belongs to: the longest prefix it starts with, as Postgres's `_delta_find_doc`. */
+  /** The definition a name belongs to: the longest prefix it starts with. */
   function findDoc(docName: string): { def: DocDef; docId: string } | null {
     let found: DocDef | undefined;
     for (const [prefix, def] of docByPrefix) {
@@ -446,7 +445,7 @@ export function registerDocs<I = unknown>(
   /**
    * The id of the `root` row that `row` (of `coll`) hangs from, following parent
    * keys up through the tables as they stand; null when the chain does not
-   * reach `root`. The twin of Postgres's `_delta_chain_root`.
+   * reach `root`.
    */
   function chainRoot(coll: string, row: any, root: string): unknown {
     if (coll === root) return row.id;
@@ -467,7 +466,7 @@ export function registerDocs<I = unknown>(
   /**
    * Does the document (`def`, read by `scope`) hold `row` of `coll`? Judged on
    * the row's values, so a row as it was before a write is judged as well as
-   * one as it is after -- Postgres's `_delta_doc_holds`.
+   * one as it is after.
    */
   function holds(def: DocDef, scope: Scope, coll: string, row: any): boolean {
     if (!row) return false;
@@ -582,7 +581,7 @@ export function registerDocs<I = unknown>(
 
   /**
    * An id a write named moves its collection's sequence past it, never back, so a later `add /<coll>/-` does not
-   * meet it (#72) -- Postgres's `_delta_serial_past`. As there, once the write is done (`passNamed`), so a
+   * meet it (#72). As there, once the write is done (`passNamed`), so a
    * write refused part way names none, and a `-` in the write after a named add takes the serial as it stood
    * (#71). A collection with no sequence yet starts one, from the largest id it holds, as `nextId` would, so
    * the id stays passed once its row is gone, as setval's does.
@@ -614,7 +613,7 @@ export function registerDocs<I = unknown>(
   // rows by bare id, so a client holding `customer:alice` could name a row of
   // `customer:bob` and reach it. Every row-addressed write asks `held` (in
   // applyOps): the row as the tables stand at that point in the write, judged by
-  // the rule a document is read by (`holds`), as Postgres asks
+  // the rule a document is read by (`holds`)
   // `_delta_row_in_scope` -- so a row that left the document earlier in the same
   // write is not its to write. A row added, or moved by a parent key written, goes
   // only under a parent the document holds (`parentHeld`; one of a collection it
@@ -640,7 +639,7 @@ export function registerDocs<I = unknown>(
 
     /**
      * The row of `table` the document holds, as the tables stand at this point
-     * in the write -- Postgres's `_delta_row_in_scope`: you may write what you
+     * in the write: you may write what you
      * may read. A row that has left the document earlier in the write (moved
      * to another parent, out of a list's condition, its parent gone) is not its
      * to write for the rest of it; null when it is not there or not the document's.
@@ -656,8 +655,7 @@ export function registerDocs<I = unknown>(
      * they come and written when the run ends -- one write of the row, one
      * answer, one entry and one telling of the run's net change. Every other op
      * ends the run first, so the ops still land in the order sent; nothing
-     * between them could see the row part-way. Postgres's `delta_apply` answers
-     * such a run once too.
+     * between them could see the row part-way.
      */
     let run: { table: ResolvedTable; id: string | number; root: boolean; key: string; before: Touched["before"]; was: any; row: any } | undefined;
 
@@ -666,7 +664,7 @@ export function registerDocs<I = unknown>(
      * closed and the write's inserted (or, once the write has made it, that
      * version rewritten); else one in-place UPDATE (`id` is the whole PK there,
      * so a reinsert would collide). The row is read back as it is kept (a parent
-     * key's "5" is 5), as Postgres's RETURNING gives it, and told as it lands.
+     * key's "5" is 5), and told as it lands.
      */
     const endRun = () => {
       if (!run) return;
@@ -693,17 +691,17 @@ export function registerDocs<I = unknown>(
 
     /**
      * A parent a row may not go under: not there, or not the document's (404) -- or, named by text that is
-     * no number, a mistake (400), as Postgres refuses to cast it. (A text id SQLite keeps is there.)
+     * no number, a mistake (400). (A text id SQLite keeps is there.)
      */
     const noParent = (coll: string, id: unknown): never =>
       typeof id === "string" && !/^\s*[+-]?\d+\s*$/.test(id)
         ? refuse(400, `${coll} "${id}" names no row: an id is a whole number`)
         : refuse(404, `Row not found: ${coll}/${id ?? ""}`);
 
-    /** Is row `id` of `coll` there now? A parent a row is added or moved under must be -- Postgres's `_delta_row_there`. */
+    /** Is row `id` of `coll` there now? A parent a row is added or moved under must be. */
     const there = (coll: string, id: unknown): boolean => readRow(schema.tables[coll]!, rowId(id as string | number)) != null;
 
-    // Does a parent the document does not include hang from its root? Asked of the tables (todo #32).
+    // Does a parent the document does not include hang from its root? Asked of the tables.
     const reaches = (coll: string, id: unknown): boolean => {
       const parent = readRow(schema.tables[coll]!, rowId(id as string | number));
       return !!parent && sameId(chainRoot(coll, parent, def.root), rootId);
@@ -722,7 +720,7 @@ export function registerDocs<I = unknown>(
      * of a map -- as the op says, into the run of that row. The path names the
      * row, so `id` and the temporal columns in a value are not taken from it.
      * A replace of the row itself (`whole`) is the row, as RFC 6902 says: a
-     * column its value leaves out holds what an add would give it (todo #3);
+     * column its value leaves out holds what an add would give it;
      * its parent key, where it hangs, stays unless the value names another.
      */
     const replaceRow = (table: ResolvedTable, id: string | number, fields: Record<string, unknown>, root: boolean, whole = false) => {
@@ -756,7 +754,7 @@ export function registerDocs<I = unknown>(
       // A list's root row written through the list stays in its scope, as an
       // add through it is given its bindings: a field, a row or a merge that
       // takes it out -- into another owner's list by its key, or out of a
-      // condition -- is refused, and the write undone (todo #6's review). So
+      // condition -- is refused, and the write undone. So
       // does a single document's root, out of the rest of its name's scope
       // (a seat of fo-seat-of:1:3 to table 7; 0.10.0 review).
       if (((list && collKey === def.root) || root) && !holds(def, scope, collKey, run.row)) {
@@ -764,7 +762,7 @@ export function registerDocs<I = unknown>(
       }
     };
 
-    // Each op lands in the order sent, as on Postgres: a field written and then
+    // Each op lands in the order sent: a field written and then
     // its row removed is written first, and a row removed is not there for an
     // op after it.
     for (const op of ops) {
@@ -794,7 +792,7 @@ export function registerDocs<I = unknown>(
       // A single-mode document's root is one row, held at /<root>.
       const isRoot = !list && collKey === def.root;
 
-      // /<root>/<id> and /<root>/<id>/<field> name it by its id, as on Postgres
+      // /<root>/<id> and /<root>/<id>/<field> name it by its id
       // and as a list document would say it: a replace of it, or of one field.
       // It holds no other root row, so another id is not found.
       if (isRoot && op.op === "replace" && (parts.length === 3 || (parts.length === 2 && namesRootRow(table!, parts[1]!, rootId)))) {
@@ -825,16 +823,16 @@ export function registerDocs<I = unknown>(
       }
 
       if (parts.length === 2) {
-        // A single document removes the root it is named for, as on Postgres,
+        // A single document removes the root it is named for,
         // with the rows it holds under it, and an undo adds it back, then them.
         // It holds no other root row, so another is not its to remove (404) or
-        // add (400; Postgres adds it, and the document does not hold it).
+        // add (400).
         if (isRoot && (parts[1] === "-" || !sameId(rowId(parts[1]!), rootId))) {
           if (op.op === "remove") refuse(404, `Row not found: ${collKey}/${parts[1]}`);
           refuse(400, `${docName} holds ${collKey} ${rootId} alone: add another ${collKey} row through a document that lists them`);
         }
-        // `add /<coll>/-` is a new row the store names: the next serial, as
-        // Postgres takes nextval -- carried by the broadcast path and the row.
+        // `add /<coll>/-` is a new row the store names: the next serial,
+        // carried by the broadcast path and the row.
         const mint = op.op === "add" && parts[1] === "-";
         const id = mint ? nextId(table) : rowId(parts[1]!);
         if (op.op === "add") {
@@ -852,7 +850,7 @@ export function registerDocs<I = unknown>(
           const named = !mint && !walk && !touched.some((t) => t.coll === collKey && sameId(t.id, id));
           if ((named && handedOut(table, id)) || db.query(`SELECT 1 FROM ${current(table)} WHERE id = ?`).get(id)) taken(collKey, id);
           const row = { ...((op as any).value as Record<string, unknown>) };
-          // A list-mode document's root row is given its scope's equality bindings, as on Postgres:
+          // A list-mode document's root row is given its scope's equality bindings:
           // each as its column takes the name's text (a boolean's "0" is false), and the row is read back.
           if (list && collKey === def.root) for (const [col, text] of Object.entries(scope.values)) row[col] = scopeValue(table, col, text);
           // A DIRECT child's FK is forced to `rootId` by insertCollectionRow, but a
@@ -875,7 +873,7 @@ export function registerDocs<I = unknown>(
           // A root row added through a document is one it holds: a list's, given
           // its bindings, meets the rest of its conditions too, and a single
           // document's own root added back the whole of its name's scope -- else
-          // refused, and the write undone (0.10.0 review, todo #66).
+          // refused, and the write undone (0.10.0 review).
           if (((list && collKey === def.root) || isRoot) && !holds(def, scope, collKey, fullRow)) {
             refuse(404, `Row not found: ${collKey}/${id} -- the add is not one ${docName} holds`);
           }
@@ -927,7 +925,7 @@ export function registerDocs<I = unknown>(
 
   /**
    * What each document that held or holds a row the write changed is told, the
-   * writer's first -- Postgres's `_delta_tell`: a row that arrives is an add,
+   * writer's first: a row that arrives is an add,
    * one that stays a replace of each field that changed (none: nothing), one
    * that leaves a remove; where the row is the document's root, a replace of the
    * root when it arrives (null when it leaves -- or, for an implied document,
@@ -938,7 +936,7 @@ export function registerDocs<I = unknown>(
    * touches twice: who holds the row after a touch is who held it at its next,
    * and after its last, who holds it once the write is done. A row made and
    * then taken out (a drink, with its course) is told its add wherever its
-   * remove is told, never a remove alone (todo #75). `_delta_tell` keeps the same.
+   * remove is told, never a remove alone. `_delta_tell` keeps the same.
    */
   function tell(writer: string | undefined, touched: Touched[]): Map<string, DeltaOp[]> {
     const rows = touched.map((t) => ({ ...t, before: t.before.get(me) ?? [], now: [] as string[] }));
@@ -962,7 +960,7 @@ export function registerDocs<I = unknown>(
         if ((!was && !is) || (t.carried && was && is)) continue;
         const root = single && t.coll === m.def.root;
         const path = root ? joinPath(t.coll) : joinPath(t.coll, String(t.id));
-        const show = (row: any) => showRow(m.def, schema, t.coll, row);   // the columns it holds (todo #70)
+        const show = (row: any) => showRow(m.def, schema, t.coll, row);   // the columns it holds
         if (was && is) ops.push(...changedFields(path, show(t.was), show(t.after)));
         else if (is) ops.push({ op: root ? "replace" : "add", path, value: show(t.after) });
         else ops.push(root ? { op: "replace", path, value: m.def.implied ? show(emptyDoc(m.def, m.docId)[m.def.root]) : null } : { op: "remove", path });
@@ -1010,7 +1008,7 @@ export function registerDocs<I = unknown>(
     subscriptions.get(docName)!.add(client);
     onClientDrop(client, releaseClient);
 
-    // with a ledger, the version the document is at, as the Postgres backend's open says it (`_v`),
+    // with a ledger, the version the document is at (`_v`),
     // so a copy kept from the stream of changes knows where it starts; its rows as it shows them
     // (the copy kept here is whole: what undo and the inverse read)
     const shown = showDoc(match.def, schema, doc, resolveScope(match.def, match.docId).mode === "single");
@@ -1110,7 +1108,7 @@ export function registerDocs<I = unknown>(
     // not roll back (the write is durable) nor masquerade as a write error.
     try {
       // Every document that held or holds a row the write changed is told what
-      // changed for it (todo #28) -- the writer's own first, with the version
+      // changed for it -- the writer's own first, with the version
       // its write made; each other, with a version of its own. Through
       // `createLocal().onPublish`, the one stream of changes an in-process
       // caller (eta) redraws from.
@@ -1128,7 +1126,7 @@ export function registerDocs<I = unknown>(
    * Tell the documents open here what a write changed (`writer`: the one
    * written through, if it is this registration's), and the custom documents
    * that watch its rows. Every document that held or holds a row the write
-   * changed is told what changed for it (todo #28) -- the writer's own first,
+   * changed is told what changed for it -- the writer's own first,
    * with the version its write made; each other, with a version of its own.
    * Through `createLocal().onPublish`, the one stream of changes an in-process
    * caller (eta) redraws from.
@@ -1137,7 +1135,7 @@ export function registerDocs<I = unknown>(
     const changes: { name: string; change: Record<string, unknown> }[] = [];
     for (const [name, tOps] of tell(writer?.name, touched)) {
       if (name === writer?.name) {
-        // a write that changed nothing tells nothing, and made no version (as on Postgres)
+        // a write that changed nothing tells nothing, and made no version
         if (applied.length > 0) changes.push({ name, change: { doc: name, ops: tOps, ...(writer.version !== undefined ? { v: writer.version } : {}) } });
       } else if (tOps.length > 0) {
         const v = ledger?.bump(name);   // numbered as committed, told in that order
@@ -1147,7 +1145,7 @@ export function registerDocs<I = unknown>(
       if (cache.has(name) || name === writer?.name) refresh(name);
     }
     inOrder(() => {
-      // With auth, only to those who may still hear each document (todo #17's rule).
+      // With auth, only to those who may still hear each document.
       const asked = auth ? [...changes.map(({ name }) => custom.letGo(name, subscriptions.get(name), ownsOf(name), { dropped: () => unheld(name) })), custom.letGoWatching(applied)] : [];
       const publish = () => {
         for (const { name, change } of changes) ws.publish(name, change);
@@ -1187,7 +1185,7 @@ export function registerDocs<I = unknown>(
     reloadEvicted();
     const doc = cache.get(docName);
     if (!doc) {
-      // a name its root's columns cannot take is the writer's mistake (400), as on Postgres, before it is a document not open
+      // a name its root's columns cannot take is the writer's mistake (400), before it is a document not open
       try { whereOf(resolveScope(match.def, match.docId), keeping(db, schema.tables[match.def.root]!)); }
       catch (err: any) { if (typeof err.code === "number") return respond({ error: { code: err.code, message: err.message } }); }
       respond({ error: { code: 404, message: `Doc not loaded: open ${docName} before writing to it` } });
@@ -1265,7 +1263,7 @@ export function registerDocs<I = unknown>(
       heardElsewhere();
       reloadEvicted();   // a walk is a write: its fan-out needs every open doc's copy, as delta's does
       // a single document whose root is gone (removed through it) is walked from
-      // its root absent, as Postgres reads it: an undo of the removal puts it back
+      // its root absent: an undo of the removal puts it back
       const doc = load(entry.doc, match.def, match.docId) ?? rootless(match.def, match.docId);
       try {
         // an implied document whose root row is not written yet holds no root to guard
@@ -1283,7 +1281,7 @@ export function registerDocs<I = unknown>(
           return row ? [{ coll: coll!, row }] : [];
         });
         const plan = planWalk({ ops: inUtc(entry.ops), inverse: inUtc(entry.inverse) }, besides(implied.has(entry.doc) ? { ...doc, [match.def.root]: null } : doc, outside), under);
-        const show = (ops: DeltaOp[]) => showOps(match.def, schema, ops);   // as the document shows them (todo #70)
+        const show = (ops: DeltaOp[]) => showOps(match.def, schema, ops);   // as the document shows them
         if (msg.dry) return respond({ result: { doc: entry.doc, entry: entry.id, ops: show(plan.ops), ...(plan.conflict.length ? { conflict: plan.conflict } : {}) } });
         const by = { who: whoOf(client), cursor, as: identityOf(client) };
         const out = plan.conflict.length || !plan.ops.length ? null : write(entry.doc, match.def, doc, plan.ops, { ...by, undoes: entry.id });
@@ -1303,7 +1301,7 @@ export function registerDocs<I = unknown>(
     };
     /**
      * With `auth`, a walk passes the gate (401) and writes to its entry's
-     * document only for one who owns it (404), as on Postgres: asked of the
+     * document only for one who owns it (404): asked of the
      * cursor's next entry, which the walk then takes alone (409 if it has
      * moved on meanwhile).
      */
@@ -1334,7 +1332,7 @@ export function registerDocs<I = unknown>(
     }));
   }
 
-  // A document as it stood at a time (`at`, ISO-8601): its temporal rows as they were then, as on Postgres.
+  // A document as it stood at a time (`at`, ISO-8601): its temporal rows as they were then.
   ws.on("open_at", guarded((msg, _client, respond) => {
     const match = findDoc(msg.doc as string);
     if (!match) return;
@@ -1412,7 +1410,7 @@ function toldAt(path: string): string {
  *
  * A row the write makes and takes out again never was outside it: its make,
  * and what it had since, walk back nothing, and its removal adds nothing back
- * -- `[add, remove]` inverts to `[]`, `[add, remove, add]` to `[remove]` (todo #67).
+ * -- `[add, remove]` inverts to `[]`, `[add, remove, add]` to `[remove]`.
  */
 export function inverseOf(before: any, applied: DeltaOp[], asked?: DeltaOp[]): DeltaOp[] {
   const heads = asked && new Set(asked.filter((op) => op.op === "remove").map((op) => toldAt(op.path)));
@@ -1436,7 +1434,7 @@ export function inverseOf(before: any, applied: DeltaOp[], asked?: DeltaOp[]): D
       inverse = inverse.filter((back) => !since.has(back));
       continue;
     }
-    const prior = withoutStorage(rowAt(before, op.path)) ?? null;   // null: not there before the write (made by it), as Postgres says it
+    const prior = withoutStorage(rowAt(before, op.path)) ?? null;   // null: not there before the write (made by it)
     if (op.op === "remove") {
       if (heads?.has(op.path)) flush();   // a remove asked for starts its own run; one it cascaded to joins it
       run.push({ op: "add", path: op.path, value: prior });

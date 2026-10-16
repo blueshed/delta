@@ -19,6 +19,7 @@ export const changes = [addColumn("people", "short", "text?")];
 export const up = (db) => db.run("UPDATE people SET short = name");
 
 // start-up: the history, and only the history, makes the tables
+import { fromFolder, migrate } from "@blueshed/delta/sqlite";
 const result = await migrate(db, await fromFolder("migrations"), { app: "team", schema });
 // result.drift: what the definitions say beyond the history (empty: they agree)
 ```

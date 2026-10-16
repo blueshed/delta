@@ -111,7 +111,7 @@ describe("openDoc per-client state", () => {
 });
 
 describe("a broadcast leaves what changed fresh, and the rest as it was", () => {
-  test("the document and a collection's map keep their references; the row a field lands in is a new object, and so is a root a field of it is replaced in; a row left alone is the same (todo #69)", async () => {
+  test("the document and a collection's map keep their references; the row a field lands in is a new object, and so is a root a field of it is replaced in; a row left alone is the same", async () => {
     const url = startFakeDeltaServer({ settings: { theme: "dark" }, shapes: { s1: { x: 0, y: 0 }, s2: { x: 1, y: 1 } } });
     const client = connectWs(url);
     const doc = openDoc<{ settings: { theme: string }; shapes: Record<string, { x: number; y: number }> }>(
@@ -672,7 +672,7 @@ describe("onConnect: saying who you are before the docs re-open", () => {
     client.close();
   });
 
-  // todo #19: only the client onConnect is given skipped `ready`. One that
+  // Only the client onConnect is given skipped `ready`. One that
   // called through DI -- `call("authenticate", params)`, no client, as
   // everywhere else in a page -- sent through inject(WS), which waited for
   // `ready`, which waited for onConnect: it never connected, and said nothing.

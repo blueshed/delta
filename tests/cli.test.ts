@@ -1,5 +1,5 @@
 /**
- * The runtime CLI as an agent runs it (todo #11): a subprocess against a
+ * The runtime CLI as an agent runs it: a subprocess against a
  * server started here (SQLite in memory, a free-form document, the same
  * behind an auth module, and Postgres in process), read back as one JSON line
  * per event.

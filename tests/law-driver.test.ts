@@ -1,5 +1,5 @@
 /**
- * The law over generated writes (todo #27), run on SQLite and the JSON file at
+ * The law over generated writes, run on SQLite and the JSON file at
  * once: the driver is `src/cases/law.ts`, published in `@blueshed/delta/testing`
  * (dzql runs it with its Postgres place beside SQLite's).
  *
@@ -11,7 +11,7 @@ import { drive, lawSeeds, lawSteps, onJson, onSqlite } from "@blueshed/delta/tes
 
 setLogLevel("silent");
 
-describe("the law over generated writes (todo #27)", () => {
+describe("the law over generated writes", () => {
   for (const seed of lawSeeds) {
     test(`seed ${seed}: ${lawSteps} steps, the same on SQLite and the JSON file`, async () => {
       const places = [onSqlite(), onJson()];

@@ -1,5 +1,5 @@
 /**
- * Migrations as a history from empty (the Django way, todo #82), on SQLite: each migration a list of
+ * Migrations as a history from empty (the Django way), on SQLite: each migration a list of
  * changes every backend makes alike, folded into the tables the history leads to; the next one
  * written from what the definitions say beyond them; a new database made by running the history
  * from its first; one made the older way (from the schema at start-up) adopting it; and data moved

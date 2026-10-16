@@ -14,7 +14,7 @@ export function loadDocAt(db: any, schema: Schema, def: DocDef, docId: string, a
  * A document as its scope reads it from the tables -- as they stand, or as they
  * stood at `at` (SQLite's own time form; by default, the time in its name, `at:`): single mode, one root row and its
  * children; list mode, every root row the scope admits and each included
- * collection in full -- as Postgres's `delta_open` and `delta_open_at` read it.
+ * collection in full.
  */
 export function readDoc(db: any, schema: Schema, def: DocDef, scope: Scope, at = scope.at === undefined ? undefined : sqliteTime(scope.at)): any | null {
   const rootTable = schema.tables[def.root];
@@ -51,7 +51,7 @@ function readRows(db: any, table: ResolvedTable, where: string, params: any[], a
 /** A single document's rows of `table`, under its root row `rootId`, walking up the parent keys to it. */
 function readCollection(db: any, schema: Schema, table: ResolvedTable, def: DocDef, rootId: unknown, at?: string): any[] {
   // No parent: no key ties a row of it to one document. Included, it is
-  // loaded in full, as the Postgres backend loads it: every document of the
+  // loaded in full: every document of the
   // prefix holds every row, and the fan-out (holds) says the same.
   if (!table.parent) return readRows(db, table, "1 = 1", [], at);
   const fk = q(table.parent.fkColumn);
@@ -59,8 +59,7 @@ function readCollection(db: any, schema: Schema, table: ResolvedTable, def: DocD
   // Grandchild: its parent rows first, then the rows under them. A parent the
   // document need not include: its rows are walked all the same. One with no
   // parent of its own ends the chain short of the root, so nothing under it is
-  // in the document, as the fan-out's chainRoot (and Postgres's
-  // _delta_load_collection) judge it (todo #32).
+  // in the document, as the fan-out's chainRoot judges it.
   const parentTable = schema.tables[table.parent.collection];
   if (!parentTable?.parent) return [];
   const ids = readCollection(db, schema, parentTable, def, rootId, at).map((r: any) => r.id);

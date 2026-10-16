@@ -98,7 +98,7 @@ describe("createLocal", () => {
     expect(errors.every((e) => e.includes("fan-out failed (write committed)") && e.includes("a listener's own mistake"))).toBe(true);
   });
 
-  test("a message sent to one caller alone (a view of its own) is heard with who it went to, each listener its own copy; one that throws is logged and the rest still hear it (todo #6's review)", async () => {
+  test("a message sent to one caller alone (a view of its own) is heard with who it went to, each listener its own copy; one that throws is logged and the rest still hear it", async () => {
     const local = createLocal();
     local.server.on("open", (msg, client, respond) => {
       client.send(JSON.stringify({ doc: msg.doc, ops: [{ op: "replace", path: "", value: { me: client.data.identity ?? null } }] }));
@@ -341,7 +341,7 @@ describe("inverse", () => {
     expect(inverseOf(before, [...cascade], [{ op: "remove", path: "/p/01" }])).toEqual([...back]);
   });
 
-  test("rows a write makes and takes out again -- a parent, and the child its removal cascades to -- have no inverse; a row removed and made again keeps its own (todo #67)", () => {
+  test("rows a write makes and takes out again -- a parent, and the child its removal cascades to -- have no inverse; a row removed and made again keeps its own", () => {
     const before = { p: { 1: { id: 1 } }, c: {} };
     const asked = [{ op: "add", path: "/p/9", value: { id: 9 } }, { op: "add", path: "/c/9", value: { id: 9, p_id: 9 } }, { op: "replace", path: "/c/9", value: { id: 9, p_id: 9, x: 1 } }, { op: "remove", path: "/p/9" }] as const;
     expect(inverseOf(before, [...asked, { op: "remove", path: "/c/9" }], [...asked])).toEqual([]);

@@ -7,7 +7,7 @@ A document is never a poster on the wall. It's a conversation. Open it in two ta
 subscribed in both: a message typed in one reaches the other as it is sent, with nothing to poll,
 fetch or refresh, and the file keeps it for whoever opens the room next.
 
-This is the delta-doc skill's recipe (`SKILL.md`), with a little more page.
+This is the delta-doc skill's recipe (`reference/recipe.md`), with a little more page.
 
 ## Run
 

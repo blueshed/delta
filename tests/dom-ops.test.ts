@@ -147,7 +147,7 @@ describe("applyOpsToCollection", () => {
     expect((nodes.get("2") as unknown as MockNode).payload.name).toBe("new");
   });
 
-  test("a field told by itself (/coll/id/field) updates the row's node with the whole row, that field changed (todo #69)", () => {
+  test("a field told by itself (/coll/id/field) updates the row's node with the whole row, that field changed", () => {
     const parent = new MockNode();
     const updates: string[] = [];
     const col = makeCollection(updates);
