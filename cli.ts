@@ -524,19 +524,6 @@ function compareVersion(a: string, b: string): number {
 }
 
 // ---------------------------------------------------------------------------
-// delta migrate
-// ---------------------------------------------------------------------------
-
-/**
- * Run an app's migrations (`--dir`, default ./migrations, each `NNN-name.ts`
- * exporting `up`; `--app` names the app when apps share the database) against
- * its database, or with --status say which ran and which are pending. With no
- * schema to ask, an app with nothing recorded is new only to a database with
- * no table but delta's: the app's own start-up, given its schema, knows better.
- * The database: a SQLite file that is there (a name mistyped makes no new
- * database); Postgres is dzql's (`dzql migrate`).
- */
-// ---------------------------------------------------------------------------
 // delta migrations make
 // ---------------------------------------------------------------------------
 
@@ -600,6 +587,19 @@ async function cmdLink(target: string | undefined, person: string | undefined, v
   } finally { db.close(); }
 }
 
+// ---------------------------------------------------------------------------
+// delta migrate
+// ---------------------------------------------------------------------------
+
+/**
+ * Run an app's migrations (`--dir`, default ./migrations, each `NNN-name.ts`
+ * exporting `up`; `--app` names the app when apps share the database) against
+ * its database, or with --status say which ran and which are pending. With no
+ * schema to ask, an app with nothing recorded is new only to a database with
+ * no table but delta's: the app's own start-up, given its schema, knows better.
+ * The database: a SQLite file that is there (a name mistyped makes no new
+ * database); Postgres is dzql's (`dzql migrate`).
+ */
 async function cmdMigrate(target: string | undefined, values: Record<string, unknown>) {
   if (!target) usageError("migrate takes a <database>: a SQLite file (Postgres: dzql migrate)", true);
   const { setLogLevel } = await import("./src/server/logger");
