@@ -1,5 +1,5 @@
 /**
- * Two processes on one SQLite file (todo #1). Each serves the path's documents
+ * Two processes on one SQLite file. Each serves the path's documents
  * over the same file; a write in one waits for the other's lock rather than
  * failing, and neither serves a copy of a document read before the other
  * wrote -- nor writes from one, overwriting the other's change.

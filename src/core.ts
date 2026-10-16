@@ -202,7 +202,7 @@ function same(a: unknown, b: unknown): boolean {
  * What a holder of a row is told when the row stays in its document: a replace
  * of each field (`path` is the row's) whose value is not what it was, in field
  * order by name -- set by the write, a default or a trigger alike. None when
- * nothing changed. Every backend tells a row that stays so (todo #69).
+ * nothing changed. Every backend tells a row that stays so.
  */
 export function changedFields(path: string, was: Record<string, unknown>, now: Record<string, unknown>): DeltaOp[] {
   return Object.keys(now).toSorted().filter((f) => !same(was[f], now[f]))

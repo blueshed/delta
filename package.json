@@ -1,7 +1,7 @@
 {
   "name": "@blueshed/delta",
   "version": "1.2.0",
-  "description": "Delta-doc \u2014 JSON-Patch document sync with SQLite and Postgres backends, WebSocket transport, and reactive client signals",
+  "description": "delta: documents people share, kept live over one WebSocket with JSON Patch; stored in a JSON file or SQLite (Postgres is dzql)",
   "type": "module",
   "main": "src/core.ts",
   "types": "src/core.ts",
@@ -66,8 +66,8 @@
     "delta-doc",
     "json-patch",
     "websocket",
-    "postgres",
     "sqlite",
-    "realtime"
+    "realtime",
+    "documents"
   ]
 }

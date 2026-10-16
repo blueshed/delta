@@ -5,7 +5,7 @@
  * - A **link** is someone: `<site>/#/in/<token>`, a random token kept only as its hash, used once,
  *   for 7 days. Its token is in the part after `#`, which a browser never sends to a server: it is in
  *   no log, and a chat's preview that fetches the link uses nothing.
- * - **The tap uses it**: the page (`takeLink`, `./auth-link/client`) posts it to `/api/in`, from the
+ * - **The tap uses it**: the page (`takeLink`, `./auth-link/client`) posts it to `/api/in/<token>`, from the
  *   site (its `Origin`), and the answer sets a **session**: an HttpOnly cookie, kept as its hash, for a
  *   year, renewed as it is used.
  * - **The socket is signed in by the cookie**, on upgrade (`onUpgrade`, through `upgradeWithAuth`):

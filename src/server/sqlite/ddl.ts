@@ -168,7 +168,7 @@ export function createSequences(db: any): void {
 
 /**
  * Wait for another connection's lock (up to 5s) rather than fail at once with
- * SQLITE_BUSY: several processes may share the file (todo #1). A timeout the
+ * SQLITE_BUSY: several processes may share the file. A timeout the
  * app set is kept.
  */
 export function waitForLocks(db: any): void {

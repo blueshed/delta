@@ -1,15 +1,15 @@
 /**
- * One app, every place its truth can live -- a JSON file, SQLite, Postgres in
- * this process (PGlite), a Postgres server -- and the same answers from each.
+ * One app, every place its truth can live -- a JSON file, SQLite, and dzql's
+ * Postgres (in the process, or a server) -- and the same answers from each.
  *
- * A project may start on a JSON file, move to SQLite, then to Postgres in
- * process, and deliver on a Postgres server. The app does not change on the
+ * A project may start on a JSON file, move to SQLite, then to Postgres on
+ * dzql. The app does not change on the
  * way: the same schema, the same documents, the same writes, the same data
  * with the same serial ids. Only where the truth lives changes. This is the
  * proof: each backend's file supplies an adapter (`PathBackend`) and asks
  * every case below of it. Where a backend answers differently, it is wrong.
  *
- * Every case ends on the law (todo #27): each document still open, with
+ * Every case ends on the law: each document still open, with
  * everything it was told applied to what it opened, equals a fresh open. A
  * message missing, extra, misshapen or out of order breaks it, whatever the
  * case set out to show. Values are compared exactly as Postgres gives them:
@@ -31,7 +31,7 @@ import { waitFor } from "./support";
  * no parent, so every document that includes them holds all of them; notes are
  * temporal (a remove closes the row; its history stays); seats carry the other
  * column types: an integer, a boolean and a json column. A household's `t` is
- * named as the write SQL once named its row (todo #58): a column may take any name.
+ * named as the write SQL once named its row: a column may take any name.
  */
 export const pathSpec: Record<string, TableDef> = {
   weddings: { table: "fo_weddings", columns: { name: "text" }, temporal: false },
@@ -46,7 +46,7 @@ export const pathSpec: Record<string, TableDef> = {
   // a favour for a household: a child of the wedding that goes with its household too (cascadeOn), so a
   // wedding's removal reaches it twice -- as the wedding's child, and through the household
   favours: { table: "fo_favours", parent: "weddings", columns: { households_id: "integer", gift: "text" }, cascadeOn: ["households_id"], temporal: false },
-  // a wedding's asks, named in SQL's own words (todo #74): the table, its parent key and its columns are keywords
+  // a wedding's asks, named in SQL's own words: the table, its parent key and its columns are keywords
   asks: { table: "order", parent: { collection: "weddings", fk: "group" }, columns: { in: "integer?", from: "text?", to: "text?" }, temporal: true },
 };
 export const pathSchema = defineSchema(pathSpec);
@@ -113,19 +113,19 @@ export const pathDocs = [
   defineDoc("fo-all-households:", { root: "households", include: [] }),
   // the party: the wedding, its households and their favours
   defineDoc("fo-party:", { root: "weddings", include: ["households", "favours"] }),
-  // the party, slim: a household's email and a seat's table, each with its id and parent key, and nothing else of them (todo #70)
+  // the party, slim: a household's email and a seat's table, each with its id and parent key, and nothing else of them
   defineDoc("fo-slim:", { root: "weddings", include: ["households", "seats"], columns: { households: ["email"], seats: ["table_no"] } }),
   // a time in the name (at:): the document as it stood then -- the notes, the courses and every note, a wedding and its notes
   defineDoc("fo-notes-on:", { root: "notes", include: [], scope: { at: "at:when" } }),
   defineDoc("fo-courses-noted-on:", { root: "courses", include: ["notes"], scope: { at: "at:when" } }),
   defineDoc("fo-board-on:", { root: "weddings", include: ["notes"], scope: { id: ":id", at: "at:when" } }),
-  // the asks under a wedding, and those from one person (list mode by a keyword): names SQL keeps for itself (todo #74)
+  // the asks under a wedding, and those from one person (list mode by a keyword): names SQL keeps for itself
   defineDoc("fo-asks:", { root: "weddings", include: ["asks"] }),
   defineDoc("fo-asks-from:", { root: "asks", include: [], scope: { from: ":from" } }),
 ];
 
 /**
- * Documents an app registers apart, over the same rows (todo #64): on SQLite
+ * Documents an app registers apart, over the same rows: on SQLite
  * and the JSON file a second `registerDocs` on the same server and database --
  * a public set beside the private one, keeping no ledger -- and on Postgres
  * beside the rest, as one registry is all it has.
@@ -200,7 +200,7 @@ export const sqliteOpenSeats = openSeatsDoc((db: any) => ({
 }));
 
 /**
- * A recompute custom document beside them (todo #35): the wedding's menu card,
+ * A recompute custom document beside them: the wedding's menu card,
  * its name and its courses' names in order -- a shape no per-row predicate
  * gives -- read whole on open and again on every write to what it watches,
  * told as a root replace. Only the read differs by backend.
@@ -238,7 +238,7 @@ export const course = (id: number, name: string, wedding = 1) => ({ id, weddings
 export const drink = (id: number, courseId: number, name: string) => ({ id, courses_id: courseId, name });
 export const household = (id: number, email: string, wedding = 1, t: string | null = null) => ({ id, weddings_id: wedding, email, t });
 export const seat = (id: number, tableNo: number, kept: boolean, wishes: unknown = null, wedding = 1) => ({ id, weddings_id: wedding, table_no: tableNo, kept, wishes });
-/** A field as a holder is told it changed: a replace of the field alone (todo #69). */
+/** A field as a holder is told it changed: a replace of the field alone. */
 export const field = (path: string, value: unknown) => ({ op: "replace", path, value });
 
 // ---------------------------------------------------------------------------
@@ -306,7 +306,7 @@ export async function openAll(p: PathProcess, docs: string[]): Promise<Map<strin
  * copy must then have been told its root is null -- or, a custom document whose
  * read is gone, let go (404), and told nothing more. The fresh open is a real
  * one: the document is closed first, so no backend answers from a copy of its
- * own -- a custom document's is the one it keeps from what it told (todo #44).
+ * own -- a custom document's is the one it keeps from what it told.
  */
 export async function assertCopiesHold(b: PathBackend, copies: Map<string, any>): Promise<void> {
   await b.quiet();
@@ -375,11 +375,11 @@ export function pathCases(backend: () => PathBackend): void {
 }
 
 /**
- * What the law over generated writes (tests/law-driver.test.ts, todo #27)
+ * What the law over generated writes (tests/law-driver.test.ts)
  * found, each pinned as the seed that met it, on every backend.
  */
 export function drivenCases(backend: () => PathBackend): void {
-  describe("found by the law over generated writes (todo #27)", () => {
+  describe("found by the law over generated writes", () => {
     test("a refused write spends the serials it took, as a Postgres sequence does: the next rows are named the same on every backend (seed 1)", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-board:2"]);
@@ -500,12 +500,12 @@ export function drivenCases(backend: () => PathBackend): void {
 }
 
 /**
- * Two registrations over the same rows (todo #64): a write through either is
+ * Two registrations over the same rows: a write through either is
  * told to the documents open through both, and a walk is guarded by every
  * write to the rows it sets back, whichever registration made it.
  */
 export function registrationCases(backend: () => PathBackend): void {
-  describe("two registrations over the same rows (todo #64)", () => {
+  describe("two registrations over the same rows", () => {
     test("a document is told a write through the other registration with its next version, and opens at the version it was last told (review)", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1", "fo-pub-courses:"]);
@@ -688,9 +688,9 @@ export function asItStoodCases(backend: () => PathBackend): void {
   });
 }
 
-/** A document over some of its rows' columns (todo #70): opened, told and written by those alone. */
+/** A document over some of its rows' columns: opened, told and written by those alone. */
 export function columnCases(backend: () => PathBackend): void {
-  describe("a document that holds some columns of a collection (todo #70)", () => {
+  describe("a document that holds some columns of a collection", () => {
     const slim = (id: number, email: string) => ({ id, weddings_id: 1, email });
 
     test("it opens with those columns, the id and the parent key -- as it stood too -- and a collection it does not name, whole", async () => {
@@ -790,7 +790,7 @@ export function documentCases(backend: () => PathBackend): void {
       expect(content((await b.process.call("open", { doc: "fo-party:1" })).result).favours).toEqual({ "1": { id: 1, weddings_id: 1, households_id: 1, gift: "jam" } });
     });
 
-    test("a table, a parent key and columns named as SQL's keywords are created, written, opened, told and carried (todo #74)", async () => {
+    test("a table, a parent key and columns named as SQL's keywords are created, written, opened, told and carried", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-asks:1", "fo-asks-from:ann"]);
       const ask = { id: 1, group: 1, in: 2, from: "ann", to: "cy" };
@@ -1115,7 +1115,7 @@ export function documentCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("a replace of a row is the row, as RFC 6902 says and the free-form document does: a field its value leaves out takes its default -- null where nullable -- a required one left out is refused (400), and where the row hangs stays; at /<coll>/<id>, the root's /<root>, and the root by its id (todo #3)", async () => {
+    test("a replace of a row is the row, as RFC 6902 says and the free-form document does: a field its value leaves out takes its default -- null where nullable -- a required one left out is refused (400), and where the row hangs stays; at /<coll>/<id>, the root's /<root>, and the root by its id", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-household:1"]);
       const code = async (doc: string, ops: unknown[]) => (await b.process.call("delta", { doc, ops })).error?.code;
@@ -1132,7 +1132,7 @@ export function documentCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("a column may take any name: a household's t, named as the write SQL named its row, is written and read in every form (todo #58)", async () => {
+    test("a column may take any name: a household's t, named as the write SQL named its row, is written and read in every form", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-household:1", "fo-inbox:a@x"]);
       await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/t", value: "field" }]);
@@ -1150,7 +1150,7 @@ export function documentCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("a single document is its root and what hangs from it: it adds no other root row (400), and once its root is gone it takes no writes (404), as it opens -- but an undo, which may put it back (todo #52, #59)", async () => {
+    test("a single document is its root and what hangs from it: it adds no other root row (400), and once its root is gone it takes no writes (404), as it opens -- but an undo, which may put it back (#59)", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-course:1", "fo-board:1", "fo-menu:1"]);
       const code = async (ops: unknown[]) => (await b.process.call("delta", { doc: "fo-course:1", ops })).error?.code;
@@ -1166,7 +1166,7 @@ export function documentCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("a single document that removed its own root takes no writes (404), but its undo puts the root back, and then it does (todo #59, #43)", async () => {
+    test("a single document that removed its own root takes no writes (404), but its undo puts the root back, and then it does (#43)", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-course:1", "fo-menu:1"]);
       const code = async (ops: unknown[]) => (await b.process.call("delta", { doc: "fo-course:1", ops })).error?.code;
@@ -1198,7 +1198,7 @@ export function documentCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("a single document that takes its root out in a write writes nothing more through it (404, nothing written) but that root back, and then on through it (todo #59, #61)", async () => {
+    test("a single document that takes its root out in a write writes nothing more through it (404, nothing written) but that root back, and then on through it (#61)", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-course:1", "fo-board:1", "fo-menu:1"]);
       const code = async (ops: unknown[]) => (await b.process.call("delta", { doc: "fo-course:1", ops })).error?.code;
@@ -1297,9 +1297,9 @@ export function documentCases(backend: () => PathBackend): void {
   });
 }
 
-/** A write reaches every other open document that holds a row it changed -- and none that do not (todo #28). */
+/** A write reaches every other open document that holds a row it changed -- and none that do not. */
 export function fanOutCases(backend: () => PathBackend): void {
-  describe("a holder is told what changed (todo #69)", () => {
+  describe("a holder is told what changed", () => {
     test("one field written is told as that field alone, to every holder -- the writer's own, a map, a root -- never the row again", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-household:1", "fo-all-households:"]);
@@ -1338,7 +1338,7 @@ export function fanOutCases(backend: () => PathBackend): void {
   });
 
   describe("a row two documents hold as a map", () => {
-    test("a field written through the board reaches the menu as that field of the row, and the course's own document as that field of its root (todo #69)", async () => {
+    test("a field written through the board reaches the menu as that field of the row, and the course's own document as that field of its root", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1", "fo-course:1"]);
       await write(b.process, "fo-board:1", [{ op: "replace", path: "/courses/1/name", value: "Consommé" }]);
@@ -1499,7 +1499,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("a drink written and then taken with its course, in one write, is told as written -- written, then gone once -- to each document that held it, as a drink written and removed is; undone, both come back (todo #75)", async () => {
+    test("a drink written and then taken with its course, in one write, is told as written -- written, then gone once -- to each document that held it, as a drink written and removed is; undone, both come back", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-menu:1", "fo-course:1", "fo-all-courses:"]);
       const { ops } = await write(b.process, "fo-board:1", [
@@ -1520,7 +1520,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("a course and its drink made and then taken out in one write -- the drink by the course's cascade, written first or not -- are told as written, add before remove, to each document that held them: the board, the menu, the drinks alone, the lists; none is told a remove of a row it never had (todo #75)", async () => {
+    test("a course and its drink made and then taken out in one write -- the drink by the course's cascade, written first or not -- are told as written, add before remove, to each document that held them: the board, the menu, the drinks alone, the lists; none is told a remove of a row it never had", async () => {
       const b = backend();
       const docs = ["fo-board:1", "fo-menu:1", "fo-drinks:1", "fo-catalog:", "fo-all-courses:"];
       const copies = await openAll(b.process, docs);
@@ -1698,7 +1698,7 @@ export function fanOutCases(backend: () => PathBackend): void {
     });
   });
 
-  describe("an included collection whose parent the document does not include (todo #32)", () => {
+  describe("an included collection whose parent the document does not include", () => {
     test("the wedding's drinks, their courses left out, are held through the courses they hang from: opened, written, told and read as they stood", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-drinks:1", "fo-drinks:2", "fo-board:1"]);
@@ -1887,7 +1887,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("an add never makes a second live note: one that meets a live id is refused as already there (409), as a plain row's is (todo #16)", async () => {
+    test("an add never makes a second live note: one that meets a live id is refused as already there (409), as a plain row's is", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-notes:1"]);
       const code = async (ops: unknown[]) => (await b.process.call("delta", { doc: "fo-board:1", ops })).error?.code;
@@ -1905,7 +1905,7 @@ export function fanOutCases(backend: () => PathBackend): void {
   });
 
   describe("undo and redo are writes too", () => {
-    test("a row a write makes and takes out again has no inverse of its own: [add, remove] inverts to [], [add, remove, add] to [remove], on a plain table and a temporal one -- and the inverse sent back puts the rows back as they were (todo #67)", async () => {
+    test("a row a write makes and takes out again has no inverse of its own: [add, remove] inverts to [], [add, remove, add] to [remove], on a plain table and a temporal one -- and the inverse sent back puts the rows back as they were", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1"]);
       const add = { op: "add", path: "/notes/7", value: { text: "seven" } };
@@ -2449,7 +2449,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("a seat that leaves a list's condition, still matching, is not taken for removed: the list is told it left, the custom document the field that changed, and keeps it -- written through the seating plan, since the list itself may not write it out (todo #6's review)", async () => {
+    test("a seat that leaves a list's condition, still matching, is not taken for removed: the list is told it left, the custom document the field that changed, and keeps it -- written through the seating plan, since the list itself may not write it out", async () => {
       const b = backend();
       await b.process.call("open", { doc: "fo-seating:1" });
       await write(b.process, "fo-seating:1", [{ op: "replace", path: "/seats/1/kept", value: false }]);
@@ -2470,7 +2470,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       await expectTold(b, "fo-inbox:a@x", [[{ op: "remove", path: "/households/1" }]]);
       await assertCopiesHold(b, copies);
     });
-    test("a wedding removed through the board takes its households out of the inboxes by its cascade; undone, redone and undone again, each inbox holds the law (todo #27)", async () => {
+    test("a wedding removed through the board takes its households out of the inboxes by its cascade; undone, redone and undone again, each inbox holds the law", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-inbox:a@x", "fo-inbox:b@x", "fo-inbox:c@x"]);
       await write(b.process, "fo-board:1", [{ op: "remove", path: "/weddings/1" }], { cursor: "s1" });
@@ -2481,7 +2481,7 @@ export function fanOutCases(backend: () => PathBackend): void {
     });
   });
 
-  describe("an implied document (todo #34)", () => {
+  describe("an implied document", () => {
     test("it opens before its root row is, empty, and makes no row; a first write that fails makes none; the first that lands makes the row, and is told as written", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-plan:7", "fo-plan:8", "fo-all-courses:"]);
@@ -2540,7 +2540,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       await expectTold(b, "fo-all-courses:", [[added.ops[0]], [{ op: "remove", path: "/courses/10" }], [{ op: "add", path: "/courses/10", value: course(10, "Soup", 7) }]]);
       await assertCopiesHold(b, copies);
     });
-    test("a course of the plan moved to another wedding through a list leaves it, its drink with it; undone, redone and undone again, the plan holds the law (todo #27)", async () => {
+    test("a course of the plan moved to another wedding through a list leaves it, its drink with it; undone, redone and undone again, the plan holds the law", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-plan:7", "fo-plan:8", "fo-all-courses:"]);
       await write(b.process, "fo-plan:7", [
@@ -2561,7 +2561,7 @@ export function fanOutCases(backend: () => PathBackend): void {
     });
   });
 
-  describe("a recompute custom document (todo #35)", () => {
+  describe("a recompute custom document", () => {
     test("the menu card is read whole, and again on each write to what it watches -- its own wedding's or another's -- told as a root replace; a write to what it does not watch is not told", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-menu-card:1", "fo-board:1", "fo-board:2"]);
@@ -2599,7 +2599,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       copies.delete("fo-menu-card:1");
       await assertCopiesHold(b, copies);
     });
-    test("the menu cards, open across a move, a cascade that takes the wedding, an undo and a redo, each hold the law: read again and told as a root replace, or null once the wedding is gone (todo #27)", async () => {
+    test("the menu cards, open across a move, a cascade that takes the wedding, an undo and a redo, each hold the law: read again and told as a root replace, or null once the wedding is gone", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-menu-card:1", "fo-menu-card:2", "fo-all-courses:"]);
       await write(b.process, "fo-all-courses:", [{ op: "replace", path: "/courses/1/weddings_id", value: 2 }], { cursor: "s1" });
@@ -2611,7 +2611,7 @@ export function fanOutCases(backend: () => PathBackend): void {
   });
 
   describe("a custom document whose query reads some columns, or reads them as text", () => {
-    test("is told what changed of what it holds, in the shape its query gave: a field it does not read, nothing; one it reads, that field; a key read as text, no change; a row that joins it, as its query reads it (todo #69's review)", async () => {
+    test("is told what changed of what it holds, in the shape its query gave: a field it does not read, nothing; one it reads, that field; a key read as text, no change; a row that joins it, as its query reads it", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-emails:1", "fo-guests:1", "fo-board:1", "fo-all-households:"]);
       await write(b.process, "fo-board:1", [{ op: "replace", path: "/households/1/t", value: "notes" }]);
@@ -2689,7 +2689,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("open across every kind of write -- an add, a field, a remove, a cascade, a move, an undo and a redo -- each holds the law: told what its time does not keep, nothing of what it does (todo #27)", async () => {
+    test("open across every kind of write -- an add, a field, a remove, a cascade, a move, an undo and a redo -- each holds the law: told what its time does not keep, nothing of what it does", async () => {
       const b = backend();
       const docs = ["fo-board:1", "fo-all-courses:", "fo-board-on:1:2021-01-01", "fo-courses-noted-on:2021-01-01", "fo-notes-on:2021-01-01", "fo-board-on:1:2999-01-01", "fo-courses-noted-on:"];
       const copies = await openAll(b.process, docs);
@@ -2782,7 +2782,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("a row moved through a document to a parent it does not hold is refused (404), as an add there is -- a household to the other wedding, a drink to its course -- and nobody is told (todo #6's review)", async () => {
+    test("a row moved through a document to a parent it does not hold is refused (404), as an add there is -- a household to the other wedding, a drink to its course -- and nobody is told", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-board:2", "fo-menu:1", "fo-drinks:1", "fo-household:1", "fo-course:2"]);
       const code = async (doc: string, ops: unknown[]) => (await b.process.call("delta", { doc, ops })).error?.code;
@@ -2797,7 +2797,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("a list's root row written through the list stays in its scope: a field, a row or a merge that takes it out -- a slot to another wedding's list, a course out of a name's -- is refused (404), the write undone, and nobody is told (todo #6's review)", async () => {
+    test("a list's root row written through the list stays in its scope: a field, a row or a merge that takes it out -- a slot to another wedding's list, a course out of a name's -- is refused (404), the write undone, and nobody is told", async () => {
       const b = backend();
       await b.process.call("open", { doc: "fo-slots-of:1" });
       expect((await write(b.process, "fo-slots-of:1", [{ op: "add", path: "/slots/-", value: { price: 1 } }])).ops[0].value.weddings_id).toBe(1);
@@ -2833,7 +2833,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("an add through a document stays in its scope: a list's row that does not meet its condition -- a name not like it, a price past its bound -- or a single document's own root added back outside its name's, is refused (404), the write undone, and nobody is told (0.10.0 review; todo #66)", async () => {
+    test("an add through a document stays in its scope: a list's row that does not meet its condition -- a name not like it, a price past its bound -- or a single document's own root added back outside its name's, is refused (404), the write undone, and nobody is told", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-courses-like:So", "fo-all-courses:", "fo-board:1", "fo-board:2", "fo-slots-upto:5", "fo-slots-upto:", "fo-seat-of:1:3", "fo-seats-at:7"]);
       const code = async (doc: string, ops: unknown[]) => (await b.process.call("delta", { doc, ops })).error?.code;
@@ -2862,7 +2862,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("a course moved to the other wedding takes its drink, the wedding's grandchild, with it: the documents it leaves are told the drink left, those it arrives in that it arrived, course first; those that hold the drink either way are told nothing of it (todo #62)", async () => {
+    test("a course moved to the other wedding takes its drink, the wedding's grandchild, with it: the documents it leaves are told the drink left, those it arrives in that it arrived, course first; those that hold the drink either way are told nothing of it", async () => {
       const b = backend();
       const docs = ["fo-board:1", "fo-board:2", "fo-menu:1", "fo-menu:2", "fo-drinks:1", "fo-drinks:2", "fo-course:1", "fo-catalog:", "fo-all-courses:"];
       const copies = await openAll(b.process, docs);
@@ -2879,7 +2879,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("a course moved out and back in one write, its drink renamed between, is told each step: the other wedding's board hears the drink arrive, renamed and leave, never a remove of a drink it was not told (todo #62)", async () => {
+    test("a course moved out and back in one write, its drink renamed between, is told each step: the other wedding's board hears the drink arrive, renamed and leave, never a remove of a drink it was not told", async () => {
       const b = backend();
       const copies = await openAll(b.process, ["fo-board:1", "fo-board:2", "fo-course:1", "fo-catalog:"]);
       const { ops } = await write(b.process, "fo-catalog:", [
@@ -2905,7 +2905,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("a course moved and renamed in one run of replaces is told once, as the run leaves it, and carries its drink as it is (todo #62)", async () => {
+    test("a course moved and renamed in one run of replaces is told once, as the run leaves it, and carries its drink as it is", async () => {
       const b = backend();
       const docs = ["fo-board:1", "fo-board:2", "fo-drinks:1", "fo-drinks:2", "fo-catalog:"];
       const copies = await openAll(b.process, docs);
@@ -2921,7 +2921,7 @@ export function fanOutCases(backend: () => PathBackend): void {
       await assertCopiesHold(b, copies);
     });
 
-    test("a course moved and moved back in one run of replaces goes nowhere: no document but the writer's hears anything, for nothing changed (todo #62, #69)", async () => {
+    test("a course moved and moved back in one run of replaces goes nowhere: no document but the writer's hears anything, for nothing changed (#69)", async () => {
       const b = backend();
       const docs = ["fo-board:1", "fo-board:2", "fo-drinks:1", "fo-drinks:2", "fo-catalog:"];
       const copies = await openAll(b.process, docs);

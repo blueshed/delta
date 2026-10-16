@@ -333,7 +333,7 @@ export function createWs(opts?: WsOptions): WsServer {
         ws.send(
           JSON.stringify({
             id,
-            // No backend owns this name (or method): not there, as on Postgres.
+            // No backend owns this name (or method): not there.
             error: { code: 404, message: `No handler matched: ${action}` },
           }),
         );

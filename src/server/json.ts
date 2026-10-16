@@ -2,9 +2,9 @@
  * @blueshed/delta/json — the app's rows in one JSON file.
  *
  * The first place on the path: the same schema, the same documents, the same
- * writes as SQLite and Postgres, with the truth kept in a file you can read
- * and edit by hand. Swap it for SQLite, then Postgres in process, then a
- * Postgres server, and the app does not change -- only where its truth lives.
+ * writes as SQLite, with the truth kept in a file you can read and edit by
+ * hand. Swap it for SQLite (and later dzql's Postgres), and the app does not
+ * change -- only where its truth lives.
  *
  *   importTables("./data.json", schema, seed);         // once, to start it
  *   const store = registerDocs(ws, "./data.json", schema, docs, [], { ledger: true });
@@ -81,7 +81,7 @@ type Engine = {
  * Each server's engines, by file: a second `registerDocs` of the file on the
  * server (a public set beside a private one) shares the first's database, so
  * each sees what the other wrote -- an undo through one is guarded by a write
- * through the other (todo #64) -- and one file is saved, not two over each other.
+ * through the other -- and one file is saved, not two over each other.
  */
 const engines = new WeakMap<WsServer, Map<string, Engine>>();
 

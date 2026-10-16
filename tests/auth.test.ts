@@ -150,7 +150,7 @@ describe("upgradeWithAuth", () => {
     expect(server.upgraded[0].opts.data.clientId).toBeDefined();
   });
 
-  test("a browser on another origin is refused before onUpgrade reads its credentials (todo #31)", async () => {
+  test("a browser on another origin is refused before onUpgrade reads its credentials", async () => {
     let asked = 0;
     const auth: DeltaAuth<{ id: number }> = {
       onUpgrade: () => { asked++; return { id: 7 }; },

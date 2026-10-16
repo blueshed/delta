@@ -85,8 +85,7 @@ function same(a: unknown, b: unknown): boolean {
 /**
  * The row a document holds at a row's path: `/<coll>/<id>` in a map, `/<coll>`
  * its root -- and, in a single document, `/<root>/<id>`, the root named by its
- * id, as a write that adds or removes the root tells it. Postgres's
- * `_delta_row_at` (001g).
+ * id, as a write that adds or removes the root tells it.
  */
 export function rowAt(doc: any, path: string): any {
   const [coll, id] = splitPath(path);
@@ -121,8 +120,7 @@ export function rowAt(doc: any, path: string): any {
  * id read from the row, so the root is walked once, by its net change, however
  * the entry spelled it -- removed, added back and written is one row, not a
  * conflict with itself. A replace of the root is planned at `/<root>/<field>`, as every
- * backend takes it; an add or a remove at `/<root>/<id>`. Postgres's
- * `_delta_walk_plan` (001g) keys it the same.
+ * backend takes it; an add or a remove at `/<root>/<id>`.
  */
 export function planWalk(entry: { ops: DeltaOp[]; inverse: DeltaOp[] }, current: any, under: (key: string) => string[] = () => []): { ops: DeltaOp[]; conflict: string[] } {
   // a row's key: its path, and a root at /<root> by /<root>/<id> -- its id from the row, or from the document
@@ -164,7 +162,7 @@ export function planWalk(entry: { ops: DeltaOp[]; inverse: DeltaOp[] }, current:
       // the document's root is replaced at /<root>, however the entry spelled it
       const path = here != null && here === current?.[coll!] ? joinPath(coll!) : key;
       if (here == null || fields.some((f) => !same(here[f], wrote[f]))) conflict.push(at);
-      else ops.push(...fields.map((f): DeltaOp => ({ op: "replace", path: path + joinPath(f), value: was[f] ?? null })));   // each field: a replace of the row is the row whole (todo #3)
+      else ops.push(...fields.map((f): DeltaOp => ({ op: "replace", path: path + joinPath(f), value: was[f] ?? null })));   // each field: a replace of the row is the row whole
     }
   }
   if (conflict.length) return { ops: [], conflict };

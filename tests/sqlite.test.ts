@@ -1489,7 +1489,7 @@ describe("migrateSchema", () => {
     expect(applied.some((s) => s.includes("project_id"))).toBe(true);
   });
 
-  test("a table, parent key and columns named as SQL's keywords migrate, temporal too (todo #74)", () => {
+  test("a table, parent key and columns named as SQL's keywords migrate, temporal too", () => {
     const db = new Database(":memory:");
     createTables(db, defineSchema({ order: { columns: { in: "integer?" }, temporal: false } }));
     migrateSchema(db, defineSchema({ group: { columns: {} }, order: { parent: { collection: "group", fk: "group" }, columns: { in: "integer?", from: "text?" } } }));

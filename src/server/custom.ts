@@ -59,7 +59,7 @@ export function assertOwned(defs: CustomDoc[], auth: DeltaAuth<any> | undefined)
 /**
  * One prefix, one document: refused where a prefix comes twice in `prefixes`,
  * or `taken` says another document has it already -- else one would silently
- * answer for the other (todo #76).
+ * answer for the other.
  */
 export function assertOnePrefix(prefixes: string[], taken: (prefix: string) => boolean = () => false): void {
   const twice = prefixes.find((p, i) => taken(p) || prefixes.indexOf(p) < i);
@@ -176,7 +176,7 @@ export function createCustomDocs<I, H>(opts: {
     }
   }
 
-  // A socket hears a document while it may open it (todo #17): an open asks
+  // A socket hears a document while it may open it: an open asks
   // the gate and the document's `owns`, and so does every request; a change
   // told asks them again of each socket it is told to, and a socket refused is
   // let go of the document and told so -- `{ doc, error: { code, message } }`,

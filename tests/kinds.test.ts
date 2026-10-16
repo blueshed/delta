@@ -217,7 +217,7 @@ describe("source: the truth is outside", () => {
 });
 
 /**
- * The law (todo #27) for the documents with no tables -- a memory document and
+ * The law for the documents with no tables -- a memory document and
  * the free-form document (`registerDoc`): a copy, with everything it was told
  * applied, equals a fresh open after every kind of write either takes: an add,
  * one the server names (`/-`), a field and a row replaced, a remove. Neither

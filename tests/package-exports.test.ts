@@ -159,7 +159,7 @@ describe("package exports", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The release gate runs one Bun (todo #12): `bun-version: latest` let a Bun
+// The release gate runs one Bun: `bun-version: latest` let a Bun
 // release turn the gate red with no change here. CLAUDE.md says how to move it.
 // ---------------------------------------------------------------------------
 

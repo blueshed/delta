@@ -1,7 +1,7 @@
 /**
- * Shared schema primitives — identical across Postgres and SQLite backends.
+ * Shared schema primitives: the same for every backend (the JSON file, SQLite, and dzql's Postgres).
  *
- * Both backends declare their tables via the same `defineSchema` + `defineDoc`
+ * Every backend declares their tables via the same `defineSchema` + `defineDoc`
  * vocabulary, and the resolved shape (`Schema`, `ResolvedTable`, `DocDef`)
  * travels between `generateSql`, `registerDocs`, the doc registry, and the
  * validation helpers. Keeping these definitions in one place prevents the
@@ -74,7 +74,7 @@ export interface DocDef {
   /**
    * The columns it holds of a collection it names (the root, an include):
    * those, the row's id and its parent key. A collection not named here is
-   * held whole. It is opened, told and written by those alone (todo #70).
+   * held whole. It is opened, told and written by those alone.
    */
   columns?: Record<string, string[]>;
   /**
@@ -94,7 +94,7 @@ export interface DocDef {
 /**
  * A table or column name as SQL names it: quoted, so a name that is a keyword
  * (`order`, `from`, `in`) or holds a `/` is a name. Every backend's SQL names
- * a schema's tables and columns through it (todo #74).
+ * a schema's tables and columns through it.
  */
 export function q(id: string): string {
   return `"${id.replace(/"/g, '""')}"`;

@@ -34,8 +34,8 @@ export interface WalkVector {
 }
 
 /**
- * The walk planner's cases: `planWalk` (SQLite, the JSON file) and
- * `_delta_walk_plan` (Postgres, 001g) answer every one alike, over the schema
+ * The walk planner's cases: `planWalk` (SQLite, the JSON file) and dzql's
+ * walk planner answer every one alike, over the schema
  * and documents given with them (cards are lists' children, by `lists_id`).
  * The same file is `src/walk-vectors.json` in the package.
  */

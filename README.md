@@ -92,12 +92,15 @@ Each of these is a page of the skill's [reference](.claude/skills/delta-doc/refe
 
 - **The JSON file, then SQLite** -- carry the rows with `exportTables` / `importTables`; the app
   stays as it is: [*Backends*](.claude/skills/delta-doc/reference/backends.md).
-- **Then Postgres** -- the same definitions on dzql (`dzql/postgres`):
+- **Then Postgres** -- the same definitions on [dzql](https://github.com/blueshed/dzql), compiled:
   [*Moving on to Postgres*](.claude/skills/delta-doc/reference/postgres.md).
-- **Upgrades that keep the data** -- rename, drop, move: `migrate` runs each once, in order, before
-  the schema adds what it declares: [*Migrations*](.claude/skills/delta-doc/reference/migrations.md).
-- **Who may have a document** -- `owns` for who may open it, and a `DeltaAuth` to sign in:
-  [*Ownership*](.claude/skills/delta-doc/reference/ownership.md), [*Signing in*](.claude/skills/delta-doc/reference/auth.md).
+- **Upgrades that keep the data** -- the tables are made by a history of migrations from empty;
+  change the schema and `delta migrations make` writes the next one (`@blueshed/delta/migrations`):
+  [*Migrations*](.claude/skills/delta-doc/reference/migrations.md).
+- **Who may have a document** -- its `owns`, a path from its row to the person
+  (`@blueshed/delta/paths`): [*Ownership*](.claude/skills/delta-doc/reference/ownership.md).
+- **Signing in, with no passwords** -- a link is someone; tapping it signs them in
+  (`@blueshed/delta/auth-link`): [*Signing in*](.claude/skills/delta-doc/reference/auth.md).
 - **Custom documents** -- a view joined or worked out per person (`defineCustomDoc`):
   [*Custom documents*](.claude/skills/delta-doc/reference/custom-docs.md).
 - **The kinds** -- who is online (memory), a sensor or an API (source), static data:
