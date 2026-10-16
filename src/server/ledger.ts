@@ -216,15 +216,6 @@ export function createLedger(db: any): Ledger {
   db.run("CREATE INDEX IF NOT EXISTS idx_delta_ledger_undoes ON delta_ledger (undoes)");
 
   const columns = "l.id, l.doc, l.version, l.ops, l.inverse, l.at, l.undoable";
-  const tips = `
-    WITH RECURSIVE chain(id, depth) AS (
-      SELECT id, 0 FROM delta_ledger WHERE cursor = ?1 AND undoes IS NULL AND undoable = 1
-      UNION ALL
-      SELECT l.id, c.depth + 1 FROM delta_ledger l JOIN chain c ON l.undoes = c.id
-    ),
-    tips AS (
-      SELECT c.id, c.depth FROM chain c WHERE NOT EXISTS (SELECT 1 FROM delta_ledger w WHERE w.undoes = c.id)
-    )`;
   const versionStmt = db.query(
     "SELECT MAX(COALESCE((SELECT version FROM delta_versions WHERE doc = ?1), 0), COALESCE((SELECT MAX(version) FROM delta_ledger WHERE doc = ?1), 0)) AS version",
   );
@@ -234,16 +225,36 @@ export function createLedger(db: any): Ledger {
   );
   // newest first, by version then id: an undo that walked nothing shares the version of the write before it
   const historyStmt = db.query(`SELECT ${columns}, l.cursor FROM delta_ledger l WHERE l.doc = ? ORDER BY l.version DESC, l.id DESC LIMIT ?`);
-  // CROSS JOIN keeps SQLite's join order: the cursor's tips first, then each row
-  // by its key. Joined the other way it scanned every row of the ledger.
-  const undoStmt = db.query(`${tips}
-    SELECT ${columns} FROM tips t CROSS JOIN delta_ledger l ON l.id = t.id
-    WHERE t.depth % 2 = 0 ORDER BY l.id DESC LIMIT 1`);
-  const redoStmt = db.query(`${tips}
-    SELECT ${columns} FROM tips t CROSS JOIN delta_ledger l ON l.id = t.id
-    WHERE t.depth % 2 = 1 AND l.undoable = 1
-      AND l.id > COALESCE((SELECT MAX(id) FROM delta_ledger WHERE cursor = ?1 AND undoes IS NULL AND undoable = 1), 0)
-    ORDER BY l.id DESC LIMIT 1`);
+  // The cursor's entries newest first, a step at a time: the cursor's index is (cursor, id),
+  // id being the rowid, so each step reads one entry.
+  const olderStmt = db.query(`SELECT ${columns}, l.cursor, l.undoes FROM delta_ledger l WHERE l.cursor = ?1 AND l.id < ?2 ORDER BY l.id DESC LIMIT 1`);
+  const walkedStmt = db.query("SELECT 1 FROM delta_ledger WHERE undoes = ? LIMIT 1");
+  const upStmt = db.query("SELECT cursor, undoes, undoable FROM delta_ledger WHERE id = ?");
+  type Step = Row & { undoes: number | null };
+  /**
+   * The entry an undo (`back`) or a redo of a cursor takes: the newest tip of the cursor's chains
+   * that goes the way asked -- back, a tip at an even depth (a write, or a redo); forward, one at an
+   * odd depth (an undo that changed something) newer than the cursor's last write. Found newest
+   * first among the cursor's own entries, so it costs what was written since the answer, not the
+   * cursor's whole history: every entry of a chain carries its write's cursor, as a walk records it.
+   */
+  const tip = (cursor: string, back: boolean): LedgerEntry | undefined => {
+    for (let entry = olderStmt.get(cursor, Number.MAX_SAFE_INTEGER) as Step | null; entry; entry = olderStmt.get(cursor, entry.id) as Step | null) {
+      // the cursor's last write, met newest first: a redo is of nothing older (a fresh write ends what could be redone)
+      if (!back && entry.undoes === null && entry.undoable === 1) return undefined;
+      if (walkedStmt.get(entry.id)) continue;   // not a tip: something has walked it
+      // its depth along its chain, up to the write that began it
+      let depth = 0;
+      let up: Pick<Step, "cursor" | "undoes" | "undoable"> = entry;
+      while (up.undoes !== null) {
+        up = upStmt.get(up.undoes);
+        depth++;
+      }
+      if (up.cursor !== cursor || up.undoable !== 1) continue;   // a chain this cursor's undoable write began
+      if (back ? depth % 2 === 0 : depth % 2 === 1 && entry.undoable === 1) return toEntry(entry);   // a walk recorded as changing nothing is never redone
+    }
+    return undefined;
+  };
   // Up the chain from the entry named to its write, which must be the cursor's own and undoable;
   // then down it to its tip, the one entry nothing has walked.
   const changeTipStmt = db.query(`
@@ -279,14 +290,8 @@ export function createLedger(db: any): Ledger {
     history(doc, cursor, limit = 50) {
       return (historyStmt.all(doc, limit) as Row[]).map((r) => ({ ...toEntry(r), mine: cursor !== null && r.cursor === cursor }));
     },
-    nextUndo(cursor) {
-      const row = undoStmt.get(cursor) as Row | null;
-      return row ? toEntry(row) : undefined;
-    },
-    nextRedo(cursor) {
-      const row = redoStmt.get(cursor) as Row | null;
-      return row ? toEntry(row) : undefined;
-    },
+    nextUndo: (cursor) => tip(cursor, true),
+    nextRedo: (cursor) => tip(cursor, false),
     changeTip(cursor, change, back) {
       const tip = changeTipStmt.get(cursor, change) as (Row & { depth: number }) | null;
       if (!tip) return null;
