@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Link sign-in: `@blueshed/delta/auth-link`**, a `DeltaAuth` in which nobody types a password,
+  lifted from Can You? (Peter, 16 October: "it would make development a pleasure and not a
+  desperate memory of email and password"; Workshop's docs/link-sign-in-plan.md).
+  - **A link is someone:** `<site>/#/in/<token>`, a random token kept only as its hash, used once,
+    for 7 days. The token is after `#`, so no server ever receives it in a URL: it is in no log,
+    and a chat's preview that fetches the link uses nothing.
+  - **The tap uses it:** the page's `takeLink()` (`@blueshed/delta/auth-link/client`) posts it to
+    `/api/in/:token` from the site (its `Origin` checked), and the answer sets the session, an
+    HttpOnly cookie kept as its hash, for a year, renewed as it is used (at most daily).
+  - **The socket is signed in by the cookie**, on upgrade (`upgradeWithAuth`): no token rides in
+    a socket's URL or messages, as `auth.ts` asks. A session that runs out is refused at the
+    gate, and its documents let go.
+  - **Anyone signed in makes anyone's link:** `call("link", { person, opens })` answers
+    `{ url, expires }`. An app may narrow it (`mayLink`).
+  - **The first person's link** comes from a command on the server: `delta link <app.db> <person>
+    [--origin] [--opens]` (the site is `--origin`, else `ORIGIN`, else `RAILWAY_PUBLIC_DOMAIN`).
+  - **In development,** `GET /api/dev/people` lists everyone and `POST /api/dev/as/:id` signs in
+    as them, one click (`everyone()`, `becomeAs()` in the page). Tests sign in with
+    `auth.signInAs(person)`, which answers a cookie. Production answers none of these (404), and
+    `signInAs` throws there.
+  - **Who people are is the app's:** `personOf(id)` reads its own collection, and the identity it
+    answers is what `owns` and the ledger see. The links and sessions are kept by a `LinkStore`:
+    `sqliteLinkStore(db)` here, in `_auth_links` and `_auth_sessions`; Postgres's comes with dzql.
+  - Not here: rate limits on the tap (a token is 256 bits, so guessing one is hopeless), and
+    passkeys, which can come later as a second module sharing the sessions.
+
+  `tests/auth-link.test.ts` covers it through a real server and real sockets:
+  - the tap and the socket it signs in, with `owns` holding;
+  - a link used twice, run out, unknown, or posted from another site;
+  - a preview's GET, and a link kept only as its hash;
+  - sign out, a session run out, and a session renewed;
+  - `link` and `mayLink`;
+  - the picker in development, and production refusing it.
+
+  `tests/auth-link-client.test.ts` covers the page's side, and `tests/cli.test.ts` covers
+  `delta link`. Every store answers `linkStoreCases` (`./testing`): used once while it lasts, two
+  taps at once one session, an unknown link nobody's, a session renewed and ended. SQLite runs them
+  here, and dzql's Postgres there.
+
 ### Fixed
 
 - **An undo no longer slows as its cursor's ledger grows** (todo #78). `nextUndo` and `nextRedo`

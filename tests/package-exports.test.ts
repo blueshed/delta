@@ -95,6 +95,8 @@ describe("package exports", () => {
     "./kinds": "registerSource",
     "./logger": "createLogger",
     "./auth": "wireAuth",
+    "./auth-link": "linkAuth",
+    "./auth-link/client": "takeLink",
     "./testing": "mockClient",
     "./backend": "resolveScope",
   };

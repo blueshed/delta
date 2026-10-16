@@ -20,6 +20,8 @@
     "./kinds": "./src/server/kinds.ts",
     "./logger": "./src/server/logger.ts",
     "./auth": "./src/server/auth.ts",
+    "./auth-link": "./src/server/auth-link.ts",
+    "./auth-link/client": "./src/client/auth-link.ts",
     "./testing": "./src/testing.ts",
     "./backend": "./src/backend.ts"
   },

@@ -59,6 +59,6 @@ the exports map in `package.json`.
 - What a write may do: `reference/writes.md`; who is told: `reference/fanout.md`.
 - Derived views: `reference/custom-docs.md`. Other kinds: `reference/kinds.md`.
 - The page: `reference/rendering.md`, `reference/write-loop.md`. The server: `reference/server.md`.
-- Sign-in: `reference/auth.md`; who opens what: `reference/ownership.md`.
+- Sign-in: `reference/auth.md` (link sign-in, `./auth-link`, needs no passwords); who opens what: `reference/ownership.md`.
 - Undo and history: `reference/ledger.md`. In-process: `reference/local.md`.
 - The wire: `reference/wire.md`. CLI: `reference/cli.md`. Tests and scripts: `reference/testing.md`.

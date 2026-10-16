@@ -283,3 +283,25 @@ describe("an auth-enabled server, the token in band", () => {
     expect(JSON.parse(stderr.trim())).toEqual({ error: { code: 401, message: "Bad token" } });
   });
 });
+
+describe("delta link: the first person's link, made in the app's SQLite file", () => {
+  test("prints a link that signs them in once, at the site given; refuses without one, and points Postgres at dzql", async () => {
+    const { Database } = await import("bun:sqlite");
+    const { hashToken, sqliteLinkStore } = await import("../src/server/auth-link");
+    const file = join(dir, "link.db");
+    new Database(file).close();
+    const made = await run(["link", file, "1", "--origin", "https://my.app", "--opens", "/people", "--json"]);
+    expect(made.code).toBe(0);
+    expect(made.lines[0].url).toMatch(/^https:\/\/my\.app\/#\/in\/[\w-]{43}$/);
+    const db = new Database(file);
+    try {
+      const token = made.lines[0].url.split("#/in/")[1];
+      expect(await sqliteLinkStore(db).link(hashToken(token))).toMatchObject({ person: 1, opens: "/people", used: null });
+    } finally {
+      db.close();
+    }
+    expect((await run(["link", file, "1"])).stderr).toContain("pass --origin");
+    expect((await run(["link", file, "Ann"])).code).toBe(2);
+    expect((await run(["link", "postgres://db/app", "1"])).stderr).toContain("dzql link");
+  });
+});

@@ -21,6 +21,8 @@ const USAGE =
     `  delta install-skills [--user] [--dry-run]\n` +
     `  delta migrate <database> [--app <name>] [--dir <migrations>] [--status]   run (or list) an app's migrations\n` +
     `        <database>: a SQLite file; --dir defaults to ./migrations (Postgres: dzql migrate)\n` +
+    `  delta link <database> <person> [--origin <url>] [--opens <path>]   a link to sign in as someone\n` +
+    `        (auth-link): the first person's, on the server; <database> a SQLite file (Postgres: dzql link)\n` +
     `\n` +
     `  delta open  <docName>                  Open a doc, print its state, exit.\n` +
     `  delta watch <docName>                  Open a doc, then print each broadcast to it, a line each.\n` +
@@ -532,6 +534,34 @@ function compareVersion(a: string, b: string): number {
  * The database: a SQLite file that is there (a name mistyped makes no new
  * database); Postgres is dzql's (`dzql migrate`).
  */
+// ---------------------------------------------------------------------------
+// delta link
+// ---------------------------------------------------------------------------
+
+/**
+ * A link to sign in as `person` (auth-link), made in the app's SQLite file: how the first person
+ * signs in, before anyone can send them one. The site is --origin, else ORIGIN, else Railway's
+ * domain. Postgres is dzql's (`dzql link`).
+ */
+async function cmdLink(target: string | undefined, person: string | undefined, values: Record<string, unknown>) {
+  if (!target || !person) usageError("link takes a <database> and a <person>: delta link app.db 1", true);
+  if (!/^\d+$/.test(person)) usageError(`<person> is a person's id, a number: ${person}`);
+  const path = resolve(process.cwd(), target);
+  if (/^postgres(ql)?:\/\//.test(target) || (existsSync(path) && statSync(path).isDirectory())) usageError(`${target} is Postgres: dzql link makes its links`);
+  if (!existsSync(path)) usageError(`no database at ${target}`);
+  const { Database } = await import("bun:sqlite");
+  const { makeLink, siteOrigin, sqliteLinkStore } = await import("./src/server/auth-link");
+  let origin: string;
+  try { origin = (values.origin as string | undefined) ?? siteOrigin(); }
+  catch (err) { usageError(`${(err as Error).message}, or pass --origin`); }
+  const db = new Database(path);
+  try {
+    const made = await makeLink(sqliteLinkStore(db), Number(person), { origin, opens: values.opens as string | undefined });
+    if (json) return print(made);
+    process.stdout.write(`${made.url}\n(used once, until ${made.expires})\n`);
+  } finally { db.close(); }
+}
+
 async function cmdMigrate(target: string | undefined, values: Record<string, unknown>) {
   if (!target) usageError("migrate takes a <database>: a SQLite file (Postgres: dzql migrate)", true);
   const { setLogLevel } = await import("./src/server/logger");
@@ -588,6 +618,8 @@ async function main() {
       dir: { type: "string" },
       app: { type: "string" },
       status: { type: "boolean", default: false },
+      origin: { type: "string" },
+      opens: { type: "string" },
       help: { type: "boolean", short: "h", default: false },
     },
     allowPositionals: true,
@@ -609,6 +641,7 @@ async function main() {
     case "delta":           return cmdDelta(arg, arg2, values);
     case "call":            return cmdCall(arg, arg2, values);
     case "migrate":         return cmdMigrate(arg, values);
+    case "link":            return cmdLink(arg, arg2, values);
     default:                usageError(cmd ? `no command ${cmd}` : "a command, please", true);
   }
 }
