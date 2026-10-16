@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-16
+
 ### Added
 
 - **Link sign-in: `@blueshed/delta/auth-link`**, a `DeltaAuth` in which nobody types a password,
