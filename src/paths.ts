@@ -127,6 +127,7 @@ function condition(part: string): Condition {
   const eq = new RegExp(`^(${IDENT})\\s*=\\s*(.+)$`).exec(part);
   if (eq && LITERAL_RE.test(eq[2]!.trim())) return { type: "equality", field: eq[1]!, value: eq[2]!.trim() };
   const cmp = TEMPORAL_RE.exec(part);
+  if (cmp && cmp[3]!.toUpperCase() === "NULL" && cmp[2] !== "<>" && cmp[2] !== "!=") throw new PathError(`NULL compares only by = or <>: '${part}'`);
   if (cmp) return { type: "temporal", field: cmp[1]!, op: cmp[2]!, value: cmp[3]! };
   throw new PathError(`cannot read the condition '${part}'`);
 }
@@ -134,7 +135,7 @@ function condition(part: string): Condition {
 // --- Against the schema ------------------------------------------------------
 
 /** The scope keys a document's name gives a value for by equality: where its path may start. */
-export function namedKeys(def: DocDef): string[] {
+function namedKeys(def: DocDef): string[] {
   return Object.entries(def.scope).filter(([, b]) => /^(=?:)?[A-Za-z_]\w*$/.test(b)).map(([k]) => k);
 }
 
@@ -230,7 +231,7 @@ export function pathSql(parsed: ParsedPath, schema: Schema, names: PathSqlNames)
     for (const c of h.conditions) {
       if (c.type === "boolean") where.push(`${col(c.field)} = TRUE`);
       else if (c.type === "equality") where.push(c.value.toUpperCase() === "NULL" ? `${col(c.field)} IS NULL` : `${col(c.field)} = ${literal(c.value)}`);
-      else where.push(c.value.toUpperCase() === "NULL" ? `${col(c.field)} IS ${c.op === "=" ? "" : "NOT "}NULL` : `${col(c.field)} ${c.op} ${NOW_RE.test(c.value) ? (names.now ?? c.value) : c.value}`);
+      else where.push(c.value.toUpperCase() === "NULL" ? `${col(c.field)} IS NOT NULL` : `${col(c.field)} ${c.op} ${NOW_RE.test(c.value) ? (names.now ?? c.value) : c.value}`);
     }
     if (t.temporal) where.push(`${a}.valid_to IS NULL`);
     where.push(i === parsed.hops.length - 1 ? `${col(h.field)} = ${names.person}` : build(i + 1, col(h.field)));
