@@ -291,19 +291,19 @@ for (const [name, b] of [["sqlite", sqliteBackend]] as [string, Backend<any>][])
 }
 
 describe("the list", () => {
-  test("is refused, before anything runs, when a migration has no id, no up, or a name twice", async () => {
+  test("is refused, before anything runs, when a migration has no id, nothing to run (no changes, no up), or a name twice", async () => {
     const db = new Database(":memory:");
     const up = () => {};
     await expect(sqlite.migrate(db, [{ id: "", up }])).rejects.toThrow(/has no id/);
-    await expect(sqlite.migrate(db, [{ id: "001-x" } as any])).rejects.toThrow(/001-x has no up/);
+    await expect(sqlite.migrate(db, [{ id: "001-x" } as any])).rejects.toThrow(/001-x has no changes and no up/);
     await expect(sqlite.migrate(db, [{ id: "001-x", up }, { id: "001-x", up }])).rejects.toThrow(/two migrations are named 001-x/);
     expect(db.query("SELECT name FROM sqlite_master WHERE name = 'delta_migrations'").get()).toBeNull();
   });
 
-  test("a file in the folder with no up is refused, by name", async () => {
+  test("a file in the folder with no changes and no up is refused, by name", async () => {
     const dir = tempDir();
     writeFileSync(join(dir, "001-nothing.ts"), "export const down = () => {};\n");
-    await expect(sqlite.fromFolder(dir)).rejects.toThrow(/001-nothing.ts exports no up/);
+    await expect(sqlite.fromFolder(dir)).rejects.toThrow(/001-nothing.ts exports no changes and no up/);
   });
 
   test("migrate runs outside a transaction (SQLite): each migration is its own", async () => {

@@ -21,6 +21,8 @@ const USAGE =
     `  delta install-skills [--user] [--dry-run]\n` +
     `  delta migrate <database> [--app <name>] [--dir <migrations>] [--status]   run (or list) an app's migrations\n` +
     `        <database>: a SQLite file; --dir defaults to ./migrations (Postgres: dzql migrate)\n` +
+    `  delta migrations make <module> [--dir <migrations>] [--name <name>] [--export <name>]\n` +
+    `        the next migration: what the module's schema says beyond the migrations in --dir\n` +
     `  delta link <database> <person> [--origin <url>] [--opens <path>]   a link to sign in as someone\n` +
     `        (auth-link): the first person's, on the server; <database> a SQLite file (Postgres: dzql link)\n` +
     `\n` +
@@ -535,6 +537,42 @@ function compareVersion(a: string, b: string): number {
  * database); Postgres is dzql's (`dzql migrate`).
  */
 // ---------------------------------------------------------------------------
+// delta migrations make
+// ---------------------------------------------------------------------------
+
+/**
+ * The next migration, written: what the module's schema (its `schema` export, or --export) says beyond
+ * the migrations in --dir (./migrations), as `NNN-<name>.ts` -- changes, and as comments what a person
+ * must write (a rename, a change of type). Nothing beyond them: nothing written.
+ */
+async function cmdMake(module: string | undefined, values: Record<string, unknown>) {
+  if (!module) usageError("migrations make takes the <module> that exports the schema: delta migrations make src/db.ts", true);
+  const path = resolve(process.cwd(), module);
+  if (!existsSync(path)) usageError(`no module at ${module}`);
+  const dir = resolve(process.cwd(), (values.dir as string | undefined) ?? "migrations");
+  const name = ((values.name as string | undefined) ?? "changes").replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "changes";
+  const schema = (await import(path))[(values.export as string | undefined) ?? "schema"];
+  if (!schema?.tables) usageError(`${module} exports no schema (${(values.export as string | undefined) ?? "schema"}): defineSchema(...)`);
+  const { diff, stateOf, writeMigration } = await import("./src/server/changes");
+  const { fromFolder } = await import("./src/server/migrate");
+  const { mkdirSync, readdirSync, writeFileSync } = await import("node:fs");
+  mkdirSync(dir, { recursive: true });
+  const list = await fromFolder(dir);
+  const { changes, byHand } = diff(stateOf(list), schema);
+  if (changes.length === 0 && byHand.length === 0) {
+    if (json) return print({ made: null });
+    process.stdout.write("nothing to make: the migrations say what the definitions say\n");
+    return;
+  }
+  const next = 1 + Math.max(0, ...readdirSync(dir).map((f) => Number(/^(\d+)-/.exec(f)?.[1] ?? 0)));
+  const file = join(dir, `${String(next).padStart(3, "0")}-${name}.ts`);
+  writeFileSync(file, writeMigration(changes, byHand, process.env.DELTA_MIGRATIONS_FROM ?? "@blueshed/delta/migrations"));
+  if (json) return print({ made: file, changes: changes.length, byHand });
+  process.stdout.write(`made ${file}: ${changes.length} change${changes.length === 1 ? "" : "s"}\n`);
+  for (const b of byHand) process.stdout.write(`by hand: ${b}\n`);
+}
+
+// ---------------------------------------------------------------------------
 // delta link
 // ---------------------------------------------------------------------------
 
@@ -619,6 +657,8 @@ async function main() {
       app: { type: "string" },
       status: { type: "boolean", default: false },
       origin: { type: "string" },
+      name: { type: "string" },
+      export: { type: "string" },
       opens: { type: "string" },
       help: { type: "boolean", short: "h", default: false },
     },
@@ -642,6 +682,7 @@ async function main() {
     case "call":            return cmdCall(arg, arg2, values);
     case "migrate":         return cmdMigrate(arg, values);
     case "link":            return cmdLink(arg, arg2, values);
+    case "migrations":      return arg === "make" ? cmdMake(arg2, values) : usageError("migrations make <module>, please", true);
     default:                usageError(cmd ? `no command ${cmd}` : "a command, please", true);
   }
 }

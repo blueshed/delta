@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Migrations as a history from empty, the Django way** (todo #82; Peter: "I think the django way
+  is more clear - you start from empty").
+  - **A migration is a list of changes** every backend makes alike: `createTable`, `addColumn`,
+    `dropColumn`, `renameColumn`, `renameTable`, `dropTable` (`@blueshed/delta/migrations`,
+    `src/server/changes.ts`). It may also have an `up` for data, run after its changes in the same
+    transaction, so they fail together. That settles #80: the data and the table it fills are one
+    migration.
+  - **Folded in order, the changes are the tables the history leads to** (`stateOf`). Then
+    `diff(state, schema)` is what the definitions say beyond them.
+  - **`delta migrations make <module>`** writes it as the next numbered file, deterministically.
+    What a diff can't know (a rename, a changed type, nullability or default, a table's parent or
+    versions) it writes as `// By hand:` comments.
+  - **A history from empty runs from its first migration on a new database.** The migrations make
+    the tables, and nothing is applied implicitly at start-up. A database that already holds every
+    table and column the history leads to (made the older way) and has recorded none of it adopts
+    the history: each recorded as run, none run.
+  - **Given the schema, `migrate` answers `drift`**: what the definitions say beyond the history,
+    logged, for `make` to write.
+  - **A list of `up`s alone keeps the older rule**: an app new to a database records every
+    migration and runs none.
+  - Every backend answers `migrationCases` (`./testing`). SQLite runs them here, and dzql's
+    Postgres there.
+  - `createTable(db, table)` comes out of `createTables` in `sqlite/ddl.ts`: one table, made inside
+    a migration's transaction (`createTables` sets WAL mode, which a transaction refuses).
+
 ## [1.1.0] - 2026-10-16
 
 ### Added

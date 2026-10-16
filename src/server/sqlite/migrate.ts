@@ -8,7 +8,8 @@
 import type { Database } from "bun:sqlite";
 import { q } from "../../schema";
 import { appOf, fenced, isDeltasOwn, runMigrations, statusOf, type MigrateOptions, type MigrateResult, type Migration, type MigrationStatus, type Store } from "../migrate";
-import { waitForLocks } from "./ddl";
+import { createSequences, createTable, migrateSchema, waitForLocks } from "./ddl";
+import { schemaOf } from "../changes";
 
 export { fromFolder, type Migration, type MigrateOptions, type MigrateResult, type MigrationStatus } from "../migrate";
 
@@ -60,6 +61,33 @@ function store(db: Database, app: string, collections?: string): Store<Database>
         SELECT 1 FROM (SELECT substr(json_extract(value, '$.path'), 2) AS rest FROM json_each(delta_ledger.ops)
                        UNION ALL SELECT substr(json_extract(value, '$.path'), 2) FROM json_each(delta_ledger.inverse)) AS p
          WHERE (CASE WHEN instr(p.rest, '/') > 0 THEN substr(p.rest, 1, instr(p.rest, '/') - 1) ELSE p.rest END) IN (SELECT value FROM json_each(?)))`, [collections]);
+    },
+    async apply(tx, c, before, after) {
+      // each change as the history makes it; made already (a database adopting the history), it is left
+      switch (c.change) {
+        case "createTable":
+          createSequences(tx);
+          createTable(tx, schemaOf(after).tables[c.key]!);
+          return;
+        case "addColumn":
+          migrateSchema(tx, schemaOf(after));
+          return;
+        case "dropColumn":
+          return dropColumn(tx, before[c.key]!.table, c.column);
+        case "renameColumn":
+          return renameColumn(tx, before[c.key]!.table, c.column, c.to);
+        case "renameTable":
+          if (before[c.key]!.table !== after[c.to]!.table) renameTable(tx, before[c.key]!.table, after[c.to]!.table);
+          if (has(tx, "table", "_delta_sequences")) tx.run("UPDATE _delta_sequences SET collection = ?2 WHERE collection = ?1 AND NOT EXISTS (SELECT 1 FROM _delta_sequences WHERE collection = ?2)", [c.key, c.to]);
+          return;
+        case "dropTable": {
+          const table = before[c.key]!.table;
+          tx.run(`DROP VIEW IF EXISTS ${q(`current_${table}`)}`);
+          tx.run(`DROP TABLE IF EXISTS ${q(table)}`);
+          if (has(tx, "table", "_delta_sequences")) tx.run("DELETE FROM _delta_sequences WHERE collection = ?", [c.key]);
+          return;
+        }
+      }
     },
   };
 }

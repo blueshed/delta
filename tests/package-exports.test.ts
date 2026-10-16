@@ -97,6 +97,7 @@ describe("package exports", () => {
     "./auth": "wireAuth",
     "./auth-link": "linkAuth",
     "./auth-link/client": "takeLink",
+    "./migrations": "createTable",
     "./testing": "mockClient",
     "./backend": "resolveScope",
   };
