@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-16
+
 ### Added
 
 - **A document's `owns` as a path** (Workshop's docs/postgres-split-plan.md, step 3): `defineDoc(prefix,
