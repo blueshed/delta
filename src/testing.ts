@@ -44,6 +44,7 @@ export const walkVectors: { schema: Record<string, any>; docs: Record<string, { 
 export * from "./cases/support";
 export * from "./cases/path";
 export * from "./cases/owns";
+export * from "./cases/permissions";
 export * from "./cases/isolation";
 export * from "./cases/law";
 export * from "./cases/writes";

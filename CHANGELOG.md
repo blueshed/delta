@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A document's `owns` as a path** (Workshop's docs/postgres-split-plan.md, step 3): `defineDoc(prefix,
+  { ..., owns: "@org_id->members[org_id=$]{active}.person_id" })`, dzql's path language moved here.
+  Permissions are a document's, never a table's.
+  - **The grammar is delta's** (`@blueshed/delta/paths`): `parsePath`, `checkPath` against the
+    schema (thrown at registration, naming the document and the path), and `pathSql`, the boolean
+    SQL both SQLite and dzql run. `defineDoc` refuses a path it cannot read.
+  - **It starts at the document's row**: a single document's root row, or the name's values for a
+    document with a scope. A hop through a table that keeps versions reads its current rows.
+  - **On SQLite and the JSON file** it is asked where `owns` is (open, delta, open_at, history, a
+    walk, before each change is told), and a document with a path needs no `owns` or `shared`.
+  - **A row is never handed away**: a write through a document that would leave its path not
+    reaching the writer is refused (403) and changes nothing; removing the row is not.
+  - **`permissionCases`** in `./testing` asks it of every backend (`tests/permissions-sqlite.test.ts`).
 - **Migrations as a history from empty, the Django way** (todo #82; Peter: "I think the django way
   is more clear - you start from empty").
   - **A migration is a list of changes** every backend makes alike: `createTable`, `addColumn`,

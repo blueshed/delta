@@ -14,6 +14,7 @@
  * mappings — this module is the vocabulary only.
  */
 import { splitPath } from "./core";
+import { parsePath } from "./paths";
 
 export type ColumnType =
   | "text" | "integer" | "real" | "boolean" | "json" | "timestamptz";
@@ -76,6 +77,12 @@ export interface DocDef {
    * held whole. It is opened, told and written by those alone (todo #70).
    */
   columns?: Record<string, string[]>;
+  /**
+   * Who may open it, write through it and hear what is written to it, as a path from its row to
+   * the person (`../paths.ts`): `"@author_id"`, `"@org_id->members[org_id=$]{active}.person_id"`.
+   * With auth, a document with a path needs no `owns` function or `shared`.
+   */
+  owns?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -219,7 +226,7 @@ export function defaultForType(type: ColumnType): unknown {
 
 export function defineDoc(
   prefix: string,
-  opts: { root: string; include: string[]; scope?: Record<string, string>; implied?: boolean; columns?: Record<string, string[]> },
+  opts: { root: string; include: string[]; scope?: Record<string, string>; implied?: boolean; columns?: Record<string, string[]>; owns?: string },
 ): DocDef {
   if (!DOC_PREFIX.test(prefix)) {
     throw new Error(
@@ -241,7 +248,18 @@ export function defineDoc(
     scope: opts.scope ?? {},
     ...(opts.implied ? { implied: true } : {}),
     ...(opts.columns && Object.keys(opts.columns).length ? { columns: opts.columns } : {}),
+    ...(opts.owns !== undefined ? { owns: ownsPath(prefix, opts.owns) } : {}),
   };
+}
+
+/** A path that reads, or a throw naming the document: checked against the schema at registration. */
+function ownsPath(prefix: string, path: string): string {
+  try {
+    parsePath(path);
+  } catch (err: any) {
+    throw new Error(`doc "${prefix}": ${err.message}`);
+  }
+  return path;
 }
 
 /** Does a document hold `field` of a row of `coll`? Its id and parent key always; else, where it names that collection's columns, those. */

@@ -98,6 +98,7 @@ describe("package exports", () => {
     "./auth-link": "linkAuth",
     "./auth-link/client": "takeLink",
     "./migrations": "createTable",
+    "./paths": "parsePath",
     "./testing": "mockClient",
     "./backend": "resolveScope",
   };
@@ -127,7 +128,7 @@ describe("package exports", () => {
       "pathSchema", "pathDocs", "pathPublicDocs", "pathSeed", "inboxDoc", "emailsDoc", "guestsDoc", "openSeatsDoc", "menuCardDoc",
       "pathCases", "drivenCases", "registrationCases", "serialCases", "asItStoodCases", "columnCases", "documentCases", "fanOutCases",
       "drive", "onSqlite", "onJson", "lawSeeds", "lawSteps",
-      "ownsCases", "assertDocIsolation",
+      "ownsCases", "permissionCases", "assertDocIsolation",
       "errorCodeCases", "createRowCases", "writeScopeCases", "roomsApp", "tenantsApp", "membershipsApp",
     ]) {
       expect([name, typeof (testing as any)[name]]).not.toEqual([name, "undefined"]);
