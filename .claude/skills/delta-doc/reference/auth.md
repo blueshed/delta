@@ -26,6 +26,31 @@ your app needs (`login`, `authenticate`, `logout` as its `actions`). On Postgres
 is one, and `asSqlArg` names who row-level security sees (`postgres.md`). Who may open which
 document: `ownership.md`.
 
+## Link sign-in: no passwords
+
+`@blueshed/delta/auth-link` is a `DeltaAuth` delta ships: a link is someone, its tap a session
+cookie the socket is signed in by (`src/server/auth-link.ts`; `tests/auth-link.test.ts`).
+
+```ts
+// server: people are the app's own collection
+const auth = linkAuth({ store: sqliteLinkStore(db), personOf, people });   // personOf(id), people(): the app's
+wireAuth(ws, auth);                                                         // me, link
+Bun.serve({ routes: { ...auth.routes, "/ws": upgradeWithAuth(ws, auth), "/": page }, websocket: ws.websocket });
+registerDocs(ws, db, schema, docs, [], { auth, owns: (me, name) => name === `mine:${me.id}` });
+
+// page: take a link before the socket connects (the cookie rides on the upgrade)
+await takeLink();                                   // opened at <site>/#/in/<token>: signed in
+provide(WS, connectWs("/ws"));
+const me = await call<Person | null>("me");          // null: nobody: show "Who are you?"
+```
+
+- **A link:** `call("link", { person, opens })` from anyone signed in (`mayLink` narrows it);
+  the first person's from the server, `bunx @blueshed/delta link app.db 1 --origin https://my.app`.
+- **In development** `everyone()` lists people and `becomeAs(id)` signs in as one: a picker
+  instead of a password. Tests: `await auth.signInAs(id)` is a cookie header. None of these
+  answers in production.
+- **Sign out:** `signOut()` ends the session and reloads the page.
+
 ## Gotchas
 
 - **Never put a token in the socket URL.** Upgrade-time (cookie or header via `onUpgrade`, no
