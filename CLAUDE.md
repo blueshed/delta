@@ -144,6 +144,9 @@ the new Bun, run `bun run ci` on it, then set `bun-version` in `ci.yml` and `pub
 - `src/server/kinds.ts`: `registerMemory`, `registerStatic`, `registerSource`.
 - `src/schema.ts`: `defineSchema`, `defineDoc` (shared by every backend, dzql's too).
   `validateOps` is `sqlite/validate.ts`, asked of each op as it comes.
+- `src/paths.ts` (`./paths`): a document's `owns` as a path: `parsePath`, `checkPath`, `pathSql`
+  (the lowering both SQLite and dzql use), `startOf`. `permissionCases` (`src/cases/permissions.ts`)
+  asks every backend.
 - `src/server/logger.ts`: a copy of railroad's `logger.ts`, so a server needs no railroad (an
   optional peer only the client imports); `tests/server.test.ts` fails when the two differ.
 - `src/server/auth.ts`: the `DeltaAuth` contract (`wireAuth`, `upgradeWithAuth`).

@@ -23,6 +23,7 @@
     "./auth-link": "./src/server/auth-link.ts",
     "./auth-link/client": "./src/client/auth-link.ts",
     "./migrations": "./src/server/changes.ts",
+    "./paths": "./src/paths.ts",
     "./testing": "./src/testing.ts",
     "./backend": "./src/backend.ts"
   },

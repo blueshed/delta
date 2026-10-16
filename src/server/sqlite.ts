@@ -30,6 +30,7 @@ import { keeping, scopeValue } from "./sqlite/keep";
 import { loadDocAt, readDoc } from "./sqlite/read";
 import { carryUndeclared, closeRow, columnsOf, undeclaredColumns, undeclaredOf, current, decodeRow, insertCollectionRow, insertRow, leftOut, named, now, refuse, sqliteTime, updateRow } from "./sqlite/rows";
 import { namesRootRow, validateOps } from "./sqlite/validate";
+import { assertPath, parsePath, pathSql, startOf } from "../paths";
 
 export type {
   ColumnType,
@@ -179,14 +180,18 @@ export function registerDocs<I = unknown>(
   customDocs: CustomDocDef<any, I>[] = [],
   options: RegisterOptions<I> = {},
 ) {
-  for (const doc of docs) assertScopeKeys(doc, schema);
+  for (const doc of docs) {
+    assertScopeKeys(doc, schema);
+    if (doc.owns !== undefined) assertPath(doc as DocDef & { owns: string }, schema);
+  }
   // Default-deny, as docTypeFromDef and createDocListener are: with auth, every
   // document says who owns it, or that it is shared. A name is the channel its
   // writes are told on, so whoever has it open hears them.
   const auth = options.auth;
   if (auth) {
-    if (docs.length && !options.owns && !options.shared) throw ownerless(docs.map((d) => d.prefix).join(", "), "registerDocs");
-  } else if (options.owns || options.shared) {
+    const unsaid = docs.filter((d) => d.owns === undefined);   // a path says it
+    if (unsaid.length && !options.owns && !options.shared) throw ownerless(unsaid.map((d) => d.prefix).join(", "), "registerDocs");
+  } else if (options.owns || options.shared || docs.some((d) => d.owns !== undefined)) {
     // and owns or shared with no auth module would guard nothing: every socket opens every document
     throw authless(docs.map((d) => d.prefix).join(", "), "registerDocs");
   }
@@ -277,10 +282,48 @@ export function registerDocs<I = unknown>(
       if (mine ? !gatesCustom : !findDoc(docName)) return handler(msg, client, respond);   // not gated here, or another backend's
       const g = gated(client);
       if ("error" in g) return respond(g);
-      const owns = mine ? mine.def.owns : options.owns;
+      const owns = mine ? mine.def.owns : ownsOf(docName);
       if (!owned || !owns) return handler(msg, client, respond);
       return whenOwned(owns(g.identity, docName), respond, () => handler(msg, client, respond));
     };
+
+  /**
+   * Does `def`'s path reach `identity` from `docName`'s row, as the tables hold it now? A path
+   * from the row's columns reads the row; one from the name's values reads them; a name that gives
+   * no row reaches nobody (but TRUE and AUTHENTICATED).
+   */
+  function reaches(def: DocDef & { owns: string }, docName: string, identity: I): boolean {
+    const parsed = parsePath(def.owns);
+    if ("literal" in parsed) return parsed.literal !== "FALSE";   // past the gate: someone is signed in
+    const scope = resolveScope(def, docName.slice(def.prefix.length));
+    const root = schema.tables[def.root]!;
+    const params: Record<string, unknown> = { $person: auth!.asSqlArg ? auth!.asSqlArg(identity) : (identity as any)?.id, $now: new Date().toISOString() };
+    let none = false;
+    const key = (v: string) => (/^-?\d+$/.test(v) ? Number(v) : v);
+    const start = (field: string) => {
+      const s = startOf(def, scope, field);
+      const name = `$s${Object.keys(params).length}`;
+      if (!s) return (none = true), "NULL";
+      if ("value" in s) return (params[name] = key(s.value)), name;
+      params[name] = rowId(s.id);
+      return `(SELECT ${q(s.column)} FROM ${q(root.name)} WHERE id = ${name}${root.temporal ? " AND valid_to IS NULL" : ""})`;
+    };
+    const sql = pathSql(parsed, schema, { start, person: "$person", now: "$now" });
+    if (none || params.$person == null) return false;
+    return !!db.query(`SELECT CASE WHEN ${sql} THEN 1 ELSE 0 END AS ok`).get(params as any)?.ok;
+  }
+  /** After a write: its path still reaches the writer, or its root row is gone (a removal hands nothing away). */
+  function keepsReach(def: DocDef, docName: string, identity: I): boolean {
+    const scope = resolveScope(def, docName.slice(def.prefix.length));
+    const root = schema.tables[def.root]!;
+    if (scope.mode === "single" && !db.query(`SELECT 1 FROM ${q(root.name)} WHERE id = ?${root.temporal ? " AND valid_to IS NULL" : ""}`).get(rowId(scope.id!) as any)) return true;
+    return reaches(def as DocDef & { owns: string }, docName, identity);
+  }
+  /** Who may open `docName`: its path, else the registration's `owns`. */
+  const ownsOf = (docName: string): ((identity: I, docName: string) => boolean | Promise<boolean>) | undefined => {
+    const def = findDoc(docName)?.def;
+    return def?.owns !== undefined ? (identity, name) => reaches(def as DocDef & { owns: string }, name, identity) : options.owns;
+  };
 
   // Open implied docs whose root row has not been written yet.
   const implied = new Set<string>();
@@ -1011,7 +1054,7 @@ export function registerDocs<I = unknown>(
    * and then told: to the document's subscribers, to the other open documents
    * that share its rows, and to the custom documents that watch them.
    */
-  function write(docName: string, def: DocDef, doc: any, ops: DeltaOp[], by: { who: string | null; cursor: string | null; undoes?: number; undoable?: boolean }): Written | Failed {
+  function write(docName: string, def: DocDef, doc: any, ops: DeltaOp[], by: { who: string | null; cursor: string | null; undoes?: number; undoable?: boolean; as?: I }): Written | Failed {
     // Each op is validated as it comes (applyOps), unknown collections, fields and bad types refused
     // rather than acked and dropped by the database.
     const scope = resolveScope(def, docName.slice(def.prefix.length));
@@ -1043,6 +1086,8 @@ export function registerDocs<I = unknown>(
         const made = implied.has(docName) && !addsRoot && ops.length > 0 ? ensureImpliedRoot(def, doc, docName) : undefined;   // an empty write makes nothing
         const done = applyOps(docName, def, doc, ops, by.undoes !== undefined);
         passNamed();
+        // a write through a document with a path keeps its row in the writer's reach (a row is never handed away)
+        if (def.owns !== undefined && by.as !== undefined && !keepsReach(def, docName, by.as)) refuse(403, `${docName}: that would take it out of your reach (its owns: ${def.owns})`);
         touched = made ? [made, ...done.touched] : done.touched;
         // a removed row comes back as it was stored: with what it held in columns this version does not declare
         const inverse = inverseOf(besides(snapshot, done.beyond), done.applied, ops).map((op) =>
@@ -1103,7 +1148,7 @@ export function registerDocs<I = unknown>(
     }
     inOrder(() => {
       // With auth, only to those who may still hear each document (todo #17's rule).
-      const asked = auth ? [...changes.map(({ name }) => custom.letGo(name, subscriptions.get(name), options.owns, { dropped: () => unheld(name) })), custom.letGoWatching(applied)] : [];
+      const asked = auth ? [...changes.map(({ name }) => custom.letGo(name, subscriptions.get(name), ownsOf(name), { dropped: () => unheld(name) })), custom.letGoWatching(applied)] : [];
       const publish = () => {
         for (const { name, change } of changes) ws.publish(name, change);
         custom.tell(applied);
@@ -1149,7 +1194,7 @@ export function registerDocs<I = unknown>(
       return;
     }
 
-    const out = write(docName, match.def, doc, msg.ops as DeltaOp[], { who: whoOf(client), cursor: cursorOf(msg, client), undoable: msg.undoable !== false });
+    const out = write(docName, match.def, doc, msg.ops as DeltaOp[], { who: whoOf(client), cursor: cursorOf(msg, client), undoable: msg.undoable !== false, as: identityOf(client) });
     if ("error" in out) return respond(out);
     // A writer that keeps its own history asks for the inverse (or keeps a
     // ledger): what delta applied, walked back, read from the document as it
@@ -1240,7 +1285,7 @@ export function registerDocs<I = unknown>(
         const plan = planWalk({ ops: inUtc(entry.ops), inverse: inUtc(entry.inverse) }, besides(implied.has(entry.doc) ? { ...doc, [match.def.root]: null } : doc, outside), under);
         const show = (ops: DeltaOp[]) => showOps(match.def, schema, ops);   // as the document shows them (todo #70)
         if (msg.dry) return respond({ result: { doc: entry.doc, entry: entry.id, ops: show(plan.ops), ...(plan.conflict.length ? { conflict: plan.conflict } : {}) } });
-        const by = { who: whoOf(client), cursor };
+        const by = { who: whoOf(client), cursor, as: identityOf(client) };
         const out = plan.conflict.length || !plan.ops.length ? null : write(entry.doc, match.def, doc, plan.ops, { ...by, undoes: entry.id });
         if (out && !("error" in out) && out.entry !== undefined) return respond({ result: { doc: entry.doc, ...out, ops: show(out.ops), inverse: show(out.inverse) } });
         if (out && "error" in out && out.error.code >= 500) return respond(out);
@@ -1270,8 +1315,9 @@ export function registerDocs<I = unknown>(
         if ("error" in g) return respond(g);
         const next = nextWalk(way, msg, client);
         const entry = "error" in next ? undefined : next.entry;
-        if (!entry || !options.owns || !findDoc(entry.doc)) return walked(msg, client, respond);   // another registration's: it asks its own owns
-        return whenOwned(options.owns(g.identity, entry.doc), respond, () => walked(msg.entry == null ? { ...msg, entry: entry.id } : msg, client, respond));
+        const owns = entry && findDoc(entry.doc) ? ownsOf(entry.doc) : undefined;
+        if (!entry || !owns) return walked(msg, client, respond);   // another registration's: it asks its own owns
+        return whenOwned(owns(g.identity, entry.doc), respond, () => walked(msg.entry == null ? { ...msg, entry: entry.id } : msg, client, respond));
       };
     };
     ws.on("undo", walkAs("undo"));
