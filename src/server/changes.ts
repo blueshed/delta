@@ -160,9 +160,20 @@ export function diff(state: State, schema: Schema): { changes: Change[]; byHand:
   return { changes, byHand };
 }
 
+/** A value as TypeScript a person would write: `{ name: { type: "text" } }`, keys unquoted where they may be. */
+function literal(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(literal).join(", ")}]`;
+  if (v && typeof v === "object") {
+    const entries = Object.entries(v);
+    if (entries.length === 0) return "{}";
+    return `{ ${entries.map(([k, x]) => `${/^[A-Za-z_$][\w$]*$/.test(k) ? k : JSON.stringify(k)}: ${literal(x)}`).join(", ")} }`;
+  }
+  return JSON.stringify(v);
+}
+
 /** A change as TypeScript, as a person would write it. */
 function source(c: Change): string {
-  const s = (v: unknown) => JSON.stringify(v);
+  const s = literal;
   switch (c.change) {
     case "createTable": {
       const { table, columns, parent, temporal } = c.table;
