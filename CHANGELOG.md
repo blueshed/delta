@@ -44,7 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - the picker in development, and production refusing it.
 
   `tests/auth-link-client.test.ts` covers the page's side, and `tests/cli.test.ts` covers
-  `delta link`.
+  `delta link`. Every store answers `linkStoreCases` (`./testing`): used once while it lasts, two
+  taps at once one session, an unknown link nobody's, a session renewed and ended. SQLite runs them
+  here, and dzql's Postgres there.
 
 ### Fixed
 

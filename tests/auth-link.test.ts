@@ -12,6 +12,7 @@ import { upgradeWithAuth, wireAuth } from "../src/server/auth";
 import { hashToken, linkAuth, makeLink, sqliteLinkStore, SESSION_COOKIE } from "../src/server/auth-link";
 import { createTables, defineDoc, defineSchema, importTables, registerDocs } from "../src/server/sqlite";
 import { setLogLevel } from "../src/server/logger";
+import { linkStoreCases } from "../src/testing";
 
 setLogLevel("silent");
 
@@ -210,3 +211,6 @@ describe("development", () => {
     expect(prod.auth.signInAs(1)).rejects.toThrow("development");
   });
 });
+
+// The store, as every backend's answers it (dzql's Postgres runs the same)
+linkStoreCases("sqlite", async () => sqliteLinkStore(new Database(":memory:")));

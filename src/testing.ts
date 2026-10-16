@@ -47,3 +47,4 @@ export * from "./cases/owns";
 export * from "./cases/isolation";
 export * from "./cases/law";
 export * from "./cases/writes";
+export * from "./cases/link-store";

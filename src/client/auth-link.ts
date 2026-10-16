@@ -38,9 +38,9 @@ export async function signOut(): Promise<void> {
 }
 
 /** Development only: everyone, for "Who are you?". Empty in production. */
-export async function everyone(): Promise<Person[]> {
+export async function everyone<P extends Person = Person>(): Promise<P[]> {
   const res = await fetch("/api/dev/people");
-  return res.ok ? ((await res.json()) as Person[]) : [];
+  return res.ok ? ((await res.json()) as P[]) : [];
 }
 
 /** Development only: be `id`, and start the page again as them. */
