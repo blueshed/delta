@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer say delta has a Postgres backend, nor cite another repo's functions or closed ledger
   items; `package.json` describes delta without Postgres. The session-start hook installs the Bun CI
   pins, and `todo.jsonl` holds only what is open.
+- **The README says what delta pairs with**: railroad for the page, dzql for Postgres,
+  paintbrush to start a website, and eta for live apps told as stories (it keeps its documents
+  in delta). `rendering.md` says an eta page is drawn on the server. The changelog's older
+  headings use the same `- date` as the newer ones, and every release links to its diff.
 
 ## [1.2.0] - 2026-10-16
 
@@ -2061,7 +2065,7 @@ and broadcasts are the same as in 0.5.1. Four changes to check when upgrading:
   0.11.0 as well): the socket's late close event reached happy-dom after it was unregistered.
   The test now waits for the socket to close first.
 
-## [0.5.1] — 2026-07-28
+## [0.5.1] - 2026-07-28
 
 ### Added
 
@@ -2219,7 +2223,7 @@ and broadcasts are the same as in 0.5.1. Four changes to check when upgrading:
   the initial DOM, and its `key` now returns the id the op paths actually use — the previous
   `` `${author}:${at}` `` never matched the uuid in `/messages/<uuid>`.
 
-## [0.5.0] — 2026-06-10
+## [0.5.0] - 2026-06-10
 
 ### Fixed
 
@@ -2241,7 +2245,7 @@ and broadcasts are the same as in 0.5.1. Four changes to check when upgrading:
   standard docs. SQLite/JSON and PG custom docs are unversioned (no `v`) and the client
   applies them as-is — back-compatible.
 
-## [0.4.16] — 2026-06-03
+## [0.4.16] - 2026-06-03
 
 A correctness, security, and documentation hardening pass: 56 findings from a
 multi-agent review, each adversarially verified against the source. +35
@@ -2343,7 +2347,7 @@ flag, and an on-reconnect `onOps` reconciliation signal.
   tables are `003-tables.sql`, framework path is `src/sql/`; `DeltaError` listed in
   the client exports. Example fixes (sites-bbox predicate signature + port).
 
-## [0.4.15] — 2026-06-03
+## [0.4.15] - 2026-06-03
 
 ### Added
 
@@ -2354,13 +2358,13 @@ flag, and an on-reconnect `onOps` reconciliation signal.
 
 - **delta-doc skill: documented the SQL-side doc-ops composition API** (`.claude/skills/delta-doc/reference.md`). The stored functions (`delta_open`/`delta_open_as`, `delta_apply`/`delta_apply_as`) were always callable from inside custom `plpgsql`/SQL, but the reference framed them only as the Bun layer's contract. Added a "Composing doc operations from SQL" recipe: a custom read evaluator composes docs via `delta_open_as` (identity bound one-shot, so RLS applies to every table it reads — avoiding the silent `app.user_id = ''` scope-to-nothing and the `::bigint`-on-`''` throw); a stored write mutates-and-broadcasts via `delta_apply_as` (never a raw `INSERT`, which wouldn't NOTIFY); and the `SECURITY DEFINER`-bypasses-RLS caveat (delta is persistence + broadcast, not authorization — a privilege-escalating function must enforce its own guards). Docs only, no code change — turns a supported-but-undocumented pattern into a documented one that generators (e.g. hjeli) can target.
 
-## [0.4.14] — 2026-06-02
+## [0.4.14] - 2026-06-02
 
 ### Added
 
 - **Private RPC methods — `_`-prefixed names are never callable from the WebSocket** (`src/server/server.ts`). The `call` dispatcher now rejects any inbound method whose name starts with `_`, responding with `{ error: { message: "Private method: <name>" } }` *before* any registered handler runs — so the gate can't be bypassed by a catch-all `ws.on("call", …)` and also covers names that were never registered. `registerMethod` complements this by throwing if asked to register a `_`-name, since such a method could never be reached over the wire (a programming error). Establishes the public/private boundary for the method surface: public methods are the sanctioned wire API; `_`-helpers are internal building blocks meant to be composed inside other handlers' bodies (e.g. generated precondition/guard predicates reused across commands). Id-less calls to a private method stay silent, consistent with the existing unknown-action behaviour.
 
-## [0.4.13] — 2026-05-31
+## [0.4.13] - 2026-05-31
 
 ### Added
 
@@ -2372,20 +2376,20 @@ flag, and an on-reconnect `onOps` reconciliation signal.
 - **Bumped `@blueshed/railroad` devDependency from `0.8.0` to `0.8.2`**. Peer range (`^0.8.0`) unchanged. Patch-level on the same minor; the four railroad primitives delta uses (`signal`, `peek`/`touch`, `key`, `inject`) are unchanged.
 - **`package.json` `files` widened to `.claude/skills/delta-doc/**`** (was listing `SKILL.md` and `reference.md` individually) so future additions to the skill directory ship without needing a `files` update.
 
-## [0.4.12] — 2026-05-31
+## [0.4.12] - 2026-05-31
 
 ### Changed
 
 - **delta-doc skill — write loop documented** (`.claude/skills/delta-doc/SKILL.md`, `.claude/skills/delta-doc/reference.md`). `doc.send` echoes the same op back to the sender, which is what patches `doc.data` and fires `onOps` — so optimistic updates double-apply on echo (rows added twice, counters landing at +2, chat lines appearing twice), and reloads/re-opens after a write are pointless because `doc.data` is already the live in-place-patched state. Adds a non-negotiable rule to SKILL.md, a reinforcing comment in the canonical recipe's `send()`, and a dedicated "The write loop" section in reference.md (with the latency tradeoff and the transient-feedback escape hatch).
 - **delta-doc skill — "no brute-force reload" framed as categorical** (`.claude/skills/delta-doc/SKILL.md`, `.claude/skills/delta-doc/reference.md`). A reload is never necessary under any trigger, because the framework owns the only two full reads that ever happen — the initial open and an automatic re-open of every tracked doc on every reconnect (`client.ts:178`, so outages self-heal). Reframes both the SKILL.md rule and the reference.md section away from "after a write" to unconditional, and adds a table walking through each tempting trigger (post-write, reconnect, refocus, "might be out of sync", "force-refresh to be safe") and why none of them needs a manual read.
 
-## [0.4.11] — 2026-05-26
+## [0.4.11] - 2026-05-26
 
 ### Added
 
 - **List-mode docs honour `include`** (`src/sql/001c-delta-read.sql`). A doc opened in list mode (`defineDoc("catalog:", { root: "products", include: ["parts", "faces"] })`) now returns every included collection in full alongside the root, with no FK filter — the answer to "catalog-shaped" workloads where a small reference table plus its children wants to open as a single doc. Previously the list branch silently dropped `include`, forcing apps to write custom `DocType` handlers that read each collection by hand. New helper `_delta_load_collection_all(key, at)` does the unfiltered load and is temporal-aware. Single-mode docs are unchanged (children still filter by `parent_fk = root.id`); writes already routed by path so `delta_apply` needed no change. Backwards-compatible: list docs declared with `include: []` keep returning only the root.
 
-## [0.4.10] — 2026-05-21
+## [0.4.10] - 2026-05-21
 
 ### Added
 
@@ -2396,7 +2400,7 @@ flag, and an on-reconnect `onOps` reconciliation signal.
 
 - **SKILL.md** documents JSON Pointer path escaping under the op vocabulary and adds a Type-drift warning bullet to the Footguns list.
 
-## [0.4.9] — 2026-04-25
+## [0.4.9] - 2026-04-25
 
 ### Requires
 
@@ -2411,7 +2415,7 @@ flag, and an on-reconnect `onOps` reconciliation signal.
 - **SKILL.md railroad section refined** to recommend `list(doc.data.map(...), keyFn, render)` and `when(doc.data, ...)` over `applyOpsToCollection` when `@blueshed/railroad` is in deps — the keyed `list()` already provides the per-row surgical update that `applyOpsToCollection` exists for in vanilla DOM. Plain DOM consumers continue to use `applyOpsToCollection` (`@blueshed/delta/dom-ops`).
 - **`examples/kanban/server.ts`** — `port: server.port!` (Bun's `Server<T>.port` is now `number | undefined` in `bun-types`; the example pins it).
 
-## [0.4.8] — 2026-04-25
+## [0.4.8] - 2026-04-25
 
 ### Added
 
@@ -2426,13 +2430,13 @@ flag, and an on-reconnect `onOps` reconciliation signal.
 
 - `.gitignore` ignores `examples/shared-state/chat-room.json` so the demo's persistence doesn't pollute the working tree.
 
-## [0.4.7] — 2026-04-25
+## [0.4.7] - 2026-04-25
 
 ### Fixed
 
 - **Flaky `lazy-tracked source doc does NOT replay history` test** — the original assertion opened the source doc over WS before applying the new write, which created an eager `tracked` entry and bypassed the lazy path the test was supposed to exercise. The remaining timing-dependent op count flaked in CI. Rewritten to drive `delta_apply` directly via `pool.query` so no eager entry can be created; the assertion is now a deterministic equality on the full op list. v0.4.6 was tagged and released on GitHub but the publish workflow's test gate failed before npm publish could run, so npm shows 0.4.5; v0.4.7 is the recovery release.
 
-## [0.4.6] — 2026-04-25
+## [0.4.6] - 2026-04-25
 
 ### Fixed
 
@@ -2457,7 +2461,7 @@ flag, and an on-reconnect `onOps` reconciliation signal.
 
 - `.gitignore` now ignores `*.sqlite{,-shm,-wal}` and `*.db{,-shm,-wal}` so example/test runs don't pollute the working tree.
 
-## [0.4.5] — 2026-04-23
+## [0.4.5] - 2026-04-23
 
 ### Changed
 
@@ -2467,25 +2471,25 @@ flag, and an on-reconnect `onOps` reconciliation signal.
 
 - **`@blueshed/railroad` ≥ 0.7.0** (peer) — needed for `Signal.touch()`, which the client now uses to notify subscribers after in-place mutation. `set(sameRef)` is a no-op under `Object.is`, so `touch()` is the escape hatch. Consumers pinned to railroad 0.6.x must upgrade alongside this release.
 
-## [0.4.4] — 2026-04-20
+## [0.4.4] - 2026-04-20
 
 ### Fixed
 
 - **Publish workflow** — rewritten to match the pattern used in `@blueshed/railroad`: trigger on `release: published`, Node 24, `NODE_AUTH_TOKEN=""` prefix to force OIDC Trusted Publishing over the token fallback `setup-node` otherwise configures, tests + publish inline. Tags `v0.4.1` / `v0.4.2` / `v0.4.3` exist in git but never reached npm; `0.4.4` is the first tag to ship through the automated pipeline. Users jumping from `0.4.0` → `0.4.4` on npm miss nothing — the intermediate versions were stuck-in-transit, not deliberately skipped.
 
-## [0.4.3] — 2026-04-20
+## [0.4.3] - 2026-04-20
 
 ### Fixed
 
 - **Publish workflow** — two changes so it actually ships to npm. (1) Drop the CI gate duplication: `ci.yml` already runs on the main-branch push and `/publish` runs `bun run ci` locally before tagging, so re-running the full gate in `publish.yml` was ceremony. (2) Swap in-place `npm install -g npm@latest` for `corepack prepare npm@latest --activate` — the in-place path hit a `MODULE_NOT_FOUND: promise-retry` self-upgrade race on hosted runners, which corepack sidesteps. v0.4.2 never reached npm; 0.4.3 is the first automated release.
 
-## [0.4.2] — 2026-04-20
+## [0.4.2] - 2026-04-20
 
 ### Fixed
 
 - **Publish workflow uses npm Trusted Publishing** (`.github/workflows/publish.yml`) — was configured for a classic `NPM_TOKEN` secret; the registry is actually set up for OIDC. Added `permissions: id-token: write` on the job, upgraded the runner's npm to 11.5.1+ (required for Trusted Publishing), and swapped `npm publish --access public` for `npm publish --access public --provenance` to emit attestations alongside the package. v0.4.1 was tagged but never reached npm because of this; 0.4.2 is the first automated release.
 
-## [0.4.1] — 2026-04-20
+## [0.4.1] - 2026-04-20
 
 ### Added
 
@@ -2495,7 +2499,7 @@ flag, and an on-reconnect `onOps` reconciliation signal.
 
 - **Tarball trim** — `.claude/commands/publish.md` is no longer shipped in the npm tarball. Each project adopting `@blueshed/delta` should copy the publish skill into their own `.claude/commands/` and tune the release cadence to fit (different preflight checks, CI gates, auth). The skill stays in-repo for our own releases.
 
-## [0.4.0] — 2026-04-20
+## [0.4.0] - 2026-04-20
 
 ### Added
 
@@ -2518,7 +2522,7 @@ flag, and an on-reconnect `onOps` reconciliation signal.
 
 A feedback loop from building two examples against the skill and noticing the first kanban iteration wasn't really *using* the library — it hand-rolled SQL around `_delta_bump_and_notify` instead of going through `docTypeFromDef` + `delta_apply` + `createDocListener`. Reworking it surfaced four ergonomic bugs that block "easy for Claude" in practice: silent NULL on config errors, `seq_*` counters drifting because `TRUNCATE RESTART IDENTITY` doesn't reset un-owned sequences, `connectWs` reconnecting forever after a server stop, and `openDoc`'s hidden module-level state blocking multi-client scripts. Each is now either fast-failing or per-client, with a message that says what's wrong and what's valid. A parallel four-agent review then flagged the schema-type duplication between the Postgres and SQLite backends, a scope-DSL example in `reference.md` that the new fail-fast raise would reject, a filename drift in `SKILL.md`, and the lack of scope-operator test coverage — all addressed here.
 
-## [0.3.0] — 2026-04-20
+## [0.3.0] - 2026-04-20
 
 ### Added
 
@@ -2536,7 +2540,7 @@ A feedback loop from building two examples against the skill and noticing the fi
 
 Two observations from feedback sessions. (1) `withAppAuth` was taking four round-trips (`BEGIN` / `set_config` / call / `COMMIT`) for one logical op the protocol can do in one — at 20 ms RTT, an 80 ms tax per authenticated write, compounding into UI lag on a mobile app. (2) The dominant client pattern would be `effect(() => rebuild(list, doc.data.get()))`, which throws away the op-level precision delta already has — focus, scroll, animations all reset on every keystroke in a collaborative doc. `dom-ops` + `onOps` preserves that precision end-to-end; the `*_as` variants collapse the four RTTs into one.
 
-## [0.2.1] — 2026-04-19
+## [0.2.1] - 2026-04-19
 
 ### Added
 
@@ -2562,7 +2566,7 @@ Two observations from feedback sessions. (1) `withAppAuth` was taking four round
 
 Three fresh Claude sessions that built the same multi-user todo app against the skill. The first surfaced the codegen gap, the missing per-user recipe, the RLS two-pool requirement, the auth-before-open race, and the missing logout / error-type primitives. The second (with those fixes in place) surfaced the `scope` syntax subtlety, the injection-vs-RLS overlap, and the Bun route + WS wiring question. The third surfaced the CLI's eager jose import and the missing `docker-entrypoint-initdb.d` + session-restore recipes — all now in `reference.md`.
 
-## [0.1.0] — 2026-04-18
+## [0.1.0] - 2026-04-18
 
 Initial extraction from `@blueshed/railroad` (delta-*) and the `clean` venue-manager.
 
@@ -2588,3 +2592,42 @@ Evolution of `dzql` (database-first codegen for Vue/Pinia), `seiro` (CQRS over W
 - `postgres/sql.ts` codegen (TS schema → `002-tables.sql`) not yet extracted — consumers bring their own or write SQL by hand.
 - `@blueshed/railroad` still ships its own `delta-*` modules; strip after delta bakes.
 - Full RLS policy enforcement requires a non-superuser role (BYPASSRLS overrides FORCE). Test suite verifies plumbing only.
+
+[Unreleased]: https://github.com/blueshed/delta/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/blueshed/delta/compare/v1.1.0...v1.2.0
+[1.1.0]: https://github.com/blueshed/delta/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/blueshed/delta/compare/v0.16.0...v1.0.0
+[0.16.0]: https://github.com/blueshed/delta/compare/v0.15.0...v0.16.0
+[0.15.0]: https://github.com/blueshed/delta/compare/v0.14.0...v0.15.0
+[0.14.0]: https://github.com/blueshed/delta/compare/v0.13.1...v0.14.0
+[0.13.1]: https://github.com/blueshed/delta/compare/v0.13.0...v0.13.1
+[0.13.0]: https://github.com/blueshed/delta/compare/v0.12.0...v0.13.0
+[0.12.0]: https://github.com/blueshed/delta/compare/v0.11.0...v0.12.0
+[0.11.0]: https://github.com/blueshed/delta/compare/v0.10.0...v0.11.0
+[0.10.0]: https://github.com/blueshed/delta/compare/v0.9.1...v0.10.0
+[0.9.1]: https://github.com/blueshed/delta/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/blueshed/delta/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/blueshed/delta/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/blueshed/delta/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/blueshed/delta/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/blueshed/delta/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/blueshed/delta/compare/v0.4.16...v0.5.0
+[0.4.16]: https://github.com/blueshed/delta/compare/v0.4.15...v0.4.16
+[0.4.15]: https://github.com/blueshed/delta/compare/v0.4.14...v0.4.15
+[0.4.14]: https://github.com/blueshed/delta/compare/v0.4.13...v0.4.14
+[0.4.13]: https://github.com/blueshed/delta/compare/v0.4.12...v0.4.13
+[0.4.12]: https://github.com/blueshed/delta/compare/v0.4.11...v0.4.12
+[0.4.11]: https://github.com/blueshed/delta/compare/v0.4.10...v0.4.11
+[0.4.10]: https://github.com/blueshed/delta/compare/v0.4.9...v0.4.10
+[0.4.9]: https://github.com/blueshed/delta/compare/v0.4.8...v0.4.9
+[0.4.8]: https://github.com/blueshed/delta/compare/v0.4.7...v0.4.8
+[0.4.7]: https://github.com/blueshed/delta/compare/v0.4.6...v0.4.7
+[0.4.6]: https://github.com/blueshed/delta/compare/v0.4.5...v0.4.6
+[0.4.5]: https://github.com/blueshed/delta/compare/v0.4.4...v0.4.5
+[0.4.4]: https://github.com/blueshed/delta/compare/v0.4.3...v0.4.4
+[0.4.3]: https://github.com/blueshed/delta/compare/v0.4.2...v0.4.3
+[0.4.2]: https://github.com/blueshed/delta/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/blueshed/delta/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/blueshed/delta/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/blueshed/delta/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/blueshed/delta/releases/tag/v0.2.1

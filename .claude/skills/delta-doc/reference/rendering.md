@@ -52,3 +52,6 @@ Without JSX, the recipe's `applyOpsToCollection` (`recipe.md`; `DomCollection` i
 - `openDoc(name, client?)`: browser code finds the client by `inject(WS)`; pass one explicitly
   for several clients in one process (`testing.md`).
 - railroad's own skill has the JSX gotchas (no `.get()` in children, keys, dispose scopes).
+- In an eta app the page never opens a document: the server draws it from delta's documents and
+  the client morphs it; an island (a railroad component) is handed its document's ops by eta.
+  eta's own skill (`eta-app`) has that.
