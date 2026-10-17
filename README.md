@@ -110,6 +110,19 @@ Each of these is a page of the skill's [reference](.claude/skills/delta-doc/refe
 - **Your own tests** -- `@blueshed/delta/testing` (`mockClient`, `sendAndAwait`, `waitFor`):
   [*Testing*](.claude/skills/delta-doc/reference/testing.md).
 
+## What it pairs with
+
+- **[railroad](https://github.com/blueshed/railroad)** draws a page in the browser: `openDoc`
+  gives a document as a railroad signal, and `list()` renders its rows keyed.
+- **[dzql](https://github.com/blueshed/dzql)** is the Postgres step: the same definitions,
+  compiled to stored functions, answering delta's cases.
+- **[paintbrush](https://github.com/blueshed/paintbrush)** is a starting website: Bun routes,
+  railroad for the page, a delta document when people share something.
+  `bun create blueshed/paintbrush my-app` makes one.
+- **[eta](https://github.com/blueshed/eta)** makes live apps for a few people at once, told as
+  stories and checked by them. delta keeps its documents, their ledger and their one stream of
+  changes; the server draws each page from them. `bun create blueshed/eta my-app` makes one.
+
 `bunx @blueshed/delta install-skills` copies the skill into your project for Claude Code. In a
 clone of this repository, [`examples/`](examples/) has a chat, a kanban board, and the sites
 inside a box on a map. [CHANGELOG.md](CHANGELOG.md) says what changed in each release.
